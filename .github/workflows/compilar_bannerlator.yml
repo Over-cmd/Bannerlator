@@ -25,34 +25,32 @@ jobs:
 
       - name: Modificar el Silicio de Bannerlator (Bypass Anti-Desbordamiento MALI)
         run: |
-          echo "-> Rastreando las compuertas de variables de entorno en el codigo java de Bannerlator..."
-          # Buscamos de forma automatica cualquier archivo de la estructura app que inyecte variables al contenedor
-          ENV_FILE=$(find app/src/main/ -name "*EnvVars*.java" -o -name "*Container*.java" -o -name "*Activity*.java" | head -n 1)
+          echo "-> Rastreando las compuertas de variables de entorno reales en Bannerlator..."
           
-          if [ -n "$ENV_FILE" ] && [ -f "$ENV_FILE" ]; then
-            echo "-> Soldando valvula de escape anti-overflow de texturas en: $ENV_FILE"
-            sed -i 's/\r$//' "$ENV_FILE"
-            
-            # HACK DE LA SCENE: Sembramos las directivas de liberacion de memoria RAM de Linux en el arranque de la botella
-            # Esto obligara al sistema a purgar la cache cada vez que queden libres 64KB, salvando tu Unisoc T618
-            sed -i '/environment.put/i\        environment.put("MALLOC_TRIM_THRESHOLD_", "65536");\n        environment.put("VK_ICD_FILENAMES_32", "/usr/share/vulkan/icd.d/icd_wrapper.json");\n        environment.put("DXVK_FILTER_DEVICE_NAME", "Mali");' "$ENV_FILE"
-          else
-            echo "-> Alshain: Mapeando bypass condicional directo en los scripts de inicializacion del sistema..."
-            # Si el codigo esta refactorizado en kotlin, inyectamos la directiva directo en los perfiles por defecto del build
-            find app/src/main/ -type f -exec sed -i 's/environment.put/environment.put("MALLOC_TRIM_THRESHOLD_","65536"); environment.put/g' {} + || true
-          fi
+          # Buscamos los archivos core de Winlator/Bannerlator donde se estructuran las variables de entorno de la botella
+          TARGET_FILES=$(find . -name "Container.java" -o -name "XServerService.java" -o -name "EnvVars.java" -o -name "ShortcutsActivity.java")
+          
+          for file in $TARGET_FILES; do
+            if [ -f "$file" ]; then
+              echo "-> Saneando y soldando valvula de escape anti-overflow en: $file"
+              sed -i 's/\r$//' "$file"
+              
+              # LA JUGADA MAESTRA RECTIFICADA: Inyectamos el parche usando la estructura real envVars.put de factoria
+              # Al estar protegido, forzara la purga radical de RAM en tu Unisoc T618 inmediatamente al terminar los combates
+              sed -i '/envVars.put/i\        envVars.put("MALLOC_TRIM_THRESHOLD_", "65536");\n        envVars.put("VK_ICD_FILENAMES_32", "/usr/share/vulkan/icd.d/icd_wrapper.json");\n        envVars.put("DXVK_FILTER_DEVICE_NAME", "Mali");' "$file"
+            fi
+          done
 
       - name: Conceder Permisos de Ejecución al Compilador Gradlew
         run: chmod +x gradlew
 
-      - name: Compilar el APK Oficial Modificado (Prensa Gradle Release)
+      - name: Compilar el APK Oficial Modificado (Prensa Gradle Debug/Release)
         run: |
-          # Ejecutamos la compilacion limpia de Android saltandonos los daemons para evitar OOM en el servidor
-          ./gradlew assembleRelease --no-daemon || ./gradlew assembleDebug --no-daemon
+          # Compilamos en modo Debug primero para asegurar las llaves de testeo nativas y evitar rechazos de firmas en tu telefono
+          ./gradlew assembleDebug --no-daemon
 
       - name: Rastrear y Redirigir el APK cocinado de Factoría
         run: |
-          # Buscamos el APK resultante en los pasillos de salida de la compilacion
           FINAL_APK=$(find app/build/outputs/apk/ -name "*.apk" | head -n 1)
           if [ -z "$FINAL_APK" ]; then
             FINAL_APK=$(find . -name "*.apk" | head -n 1)
