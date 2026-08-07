@@ -13,7 +13,7 @@ jobs:
         with:
           submodules: 'recursive'
 
-      - name: Configurar Entorno de Java (JDK 17 reglamentario)
+      - name: Configurar Entorno de Java (JDK 17 de Factoría)
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
@@ -23,44 +23,45 @@ jobs:
       - name: Activar Android SDK y NDK del Servidor
         uses: android-actions/setup-android@v3
 
-      - name: Modificar el Silicio de Bannerlator (Bypass Anti-Desbordamiento MALI)
+      - name: Modificar el Silicio de Bannerlator (Bypass de Memoria Real para MALI)
         run: |
-          echo "-> Rastreando las compuertas de variables de entorno reales en Bannerlator..."
+          echo "-> Rastreando las compuertas de variables de entorno en el codigo de Bannerlator..."
           
-          # Buscamos los archivos core de Winlator/Bannerlator donde se estructuran las variables de entorno de la botella
-          TARGET_FILES=$(find . -name "Container.java" -o -name "XServerService.java" -o -name "EnvVars.java" -o -name "ShortcutsActivity.java")
+          # Buscamos de forma automatica el archivo core donde Winlator/Bannerlator inyecta el entorno a Wine
+          ENV_FILE=$(find . -name "Container.java" -o -name "XServerService.java" -o -name "EnvVars.java" | head -n 1)
           
-          for file in $TARGET_FILES; do
-            if [ -f "$file" ]; then
-              echo "-> Saneando y soldando valvula de escape anti-overflow en: $file"
-              sed -i 's/\r$//' "$file"
-              
-              # LA JUGADA MAESTRA RECTIFICADA: Inyectamos el parche usando la estructura real envVars.put de factoria
-              # Al estar protegido, forzara la purga radical de RAM en tu Unisoc T618 inmediatamente al terminar los combates
-              sed -i '/envVars.put/i\        envVars.put("MALLOC_TRIM_THRESHOLD_", "65536");\n        envVars.put("VK_ICD_FILENAMES_32", "/usr/share/vulkan/icd.d/icd_wrapper.json");\n        envVars.put("DXVK_FILTER_DEVICE_NAME", "Mali");' "$file"
-            fi
-          done
+          if [ -n "$ENV_FILE" ] && [ -f "$ENV_FILE" ]; then
+            echo "-> Soldando valvula de escape anti-overflow de texturas en: $ENV_FILE"
+            sed -i 's/\r$//' "$ENV_FILE"
+            
+            # HACK DE FACTORÍA DE LA SCENE: Sembramos las directivas de liberacion de memoria RAM de Linux en el arranque de la botella
+            # Esto obligara al sistema a purgar la cache cada vez que queden libres 64KB, salvando tu Unisoc T618
+            sed -i '/envVars.put/i\        envVars.put("MALLOC_TRIM_THRESHOLD_", "65536");\n        envVars.put("VK_ICD_FILENAMES_32", "/usr/share/vulkan/icd.d/icd_wrapper.json");\n        envVars.put("DXVK_FILTER_DEVICE_NAME", "Mali");' "$ENV_FILE"
+          else
+            echo "-> Mapeando bypass condicional en los archivos auxiliares de la aplicacion..."
+            find app/src/main/ -type f -name "*.java" -exec sed -i 's/envVars.put/envVars.put("MALLOC_TRIM_THRESHOLD_","65536"); envVars.put/g' {} + || true
+          fi
 
-      - name: Conceder Permisos de Ejecución al Compilador Gradlew
+      - name: Conceder Permisos de Ejecución al Compilador Gradle
         run: chmod +x gradlew
 
-      - name: Compilar el APK Oficial Modificado (Prensa Gradle Debug/Release)
+      - name: Compilar el APK Oficial Modificado (Prensa Gradle Build Debug)
         run: |
-          # Compilamos en modo Debug primero para asegurar las llaves de testeo nativas y evitar rechazos de firmas en tu telefono
+          # Compilamos en modo Debug para heredar las firmas lícitas multiplataforma y evitar rechazos en tu Android
           ./gradlew assembleDebug --no-daemon
 
       - name: Rastrear y Redirigir el APK cocinado de Factoría
         run: |
-          FINAL_APK=$(find app/build/outputs/apk/ -name "*.apk" | head -n 1)
-          if [ -z "$FINAL_APK" ]; then
-            FINAL_APK=$(find . -name "*.apk" | head -n 1)
+          APK_PATH=$(find app/build/outputs/apk/ -name "*.apk" | head -n 1)
+          if [ -z "$APK_PATH" ]; then
+            APK_PATH=$(find . -name "*.apk" | head -n 1)
           fi
-          echo "APK_OUTPUT_PATH=$FINAL_APK" >> $GITHUB_ENV
-          echo "=== APK DEFINITIVO DETECTADO EN LA RUTA: $FINAL_APK ==="
+          echo "APK_OUTPUT_PATH=$APK_PATH" >> $GITHUB_ENV
+          echo "=== APK DEFINITIVO DETECTADO EN LA RUTA: $APK_PATH ==="
 
       - name: Subir APK de Bannerlator Modificado a GitHub Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: Bannerlator-Unisoc-T618-Mali
+          name: Bannerlator-Mali-Unisoc-T618
           path: ${{ env.APK_OUTPUT_PATH }}
           if-no-files-found: error
