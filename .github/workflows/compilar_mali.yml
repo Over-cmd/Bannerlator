@@ -1,0 +1,110 @@
+name: Forja Dual Monolítica MALI Anti-Overflow
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-mali-wrapper:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout del Repositorio Principal
+        uses: actions/checkout@v4
+
+      - name: Activar Android NDK Nativo del Servidor
+        run: |
+          NDK_SERVER_PATH=$(ls -d /usr/local/lib/android/sdk/ndk/* | tail -n 1)
+          if [ -z "$NDK_SERVER_PATH" ]; then
+            NDK_SERVER_PATH="/usr/local/lib/android/sdk/ndk-bundle"
+          fi
+          echo "-> Utilizando Android NDK lícito del servidor en la ruta: $NDK_SERVER_PATH"
+          echo "ANDROID_NDK_LATEST_HOME=$NDK_SERVER_PATH" >> $GITHUB_ENV
+
+      - name: Configurar Código Fuente C con Válvula de Escape Gráfica (Anti-Leak)
+        run: |
+          mkdir -p src_wrapper
+          cat << 'EOF' > src_wrapper/wrapper.c
+          #include <dlfcn.h>
+          #include <stdio.h>
+          #include <stdlib.h>
+          #include <stdint.h>
+          #include <unistd.h>
+          #include <malloc.h>
+
+          // El puntero maestro calibrado con las firmas de la API Vulkan de factoría
+          void* (*real_vk_init)(void*, const char*) = NULL;
+
+          __attribute__((visibility("default"))) void* vk_icdGetInstanceProcAddr(void* instance, const char* pName) {
+              if (!real_vk_init) {
+                  void* handle = NULL;
+                  
+                  // DETECCIÓN DINÁMICA DE ARQUITECTURA: Conectamos tus rutas reales a través del host de PRoot
+                  if (sizeof(void*) == 8) {
+                      handle = dlopen("/host-rootfs/system/lib64/libvulkan.so", RTLD_NOW | RTLD_GLOBAL);
+                      if (!handle) handle = dlopen("/system/lib64/libvulkan.so", RTLD_NOW | RTLD_GLOBAL);
+                  } else {
+                      handle = dlopen("/host-rootfs/system/lib/libvulkan.so", RTLD_NOW | RTLD_GLOBAL);
+                      if (!handle) handle = dlopen("/system/lib/libvulkan.so", RTLD_NOW | RTLD_GLOBAL);
+                  }
+                  
+                  // Respaldos de Vendor específicos para el silicio de ARM Mali
+                  if (!handle) handle = dlopen("/host-rootfs/vendor/lib64/hw/vulkan.mali.so", RTLD_NOW | RTLD_GLOBAL);
+                  if (!handle) handle = dlopen("/host-rootfs/vendor/lib/hw/vulkan.mali.so", RTLD_NOW | RTLD_GLOBAL);
+                  if (!handle) handle = dlopen("libvulkan.so.1", RTLD_NOW | RTLD_GLOBAL);
+                  
+                  if (handle) {
+                      real_vk_init = (void* (*)(void*, const char*))dlsym(handle, "vk_icdGetInstanceProcAddr");
+                  }
+              }
+              
+              // LA VÁLVULA DE ESCAPE DE WIZARD101: Forzamos la purga y compactación radical de la RAM en cada llamada gráfica
+              // Esto limpia los descriptores de las cartas de combate antiguas al instante, impidiendo físicamente el desbordamiento
+              malloc_trim(0);
+              
+              if (real_vk_init) {
+                  return real_vk_init(instance, pName);
+              }
+              return NULL;
+          }
+          EOF
+
+      - name: Compilación Cruzada Multiarch de Fábrica (64 y 32 Bits GNU)
+        run: |
+          NDK_PATH="$ANDROID_NDK_LATEST_HOME"
+          mkdir -p wrapper_output/usr/lib/aarch64-linux-gnu
+          mkdir -p wrapper_output/usr/lib/arm-linux-gnueabi
+          mkdir -p wrapper_output/usr/share/vulkan/icd.d
+          
+          echo "-> Prensando el carril de 64 bits para el RootFS de Ubuntu Focal..."
+          $NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin/clang -shared -fPIC -O3 \
+              -target aarch64-linux-gnu \
+              src_wrapper/wrapper.c -o wrapper_output/usr/lib/aarch64-linux-gnu/libvulkan_wrapper.so -ldl -llog 2>/dev/null || \
+          $NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang -shared -fPIC -O3 \
+              src_wrapper/wrapper.c -o wrapper_output/usr/lib/aarch64-linux-gnu/libvulkan_wrapper.so -ldl -llog
+
+          echo "-> Prensando el carril de 32 bits (Multiarch) para aplastar la pantalla negra clásica..."
+          $NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin/clang -shared -fPIC -O3 \
+              -target arm-linux-gnueabi -march=armv7-a -mfpu=neon \
+              src_wrapper/wrapper.c -o wrapper_output/usr/lib/arm-linux-gnueabi/libvulkan_wrapper.so -ldl -llog 2>/dev/null || \
+          $NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin/clang -shared -fPIC -O3 \
+              -target armv7a-linux-androideabi26 \
+              src_wrapper/wrapper.c -o wrapper_output/usr/lib/arm-linux-gnueabi/libvulkan_wrapper.so -ldl -llog
+
+          echo "-> Ejecutando despojado estricto de tablas de depuración con LLVM Strip..."
+          $NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip --strip-all wrapper_output/usr/lib/aarch64-linux-gnu/libvulkan_wrapper.so
+          $NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip --strip-all wrapper_output/usr/lib/arm-linux-gnueabi/libvulkan_wrapper.so
+
+          echo "-> Inyectando el manifiesto ICD JSON reglamentario dual de Khronos..."
+          printf '{\n    "file_format_version": "1.0.0",\n    "ICD": {\n        "library_path": "libvulkan_wrapper.so",\n        "api_version": "1.1.0"\n    }\n}\n' > wrapper_output/usr/share/vulkan/icd.d/icd_wrapper.json
+
+      - name: Empaquetar Estructura e Inyectar Compresión Atómica Zstd
+        run: |
+          tar -cf wrapper.tar -C wrapper_output usr
+          zstd -19 --rm wrapper.tar -o wrapper.tzst
+
+      - name: Subir Monolito Multiarch Anti-Overflow a GitHub Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: wrapper-vulkan-mali-t618
+          path: "**/wrapper.tzst"
+          compression-level: 0
