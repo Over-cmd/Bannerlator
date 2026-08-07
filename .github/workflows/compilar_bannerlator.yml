@@ -1,0 +1,68 @@
+name: Forja del APK de Bannerlator MALI Anti-Overflow
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-bannerlator-apk:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout del Repositorio de Bannerlator
+        uses: actions/checkout@v4
+        with:
+          submodules: 'recursive'
+
+      - name: Configurar Entorno de Java (JDK 17 reglamentario)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: 'gradle'
+
+      - name: Activar Android SDK y NDK del Servidor
+        uses: android-actions/setup-android@v3
+
+      - name: Modificar el Silicio de Bannerlator (Bypass Anti-Desbordamiento MALI)
+        run: |
+          echo "-> Rastreando las compuertas de variables de entorno en el codigo java de Bannerlator..."
+          # Buscamos de forma automatica cualquier archivo de la estructura app que inyecte variables al contenedor
+          ENV_FILE=$(find app/src/main/ -name "*EnvVars*.java" -o -name "*Container*.java" -o -name "*Activity*.java" | head -n 1)
+          
+          if [ -n "$ENV_FILE" ] && [ -f "$ENV_FILE" ]; then
+            echo "-> Soldando valvula de escape anti-overflow de texturas en: $ENV_FILE"
+            sed -i 's/\r$//' "$ENV_FILE"
+            
+            # HACK DE LA SCENE: Sembramos las directivas de liberacion de memoria RAM de Linux en el arranque de la botella
+            # Esto obligara al sistema a purgar la cache cada vez que queden libres 64KB, salvando tu Unisoc T618
+            sed -i '/environment.put/i\        environment.put("MALLOC_TRIM_THRESHOLD_", "65536");\n        environment.put("VK_ICD_FILENAMES_32", "/usr/share/vulkan/icd.d/icd_wrapper.json");\n        environment.put("DXVK_FILTER_DEVICE_NAME", "Mali");' "$ENV_FILE"
+          else
+            echo "-> Alshain: Mapeando bypass condicional directo en los scripts de inicializacion del sistema..."
+            # Si el codigo esta refactorizado en kotlin, inyectamos la directiva directo en los perfiles por defecto del build
+            find app/src/main/ -type f -exec sed -i 's/environment.put/environment.put("MALLOC_TRIM_THRESHOLD_","65536"); environment.put/g' {} + || true
+          fi
+
+      - name: Conceder Permisos de Ejecución al Compilador Gradlew
+        run: chmod +x gradlew
+
+      - name: Compilar el APK Oficial Modificado (Prensa Gradle Release)
+        run: |
+          # Ejecutamos la compilacion limpia de Android saltandonos los daemons para evitar OOM en el servidor
+          ./gradlew assembleRelease --no-daemon || ./gradlew assembleDebug --no-daemon
+
+      - name: Rastrear y Redirigir el APK cocinado de Factoría
+        run: |
+          # Buscamos el APK resultante en los pasillos de salida de la compilacion
+          FINAL_APK=$(find app/build/outputs/apk/ -name "*.apk" | head -n 1)
+          if [ -z "$FINAL_APK" ]; then
+            FINAL_APK=$(find . -name "*.apk" | head -n 1)
+          fi
+          echo "APK_OUTPUT_PATH=$FINAL_APK" >> $GITHUB_ENV
+          echo "=== APK DEFINITIVO DETECTADO EN LA RUTA: $FINAL_APK ==="
+
+      - name: Subir APK de Bannerlator Modificado a GitHub Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Bannerlator-Unisoc-T618-Mali
+          path: ${{ env.APK_OUTPUT_PATH }}
+          if-no-files-found: error
