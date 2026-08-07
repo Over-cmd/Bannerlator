@@ -1,10 +1,10 @@
-name: Forja del APK de Bannerlator MALI Completo Real
+name: Forja del APK de Bannerlator MALI Multiarch Anti-Overflow
 
 on:
   workflow_dispatch:
 
 jobs:
-  build-mali-apk-complete:
+  build-bannerlator-apk:
     runs-on: ubuntu-latest
 
     steps:
@@ -23,85 +23,45 @@ jobs:
       - name: Activar Android SDK y NDK del Servidor
         uses: android-actions/setup-android@v3
 
-      - name: 1. COMPILACIÓN DE LIBRERÍAS GRÁFICAS ANTI-OVERFLOW (Mesa Wrapper Mali)
+      - name: Modificar el Silicio de Bannerlator (Inyección de Purga en Wrapper Original)
         run: |
-          NDK_PATH="$ANDROID_NDK_LATEST_HOME"
-          mkdir -p src_wrapper
+          echo "-> Rastreando las compuertas de variables core en Bannerlator..."
           
-          # Escribimos el codigo del interceptor con la purga nativa calibrada milimétricamente para Bionic de Android
-          cat << 'EOF' > src_wrapper/wrapper.c
-          #include <dlfcn.h>
-          #include <stdio.h>
-          #include <stdlib.h>
-          #include <stdint.h>
-          #include <unistd.h>
+          # Buscamos de forma masiva los archivos Java donde el emulador inyecta variables al contenedor de Wine
+          TARGET_FILES=$(find . -name "Container.java" -o -name "XServerService.java" -o -name "EnvVars.java" -o -name "ShortcutsActivity.java")
           
-          // Declaramos la directiva mallopt nativa de Android de forma estricta para evitar que Clang proteste
-          extern int mallopt(int param, int value);
-
-          void* (*real_vk_init)(void*, const char*) = NULL;
-
-          __attribute__((visibility("default"))) void* vk_icdGetInstanceProcAddr(void* instance, const char* pName) {
-              if (!real_vk_init) {
-                  void* handle = NULL;
-                  if (sizeof(void*) == 8) {
-                      handle = dlopen("/host-rootfs/system/lib64/libvulkan.so", RTLD_NOW | RTLD_GLOBAL);
-                      if (!handle) handle = dlopen("/system/lib64/libvulkan.so", RTLD_NOW | RTLD_GLOBAL);
-                  } else {
-                      handle = dlopen("/host-rootfs/system/lib/libvulkan.so", RTLD_NOW | RTLD_GLOBAL);
-                      if (!handle) handle = dlopen("/system/lib/libvulkan.so", RTLD_NOW | RTLD_GLOBAL);
-                  }
-                  if (!handle) handle = dlopen("libvulkan.so.1", RTLD_NOW | RTLD_GLOBAL);
-                  if (handle) real_vk_init = (void* (*)(void*, const char*))dlsym(handle, "vk_icdGetInstanceProcAddr");
-              }
+          for file in $TARGET_FILES; do
+            if [ -f "$file" ]; then
+              echo "-> Saneando y soldando valvula de escape anti-overflow en: $file"
+              sed -i 's/\r$//' "$file"
               
-              // LA VÁLVULA DE ESCAPE REAL BIONIC: Forzamos el vaciado radical de la cache de texturas en la RAM del Unisoc T618
-              // Esto aniquila el desbordamiento de las cartas al cerrar el combate en Wizard101 sin corromper el APK
-              mallopt(-1000, 0); 
-              
-              if (real_vk_init) return real_vk_init(instance, pName);
-              return NULL;
-          }
-          EOF
+              # LA JUGADA MAESTRA MULTIARCH: Inyectamos las llaves de control de memoria en el bloque general de arranque
+              # Esto asegura que las variables se apliquen de factoría al contenedor sin importar el wrapper que elijas en el menú,
+              # blindando los 32 bits del Wrapper Original contra la caida a 5 FPS.
+              sed -i '/envVars.put/i\        envVars.put("MALLOC_TRIM_THRESHOLD_", "65536");\n        envVars.put("VK_ICD_FILENAMES_32", "/usr/share/vulkan/icd.d/icd_wrapper.json");\n        envVars.put("DXVK_FILTER_DEVICE_NAME", "Mali");' "$file"
+            fi
+          done
 
-          # Creamos las carpetas de destino de arquitectura cruzada dentro de los assets de la app
-          mkdir -p app/src/main/assets/usr/lib/aarch64-linux-gnu
-          mkdir -p app/src/main/assets/usr/lib/arm-linux-gnueabi
-
-          # Prensamos las dos arquitecturas reales con el compilador de Google NDK sin pánicos de tipos
-          $NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang -shared -fPIC -O3 \
-              src_wrapper/wrapper.c -o app/src/main/assets/usr/lib/aarch64-linux-gnu/libvulkan_wrapper.so -ldl -llog
-          $NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi26-clang -shared -fPIC -O3 \
-              src_wrapper/wrapper.c -o app/src/main/assets/usr/lib/arm-linux-gnueabi/libvulkan_wrapper.so -ldl -llog
-
-          # Despojamos simbolos redundantes con LLVM Strip
-          $NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip --strip-all app/src/main/assets/usr/lib/aarch64-linux-gnu/libvulkan_wrapper.so
-          $NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip --strip-all app/src/main/assets/usr/lib/arm-linux-gnueabi/libvulkan_wrapper.so
-
-      - name: 2. MODIFICACIÓN DEL CODIGO JAVA (Inyección de Arranque)
-        run: |
-          ENV_FILE=$(find . -name "Container.java" -o -name "XServerService.java" -o -name "EnvVars.java" | head -n 1)
-          if [ -n "$ENV_FILE" ] && [ -f "$ENV_FILE" ]; then
-            sed -i 's/\r$//' "$ENV_FILE"
-            sed -i '/envVars.put/i\        envVars.put("MALLOC_TRIM_THRESHOLD_", "65536");\n        envVars.put("VK_ICD_FILENAMES_32", "/usr/share/vulkan/icd.d/icd_wrapper.json");\n        envVars.put("DXVK_FILTER_DEVICE_NAME", "Mali");' "$ENV_FILE"
-          fi
-
-      - name: Conceder Permisos de Ejecución al Compilador Gradle
+      - name: Conceder Permisos de Ejecución al Compilador Gradlew
         run: chmod +x gradlew
 
-      - name: 3. FABRICACIÓN DEL APK MODIFICADO COMPLETO (Prensa Gradle Build)
-        run: ./gradlew assembleDebug --no-daemon
-
-      - name: Rastrear y Redirigir el APK Final Cocinado
+      - name: Compilar el APK Oficial Modificado (Prensa Gradle Build Debug)
         run: |
-          APK_PATH=$(find app/build/outputs/apk/ -name "*.apk" | head -n 1)
-          if [ -z "$APK_PATH" ]; then APK_PATH=$(find . -name "*.apk" | head -n 1); fi
-          echo "APK_OUTPUT_PATH=$APK_PATH" >> $GITHUB_ENV
-          echo "=== APK MONOLÍTICO DETECTADO EN LA RUTA: $APK_PATH ==="
+          # Forzamos la tarea de ensamblado en modo Debug para heredar las firmas lícitas y evitar bloqueos en Android
+          ./gradlew assembleDebug --no-daemon
 
-      - name: Subir APK de Bannerlator Completo a GitHub Artifacts
+      - name: Rastrear y Redirigir el APK cocinado de Factoría
+        run: |
+          FINAL_APK=$(find app/build/outputs/apk/ -name "*.apk" | head -n 1)
+          if [ -z "$FINAL_APK" ]; then
+            FINAL_APK=$(find . -name "*.apk" | head -n 1)
+          fi
+          echo "APK_OUTPUT_PATH=$FINAL_APK" >> $GITHUB_ENV
+          echo "=== APK MONOLÍTICO DETECTADO EN LA RUTA: $FINAL_APK ==="
+
+      - name: Subir APK de Bannerlator Modificado a GitHub Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: Bannerlator-Mali-T618-FullPack
+          name: Bannerlator-Unisoc-T618-Mali
           path: ${{ env.APK_OUTPUT_PATH }}
           if-no-files-found: error
