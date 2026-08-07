@@ -1,4 +1,4 @@
-name: Forja del APK de Bannerlator MALI Multiarch Anti-Overflow
+name: Forja del APK de Bannerlator Oficial Puro MALI
 
 on:
   workflow_dispatch:
@@ -8,12 +8,20 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout del Repositorio de Bannerlator
+      - name: Checkout del Repositorio de Bannerlator (Restauración de Fábrica)
         uses: actions/checkout@v4
         with:
           submodules: 'recursive'
+          fetch-depth: 0
 
-      - name: Configurar Entorno de Java (JDK 17 de Factoría)
+      - name: Deshacer Cambios y Purgar Residuos Corruptos
+        run: |
+          echo "-> Purgando modificaciones viejas y restaurando el codigo Java original..."
+          # Forzamos a git a limpiar cualquier alteracion en caliente para sanar el cerebro del APK
+          git reset --hard HEAD
+          git clean -fdx
+
+      - name: Configurar Entorno de Java (JDK 17 reglamentario)
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
@@ -23,45 +31,26 @@ jobs:
       - name: Activar Android SDK y NDK del Servidor
         uses: android-actions/setup-android@v3
 
-      - name: Modificar el Silicio de Bannerlator (Inyección de Purga en Wrapper Original)
-        run: |
-          echo "-> Rastreando las compuertas de variables core en Bannerlator..."
-          
-          # Buscamos de forma masiva los archivos Java donde el emulador inyecta variables al contenedor de Wine
-          TARGET_FILES=$(find . -name "Container.java" -o -name "XServerService.java" -o -name "EnvVars.java" -o -name "ShortcutsActivity.java")
-          
-          for file in $TARGET_FILES; do
-            if [ -f "$file" ]; then
-              echo "-> Saneando y soldando valvula de escape anti-overflow en: $file"
-              sed -i 's/\r$//' "$file"
-              
-              # LA JUGADA MAESTRA MULTIARCH: Inyectamos las llaves de control de memoria en el bloque general de arranque
-              # Esto asegura que las variables se apliquen de factoría al contenedor sin importar el wrapper que elijas en el menú,
-              # blindando los 32 bits del Wrapper Original contra la caida a 5 FPS.
-              sed -i '/envVars.put/i\        envVars.put("MALLOC_TRIM_THRESHOLD_", "65536");\n        envVars.put("VK_ICD_FILENAMES_32", "/usr/share/vulkan/icd.d/icd_wrapper.json");\n        envVars.put("DXVK_FILTER_DEVICE_NAME", "Mali");' "$file"
-            fi
-          done
-
       - name: Conceder Permisos de Ejecución al Compilador Gradlew
         run: chmod +x gradlew
 
-      - name: Compilar el APK Oficial Modificado (Prensa Gradle Build Debug)
+      - name: Compilar el APK Oficial Inmaculado (Prensa Gradle Build)
         run: |
-          # Forzamos la tarea de ensamblado en modo Debug para heredar las firmas lícitas y evitar bloqueos en Android
+          # Forzamos la tarea de ensamblado limpia en modo Debug para asegurar el éxito del arranque
           ./gradlew assembleDebug --no-daemon
 
-      - name: Rastrear y Redirigir el APK cocinado de Factoría
+      - name: Rastrear y Redirigir el APK Final Sano
         run: |
           FINAL_APK=$(find app/build/outputs/apk/ -name "*.apk" | head -n 1)
           if [ -z "$FINAL_APK" ]; then
             FINAL_APK=$(find . -name "*.apk" | head -n 1)
           fi
           echo "APK_OUTPUT_PATH=$FINAL_APK" >> $GITHUB_ENV
-          echo "=== APK MONOLÍTICO DETECTADO EN LA RUTA: $FINAL_APK ==="
+          echo "=== APK SANO DETECTADO EN LA RUTA: $FINAL_APK ==="
 
-      - name: Subir APK de Bannerlator Modificado a GitHub Artifacts
+      - name: Subir APK de Bannerlator Puro a GitHub Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: Bannerlator-Unisoc-T618-Mali
+          name: Bannerlator-Oficial-Mali
           path: ${{ env.APK_OUTPUT_PATH }}
           if-no-files-found: error
