@@ -58,6 +58,19 @@
 
 ---
 
+## 🤖 AI Disclaimer
+
+All coding, features, and changes in this project are developed with the assistance of **[Claude AI](https://www.anthropic.com/claude)** by Anthropic. Claude is used to help with the heavy lifting — writing, reviewing, and modifying the emulator's code and the features added here: the Kotlin/Compose app shell and the native emulation glue (Wine/Proton, box64/FEX, DXVK/VKD3D → Vulkan), the storefront and cloud-save integrations, and the per-game/container features — as well as porting and re-deriving community changes into this build.
+
+Before any **stable release** is published, all changes are **manually debugged and tested by me across multiple devices — both rooted and unrooted**. Debugging is done using `logcat`/`getlog` output and in-app debug log files to diagnose and verify behaviour, and no stable release is cut until the change is verified end-to-end on real hardware. Test devices:
+
+- **Samsung Galaxy Fold 8 Ultra** — Snapdragon 8 Elite Gen 5 — *not rooted*
+- **AYANEO Konkr Pocket Fit** — Snapdragon G3 Gen 3 — *rooted*
+- **Odin 2 Portal** (base) — Snapdragon 8 Gen 2 — *rooted*
+- **Retroid Pocket 5** — Snapdragon 865 — *rooted*
+
+---
+
 ## ℹ️ Information
 
 | | |
@@ -93,6 +106,7 @@ Every report gets its own **public discussion thread**. You can reply as the ori
 ## 📖 Contents
 
 - [📌 Project Notice](#-project-notice)
+- [🤖 AI Disclaimer](#-ai-disclaimer)
 - [ℹ️ Information](#ℹ️-information)
 - [🐛 Report a Mali GPU Issue](#-report-a-mali-gpu-game-issue)
 - [🆕 What's New in 3.0.0](#-whats-new-in-300)
