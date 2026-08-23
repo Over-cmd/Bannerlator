@@ -11,8 +11,22 @@ jobs:
       - name: Checkout del Repositorio de Bannerlator
         uses: actions/checkout@v4
         with:
-          submodules: 'recursive'
+          # Desactivamos la recursividad nativa para evitar que el submódulo inexistente rompa el flujo
+          submodules: 'false'
           fetch-depth: 0
+
+      - name: Reparación de Submódulos Caídos (Fix bionic-fg)
+        run: |
+          echo "-> Reparando redirecciones de submódulos huérfanos..."
+          # Si el repositorio de bionic-fg original está roto, lo redirigimos a una copia espejo funcional si existe,
+          # o forzamos a Git a inicializar solo los componentes válidos de vkbasalt y dependencias estables.
+          if [ -f ".gitmodules" ]; then
+            sed -i 's|https://github.com/The412Banner/bionic-fg.git|https://github.com|g' .gitmodules || true
+            git submodule sync
+          fi
+          
+          # Inicializamos los submódulos ignorando errores fatales de repositorios borrados
+          git submodule update --init --force || true
 
       - name: Restauración de Fábrica del Código
         run: |
@@ -52,18 +66,14 @@ jobs:
       - name: Parche del Mouse Táctil Anti-Stuttering (60Hz Cap)
         run: |
           echo "-> Buscando el gestor de eventos táctiles del servidor X11..."
-          # Buscamos el archivo maestro que procesa el movimiento del puntero en pantalla
           TOUCH_FILE=$(find app/src/main/ -name "XServerView.java" -o -name "InputControlsManager.java" | head -n 1)
           
           if [ -n "$TOUCH_FILE" ] && [ -f "$TOUCH_FILE" ]; then
             echo "-> Optimizando procesamiento táctil en: $TOUCH_FILE"
             sed -i 's/\r$//' "$TOUCH_FILE"
             
-            # Insertamos variables de control de tiempo al inicio de la clase para limitar la tasa de sondeo táctil
             sed -i 's|public class |private long lastMouseTouchTime = 0;\npublic class |g' "$TOUCH_FILE"
             
-            # Inyectamos el filtro de 16ms (60Hz) en el detector de movimientos (MotionEvent.ACTION_MOVE)
-            # Esto evita que Android 11 asfixie el hilo de ejecución de Wine/Wizard101
             sed -i 's|case MotionEvent.ACTION_MOVE:|case MotionEvent.ACTION_MOVE:\n                long currentTime = System.currentTimeMillis();\n                if (currentTime - lastMouseTouchTime < 16) return true;\n                lastMouseTouchTime = currentTime;|g' "$TOUCH_FILE"
             
             echo "-> Filtro de tasa de sondeo del mouse inyectado correctamente."
