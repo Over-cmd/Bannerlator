@@ -253,10 +253,28 @@ object CopyGameToDriveC {
             else -> return null
         }
         val newExeAndroid = if (rel.isEmpty()) destRoot else File(destRoot, rel)
-        val newWin = WinePath.resolveWindowsPath(shortcut.container, newExeAndroid.absolutePath)
-        val newExecValue = WinePath.escapeForExec(newWin) + info.argsSuffix
+        return setShortcutExe(shortcut, newExeAndroid, info.argsSuffix)
+    }
+
+    /**
+     * THE single source of truth for repointing a shortcut's `Exec=` line at a new target. Converts
+     * [newExeAndroid] to a Wine drive path via [WinePath.resolveWindowsPath] (mapping/persisting a
+     * drive letter for its volume exactly like the importer does), escapes it, appends [argsSuffix]
+     * verbatim (pass "" to drop launch args, or a leading-space suffix to keep them), and rewrites
+     * the file's Exec line. Returns the new Windows path, or null when the path can't be mapped to a
+     * drive (e.g. every drive letter is taken) or the file has no Exec line — in which case nothing
+     * was written, so the caller can warn and abort with the shortcut left untouched.
+     *
+     * Used by both copy-to-C's [repoint] and the "Change executable" flow so the rewrite logic never
+     * forks.
+     */
+    fun setShortcutExe(shortcut: Shortcut, newExeAndroid: File, argsSuffix: String): String? {
+        val newWin = runCatching {
+            WinePath.resolveWindowsPath(shortcut.container, newExeAndroid.absolutePath)
+        }.getOrNull() ?: return null
+        val newExecValue = WinePath.escapeForExec(newWin) + argsSuffix
         if (!rewriteExecLine(shortcut.file, newExecValue)) return null
-        Log.d(TAG, "Repointed '${shortcut.name}': ${shortcut.path} -> $newWin")
+        Log.d(TAG, "setShortcutExe '${shortcut.name}': ${shortcut.path} -> $newWin")
         return newWin
     }
 

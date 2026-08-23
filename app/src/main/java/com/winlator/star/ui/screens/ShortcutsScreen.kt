@@ -102,6 +102,7 @@ import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.DriveFileMove
 import androidx.compose.material.icons.filled.FileUpload
@@ -312,6 +313,10 @@ fun ShortcutsScreen(vm: ShortcutsViewModel = viewModel()) {
     // drive (and then repointed). Both entry points (the ⋮ menu item and the editor's Storage row)
     // set this; the shared CopyToDriveCCoordinator below owns the whole confirm→copy→repoint flow.
     var copyToDriveCTarget by remember { mutableStateOf<Shortcut?>(null) }
+    // "Change executable…" target — the game being repointed at a different .exe/.lnk (launcher →
+    // real exe, dx11 ↔ dx9, a config tool). Both entry points set it; ChangeExecutableCoordinator
+    // owns the pick → args-choice → rewrite flow via the shared CopyGameToDriveC.setShortcutExe.
+    var changeExeTarget by remember { mutableStateOf<Shortcut?>(null) }
     var gameDetailsShortcut by remember { mutableStateOf<Shortcut?>(null) }
     var propertiesShortcut by remember { mutableStateOf<Shortcut?>(null) }
     var logsShortcut by remember { mutableStateOf<Shortcut?>(null) }
@@ -856,6 +861,7 @@ fun ShortcutsScreen(vm: ShortcutsViewModel = viewModel()) {
                                     onRemove = { confirmRemove = shortcut },
                                     onClone = { cloneTarget = shortcut },
                                     onCopyToDriveC = { copyToDriveCTarget = shortcut },
+                                    onChangeExe = { changeExeTarget = shortcut },
                                     onAddToHome = { addToHomeScreen(context, shortcut) },
                                     onExport = { exportShortcut(context, shortcut) },
                                     onProperties = { propertiesShortcut = shortcut },
@@ -883,6 +889,7 @@ fun ShortcutsScreen(vm: ShortcutsViewModel = viewModel()) {
                                 val itemRemove = { confirmRemove = shortcut }
                                 val itemClone = { cloneTarget = shortcut }
                                 val itemCopyToDriveC = { copyToDriveCTarget = shortcut }
+                                val itemChangeExe = { changeExeTarget = shortcut }
                                 val itemAddToHome = { addToHomeScreen(context, shortcut) }
                                 val itemExport = { exportShortcut(context, shortcut) }
                                 val itemProperties = { propertiesShortcut = shortcut }
@@ -895,6 +902,7 @@ fun ShortcutsScreen(vm: ShortcutsViewModel = viewModel()) {
                                     onRemove = itemRemove,
                                     onClone = itemClone,
                                     onCopyToDriveC = itemCopyToDriveC,
+                                    onChangeExe = itemChangeExe,
                                     onAddToHome = itemAddToHome,
                                     onExport = itemExport,
                                     onProperties = itemProperties,
@@ -1528,6 +1536,13 @@ fun ShortcutsScreen(vm: ShortcutsViewModel = viewModel()) {
     CopyToDriveCCoordinator(
         target = copyToDriveCTarget,
         onFinished = { copyToDriveCTarget = null; vm.refresh() },
+    )
+
+    // "Change executable…" — pick a different .exe/.lnk in the game's folder and repoint the shortcut
+    // at it (shared Exec-rewrite with copy-to-C). Fed by the ⋮ item and the editor's Executable row.
+    ChangeExecutableCoordinator(
+        target = changeExeTarget,
+        onFinished = { changeExeTarget = null; vm.refresh() },
     )
 
     // Save Restore: a backup .zip has been picked — choose the TARGET container to restore it into,
@@ -2607,6 +2622,8 @@ fun ShortcutsScreen(vm: ShortcutsViewModel = viewModel()) {
             // "Move to Drive C" (Storage row, General tab): close the editor and hand this game to
             // the shared coordinator. Same destination as the ⋮ "Copy to Drive C…" item.
             onMoveToDriveC = { settingsShortcut = null; copyToDriveCTarget = s },
+            // "Change executable…" (Executable row): close the editor and hand off to the coordinator.
+            onChangeExe = { settingsShortcut = null; changeExeTarget = s },
         )
     }
 
@@ -4522,6 +4539,7 @@ private fun ShortcutItemLayoutL(
     onRemove: () -> Unit,
     onClone: () -> Unit,
     onCopyToDriveC: () -> Unit,
+    onChangeExe: () -> Unit,
     onAddToHome: () -> Unit,
     onExport: () -> Unit,
     onProperties: () -> Unit,
@@ -4654,6 +4672,7 @@ private fun ShortcutItemLayoutL(
             onRemove = onRemove,
             onClone = onClone,
             onCopyToDriveC = onCopyToDriveC,
+            onChangeExe = onChangeExe,
             onAddToHome = onAddToHome,
             onExport = onExport,
             onProperties = onProperties,
@@ -4676,6 +4695,7 @@ private fun ShortcutOverflowButton(
     onRemove: () -> Unit,
     onClone: () -> Unit,
     onCopyToDriveC: () -> Unit,
+    onChangeExe: () -> Unit,
     onAddToHome: () -> Unit,
     onExport: () -> Unit,
     onProperties: () -> Unit,
@@ -4719,6 +4739,12 @@ private fun ShortcutOverflowButton(
                 text = { Text("Copy to Drive C…") },
                 leadingIcon = { Icon(Icons.Filled.DriveFileMove, null, tint = MaterialTheme.colorScheme.primary) },
                 onClick = { menuExpanded = false; onCopyToDriveC() },
+            )
+            MenuItemDivider()
+            DropdownMenuItem(
+                text = { Text("Change executable…") },
+                leadingIcon = { Icon(Icons.Filled.SwapHoriz, null, tint = MaterialTheme.colorScheme.primary) },
+                onClick = { menuExpanded = false; onChangeExe() },
             )
             MenuItemDivider()
             DropdownMenuItem(
@@ -4803,6 +4829,7 @@ private fun ShortcutGridItem(
     onRemove: () -> Unit,
     onClone: () -> Unit,
     onCopyToDriveC: () -> Unit,
+    onChangeExe: () -> Unit,
     onAddToHome: () -> Unit,
     onExport: () -> Unit,
     onProperties: () -> Unit,
@@ -4944,6 +4971,8 @@ private fun ShortcutGridItem(
             DropdownMenuItem(text = { Text("Clone to container") }, leadingIcon = { Icon(Icons.Filled.ContentCopy, null) }, onClick = { menuExpanded = false; onClone() })
             MenuItemDivider()
             DropdownMenuItem(text = { Text("Copy to Drive C…") }, leadingIcon = { Icon(Icons.Filled.DriveFileMove, null, tint = MaterialTheme.colorScheme.primary) }, onClick = { menuExpanded = false; onCopyToDriveC() })
+            MenuItemDivider()
+            DropdownMenuItem(text = { Text("Change executable…") }, leadingIcon = { Icon(Icons.Filled.SwapHoriz, null, tint = MaterialTheme.colorScheme.primary) }, onClick = { menuExpanded = false; onChangeExe() })
             MenuItemDivider()
             DropdownMenuItem(text = { Text("Add to home screen") }, leadingIcon = { Icon(Icons.Filled.AddToHomeScreen, null) }, onClick = { menuExpanded = false; onAddToHome() })
             MenuItemDivider()
@@ -5511,6 +5540,9 @@ internal fun ShortcutSettingsDialogScreen(
     // Non-null when the host can run the "Copy to Drive C" flow (the Games list). The Storage row's
     // "Move to Drive C" button calls this; it stays hidden for a game already on C:.
     onMoveToDriveC: (() -> Unit)? = null,
+    // Non-null when the host can run the "Change executable" flow (the Games list). The Executable
+    // row's "Change…" button calls this.
+    onChangeExe: (() -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val res = context.resources
@@ -6270,6 +6302,39 @@ internal fun ShortcutSettingsDialogScreen(
                                 )
                                 Spacer(Modifier.width(6.dp))
                                 Text("Move to Drive C")
+                            }
+                        }
+                    }
+
+                    // Executable — the .exe this shortcut launches, with a one-tap repoint to a
+                    // different exe in the same game (launcher → real exe, dx11 ↔ dx9, a config tool).
+                    if (onChangeExe != null) {
+                        val currentExeName = remember(shortcut) {
+                            CopyGameToDriveC.parse(shortcut).exeWin.substringAfterLast('\\').substringAfterLast('/')
+                        }
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("Executable", fontSize = 14.sp)
+                                Text(
+                                    currentExeName.ifEmpty { "Unknown" },
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                            Spacer(Modifier.width(8.dp))
+                            OutlinedButton(onClick = onChangeExe) {
+                                Icon(
+                                    Icons.Filled.SwapHoriz,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp),
+                                )
+                                Spacer(Modifier.width(6.dp))
+                                Text("Change…")
                             }
                         }
                     }
@@ -8192,6 +8257,125 @@ private fun CopyToDriveCCoordinator(
                     onFinished()
                 }) { Text("Keep original") }
             },
+        )
+    }
+}
+
+/**
+ * "Change executable" coordinator. Given a [target] shortcut, opens the in-app file picker at the
+ * current exe's folder (filtered to .exe/.lnk/.desktop, with the container's Drive-C rail available),
+ * then repoints the shortcut at the picked file through the shared [CopyGameToDriveC.setShortcutExe]
+ * — asking first whether to keep or clear the existing launch arguments. [onFinished] clears the
+ * target and refreshes the list (Shortcut.path is final — same reload pattern as copy-to-C). The
+ * shortcut is touched ONLY on a valid, mappable pick; anything else warns and aborts unchanged.
+ */
+@Composable
+private fun ChangeExecutableCoordinator(
+    target: Shortcut?,
+    onFinished: () -> Unit,
+) {
+    if (target == null) return
+    val context = LocalContext.current
+
+    val info = remember(target) { CopyGameToDriveC.parse(target) }
+    // A picked exe awaiting the keep/clear-args choice (null until then).
+    var pendingExe by remember(target) { mutableStateOf<File?>(null) }
+
+    // Extensions accepted as a launch target (matches the InAppFilePicker.SHORTCUT filter).
+    fun isSupported(name: String) =
+        name.substringAfterLast('.', "").lowercase() in setOf("exe", "lnk", "desktop")
+
+    // Write the new exe via the shared helper, toast the outcome, and finish. argsSuffix "" clears
+    // the launch args; a leading-space suffix keeps them.
+    fun applyExe(exe: File, argsSuffix: String) {
+        val win = CopyGameToDriveC.setShortcutExe(target, exe, argsSuffix)
+        if (win == null) {
+            Toast.makeText(
+                context,
+                "That file isn't on a drive this container can reach. Keep the game on storage the " +
+                    "container maps (internal/SD, or its C: drive).",
+                Toast.LENGTH_LONG,
+            ).show()
+        } else {
+            Toast.makeText(context, "\"${target.name}\" now launches $win", Toast.LENGTH_LONG).show()
+        }
+        onFinished()
+    }
+
+    val picker = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode != Activity.RESULT_OK) {
+            onFinished(); return@rememberLauncherForActivityResult
+        }
+        val file = InAppFilePicker.pickedPath(result.data)?.let { File(it) }
+        if (file == null || !file.isFile || !isSupported(file.name)) {
+            Toast.makeText(context, "Pick a .exe, .lnk, or .desktop file.", Toast.LENGTH_LONG).show()
+            onFinished(); return@rememberLauncherForActivityResult
+        }
+        // Ask about launch args only when there are some to keep; otherwise apply straight away.
+        if (info.argsSuffix.isBlank()) applyExe(file, "") else pendingExe = file
+    }
+
+    // Launch the picker once when this target opens, seeded at the current exe's folder.
+    LaunchedEffect(target) {
+        val driveC = File(target.container.rootDir, ".wine/drive_c").takeIf { it.isDirectory }
+        picker.launch(
+            InAppFilePicker.buildIntent(
+                context,
+                InAppFilePicker.SHORTCUT,
+                "Select the game's .exe",
+                initialDir = info.exeAndroid?.parentFile?.absolutePath,
+                driveCPath = driveC?.absolutePath,
+            )
+        )
+    }
+
+    // Keep-or-clear the launch arguments (default keep). Mirrors the backup-format chooser idiom.
+    pendingExe?.let { exe ->
+        OutlinedAlertDialog(
+            onDismissRequest = onFinished,
+            title = { Text("Launch arguments") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(
+                        "This shortcut launches with arguments:",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = OnSurfaceVariant,
+                    )
+                    Text(
+                        info.argsSuffix.trim(),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                    Column(
+                        modifier = Modifier.fillMaxWidth()
+                            .clickable { applyExe(exe, info.argsSuffix) }
+                            .padding(vertical = 8.dp),
+                    ) {
+                        Text("Keep arguments", color = MaterialTheme.colorScheme.primary)
+                        Text(
+                            "Launch the new .exe with the same arguments",
+                            color = OnSurfaceVariant,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                    Column(
+                        modifier = Modifier.fillMaxWidth()
+                            .clickable { applyExe(exe, "") }
+                            .padding(vertical = 8.dp),
+                    ) {
+                        Text("Clear arguments", color = MaterialTheme.colorScheme.primary)
+                        Text(
+                            "Launch the new .exe with no arguments",
+                            color = OnSurfaceVariant,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = { TextButton(onClick = onFinished) { Text("Cancel") } },
         )
     }
 }
