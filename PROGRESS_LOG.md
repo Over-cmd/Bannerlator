@@ -1,5 +1,27 @@
 # Star-Compose — Progress Log
 
+## 2026-08-23 — 🏁🎉 **Bannerlator 3.0.0 — STABLE shipped (Latest)**
+> Cut the 3.0.0 stable: **vc74 / versionName "3.0.0"**. Built from `61fbb9e4` (the vc74 bump on top of
+> the vk-clamp #403 fix `2cdb5ca2`); `release.yml` run `32668286994`, `make_latest=true`,
+> `prerelease=false` → now `releases/latest`, so the in-app updater offers it to everyone on ≤vc73.
+> 3 flavor APKs (~524 MB each) + update.json (vc74). versionCode 74 clears both prereleases
+> (pre1 vc72, pre2 vc73) — verified against GitHub, not assumed.
+> ⚠️ **TAG QUIRK:** tag `3.0.0` → commit `e6547142` (a README-only docs commit pushed to `main`
+> *during* the build), NOT the built `61fbb9e4` — `action-gh-release` tagged main's tip at release-job
+> time, not `GITHUB_SHA`. Harmless (delta = README.md only; APKs built from `61fbb9e4` are the correct
+> vc74; update.json vc74). Lesson reconfirmed: **never push CODE to `main` while `release.yml` runs.**
+> Release body = curated "What's New since 2.9.9" in house style (`# What's New` umbrella + `## <emoji>`
+> sections, matched to pre1/pre2). **⚖️ Credits corrected at cut:** the draft wrongly claimed GameNative
+> "clean-room, no GPL code ships" — FALSE; GameNative (GPL-3.0) IS incorporated (present/scanout path,
+> FPS limiter, Proton xlat, Steam session-hardening) → the app is GPL-3.0; clean-room applies to
+> **win-fg** only. Added lsfg-vk (PancakeTAS) + lsfg-vk-android (FrankBarretta), Samsung Perf SDK,
+> PulseAudio/ALSA, DirectAudio (own repo, LGPL), JavaSteam, and the Winlator lineage — now matches
+> `THIRD-PARTY-LICENSES.md`. **Notes & known-limitations** section added: controllers **PARKED/unchanged
+> since 2.9.9** (didn't want #345 holding up 3.0), Big-Picture games wall **still rough**, and all
+> current **Proton layers already available via Contents / in-game catalog**. README on `main` updated
+> to 3.0.0/vc74 (`e6547142`). Controller branch `feat/controller-345-fa-spine` stays parked on origin,
+> untouched. Memory checkpointed (MEMORY.md stable pointer + release-history section renamed to tag).
+
 ## 2026-08-23 — 🛒🐛 **Lossless Scaling ships STALE Lossless.dll — depot-dedup fix**
 > Diagnosed on device (pubg variant, 3.0.0-pre2): Bannerlator's Steam-store install of Lossless
 > Scaling (993090) landed a **5.18 MB** `Lossless.dll`, while GameNative's install of the SAME public
