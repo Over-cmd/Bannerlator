@@ -64,7 +64,7 @@
 |---|---|
 | **App label** | `Bannerlator Bionic` (standard) · `Bannerlator Bionic PuBG` (pubg) · `Bannerlator Bionic Ludashi` (ludashi) |
 | **Packages** | `com.winlator.banner` (standard) · `com.tencent.ig` (pubg) · `com.ludashi.benchmark` (ludashi) |
-| **Version** | Bannerlator **V 2.9.9** — built from Star **marcescence** (`versionName 2.9.9`, `versionCode 71`) |
+| **Version** | Bannerlator **V 3.0.0** — built from Star **marcescence** (`versionName 3.0.0`, `versionCode 74`) |
 | **Android SDK** | `compileSdk 34` · `targetSdk 28` · `minSdk 26` (Android 8.0+) |
 | **Lineage** | Winlator → cmod → Bionic Nightly → Star Bionic → **marcescence** → **Bannerlator** |
 
@@ -95,7 +95,7 @@ Every report gets its own **public discussion thread**. You can reply as the ori
 - [📌 Project Notice](#-project-notice)
 - [ℹ️ Information](#ℹ️-information)
 - [🐛 Report a Mali GPU Issue](#-report-a-mali-gpu-game-issue)
-- [🆕 What's New in 2.9.9](#-whats-new-in-299)
+- [🆕 What's New in 3.0.0](#-whats-new-in-300)
 - [🎞️ Frame Generation & Present Modes](#-frame-generation--present-modes)
 - [✨ Full Features](#-full-features)
 - [🎨 Adding your own ReShade effects](#-adding-your-own-reshade-effects)
@@ -108,16 +108,15 @@ Every report gets its own **public discussion thread**. You can reply as the ori
 
 ---
 
-## 🆕 What's New in 2.9.9
+## 🆕 What's New in 3.0.0
 
-**Hotfix over 2.9.8.** Entirely app-side — install over 2.9.8, everything carries over.
+**The big 3.0 stable** — rolls up everything since 2.9.9, including the `3.0.0-pre1` / `pre2` opt-in betas. Entirely app-side — **no ImageFS reinstall**; install over 2.9.9 and your containers, Wine installs, themes, accent colour and per-game settings all carry over. Full notes on the [**3.0.0 release page**](https://github.com/The412Banner/Bannerlator/releases/tag/3.0.0).
 
-> 🙏 **Sorry for the churn** — 2.9.8 shipped the TV / external-display feature before it was ready (it broke on Samsung DeX and Motorola desktop modes), so 2.9.9 is a quick turnaround to pull that feature until it's finished rather than leave a half-working release up. Thanks for the reports and patience.
-
-- **📺 TV / external-display output temporarily turned off.** After reports it misbehaved on Samsung (DeX) and Motorola devices ([#339](https://github.com/The412Banner/Bannerlator/issues/339)) — game wouldn't go fullscreen, FPS HUD vanished, mouse stopped — the whole TV feature (auto-swap onto a TV/DeX display, the in-game **TV tab**, and the experimental wireless caster) is disabled until it's finished and properly tested. Plugging in a TV no longer pushes the game to it. Nothing is lost; saved TV settings stay on disk and the feature (with the DeX fix in place) returns in a later build.
-- **🎮 Controller/touch fix ([#338](https://github.com/The412Banner/Bannerlator/issues/338), thanks @NaufalFajri).** An explicit "-- Disabled --" touch-controls choice is honored and persists across launches (no phantom on-screen pad, no fake timeout), and the smart-default on-screen pad no longer spawns when a physical controller is already connected at launch.
-- **📝 Deeper log capture.** Log Manager → "Capture logcat now" now grabs up to **10,000 lines** (was 1,000) — still app-scoped, redacted, and on-demand — so bug-report logs reach much further back.
-- **🔊 Coming soon in 3.0:** a ground-up audio stack rebuilt on PulseAudio 13.0 with a new **adaptive AAudio sink** that smart-adjusts on the fly, plus a dedicated in-game **Audio tab** / container-editor Audio panel with presets, fine-tuning and guest-latency control. Not in this build — in the works.
+- **🔊 New three-engine audio stack (the headline).** The ground-up audio rebuild that was "coming soon" in 2.9.9 has landed: a new **adaptive PulseAudio engine** (grows its buffer on crackle/underruns, re-opens cleanly when your output changes), a second **adaptive ALSA** engine, and an experimental third **DirectAudio** driver — each with an Audio cog in the container editor, per-game shortcut settings and the in-game side-menu, presets + fine-tune rows, a per-row **"?"** explanation, and a latency slider that really drives the buffer. Strict per-engine / per-scope settings mean changing one never rewrites another.
+- **🛒 Storefronts + automatic cloud saves across GOG, Epic & Steam.** GOG gets a major overhaul — automatic cloud saves (auto-path, upload-on-exit / download-on-launch, content-hash skip), MD5 verify + repair, redistributable auto-install, per-DLC installs, faster parallel downloads, and a Save Manager tab with cover art. Epic / EOS adds cloud saves, real launch-time sign-in + EOS game IDs, EPIC/EOS badges, Denuvo & offline support, and a robust cancelable downloader. Steam adds one-tap **Lossless Scaling "Detect from store"**, beta-branch selection, and non-game apps in your library.
+- **🎮 Games & shortcuts.** The internal-storage intro-movie hang fix — **add a game from Drive C** and **Copy game to Drive C** (moves a game onto the container's fast C: drive and re-points the shortcut), plus **Change executable**, a file picker that opens at your storage root with a working Back button, responsive shortcut settings, per-DLL toggles, per-game graphics persistence, and an opt-in **Big Picture games wall**.
+- **🖥️ Graphics & performance.** Hardened Native Rendering with a per-container / per-game **backend picker**, clean-room **win-fg** frame generation (replaces bionic-fg, adapts AMD FidelityFX FSR3), Samsung Galaxy **no-root power control**, a live **Performance dashboard**, an upgraded **Fusion HUD** (battery temp, accurate DXVK/VKD3D label), and a new **Contents hub** for browsing/installing/removing GPU drivers & components. Plus a **wrapper + Adreno Vulkan fix ([#403](https://github.com/The412Banner/Bannerlator/issues/403))** — DXVK/games start again on wrapper drivers and low-tier Adreno (e.g. 610).
+- **🐛 Stability.** Rootless native crash-capture with real backtraces, a background-pause fix for games with very long executable names, malformed-environment-variable resilience, and assorted X-server leak/crash fixes.
 
 ---
 
