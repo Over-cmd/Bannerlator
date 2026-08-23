@@ -69,6 +69,8 @@ Before any **stable release** is published, all changes are **manually debugged 
 - **Odin 2 Portal** (base) — Snapdragon 8 Gen 2 — *rooted*
 - **Retroid Pocket 5** — Snapdragon 865 — *rooted*
 
+> **A note on root:** using any root-only features is entirely **your own choice and at your own risk**. I don't encourage rooting your device in general — especially without the proper knowledge and tools to do it correctly. Bannerlator runs fine unrooted; root only unlocks a few optional performance extras.
+
 ---
 
 ## ℹ️ Information
