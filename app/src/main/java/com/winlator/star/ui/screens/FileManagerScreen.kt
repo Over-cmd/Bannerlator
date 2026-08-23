@@ -300,22 +300,31 @@ fun FileManagerScreen(
     val pickPrefs = remember { androidx.preference.PreferenceManager.getDefaultSharedPreferences(context) }
     val browsePrefs = pickPrefs
     val rootDir = remember {
-        if (pickMode) {
-            val remembered = pickPrefs.getString("lastFilePickerDir", null)?.let { File(it) }?.takeIf { it.isDirectory }
-            initialDir?.takeIf { it.isDirectory }
-                ?: remembered
-                ?: File("/sdcard/Download/").takeIf { it.isDirectory }
-                ?: File("/storage/emulated/0")
-        } else {
-            // Browse mode used to ignore initialDir entirely and always open at internal storage.
-            // The Log Manager passes a game's log folder here, so honour it in both modes; falling
-            // back to internal storage keeps the plain File Manager destination unchanged.
-            initialDir?.takeIf { it.isDirectory } ?: File("/storage/emulated/0")
-        }
+        // Both modes: honour an explicit caller-supplied start dir (e.g. Log Manager's game-log
+        // folder), else open at the INTERNAL STORAGE ROOT. Selection screens (drive-folder pick,
+        // local component pick, imports) previously defaulted to Download which — combined with the
+        // currentRoot floor below — trapped users in Download with no way up (reported bug).
+        initialDir?.takeIf { it.isDirectory } ?: File("/storage/emulated/0")
     }
 
     var currentDir by remember { mutableStateOf(rootDir) }
-    var currentRoot by remember { mutableStateOf(rootDir) }
+    // The up/back FLOOR — back + the up-arrow are disabled while currentDir == currentRoot. It MUST be
+    // the VOLUME ROOT of the start dir (internal /storage/emulated/0, or an SD card /storage/XXXX-XXXX),
+    // NOT the start dir itself: otherwise opening at any subfolder disables up/back and traps the user
+    // there. (Mirrors the volume-root logic in favLocationOf above.)
+    var currentRoot by remember {
+        val abs = rootDir.absolutePath
+        val internal = "/storage/emulated/0"
+        val vol = when {
+            abs == internal || abs.startsWith("$internal/") -> File(internal)
+            abs.startsWith("/storage/") -> {
+                val name = abs.removePrefix("/storage/").substringBefore('/')
+                if (name.isNotEmpty() && name != "emulated" && name != "self") File("/storage/$name") else rootDir
+            }
+            else -> rootDir
+        }
+        mutableStateOf(vol)
+    }
     var entries by remember { mutableStateOf(listOf<File>()) }
     var selectedEntry by remember { mutableStateOf<File?>(null) }
     var showMenuFor by remember { mutableStateOf<File?>(null) }
