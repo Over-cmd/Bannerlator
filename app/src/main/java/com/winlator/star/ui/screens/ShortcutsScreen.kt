@@ -103,6 +103,7 @@ import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.DriveFileMove
 import androidx.compose.material.icons.filled.FileUpload
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.InsertDriveFile
@@ -223,6 +224,7 @@ import com.winlator.star.ui.findActivity
 import com.winlator.star.ui.screens.adrenodownload.AdrenoDriverDownloadSheet
 import com.winlator.star.ui.screens.adrenodownload.RemoteDriverEntry
 import com.winlator.star.ui.screens.adrenodownload.RemoteDriverRepository
+import com.winlator.star.core.CopyGameToDriveC
 import com.winlator.star.core.DefaultVersion
 import com.winlator.star.core.FileUtils
 import com.winlator.star.core.GameFolderScanner
@@ -306,6 +308,10 @@ fun ShortcutsScreen(vm: ShortcutsViewModel = viewModel()) {
     // The shortcut whose "Back up saves" layout-choice dialog is open (Winlator vs GameHub).
     var backupFormatShortcut by remember { mutableStateOf<Shortcut?>(null) }
     var settingsShortcut by remember { mutableStateOf<Shortcut?>(null) }
+    // "Copy to Drive C…" target — the game whose folder is being copied onto the container's C:
+    // drive (and then repointed). Both entry points (the ⋮ menu item and the editor's Storage row)
+    // set this; the shared CopyToDriveCCoordinator below owns the whole confirm→copy→repoint flow.
+    var copyToDriveCTarget by remember { mutableStateOf<Shortcut?>(null) }
     var gameDetailsShortcut by remember { mutableStateOf<Shortcut?>(null) }
     var propertiesShortcut by remember { mutableStateOf<Shortcut?>(null) }
     var logsShortcut by remember { mutableStateOf<Shortcut?>(null) }
@@ -849,6 +855,7 @@ fun ShortcutsScreen(vm: ShortcutsViewModel = viewModel()) {
                                     onSettings = { settingsShortcut = shortcut },
                                     onRemove = { confirmRemove = shortcut },
                                     onClone = { cloneTarget = shortcut },
+                                    onCopyToDriveC = { copyToDriveCTarget = shortcut },
                                     onAddToHome = { addToHomeScreen(context, shortcut) },
                                     onExport = { exportShortcut(context, shortcut) },
                                     onProperties = { propertiesShortcut = shortcut },
@@ -875,6 +882,7 @@ fun ShortcutsScreen(vm: ShortcutsViewModel = viewModel()) {
                                 val itemSettings = { settingsShortcut = shortcut }
                                 val itemRemove = { confirmRemove = shortcut }
                                 val itemClone = { cloneTarget = shortcut }
+                                val itemCopyToDriveC = { copyToDriveCTarget = shortcut }
                                 val itemAddToHome = { addToHomeScreen(context, shortcut) }
                                 val itemExport = { exportShortcut(context, shortcut) }
                                 val itemProperties = { propertiesShortcut = shortcut }
@@ -886,6 +894,7 @@ fun ShortcutsScreen(vm: ShortcutsViewModel = viewModel()) {
                                     onSettings = itemSettings,
                                     onRemove = itemRemove,
                                     onClone = itemClone,
+                                    onCopyToDriveC = itemCopyToDriveC,
                                     onAddToHome = itemAddToHome,
                                     onExport = itemExport,
                                     onProperties = itemProperties,
@@ -1513,6 +1522,13 @@ fun ShortcutsScreen(vm: ShortcutsViewModel = viewModel()) {
             dismissButton = { TextButton(onClick = { cloneTarget = null }) { Text("Cancel") } },
         )
     }
+
+    // "Copy to Drive C…" — the shared confirm→copy→repoint flow, fed by the ⋮ menu item and the
+    // editor's Storage row. Owns its own dialogs/progress; clears the target and refreshes on finish.
+    CopyToDriveCCoordinator(
+        target = copyToDriveCTarget,
+        onFinished = { copyToDriveCTarget = null; vm.refresh() },
+    )
 
     // Save Restore: a backup .zip has been picked — choose the TARGET container to restore it into,
     // then hand off to GameSaveBackup.restore (which unzips into that container and remaps the user).
@@ -2587,7 +2603,10 @@ fun ShortcutsScreen(vm: ShortcutsViewModel = viewModel()) {
     settingsShortcut?.let { s ->
         ShortcutSettingsDialogScreen(
             shortcut = s,
-            onDismiss = { settingsShortcut = null; vm.refresh() }
+            onDismiss = { settingsShortcut = null; vm.refresh() },
+            // "Move to Drive C" (Storage row, General tab): close the editor and hand this game to
+            // the shared coordinator. Same destination as the ⋮ "Copy to Drive C…" item.
+            onMoveToDriveC = { settingsShortcut = null; copyToDriveCTarget = s },
         )
     }
 
@@ -4502,6 +4521,7 @@ private fun ShortcutItemLayoutL(
     onSettings: () -> Unit,
     onRemove: () -> Unit,
     onClone: () -> Unit,
+    onCopyToDriveC: () -> Unit,
     onAddToHome: () -> Unit,
     onExport: () -> Unit,
     onProperties: () -> Unit,
@@ -4633,6 +4653,7 @@ private fun ShortcutItemLayoutL(
             onSettings = onSettings,
             onRemove = onRemove,
             onClone = onClone,
+            onCopyToDriveC = onCopyToDriveC,
             onAddToHome = onAddToHome,
             onExport = onExport,
             onProperties = onProperties,
@@ -4654,6 +4675,7 @@ private fun ShortcutOverflowButton(
     onSettings: () -> Unit,
     onRemove: () -> Unit,
     onClone: () -> Unit,
+    onCopyToDriveC: () -> Unit,
     onAddToHome: () -> Unit,
     onExport: () -> Unit,
     onProperties: () -> Unit,
@@ -4691,6 +4713,12 @@ private fun ShortcutOverflowButton(
                 text = { Text("Clone to container") },
                 leadingIcon = { Icon(Icons.Filled.ContentCopy, null) },
                 onClick = { menuExpanded = false; onClone() },
+            )
+            MenuItemDivider()
+            DropdownMenuItem(
+                text = { Text("Copy to Drive C…") },
+                leadingIcon = { Icon(Icons.Filled.DriveFileMove, null, tint = MaterialTheme.colorScheme.primary) },
+                onClick = { menuExpanded = false; onCopyToDriveC() },
             )
             MenuItemDivider()
             DropdownMenuItem(
@@ -4774,6 +4802,7 @@ private fun ShortcutGridItem(
     onSettings: () -> Unit,
     onRemove: () -> Unit,
     onClone: () -> Unit,
+    onCopyToDriveC: () -> Unit,
     onAddToHome: () -> Unit,
     onExport: () -> Unit,
     onProperties: () -> Unit,
@@ -4913,6 +4942,8 @@ private fun ShortcutGridItem(
             DropdownMenuItem(text = { Text("Remove") }, leadingIcon = { Icon(Icons.Filled.Delete, null) }, onClick = { menuExpanded = false; onRemove() })
             MenuItemDivider()
             DropdownMenuItem(text = { Text("Clone to container") }, leadingIcon = { Icon(Icons.Filled.ContentCopy, null) }, onClick = { menuExpanded = false; onClone() })
+            MenuItemDivider()
+            DropdownMenuItem(text = { Text("Copy to Drive C…") }, leadingIcon = { Icon(Icons.Filled.DriveFileMove, null, tint = MaterialTheme.colorScheme.primary) }, onClick = { menuExpanded = false; onCopyToDriveC() })
             MenuItemDivider()
             DropdownMenuItem(text = { Text("Add to home screen") }, leadingIcon = { Icon(Icons.Filled.AddToHomeScreen, null) }, onClick = { menuExpanded = false; onAddToHome() })
             MenuItemDivider()
@@ -5474,7 +5505,13 @@ private fun DpTabs(dp: SettingsDpad, id: String, selected: Int, count: Int, onSe
 }
 
 @Composable
-internal fun ShortcutSettingsDialogScreen(shortcut: Shortcut, onDismiss: () -> Unit) {
+internal fun ShortcutSettingsDialogScreen(
+    shortcut: Shortcut,
+    onDismiss: () -> Unit,
+    // Non-null when the host can run the "Copy to Drive C" flow (the Games list). The Storage row's
+    // "Move to Drive C" button calls this; it stays hidden for a game already on C:.
+    onMoveToDriveC: (() -> Unit)? = null,
+) {
     val context = LocalContext.current
     val res = context.resources
     // Controller / D-pad state for this editor (see the SettingsDpad model above).
@@ -6205,6 +6242,37 @@ internal fun ShortcutSettingsDialogScreen(shortcut: Shortcut, onDismiss: () -> U
                         label = stringResource(R.string.exec_arguments),
                         modifier = Modifier.fillMaxWidth()
                     )
+
+                    // Storage — where this game's files currently live, and (unless it's already on
+                    // C:) a one-tap "Move to Drive C" that copies the folder onto native app storage.
+                    // Games that stream assets over FUSE-backed shared storage stall; from C: they run.
+                    val storageLabel = remember(shortcut) { CopyGameToDriveC.storageLabel(shortcut) }
+                    val alreadyOnC = remember(shortcut) { CopyGameToDriveC.parse(shortcut).onDriveC }
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Storage", fontSize = 14.sp)
+                            Text(
+                                storageLabel,
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        if (onMoveToDriveC != null && !alreadyOnC) {
+                            Spacer(Modifier.width(8.dp))
+                            OutlinedButton(onClick = onMoveToDriveC) {
+                                Icon(
+                                    Icons.Filled.DriveFileMove,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp),
+                                )
+                                Spacer(Modifier.width(6.dp))
+                                Text("Move to Drive C")
+                            }
+                        }
+                    }
 
                     // Epic Online Services (EOS) auth toggle — only for Epic-origin shortcuts.
                     // When ON, the launcher injects real-Epic auth args (-EpicPortal + a fresh
@@ -7840,6 +7908,294 @@ private fun isGogShortcut(shortcut: Shortcut): Boolean =
  * EPIC + EOS + GOG pills clustered for the top-left corner of a shortcut's cover art. Caller aligns
  * and insets this (Alignment.TopStart, ~6dp); each pill keeps its own opaque background for contrast.
  */
+// The stages of the "Copy to Drive C" flow, in order: confirm the source root, resolve a
+// destination collision, run the background copy, then offer to delete the original.
+private enum class CopyToCPhase { CONFIRM, OVERWRITE, COPYING, DELETE_ORIGINAL }
+
+/**
+ * Shared coordinator for "Copy to Drive C…". Fed a [target] shortcut by either entry point (the ⋮
+ * menu item or the editor's Storage-row button); [onFinished] clears that target and refreshes the
+ * list. Owns the whole flow and all its dialogs:
+ *   1. Locate the exe on disk. Already on C: (or unmappable) → toast + finish, no dialogs.
+ *   2. Confirm-source: propose the plausible game root, show its size, let the user Change folder…
+ *      Validates the chosen folder is an ancestor of the exe so the repoint is correct.
+ *   3. Free-space check against the data partition (drive_c lives under filesDir).
+ *   4. Background copy (cancelable progress) into drive_c/Games/<name>, with an overwrite prompt.
+ *   5. Repoint the shortcut to C:\Games\<name>\… — ONLY after a fully successful copy.
+ *   6. Offer to delete the original folder (Move) vs keep it (Copy).
+ * On cancel or any failure the partial destination is deleted and the shortcut is left untouched.
+ */
+@Composable
+private fun CopyToDriveCCoordinator(
+    target: Shortcut?,
+    onFinished: () -> Unit,
+) {
+    if (target == null) return
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+
+    // Parsed once per opened game. exeAndroid == null => the drive letter isn't mapped, so the
+    // files can't be located; onDriveC => it's already where we'd copy it to.
+    val info = remember(target) { CopyGameToDriveC.parse(target) }
+    val actionable = info.exeAndroid != null && !info.onDriveC
+
+    // Step 1 short-circuits — fire a toast and bail before any dialog shows.
+    LaunchedEffect(target) {
+        if (info.onDriveC) {
+            Toast.makeText(context, "\"${target.name}\" already runs from Drive C.", Toast.LENGTH_SHORT).show()
+            onFinished()
+        } else if (info.exeAndroid == null) {
+            Toast.makeText(context, "Couldn't locate this game's files on disk.", Toast.LENGTH_LONG).show()
+            onFinished()
+        }
+    }
+    if (!actionable) return
+    val exeAndroid = info.exeAndroid!!
+
+    var phase by remember(target) { mutableStateOf(CopyToCPhase.CONFIRM) }
+    // Chosen/confirmed source root — defaults to the plausible game root, user can Change folder….
+    var sourceRoot by remember(target) { mutableStateOf(CopyGameToDriveC.defaultSourceRoot(exeAndroid)) }
+    var sourceSize by remember(target) { mutableStateOf<Long?>(null) } // null = still computing
+    var validationError by remember(target) { mutableStateOf<String?>(null) }
+    // Copy progress + cooperative cancel handle (read by copyTree on the IO thread).
+    val cancelFlag = remember(target) { java.util.concurrent.atomic.AtomicBoolean(false) }
+    var progress by remember(target) { mutableStateOf<CopyGameToDriveC.Progress?>(null) }
+
+    fun fmt(bytes: Long) = android.text.format.Formatter.formatShortFileSize(context, bytes)
+
+    // Size the source folder (background) and re-validate ancestry whenever the root changes.
+    LaunchedEffect(sourceRoot) {
+        validationError = if (!CopyGameToDriveC.isAncestor(sourceRoot, exeAndroid)) {
+            "That folder doesn't contain this game's .exe. Pick the folder the game runs from."
+        } else null
+        sourceSize = null
+        val size = withContext(Dispatchers.IO) { CopyGameToDriveC.folderSize(sourceRoot) }
+        sourceSize = size
+    }
+
+    // Folder picker (real absolute path via buildDirIntent) so the user can navigate to the true root.
+    val folderPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            InAppFilePicker.pickedPath(result.data)?.let { sourceRoot = File(it) }
+        }
+    }
+
+    // Kick the background copy of [sourceRoot] into [dest]; [cleanFirst] wipes an existing dest
+    // (overwrite). Drives phase COPYING → DELETE_ORIGINAL on success, or finishes on cancel/failure.
+    fun startCopy(dest: File, cleanFirst: Boolean) {
+        cancelFlag.set(false)
+        val total = sourceSize ?: 0L
+        val src = sourceRoot
+        progress = CopyGameToDriveC.Progress(0, total, "")
+        phase = CopyToCPhase.COPYING
+        scope.launch {
+            val outcome = withContext(Dispatchers.IO) {
+                runCatching {
+                    if (cleanFirst) dest.deleteRecursively()
+                    CopyGameToDriveC.copyTree(src, dest, total, { cancelFlag.get() }) { p -> progress = p }
+                    CopyGameToDriveC.repoint(target, src, dest)
+                        ?: throw java.io.IOException("Couldn't repoint the shortcut to the copied files.")
+                }
+            }
+            outcome.fold(
+                onSuccess = { phase = CopyToCPhase.DELETE_ORIGINAL },
+                onFailure = { e ->
+                    if (e is CopyGameToDriveC.CancelledException) {
+                        Toast.makeText(context, "Copy cancelled — nothing was changed.", Toast.LENGTH_SHORT).show()
+                    } else {
+                        android.util.Log.e("CopyToDriveC", "copy/repoint failed for ${target.name}", e)
+                        Toast.makeText(
+                            context,
+                            "Copy failed: ${e.message ?: "unknown error"}. Nothing was changed.",
+                            Toast.LENGTH_LONG,
+                        ).show()
+                    }
+                    onFinished()
+                },
+            )
+        }
+    }
+
+    // Validate ancestry + free space, resolve a destination collision, then start.
+    fun confirmAndCopy() {
+        if (!CopyGameToDriveC.isAncestor(sourceRoot, exeAndroid)) {
+            validationError = "That folder doesn't contain this game's .exe. Pick the folder the game runs from."
+            return
+        }
+        val size = sourceSize ?: return // still sizing — Copy is disabled, but guard anyway
+        if (!CopyGameToDriveC.hasRoomFor(context, size)) {
+            validationError = "Not enough space on Drive C. Needs ${fmt(size)} plus headroom, but only " +
+                "${fmt(CopyGameToDriveC.freeBytes(context))} is free."
+            return
+        }
+        val dest = CopyGameToDriveC.destRootFor(target.container, sourceRoot.name)
+        if (dest.exists()) phase = CopyToCPhase.OVERWRITE else startCopy(dest, cleanFirst = false)
+    }
+
+    when (phase) {
+        CopyToCPhase.CONFIRM -> OutlinedAlertDialog(
+            onDismissRequest = onFinished,
+            title = { Text("Copy \"${target.name}\" to Drive C") },
+            text = {
+                Column(
+                    modifier = Modifier.heightIn(max = 460.dp).verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text(
+                        "Copies the game onto this container's C: drive (native app storage) and points " +
+                            "the shortcut there. Fixes games that stall streaming from shared storage.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = OnSurfaceVariant,
+                    )
+                    Text("Folder to copy", style = MaterialTheme.typography.labelMedium, color = OnSurface)
+                    Text(
+                        sourceRoot.absolutePath,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = OnSurfaceVariant,
+                    )
+                    Text(
+                        text = when {
+                            validationError != null -> "Size —"
+                            sourceSize == null -> "Calculating size…"
+                            else -> "Size: ${fmt(sourceSize!!)}"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = OnSurfaceVariant,
+                    )
+                    Text(
+                        "Pick the folder that holds everything the game needs, not just the .exe.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = OnSurfaceVariant,
+                    )
+                    validationError?.let {
+                        Text(it, style = MaterialTheme.typography.bodySmall, color = DangerRed)
+                    }
+                    OutlinedButton(onClick = {
+                        val driveC = File(target.container.rootDir, ".wine/drive_c").takeIf { it.isDirectory }
+                        folderPicker.launch(
+                            InAppFilePicker.buildDirIntent(
+                                context, "Select the game's folder", initialDir = sourceRoot.absolutePath,
+                                driveCPath = driveC?.absolutePath,
+                            )
+                        )
+                    }) {
+                        Icon(Icons.Filled.Folder, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Change folder…")
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = { confirmAndCopy() },
+                    enabled = validationError == null && sourceSize != null,
+                ) { Text("Copy") }
+            },
+            dismissButton = { TextButton(onClick = onFinished) { Text("Cancel") } },
+        )
+
+        CopyToCPhase.OVERWRITE -> OutlinedAlertDialog(
+            onDismissRequest = onFinished,
+            title = { Text("Already on Drive C") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(
+                        "A folder named \"${sourceRoot.name}\" already exists under C:\\${CopyGameToDriveC.GAMES_SUBDIR}. " +
+                            "Overwrite it, or keep both by copying to a new folder?",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = OnSurfaceVariant,
+                    )
+                    OutlinedButton(onClick = {
+                        val dest = CopyGameToDriveC.autoRenamedDest(
+                            CopyGameToDriveC.destRootFor(target.container, sourceRoot.name)
+                        )
+                        startCopy(dest, cleanFirst = false)
+                    }) { Text("Keep both (new folder)") }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    startCopy(CopyGameToDriveC.destRootFor(target.container, sourceRoot.name), cleanFirst = true)
+                }) { Text("Overwrite") }
+            },
+            dismissButton = { TextButton(onClick = onFinished) { Text("Cancel") } },
+        )
+
+        CopyToCPhase.COPYING -> {
+            val p = progress
+            val total = p?.totalBytes ?: 0L
+            val done = p?.copiedBytes ?: 0L
+            OutlinedAlertDialog(
+                onDismissRequest = {}, // no accidental dismiss mid-copy; use Cancel
+                title = { Text("Copying to Drive C…") },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (total > 0L) {
+                            LinearProgressIndicator(
+                                progress = (done.toFloat() / total.toFloat()).coerceIn(0f, 1f),
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                            Text(
+                                "${fmt(done)} / ${fmt(total)}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = OnSurfaceVariant,
+                            )
+                        } else {
+                            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                        }
+                        p?.currentFile?.takeIf { it.isNotEmpty() }?.let {
+                            Text(
+                                it,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = OnSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { cancelFlag.set(true) }) { Text("Cancel") }
+                },
+            )
+        }
+
+        CopyToCPhase.DELETE_ORIGINAL -> OutlinedAlertDialog(
+            onDismissRequest = {
+                Toast.makeText(context, "\"${target.name}\" now runs from Drive C.", Toast.LENGTH_SHORT).show()
+                onFinished()
+            },
+            title = { Text("Copied to Drive C") },
+            text = {
+                Text(
+                    "\"${target.name}\" now runs from Drive C. Delete the original folder to free " +
+                        "${sourceSize?.let { fmt(it) } ?: "space"}, or keep it as a backup?",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = OnSurfaceVariant,
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val src = sourceRoot
+                    scope.launch {
+                        withContext(Dispatchers.IO) { runCatching { src.deleteRecursively() } }
+                        Toast.makeText(context, "Moved to Drive C — original deleted.", Toast.LENGTH_SHORT).show()
+                        onFinished()
+                    }
+                }) { Text("Delete original", color = DangerRed) }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    Toast.makeText(context, "Copied to Drive C — original kept.", Toast.LENGTH_SHORT).show()
+                    onFinished()
+                }) { Text("Keep original") }
+            },
+        )
+    }
+}
+
 @Composable
 private fun ShortcutBadgeOverlay(
     showEpic: Boolean,
