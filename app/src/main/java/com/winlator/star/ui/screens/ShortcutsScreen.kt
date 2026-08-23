@@ -1061,9 +1061,17 @@ fun ShortcutsScreen(vm: ShortcutsViewModel = viewModel()) {
                         icon = Icons.Default.InsertDriveFile,
                     ) {
                         showImportMethodPicker = false
+                        // A container is already chosen here — hand the in-app picker its C: drive so
+                        // the user can pick a game living on C: (games picked under drive_c import as
+                        // C:\… via WinePath, running FROM the container's C:). Null-safe: only when the
+                        // C: drive actually exists on disk. The system picker (SAF) has no C: notion.
+                        val driveC = pendingImportContainerIndex.takeIf { it >= 0 }
+                            ?.let { vm.containers().getOrNull(it) }
+                            ?.let { File(it.rootDir, ".wine/drive_c") }
+                            ?.takeIf { it.isDirectory }
                         if (importUseSystemPicker) importFileLauncher.launch("*/*")
                         else importFileInAppLauncher.launch(
-                            InAppFilePicker.buildIntent(context, InAppFilePicker.SHORTCUT, "Select .exe / .desktop / .lnk")
+                            InAppFilePicker.buildIntent(context, InAppFilePicker.SHORTCUT, "Select .exe / .desktop / .lnk", driveCPath = driveC?.absolutePath)
                         )
                     }
                     MenuOptionCard(
@@ -1072,8 +1080,14 @@ fun ShortcutsScreen(vm: ShortcutsViewModel = viewModel()) {
                         icon = Icons.Default.Folder,
                     ) {
                         showImportMethodPicker = false
+                        // Same C: hand-off as the single-exe path: let the folder picker browse the
+                        // chosen container's C: drive (scanned games under drive_c import as C:\…).
+                        val driveC = pendingImportContainerIndex.takeIf { it >= 0 }
+                            ?.let { vm.containers().getOrNull(it) }
+                            ?.let { File(it.rootDir, ".wine/drive_c") }
+                            ?.takeIf { it.isDirectory }
                         importFolderLauncher.launch(
-                            InAppFilePicker.buildDirIntent(context, "Select your games folder")
+                            InAppFilePicker.buildDirIntent(context, "Select your games folder", driveCPath = driveC?.absolutePath)
                         )
                     }
                 }

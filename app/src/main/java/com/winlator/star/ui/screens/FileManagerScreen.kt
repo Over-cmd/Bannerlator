@@ -278,6 +278,12 @@ fun FileManagerScreen(
     pickExtensions: List<String> = emptyList(),
     initialDir: File? = null,
     pickerTitle: String? = null,
+    // The chosen container's C: drive (`<container>/.wine/drive_c`), passed only by the add-a-game
+    // flow which already knows the target container. When non-null AND it exists, the picker offers a
+    // working "Drive C:" location (rail item + drive-chip menu) so the user can browse/pick a game
+    // that lives on C: — some games only boot (or boot faster) from the container's own C: drive. The
+    // default landing is unchanged (internal root); C: is an opt-in jump. Null for every other picker.
+    driveCPath: File? = null,
     onPick: ((File) -> Unit)? = null,
 ) {
     val context = LocalContext.current
@@ -988,7 +994,11 @@ fun FileManagerScreen(
                 Icon(Icons.Filled.ArrowBack, "Back", tint = MaterialTheme.colorScheme.primary)
             }
 
-            val currentDriveLabel = describeLocation(currentDir, containers, imagefsDir).driveLabel
+            // describeLocation labels C: by matching against the container list, which is empty in the
+            // picker (FilePickerActivity has no MainActivity) — so when we were handed the C: drive
+            // directly, label it from that instead of falling through to a generic "Storage".
+            val currentDriveLabel = if (driveCPath != null && isWithin(currentDir, driveCPath)) "Drive C:"
+                else describeLocation(currentDir, containers, imagefsDir).driveLabel
             // Dim the drive chip while the Favorites list is open (it's not the active context).
             val driveChipAlpha = if (showFavorites) 0.45f else 1f
             Box {
@@ -1020,10 +1030,15 @@ fun FileManagerScreen(
                         },
                         onClick = {
                             showDriveMenu = false
-                            if (containers.size == 1) {
+                            // Prefer the container the picker was launched with (add-a-game flow): its
+                            // C: is known even though FilePickerActivity has no MainActivity/container
+                            // list (that's why this menu item did nothing in the picker before).
+                            val dc = driveCPath?.takeIf { it.isDirectory }
+                            if (dc != null) {
+                                openDrive(dc)
+                            } else if (containers.size == 1) {
                                 openDrive(File(containers.first().rootDir, ".wine/drive_c"))
-                            }
-                            else if (containers.size > 1) {
+                            } else if (containers.size > 1) {
                                 showContainerPicker = true
                             }
                         },
@@ -1360,6 +1375,13 @@ fun FileManagerScreen(
                     showFavorites = false; if (d.readable) openDrive(d.dir)
                 })
             }
+            // Add-a-game-from-C: (add-game flow only). openDrive() pins currentRoot = drive_c so
+            // up/back is bounded at C:\ and the user can't wander up into the Linux prefix. RailItem
+            // carries no per-item colour — C: gets the standard accent highlight like Internal/SD
+            // (the amber Drive C: identity lives on the Favorites badge, not the rail).
+            driveCPath?.takeIf { it.isDirectory }?.let { dc ->
+                add(locItem("Drive C:", Icons.Filled.Storage, dc))
+            }
         }
         val quickItems = buildList {
             File("/storage/emulated/0/Download").takeIf { it.isDirectory }?.let { add(locItem("Downloads", Icons.Filled.Download, it)) }
@@ -1375,7 +1397,10 @@ fun FileManagerScreen(
         }
 
         Row(modifier = Modifier.weight(1f).fillMaxWidth()) {
-            if (!pickMode) {
+            // The slim picker normally hides the rail; the add-a-game-from-C: flow (driveCPath set) is
+            // the exception — it shows the rail so the "Drive C:" location item is reachable. Pickers
+            // that don't pass driveCPath keep the rail hidden exactly as before.
+            if (!pickMode || driveCPath != null) {
                 CollapsibleRail(state = fmRailState, title = "Files", sections = locationSections, outlinedItems = true)
             }
             Box(modifier = Modifier.weight(1f).fillMaxSize()) {
