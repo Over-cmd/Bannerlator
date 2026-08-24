@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - name: 📥 1. Clonar código fuente de Bannerlator
+    - name: 📥 1. Clonar codigo fuente de Bannerlator
       uses: actions/checkout@v4
 
     - name: ⚙️ 2. Configurar Entorno de Java JDK 17
@@ -19,12 +19,11 @@ jobs:
         distribution: 'zulu'
         java-version: '17'
 
-    - name: 🛠️ 3. PARCHE DE ARQUITECTURA: Forzar SDK de Android 11 (API 30)
+    - name: 🛠️ 3. PARCHE DE ARQUITECTURA: Forzar SDK de Android 11
       run: |
-        # Modificamos el targetSdk en el archivo build.gradle principal para eliminar 
-        # los bloqueos gráficos y los desbordamientos de memoria en Android 11
-        find . -name "build.gradle" -exec sed -i 's/targetSdk 28/targetSdk 30/g' {} \;
-        find . -name "build.gradle" -exec sed -i 's/targetSdkVersion 28/targetSdkVersion 30/g' {} \;
+        sed -i 's/targetSdk 28/targetSdk 30/g' app/build.gradle || true
+        sed -i 's/targetSdkVersion 28/targetSdkVersion 30/g' app/build.gradle || true
+        sed -i 's/targetSdk = 28/targetSdk = 30/g' app/build.gradle || true
 
     - name: 🤖 4. Configurar Android SDK y NDK
       uses: android-actions/setup-android@v3
