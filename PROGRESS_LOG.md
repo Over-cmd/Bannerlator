@@ -1,5 +1,24 @@
 # Star-Compose — Progress Log
 
+## 2026-08-24 — 🐛🎮📳 **Crash: setting in-game vibration to 0 while rumbling (createOneShot amplitude 0)**
+> DiRT Showdown hard-crashed the instant the user dragged **vibration → 0** in the in-game side menu
+> **while the pad was actively rumbling**. Device-confirmed: logcat `FATAL EXCEPTION: pool-6-thread-1`
+> + `exit-reasons-…07-33-19.log` `JAVA_CRASH` at 07:33:18, on installed build sha `b4b17f2a` (the
+> wowbox64-dl build = `2732dcc3`/main). ROOT CAUSE: the in-game "vibration=0" sets
+> `vibrationIntensity=0` (NOT mode=Off), so `triggerVibration` still dispatches. `applyIntensity()`
+> returns **0** when intensity≤0, and `WinHandler.vibrateBlended` fed that 0 straight into
+> `VibrationEffect.createOneShot(duration, 0)` → `IllegalArgumentException: amplitude … between 1 and
+> 255` (uncaught, on the `winlator_vibration` listener thread → process death). The dual-motor path
+> already guards `amp > 0`; the single-motor blend (phone vibrator + single-motor pads) did not, and
+> the DEVICE path funnels through the same `vibrateBlended`. FIX (`WinHandler.java:899`): one guard at
+> the single funnel point — `int scaled = applyIntensity(amplitude); if (scaled <= 0) return;` — 0 =
+> silence, matching applyIntensity's documented "0 stays 0"; also skips the pre-O legacy `vibrate()`
+> so intensity 0 is truly silent. Built off `origin/main` in an **isolated worktree** (a foreign
+> session held unrelated `VulkanRendererContext` WIP on the checked-out branch — left untouched).
+> Branch `fix/vibration-amplitude-zero-crash`. Separately noted in the same exit-reasons log: an
+> unrelated **05:37 JAVA_CRASH = JavaSteam depot-download OOM** (okio/okhttp `downloadDepotChunk`) —
+> that's the `fix/steam-download-oom-408` disk-spooling work, not this.
+
 ## 2026-08-24 — 🐛🎮 **Shortcut editor: WOWBox64 "download more" opened Box64 sheet (arm64ec)**
 > On an **arm64ec** container, the per-game shortcut editor's **Advanced** tab correctly labels the x86
 > layer **WOWBox64** (selector, version list, preset — `ShortcutsScreen.kt:5993-5996`, `:7549`), but the

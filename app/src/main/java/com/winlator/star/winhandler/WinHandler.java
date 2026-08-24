@@ -891,6 +891,12 @@ public class WinHandler {
         int intensity = Math.max(strong, weak);
         int amplitude = Math.min(255, Math.max(1, (int) ((intensity / 65535.0f) * 255)));
         int scaled = applyIntensity(amplitude);
+        // Per-container intensity 0 (e.g. vibration set to 0 in the in-game side menu) drives scaled
+        // to 0; VibrationEffect.createOneShot rejects amplitude 0 with IllegalArgumentException and
+        // crashes the vibration-listener thread. Treat 0 as silence — matching the dual-motor path's
+        // `amp > 0` guards and applyIntensity's documented "0 stays 0". Also skips the pre-O legacy
+        // vibrate() so intensity 0 is truly silent, not a full-strength buzz.
+        if (scaled <= 0) return;
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
             vibrator.vibrate(VibrationEffect.createOneShot(duration, scaled));
         } else {
