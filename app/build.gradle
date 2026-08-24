@@ -227,10 +227,11 @@ dependencies {
     // module was rewritten to disk-spool chunks (temp files, not RAM) + drop the 8 MB per-thread
     // ThreadLocal decompress window, fixing the large-game OOM (#408/#380: HITMAN 87 GB crashed at
     // every speed tier on the public in.dragonbra:1.8.0 in-memory pipeline). Same published artifact
-    // GameNative ships. NOTE: -SNAPSHOT is mutable; pin to an immutable commit (JitPack / own fork)
-    // before this is a long-term dependency.
-    implementation 'io.github.joshuatam:javasteam:1.8.0.1-26-SNAPSHOT'
-    implementation 'io.github.joshuatam:javasteam-depotdownloader:1.8.0.1-26-SNAPSHOT'
+    // GameNative ships. PINNED to the exact timestamped snapshot (buildNumber 1, the only build that
+    // exists) so it is immutable — a re-published -SNAPSHOT cannot silently change what we ship. This
+    // is byte-identical to the artifact the #408 device-proof build (CI run 32710611783) resolved.
+    implementation 'io.github.joshuatam:javasteam:1.8.0.1-26-20260801.180149-1'
+    implementation 'io.github.joshuatam:javasteam-depotdownloader:1.8.0.1-26-20260801.180149-1'
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
     implementation 'com.google.zxing:core:3.5.3'
     implementation 'androidx.recyclerview:recyclerview:1.2.0'

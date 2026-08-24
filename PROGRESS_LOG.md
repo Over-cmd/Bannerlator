@@ -20,8 +20,17 @@
 > (drop dead `maxFileWrites`). Our whole Android layer (foreground service, notification, two-bar progress,
 > `IDownloadListener` callbacks, `add`/`finishAdding`/`getCompletion`/`close`, `AppItem`) is UNCHANGED — the
 > only compile break was the removed `maxFileWrites` ctor arg. Branch `fix/steam-download-oom-408` off
-> `main` (`aa1e25ea`) → CI build for Mr-Teal to device-test on HITMAN. **NOT device-proven yet.**
-> ⚠️ `-SNAPSHOT` is mutable; before this merges, pin to an immutable commit (JitPack `433f2ad15` / own fork).
+> `main` (`aa1e25ea`) → CI build for Mr-Teal to device-test on HITMAN.
+> **✅ DEVICE-PROVEN (2026-08-24, reporter Mr-Teal, #408):** HITMAN WoA (87 GB) now downloads to
+> completion at the **blazing** tier — no OOM, speed good, both progress bars behave. Proven binary =
+> CI run `32710611783`, headSha `288c0be7` (== branch head, verified). (His follow-up "can't launch"
+> is #412 = Goldberg/no-steam-client, a separate closed issue — not this fix.)
+> **✅ PINNED (pre-merge):** dropped the mutable `-SNAPSHOT` for the exact timestamped snapshot
+> `1.8.0.1-26-20260801.180149-1` (buildNumber 1 — the only build in Sonatype's metadata, so it *is*
+> what the proven run resolved; pom+jar verified HTTP 200). Immutable → a re-published `-SNAPSHOT`
+> can't silently change our bits. Chose the timestamped Sonatype coord over a JitPack commit because
+> JitPack rebuilds from source (not guaranteed byte-identical to the proven artifact). ⚠️ Sonatype
+> may purge old snapshots eventually; if it does, mirror the JAR to our own maven or vendor the fork.
 
 ## 2026-08-23 — 🏁🎉 **Bannerlator 3.0.0 — STABLE shipped (Latest)**
 > Cut the 3.0.0 stable: **vc74 / versionName "3.0.0"**. Built from `61fbb9e4` (the vc74 bump on top of
