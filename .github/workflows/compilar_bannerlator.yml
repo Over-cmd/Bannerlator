@@ -49,7 +49,6 @@ jobs:
           if [ -n "$MAIN_ACTIVITY" ] && [ -f "$MAIN_ACTIVITY" ]; then
             echo "-> Aplicando inyección de silicio anti-stuttering segura en: $MAIN_ACTIVITY"
             sed -i 's/\r$//' "$MAIN_ACTIVITY"
-            # SOLUCIÓN CRÍTICA: Eliminamos el filtro de dispositivo de Java que congelaba el arranque (Waiting to render)
             sed -i 's|super.onCreate(savedInstanceState);|System.setProperty("MALLOC_TRIM_THRESHOLD_", "131072"); super.onCreate(savedInstanceState);|g' "$MAIN_ACTIVITY" || true
           else
             XSERVER_FILE=$(find app/src/main/ -name "XServerView.java" | head -n 1)
@@ -64,9 +63,9 @@ jobs:
           find app/src/main/ \( -name "*.sh" -o -name "*.json" -o -name "*.xml" \) -exec sed -i 's|"hardware_cursor": true|"hardware_cursor": false|g' {} + || true
           find app/src/main/ \( -name "*.sh" -o -name "*.json" -o -name "*.xml" \) -exec sed -i 's|cursor_visible=false|cursor_visible=true|g' {} + || true
 
-          echo "-> Creando directivas nativas de DXVK para optimizar la GPU Mali sin romper el inicio de la App..."
-          # Inyectamos el filtro de dispositivo de manera segura en las configuraciones del entorno de botellas
-          find app/src/main/ -name "dxvk.conf" -exec sed -i 's|# dxvk.customDeviceName =|dxvk.customDeviceName = Mali|g' {} + || true
+          echo "-> Creando directivas nativas de DXVK para optimizar la GPU Mali..."
+          # Buscamos en todo el proyecto (.) para asegurar la inyección de dxvk.conf sin romper la app de Android
+          find . -name "dxvk.conf" -exec sed -i 's|# dxvk.customDeviceName =|dxvk.customDeviceName = Mali|g' {} + || true
 
           echo "-> Configurando los recursos de strings globales para inyectar flags de visibilidad absoluta..."
           find app/src/main/ -name "strings.xml" -exec sed -i 's|</resources>|  <string name="default_malloc_trim">131072</string>\n  <string name="default_dxvk_filter">Mali</string>\n  <string name="show_hardware_cursor">false</string>\n  <string name="cursor_visible">true</string>\n  <string name="force_software_cursor">true</string>\n  <string name="enable_mouse_warp">false</string>\n</resources>|g' {} + || true
