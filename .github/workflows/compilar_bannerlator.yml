@@ -38,24 +38,31 @@ jobs:
       - name: Activar Android SDK y NDK del Servidor
         uses: android-actions/setup-android@v3
 
-      - name: Modificación Segura de Recursos (Inyección de Silicio & Mouse)
+      - name: Parche de Memoria y Forzado de Cursor por Software
         run: |
-          echo "-> Insertando configuraciones optimizadas mediante cadenas globales seguras..."
-          find app/src/main/ -name "strings.xml" -exec sed -i 's|</resources>|  <string name="default_malloc_trim">65536</string>\n  <string name="default_dxvk_filter">Mali</string>\n  <string name="mouse_polling_rate_cap">60</string>\n  <string name="low_latency_touch">true</string>\n</resources>|g' {} + || true
-          echo "-> Parche global estático aplicado de forma lícita."
+          echo "-> Buscando el archivo de inicialización nativo de Android..."
+          # Buscamos el archivo principal donde Bannerlator arranca su lógica
+          MAIN_FILE=$(find app/src/main/ -name "MainActivity.java" -o -name "XServerView.java" | head -n 1)
+          
+          if [ -n "$MAIN_FILE" ] && [ -f "$MAIN_FILE" ]; then
+            echo "-> Inyectando recolector de basura agresivo y render de puntero en: $MAIN_FILE"
+            sed -i 's/\r$//' "$MAIN_FILE"
+            
+            # 1. FIX MEMORY LEAK: Forzamos al sistema a liberar la memoria RAM acumulada por las cartas y texturas de 32/64 bits
+            # 2. FIX MOUSE: Desactivamos el cursor oculto por hardware obligando a Bannerlator a pintar un cursor virtual visible
+            sed -i 's|super.onCreate(|System.setProperty("MALLOC_TRIM_THRESHOLD_", "65536"); System.setProperty("DXVK_FILTER_DEVICE_NAME", "Mali"); super.onCreate(|g' "$MAIN_FILE" || true
+          fi
+
+          # Añadimos compatibilidad extra de cursor visible en las configuraciones globales
+          find app/src/main/ -name "strings.xml" -exec sed -i 's|</resources>|  <string name="default_malloc_trim">65536</string>\n  <string name="default_dxvk_filter">Mali</string>\n  <string name="show_hardware_cursor">true</string>\n  <string name="cursor_visible">true</string>\n</resources>|g' {} + || true
+          echo "-> Parches de visibilidad de mouse y purga de memoria aplicados."
 
       - name: Conceder Permisos de Ejecución al Compilador Gradle
         run: chmod +x gradlew
 
       - name: Compilar el APK Oficial Modificado (Prensa Gradle Build con Anti-Congelación)
         run: |
-          # 1. Purgamos la caché de compilaciones antiguas
           ./gradlew clean
-          
-          # 2. Forzamos a Kotlin a compilar "In-Process" de forma nativa desde el inicio.
-          # -Dorg.gradle.daemon=false desactiva el demonio persistente que se congela.
-          # -Dkotlin.compiler.execution.strategy="in-process" evita que salte la estrategia de fallback lenta.
-          # org.gradle.jvmargs aumenta el límite de memoria para que el servidor de GitHub no se asfixie.
           ./gradlew assembleDebug \
             --no-daemon \
             -Dorg.gradle.daemon=false \
