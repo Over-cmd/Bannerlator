@@ -1,63 +1,51 @@
 name: Forja del APK de Bannerlator MALI Unisoc T618
-
 on:
   workflow_dispatch:
-
 jobs:
   build-bannerlator-apk:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout del Repositorio de Bannerlator
         uses: actions/checkout@v4
         with:
           submodules: 'false'
           fetch-depth: 0
-
       - name: Reparación de Submódulos Caídos (Fix bionic-fg)
         run: |
           echo "-> Reparando redirecciones de submódulos huérfanos..."
           if [ -f ".gitmodules" ]; then
+            sed -i 's|https://github.com|https://github.com|g' .gitmodules || true
             git submodule sync
           fi
           git submodule update --init --force || true
-
       - name: Restauración de Fábrica del Código
         run: |
           git reset --hard HEAD
           git clean -fdx
-
       - name: Configurar Entorno de Java (JDK 17 de Factoría)
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
           cache: 'gradle'
-
       - name: Activar Android SDK y NDK del Servidor
         uses: android-actions/setup-android@v3
-
-      - name: Parche de Memoria Seguro (Puntero del Mouse 100% Original)
+      - name: Parche de Memoria
         run: |
           echo "-> Buscando el archivo de inicialización nativo de Android..."
-          MAIN_FILE=$(find app/src/main/ -name "MainActivity.java" | head -n 1)
-          
+          # Buscamos el archivo principal donde Bannerlator arranca su lógica
+          MAIN_FILE=$(find app/src/main/ -name "MainActivity.java" -o -name "XServerView.java" | head -n 1)
           if [ -n "$MAIN_FILE" ] && [ -f "$MAIN_FILE" ]; then
-            echo "-> Inyectando propiedades del sistema para mitigar fugas de memoria en: $MAIN_FILE"
+            echo "-> Inyectando recolector de basura agresivo en: $MAIN_FILE"
             sed -i 's/\r$//' "$MAIN_FILE"
-            # Inyectamos MALLOC_TRIM de forma segura. El control del mouse se queda original e intacto.
-            sed -i 's|super.onCreate(savedInstanceState);|System.setProperty("MALLOC_TRIM_THRESHOLD_", "65536"); super.onCreate(savedInstanceState);|g' "$MAIN_FILE" || true
+            # 1. FIX MEMORY LEAK: Forzamos al sistema a liberar la memoria RAM acumulada por las cartas y texturas de 32/64 bits
+            sed -i 's|super.onCreate(|System.setProperty("MALLOC_TRIM_THRESHOLD_", "65536"); System.setProperty("DXVK_FILTER_DEVICE_NAME", "Mali"); super.onCreate(|g' "$MAIN_FILE" || true
           fi
-
-          echo "-> Insertando variables Mali estables en configuraciones locales..."
-          find app/src/main/ -name "dxvk.conf" -exec sed -i 's|# dxvk.customDeviceName =|dxvk.customDeviceName = Mali|g' {} + || true
-
-          find app/src/main/ -name "strings.xml" -exec sed -i 's|</resources>|  <string name="default_malloc_trim">65536</string>\n  <string name="default_dxvk_filter">Mali</string>\n</resources>|g' {} + || true
-          echo "-> Parches de memoria aplicados. Código del puntero original restaurado."
-
+          # Añadimos compatibilidad extra de memoria en las configuraciones globales
+          find app/src/main/ -name "strings.xml" -exec sed -i 's|</resources>| <string name="default_malloc_trim">65536</string>\n <string name="default_dxvk_filter">Mali</string>\n</resources>|g' {} + || true
+          echo "-> Parches de purga de memoria aplicados."
       - name: Conceder Permisos de Ejecución al Compilador Gradle
         run: chmod +x gradlew
-
       - name: Compilar el APK Oficial Modificado (Prensa Gradle Build con Anti-Congelación)
         run: |
           ./gradlew clean
@@ -66,7 +54,6 @@ jobs:
             -Dorg.gradle.daemon=false \
             -Dkotlin.compiler.execution.strategy="in-process" \
             -Porg.gradle.jvmargs="-Xmx4g -XX:MaxMetaspaceSize=1g -XX:+UseParallelGC"
-
       - name: Rastrear el APK Cocinado de Factoría
         run: |
           APK_PATH=$(find app/build/outputs/apk/ -name "*.apk" | head -n 1)
@@ -75,7 +62,6 @@ jobs:
           fi
           echo "APK_OUTPUT_PATH=$APK_PATH" >> $GITHUB_ENV
           echo "=== APK MONOLÍTICO SANO DETECTADO: $APK_PATH ==="
-
       - name: Subir APK Modificado a GitHub Artifacts
         uses: actions/upload-artifact@v4
         with:
