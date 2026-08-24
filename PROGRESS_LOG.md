@@ -32,6 +32,37 @@
 > WOWBox64. Also fixed the gear-icon a11y `contentDescription` "Download Box64" → `"Download $emulatorLabel"`.
 > Diagnosed from user's two device screenshots (DiRT Rally 2.0, arm64ec). Branch
 > `fix/shortcut-wowbox64-download-sheet` off `origin/main`. CI-green + device-proof pending.
+## 2026-08-24 — 🛒💥 **Steam large-game download OOM (#408/#380) — swap to GameNative's disk-spooling JavaSteam fork**
+> Reporter Mr-Teal: **HITMAN WoA (87 GB)** OOM-crashes within ~1 min at **every** speed tier (small
+> games fine) — `java.lang.OutOfMemoryError` vs the 512 MB largeHeap. Root cause (confirmed from engine
+> source): the public `in.dragonbra:javasteam-depotdownloader:1.8.0` holds multi-MB chunk buffers **in
+> memory** the whole pipeline transit — the two `flatMapMerge` inter-stage channels default to
+> `Channel.BUFFERED = 64` (invisible to the `max*` knobs → ~128 MB of 1 MB buffers) plus
+> `VZipUtil.windowBufferPool`, an **8 MB per-Default-thread `ThreadLocal`** never released (~64 MB). So
+> heap peak scales with pipeline saturation, not game size → a long 87 GB download breaches the heap;
+> the speed knobs only change *how fast*, which is why it dies at every tier. App-side caps only DELAY it.
+> **Fix = adopt GameNative's fork** `io.github.joshuatam:javasteam(-depotdownloader):1.8.0.1-26-SNAPSHOT`
+> (`joshuatam/JavaSteam @ gamenative-latest`), whose depot-downloader was rewritten to **disk-spool
+> chunks** (per-chunk temp files under `.DepotDownloader/staging`, only a `fileId` rides the flow, buffer
+> freed immediately, temp deleted after write) → heap peak `O(maxDownloads+maxDecompress)`, **constant
+> regardless of game size**; the ThreadLocal 8 MB window is gone; and a new `skipLargeFileAllocation`
+> flag sidesteps a separate multi-GB per-file prealloc OOM HITMAN also hits. 4 files: `settings.gradle`
+> (+ sonatype-snapshots repo, same as GameNative), `app/build.gradle` (dep swap), `SteamDepotDownloader.kt`
+> (ctor rewrite → named args, drop `maxFileWrites`, `skipLargeFileAllocation=true`), `DownloadSpeedConfig.kt`
+> (drop dead `maxFileWrites`). Our whole Android layer (foreground service, notification, two-bar progress,
+> `IDownloadListener` callbacks, `add`/`finishAdding`/`getCompletion`/`close`, `AppItem`) is UNCHANGED — the
+> only compile break was the removed `maxFileWrites` ctor arg. Branch `fix/steam-download-oom-408` off
+> `main` (`aa1e25ea`) → CI build for Mr-Teal to device-test on HITMAN.
+> **✅ DEVICE-PROVEN (2026-08-24, reporter Mr-Teal, #408):** HITMAN WoA (87 GB) now downloads to
+> completion at the **blazing** tier — no OOM, speed good, both progress bars behave. Proven binary =
+> CI run `32710611783`, headSha `288c0be7` (== branch head, verified). (His follow-up "can't launch"
+> is #412 = Goldberg/no-steam-client, a separate closed issue — not this fix.)
+> **✅ PINNED (pre-merge):** dropped the mutable `-SNAPSHOT` for the exact timestamped snapshot
+> `1.8.0.1-26-20260801.180149-1` (buildNumber 1 — the only build in Sonatype's metadata, so it *is*
+> what the proven run resolved; pom+jar verified HTTP 200). Immutable → a re-published `-SNAPSHOT`
+> can't silently change our bits. Chose the timestamped Sonatype coord over a JitPack commit because
+> JitPack rebuilds from source (not guaranteed byte-identical to the proven artifact). ⚠️ Sonatype
+> may purge old snapshots eventually; if it does, mirror the JAR to our own maven or vendor the fork.
 
 ## 2026-08-23 — 🏁🎉 **Bannerlator 3.0.0 — STABLE shipped (Latest)**
 > Cut the 3.0.0 stable: **vc74 / versionName "3.0.0"**. Built from `61fbb9e4` (the vc74 bump on top of
