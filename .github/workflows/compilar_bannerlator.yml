@@ -14,12 +14,7 @@ jobs:
           submodules: 'false'
           fetch-depth: 0
 
-      - name: 🧹 1. Restauración de Fábrica del Código Inicial
-        run: |
-          git reset --hard HEAD
-          git clean -fdx
-
-      - name: 🔗 2. Reparación de Submódulos Caídos (Fix bionic-fg)
+      - name: Reparación de Submódulos Caídos (Fix bionic-fg)
         run: |
           echo "-> Reparando redirecciones de submódulos huérfanos..."
           if [ -f ".gitmodules" ]; then
@@ -27,46 +22,52 @@ jobs:
           fi
           git submodule update --init --force || true
 
-      - name: ⚙️ 3. Configurar Entorno de Java (JDK 17 de Factoría)
+      - name: Restauración de Fábrica del Código
+        run: |
+          git reset --hard HEAD
+          git clean -fdx
+
+      - name: Configurar Entorno de Java (JDK 17 de Factoría)
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
           cache: 'gradle'
 
-      - name: 🤖 4. Activar Android SDK y NDK del Servidor
+      - name: Activar Android SDK y NDK del Servidor
         uses: android-actions/setup-android@v3
 
-      - name: 🛠️ 5. Parche Maestro (Fix de Arranque Absoluto, Puntero Visible y Anti-Leak)
+      - name: Parche de Memoria Seguro (Puntero del Mouse 100% Original)
         run: |
-          echo "-> Mantenemos el targetSdk original del proyecto para evitar la congelación del motor de renderizado..."
-          # NOTA: Se eliminaron las líneas de 'targetSdk 30' que asfixiaban el render de Bannerlator.
+          echo "-> Buscando el archivo de inicialización nativo de Android..."
+          MAIN_FILE=$(find app/src/main/ -name "MainActivity.java" | head -n 1)
+          
+          if [ -n "$MAIN_FILE" ] && [ -f "$MAIN_FILE" ]; then
+            echo "-> Inyectando propiedades del sistema para mitigar fugas de memoria en: $MAIN_FILE"
+            sed -i 's/\r$//' "$MAIN_FILE"
+            # Inyectamos MALLOC_TRIM de forma segura. El control del mouse se queda original e intacto.
+            sed -i 's|super.onCreate(savedInstanceState);|System.setProperty("MALLOC_TRIM_THRESHOLD_", "65536"); super.onCreate(savedInstanceState);|g' "$MAIN_FILE" || true
+          fi
 
-          echo "-> Forzando al entorno X11/Wine a no ocultar el cursor bajo ninguna circunstancia..."
-          # El escape de los paréntesis asegura que find procese la inyección en todos los scripts de inicialización del puntero
-          find app/src/main/ \( -name "*.sh" -o -name "*.json" -o -name "*.xml" \) -exec sed -i 's|"show_cursor": false|"show_cursor": true|g' {} + || true
-          find app/src/main/ \( -name "*.sh" -o -name "*.json" -o -name "*.xml" \) -exec sed -i 's|"hardware_cursor": true|"hardware_cursor": false|g' {} + || true
-          find app/src/main/ \( -name "*.sh" -o -name "*.json" -o -name "*.xml" \) -exec sed -i 's|cursor_visible=false|cursor_visible=true|g' {} + || true
-
-          echo "-> Optimizando DXVK para la GPU Mali desde las directivas internas de la botella..."
+          echo "-> Insertando variables Mali estables en configuraciones locales..."
           find app/src/main/ -name "dxvk.conf" -exec sed -i 's|# dxvk.customDeviceName =|dxvk.customDeviceName = Mali|g' {} + || true
 
-          echo "-> Configurando los recursos de strings globales para inyectar los flags de visibilidad y memoria RAM..."
-          # Al inyectar el MALLOC_TRIM en recursos, mitigamos la fuga de memoria en juegos de 32/64 bits de forma segura
-          find app/src/main/ -name "strings.xml" -exec sed -i 's|</resources>|  <string name="default_malloc_trim">131072</string>\n  <string name="default_dxvk_filter">Mali</string>\n  <string name="show_hardware_cursor">false</string>\n  <string name="cursor_visible">true</string>\n  <string name="force_software_cursor">true</string>\n  <string name="enable_mouse_warp">false</string>\n</resources>|g' {} + || true
-          echo "-> Parches estáticos inyectados con éxito. Código fuente Java/Kotlin intacto."
+          find app/src/main/ -name "strings.xml" -exec sed -i 's|</resources>|  <string name="default_malloc_trim">65536</string>\n  <string name="default_dxvk_filter">Mali</string>\n</resources>|g' {} + || true
+          echo "-> Parches de memoria aplicados. Código del puntero original restaurado."
 
-      - name: 🔑 6. Conceder Permisos de Ejecución al Compilador Gradle
+      - name: Conceder Permisos de Ejecución al Compilador Gradle
         run: chmod +x gradlew
 
-      - name: 🏗️ 7. Compilar el APK Oficial Modificado (Gradle con Anti-Congelación)
-        env:
-          GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx5632m -XX:MaxMetaspaceSize=1024m -XX:+UseParallelGC -Dorg.gradle.daemon=false -Dorg.gradle.parallel=false -Dorg.gradle.configureondemand=false"
+      - name: Compilar el APK Oficial Modificado (Prensa Gradle Build con Anti-Congelación)
         run: |
-          ./gradlew clean --no-daemon
-          ./gradlew assembleDebug --no-daemon --no-build-cache --stacktrace
+          ./gradlew clean
+          ./gradlew assembleDebug \
+            --no-daemon \
+            -Dorg.gradle.daemon=false \
+            -Dkotlin.compiler.execution.strategy="in-process" \
+            -Porg.gradle.jvmargs="-Xmx4g -XX:MaxMetaspaceSize=1g -XX:+UseParallelGC"
 
-      - name: 📂 8. Rastrear el APK Cocinado de Factoría
+      - name: Rastrear el APK Cocinado de Factoría
         run: |
           APK_PATH=$(find app/build/outputs/apk/ -name "*.apk" | head -n 1)
           if [ -z "$APK_PATH" ]; then
@@ -75,7 +76,7 @@ jobs:
           echo "APK_OUTPUT_PATH=$APK_PATH" >> $GITHUB_ENV
           echo "=== APK MONOLÍTICO SANO DETECTADO: $APK_PATH ==="
 
-      - name: 📤 9. Subir APK Modificado a GitHub Artifacts
+      - name: Subir APK Modificado a GitHub Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: Bannerlator-Unisoc-T618-Mali
