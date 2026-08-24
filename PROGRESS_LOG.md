@@ -1,5 +1,19 @@
 # Star-Compose — Progress Log
 
+## 2026-08-24 — 🐛🎮 **Shortcut editor: WOWBox64 "download more" opened Box64 sheet (arm64ec)**
+> On an **arm64ec** container, the per-game shortcut editor's **Advanced** tab correctly labels the x86
+> layer **WOWBox64** (selector, version list, preset — `ShortcutsScreen.kt:5993-5996`, `:7549`), but the
+> gear/**download** button next to it opened **"Box64 Downloads"** listing plain Box64 builds
+> (`Box64-Hybrid-Bionic`, `Box64-0.4.4-Bionic`, …) — the wrong content type, so no WOWBox64 build was
+> installable from there. ROOT CAUSE: `ShortcutsScreen.kt:7383` hardcoded `CONTENT_TYPE_BOX64` regardless
+> of arch, while the **container** editor already arch-branches (`ContainerDetailScreen.kt:393-399`) — a
+> pure parity gap. FIX (mirror the container editor): download sheet now
+> `isArm64EC ? CONTENT_TYPE_WOWBOX64 : CONTENT_TYPE_BOX64` — `ContentDownloadSheet` derives both title
+> (`:291`) and listing (`:608`) from the type, so the sheet retitles **"WOWBox64 Downloads"** and lists
+> WOWBox64. Also fixed the gear-icon a11y `contentDescription` "Download Box64" → `"Download $emulatorLabel"`.
+> Diagnosed from user's two device screenshots (DiRT Rally 2.0, arm64ec). Branch
+> `fix/shortcut-wowbox64-download-sheet` off `origin/main`. CI-green + device-proof pending.
+
 ## 2026-08-23 — 🏁🎉 **Bannerlator 3.0.0 — STABLE shipped (Latest)**
 > Cut the 3.0.0 stable: **vc74 / versionName "3.0.0"**. Built from `61fbb9e4` (the vc74 bump on top of
 > the vk-clamp #403 fix `2cdb5ca2`); `release.yml` run `32668286994`, `make_latest=true`,
