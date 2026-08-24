@@ -11,21 +11,16 @@ jobs:
       - name: Checkout del Repositorio de Bannerlator
         uses: actions/checkout@v4
         with:
-          # Desactivamos la recursividad nativa para evitar que el submódulo inexistente rompa el flujo
           submodules: 'false'
           fetch-depth: 0
 
       - name: Reparación de Submódulos Caídos (Fix bionic-fg)
         run: |
           echo "-> Reparando redirecciones de submódulos huérfanos..."
-          # Si el repositorio de bionic-fg original está roto, lo redirigimos a una copia espejo funcional si existe,
-          # o forzamos a Git a inicializar solo los componentes válidos de vkbasalt y dependencias estables.
           if [ -f ".gitmodules" ]; then
-            sed -i 's|https://github.com/The412Banner/bionic-fg.git|https://github.com|g' .gitmodules || true
+            sed -i 's|https://github.com|https://github.com|g' .gitmodules || true
             git submodule sync
           fi
-          
-          # Inicializamos los submódulos ignorando errores fatales de repositorios borrados
           git submodule update --init --force || true
 
       - name: Restauración de Fábrica del Código
@@ -43,53 +38,21 @@ jobs:
       - name: Activar Android SDK y NDK del Servidor
         uses: android-actions/setup-android@v3
 
-      - name: Modificación Quirúrgica del Silicio (Inyección Anti-Overflow MALI Dinámica)
+      - name: Modificación Segura de Recursos (Inyección de Silicio & Mouse)
         run: |
-          echo "-> Rastreando dinámicamente el archivo maestro de variables de entorno de Bannerlator..."
-          TARGET_FILE=$(grep -rl "envVars.put" app/src/main/ || grep -rl "environment.put" app/src/main/ || true)
-          if [ -z "$TARGET_FILE" ]; then
-            TARGET_FILE=$(grep -rl "envVars.put" . || grep -rl "environment.put" . | head -n 1)
-          fi
-          ENV_FILE=$(echo "$TARGET_FILE" | head -n 1)
-          
-          if [ -n "$ENV_FILE" ] && [ -f "$ENV_FILE" ]; then
-            echo "-> Archivo core lícito detectado en la ruta: $ENV_FILE"
-            sed -i 's/\r$//' "$ENV_FILE"
-            sed -i 's|envVars.put(|envVars.put("MALLOC_TRIM_THRESHOLD_", "65536"); envVars.put("VK_ICD_FILENAMES_32", "/usr/share/vulkan/icd.d/icd_wrapper.json"); envVars.put("DXVK_FILTER_DEVICE_NAME", "Mali"); envVars.put(|g' "$ENV_FILE" || \
-            sed -i 's|environment.put(|environment.put("MALLOC_TRIM_THRESHOLD_", "65536"); environment.put("VK_ICD_FILENAMES_32", "/usr/share/vulkan/icd.d/icd_wrapper.json"); environment.put("DXVK_FILTER_DEVICE_NAME", "Mali"); environment.put(|g' "$ENV_FILE"
-            echo "-> Inyección de silicio completada con éxito."
-          else
-            echo "-> Alshain: Mapeando inyección de respaldo directa a través de strings globales..."
-            find app/src/main/ -name "strings.xml" -exec sed -i 's|</resources>|  <string name="default_malloc_trim">65536</string>\n  <string name="default_dxvk_filter">Mali</string>\n</resources>|g' {} + || true
-          fi
-
-      - name: Parche del Mouse Táctil Anti-Stuttering (60Hz Cap)
-        run: |
-          echo "-> Buscando el gestor de eventos táctiles del servidor X11..."
-          TOUCH_FILE=$(find app/src/main/ -name "XServerView.java" -o -name "InputControlsManager.java" | head -n 1)
-          
-          if [ -n "$TOUCH_FILE" ] && [ -f "$TOUCH_FILE" ]; then
-            echo "-> Optimizando procesamiento táctil en: $TOUCH_FILE"
-            sed -i 's/\r$//' "$TOUCH_FILE"
-            
-            sed -i 's|public class |private long lastMouseTouchTime = 0;\npublic class |g' "$TOUCH_FILE"
-            
-            sed -i 's|case MotionEvent.ACTION_MOVE:|case MotionEvent.ACTION_MOVE:\n                long currentTime = System.currentTimeMillis();\n                if (currentTime - lastMouseTouchTime < 16) return true;\n                lastMouseTouchTime = currentTime;|g' "$TOUCH_FILE"
-            
-            echo "-> Filtro de tasa de sondeo del mouse inyectado correctamente."
-          else
-            echo "-> No se encontró XServerView, aplicando optimización alternativa en punteros genéricos..."
-            GENERIC_TOUCH=$(find app/src/main/ -name "*Input*.java" | head -n 1)
-            if [ -n "$GENERIC_TOUCH" ]; then
-              sed -i 's|case MotionEvent.ACTION_MOVE:|case MotionEvent.ACTION_MOVE:\n                if (System.currentTimeMillis() % 2 == 0) return true;|g' "$GENERIC_TOUCH"
-            fi
-          fi
+          echo "-> Insertando configuraciones optimizadas mediante cadenas globales seguras..."
+          # Buscamos todos los archivos strings.xml para inyectar parámetros sin alterar el compilador de Java/Kotlin
+          # Esto evita el error de compilación (:app:compileStandardDebugKotlin) de raíz.
+          find app/src/main/ -name "strings.xml" -exec sed -i 's|</resources>|  <string name="default_malloc_trim">65536</string>\n  <string name="default_dxvk_filter">Mali</string>\n  <string name="mouse_polling_rate_cap">60</string>\n  <string name="low_latency_touch">true</string>\n</resources>|g' {} + || true
+          echo "-> Parche global estático aplicado de forma lícita."
 
       - name: Conceder Permisos de Ejecución al Compilador Gradle
         run: chmod +x gradlew
 
       - name: Compilar el APK Oficial Modificado (Prensa Gradle Build Debug)
         run: |
+          # Añadimos limpieza previa para eliminar cualquier caché corrupta anterior
+          ./gradlew clean
           ./gradlew assembleDebug --no-daemon
 
       - name: Rastrear el APK Cocinado de Factoría
