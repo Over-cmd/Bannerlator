@@ -41,19 +41,26 @@ jobs:
       - name: Modificación Segura de Recursos (Inyección de Silicio & Mouse)
         run: |
           echo "-> Insertando configuraciones optimizadas mediante cadenas globales seguras..."
-          # Buscamos todos los archivos strings.xml para inyectar parámetros sin alterar el compilador de Java/Kotlin
-          # Esto evita el error de compilación (:app:compileStandardDebugKotlin) de raíz.
           find app/src/main/ -name "strings.xml" -exec sed -i 's|</resources>|  <string name="default_malloc_trim">65536</string>\n  <string name="default_dxvk_filter">Mali</string>\n  <string name="mouse_polling_rate_cap">60</string>\n  <string name="low_latency_touch">true</string>\n</resources>|g' {} + || true
           echo "-> Parche global estático aplicado de forma lícita."
 
       - name: Conceder Permisos de Ejecución al Compilador Gradle
         run: chmod +x gradlew
 
-      - name: Compilar el APK Oficial Modificado (Prensa Gradle Build Debug)
+      - name: Compilar el APK Oficial Modificado (Prensa Gradle Build con Anti-Congelación)
         run: |
-          # Añadimos limpieza previa para eliminar cualquier caché corrupta anterior
+          # 1. Purgamos la caché de compilaciones antiguas
           ./gradlew clean
-          ./gradlew assembleDebug --no-daemon
+          
+          # 2. Forzamos a Kotlin a compilar "In-Process" de forma nativa desde el inicio.
+          # -Dorg.gradle.daemon=false desactiva el demonio persistente que se congela.
+          # -Dkotlin.compiler.execution.strategy="in-process" evita que salte la estrategia de fallback lenta.
+          # org.gradle.jvmargs aumenta el límite de memoria para que el servidor de GitHub no se asfixie.
+          ./gradlew assembleDebug \
+            --no-daemon \
+            -Dorg.gradle.daemon=false \
+            -Dkotlin.compiler.execution.strategy="in-process" \
+            -Porg.gradle.jvmargs="-Xmx4g -XX:MaxMetaspaceSize=1g -XX:+UseParallelGC"
 
       - name: Rastrear el APK Cocinado de Factoría
         run: |
