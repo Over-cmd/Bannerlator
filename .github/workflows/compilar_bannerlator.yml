@@ -19,21 +19,15 @@ jobs:
         distribution: 'zulu'
         java-version: '17'
 
-    - name: 🛠️ 3. PARCHE DE ARQUITECTURA: Forzar SDK de Android 11
-      run: |
-        sed -i 's/targetSdk 28/targetSdk 30/g' app/build.gradle || true
-        sed -i 's/targetSdkVersion 28/targetSdkVersion 30/g' app/build.gradle || true
-        sed -i 's/targetSdk = 28/targetSdk = 30/g' app/build.gradle || true
-
-    - name: 🤖 4. Configurar Android SDK y NDK
+    - name: 🤖 3. Configurar Android SDK y NDK
       uses: android-actions/setup-android@v3
 
-    - name: 🏗️ 5. Compilar APK Oficial via Gradle en la Nube
+    - name: 🏗️ 4. Compilar APK Oficial via Gradle en la Nube
       run: |
         chmod +x ./gradlew
         ./gradlew assembleRelease --no-daemon
 
-    - name: 📤 6. Subir APK Optimizado a los Artefactos
+    - name: 📤 5. Subir APK Optimizado a los Artefactos
       uses: actions/upload-artifact@v4
       with:
         name: Bannerlator-Bifrost-Android11-APK
