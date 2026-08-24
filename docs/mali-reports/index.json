@@ -1,5 +1,15 @@
 [
   {
+    "id": "2026-08-24T10-23-22-c4a658",
+    "created": "2026-08-24T10:23:22.827Z",
+    "reporter": "Tirtogalih",
+    "device": "Infinix Note 50x 5G",
+    "gpu": "Mali-G615 MC2",
+    "game": "Need for Speed Underground 2",
+    "symptom": "Black screen (no image)",
+    "logs": 1
+  },
+  {
     "id": "2026-08-22T04-12-36-08d428",
     "created": "2026-08-22T04:12:36.614Z",
     "reporter": "Mohd Ariana Bin Ahmad",
