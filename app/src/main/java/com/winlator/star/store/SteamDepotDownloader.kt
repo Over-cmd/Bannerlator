@@ -225,7 +225,7 @@ object SteamDepotDownloader {
     /**
      * Start a fresh install. Returns a DownloadControl with cancel + pause Runnables.
      * @param speedTier download-speed tier key (8=Slow / 16=Medium / 24=Fast / 32=Blazing);
-     *   fed to [DownloadSpeedConfig] to derive maxDownloads/maxDecompress/maxFileWrites.
+     *   fed to [DownloadSpeedConfig] to derive maxDownloads/maxDecompress.
      * @param debugLog when true (or in a debug build) writes the verbose steam_debug.txt firehose +
      *   JavaSteam-internal bridge for this download. Off = logcat-only; failures still leave a trace.
      */
@@ -459,30 +459,31 @@ object SteamDepotDownloader {
             repo.emit("DownloadProgress:$appId:$iDone:$iTotal:$dDone:$dTotal:$etaSeconds:$speedBps")
         }
 
-        // Derive the three pipeline-stage caps from CPU cores × the selected tier's ratios
-        // (see DownloadSpeedConfig, a faithful port of GameNative on this same engine). The 7th
-        // ctor arg is maxFileWrites (NOT progressUpdateInterval — that's a hardcoded 500L inside
-        // the engine); passing a large value there let up to ~100 chunks hold multi-MB decompressed
-        // buffers at once and OOM'd the 256 MB heap. maxDownloads stays high (network parallelism is
-        // cheap on heap); decompress + file-write are the heap drivers and are kept bounded.
+        // Derive the two pipeline-stage caps from CPU cores × the selected tier's ratios
+        // (see DownloadSpeedConfig). On the joshuatam fork engine, chunk buffers are disk-spooled
+        // (temp files) rather than held in memory, so heap peak no longer scales with game size and
+        // these are purely throughput knobs — the old maxFileWrites stage was removed upstream.
         val speedConfig   = DownloadSpeedConfig(speedTier)
         val cores         = speedConfig.cpuCores
         val maxDownloads  = speedConfig.maxDownloads
         val maxDecompress = speedConfig.maxDecompress
-        val maxFileWrites = speedConfig.maxFileWrites
         dlog("Constructing DepotDownloader(tier=$speedTier, cores=$cores, maxDownloads=$maxDownloads, " +
-                "maxDecompress=$maxDecompress, maxFileWrites=$maxFileWrites, androidEmulation=true, debug=$verbose)")
+                "maxDecompress=$maxDecompress, androidEmulation=true, skipLargeFileAllocation=true, debug=$verbose)")
         val downloader = try {
+            // Named args: the fork removed the maxFileWrites ctor arg (it no longer has a separate
+            // file-write stage — decompress+write are combined), so the positional slots shifted.
             DepotDownloader(
-                steamClient,
-                licenses,
-                verbose,       // debug (gated: BuildConfig.DEBUG || user "Log debug session")
-                false,         // useLanCache
-                maxDownloads,  // maxDownloads (cores × tier download ratio)
-                maxDecompress, // maxDecompress (cores × tier decompress ratio — bounds the big buffers)
-                maxFileWrites, // maxFileWrites (tied to maxDecompress; was 100, mislabeled "progressUpdateInterval")
-                true,          // androidEmulation
-                null,          // parentJob
+                steamClient = steamClient,
+                licenses = licenses,
+                debug = verbose,                 // gated: BuildConfig.DEBUG || user "Log debug session"
+                useLanCache = false,
+                maxDownloads = maxDownloads,      // cores × tier download ratio
+                maxDecompress = maxDecompress,    // cores × tier decompress ratio
+                androidEmulation = true,
+                parentJob = null,
+                // #408: the fork disk-spools chunks so heap no longer scales with game size; this
+                // flag also skips the multi-GB per-file pre-allocation that HITMAN's large files tripped.
+                skipLargeFileAllocation = true,
             )
         } catch (e: Exception) {
             dlog("FAIL: DepotDownloader constructor threw")

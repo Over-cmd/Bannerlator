@@ -18,6 +18,9 @@ dependencyResolutionManagement {
         mavenCentral()
         // topjohnwu libsu (root shell for the power-user perf toggles) is jitpack-only.
         maven { url 'https://jitpack.io' }
+        // JavaSteam depot-downloader fork (io.github.joshuatam) — GameNative's disk-spooling engine
+        // that fixes the large-game download OOM (#408). Snapshot-published only, like GameNative.
+        maven { url 'https://central.sonatype.com/repository/maven-snapshots/' }
     }
 }
 

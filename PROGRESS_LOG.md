@@ -1,5 +1,28 @@
 # Star-Compose — Progress Log
 
+## 2026-08-24 — 🛒💥 **Steam large-game download OOM (#408/#380) — swap to GameNative's disk-spooling JavaSteam fork**
+> Reporter Mr-Teal: **HITMAN WoA (87 GB)** OOM-crashes within ~1 min at **every** speed tier (small
+> games fine) — `java.lang.OutOfMemoryError` vs the 512 MB largeHeap. Root cause (confirmed from engine
+> source): the public `in.dragonbra:javasteam-depotdownloader:1.8.0` holds multi-MB chunk buffers **in
+> memory** the whole pipeline transit — the two `flatMapMerge` inter-stage channels default to
+> `Channel.BUFFERED = 64` (invisible to the `max*` knobs → ~128 MB of 1 MB buffers) plus
+> `VZipUtil.windowBufferPool`, an **8 MB per-Default-thread `ThreadLocal`** never released (~64 MB). So
+> heap peak scales with pipeline saturation, not game size → a long 87 GB download breaches the heap;
+> the speed knobs only change *how fast*, which is why it dies at every tier. App-side caps only DELAY it.
+> **Fix = adopt GameNative's fork** `io.github.joshuatam:javasteam(-depotdownloader):1.8.0.1-26-SNAPSHOT`
+> (`joshuatam/JavaSteam @ gamenative-latest`), whose depot-downloader was rewritten to **disk-spool
+> chunks** (per-chunk temp files under `.DepotDownloader/staging`, only a `fileId` rides the flow, buffer
+> freed immediately, temp deleted after write) → heap peak `O(maxDownloads+maxDecompress)`, **constant
+> regardless of game size**; the ThreadLocal 8 MB window is gone; and a new `skipLargeFileAllocation`
+> flag sidesteps a separate multi-GB per-file prealloc OOM HITMAN also hits. 4 files: `settings.gradle`
+> (+ sonatype-snapshots repo, same as GameNative), `app/build.gradle` (dep swap), `SteamDepotDownloader.kt`
+> (ctor rewrite → named args, drop `maxFileWrites`, `skipLargeFileAllocation=true`), `DownloadSpeedConfig.kt`
+> (drop dead `maxFileWrites`). Our whole Android layer (foreground service, notification, two-bar progress,
+> `IDownloadListener` callbacks, `add`/`finishAdding`/`getCompletion`/`close`, `AppItem`) is UNCHANGED — the
+> only compile break was the removed `maxFileWrites` ctor arg. Branch `fix/steam-download-oom-408` off
+> `main` (`aa1e25ea`) → CI build for Mr-Teal to device-test on HITMAN. **NOT device-proven yet.**
+> ⚠️ `-SNAPSHOT` is mutable; before this merges, pin to an immutable commit (JitPack `433f2ad15` / own fork).
+
 ## 2026-08-23 — 🏁🎉 **Bannerlator 3.0.0 — STABLE shipped (Latest)**
 > Cut the 3.0.0 stable: **vc74 / versionName "3.0.0"**. Built from `61fbb9e4` (the vc74 bump on top of
 > the vk-clamp #403 fix `2cdb5ca2`); `release.yml` run `32668286994`, `make_latest=true`,

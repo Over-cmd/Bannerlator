@@ -223,8 +223,14 @@ dependencies {
         logger.lifecycle("Galaxy Performance SDK found; bundling ${perfSdkJar.name}")
     }
 
-    implementation 'in.dragonbra:javasteam:1.8.0'
-    implementation 'in.dragonbra:javasteam-depotdownloader:1.8.0'
+    // JavaSteam — GameNative's fork (joshuatam/JavaSteam @ gamenative-latest). The depot-downloader
+    // module was rewritten to disk-spool chunks (temp files, not RAM) + drop the 8 MB per-thread
+    // ThreadLocal decompress window, fixing the large-game OOM (#408/#380: HITMAN 87 GB crashed at
+    // every speed tier on the public in.dragonbra:1.8.0 in-memory pipeline). Same published artifact
+    // GameNative ships. NOTE: -SNAPSHOT is mutable; pin to an immutable commit (JitPack / own fork)
+    // before this is a long-term dependency.
+    implementation 'io.github.joshuatam:javasteam:1.8.0.1-26-SNAPSHOT'
+    implementation 'io.github.joshuatam:javasteam-depotdownloader:1.8.0.1-26-SNAPSHOT'
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
     implementation 'com.google.zxing:core:3.5.3'
     implementation 'androidx.recyclerview:recyclerview:1.2.0'
