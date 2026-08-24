@@ -1,5 +1,22 @@
 # Star-Compose — Progress Log
 
+## 2026-08-24 — 📦🛒 **Vendor the JavaSteam fork in-repo (durability follow-up to #408)**
+> After the #408 OOM fix merged (`a586f73d`) with the dep pinned to the immutable timestamped snapshot
+> `io.github.joshuatam:javasteam(-depotdownloader):1.8.0.1-26-20260801.180149-1`, the artifact was still
+> **downloaded from Sonatype's snapshot repo on every clean build** — and snapshot repos may purge old
+> builds, which would break future builds (never ship bad bits, but fail to resolve). Fix = **vendor the
+> jars + full metadata in-repo** so the build never reaches Sonatype. Mirrored both artifacts' entire
+> `1.8.0.1-26-SNAPSHOT/` dirs **verbatim** (`.jar` + `.pom` + Gradle `.module` + `maven-metadata.xml` +
+> every `.md5/.sha1/.sha256/.sha512`) into `vendor/maven/` (javasteam.jar ~16 MB, depotdownloader ~218 KB).
+> `settings.gradle`: **removed** the sonatype-snapshots repo, **added** `maven { url = uri("${rootDir}/vendor/maven"); content { includeGroup 'io.github.joshuatam' } }`.
+> Transitive deps (ktor 3.2.2, okhttp 5.1.0, protobuf 4.31.1, okio, coroutines, kotlin-stdlib) still
+> resolve from mavenCentral (permanent). Removing sonatype means CI proves the vendored copy resolves
+> **offline** — a genuine independence test. Every mirrored file verified against its own checksum
+> sidecar before commit. Docs: `vendor/maven/README.md` (what/why + how-to-update). Branch
+> `feat/vendor-javasteam-jar` off main → CI must go green BEFORE merge (real resolution change). ⚠️ If
+> Gradle can't resolve the timestamped snapshot from the local file repo, fallback = re-coordinate to a
+> release-style path (rewrite pom/module versions). NOT a versionCode bump.
+
 ## 2026-08-24 — 🐛🎮📳 **Crash: setting in-game vibration to 0 while rumbling (createOneShot amplitude 0)**
 > DiRT Showdown hard-crashed the instant the user dragged **vibration → 0** in the in-game side menu
 > **while the pad was actively rumbling**. Device-confirmed: logcat `FATAL EXCEPTION: pool-6-thread-1`
