@@ -37,14 +37,12 @@ jobs:
       - name: 🤖 4. Activar Android SDK y NDK del Servidor
         uses: android-actions/setup-android@v3
 
-      - name: 🛠️ 5. Parche Maestro (SDK 30, Puntero Siempre Visible y Anti-Fuga de Memoria)
+      - name: 🛠️ 5. Parche Maestro (Target SDK 30, Puntero Siempre Visible y Anti-Fuga de Memoria)
         run: |
-          echo "-> PARCHE GRADO SDK 30: Forzando la compilación nativa sobre Android 11 para erradicar el lag..."
-          # Buscamos dinámicamente todos los archivos build.gradle del proyecto y reemplazamos el SDK antiguo por el 30 (Android 11)
+          echo "-> PARCHE GRADO TARGET SDK 30: Ajustando el objetivo de ejecución gráfica a Android 11 sin romper librerías..."
+          # Mantenemos compileSdk alto para compatibilidad de dependencias, pero fijamos targetSdk en la API 30 de Android 11
           find . -name "build.gradle" -exec sed -i 's/targetSdk 28/targetSdk 30/g' {} + || true
           find . -name "build.gradle" -exec sed -i 's/targetSdkVersion 28/targetSdkVersion 30/g' {} + || true
-          find . -name "build.gradle" -exec sed -i 's/compileSdk 34/compileSdk 30/g' {} + || true
-          find . -name "build.gradle" -exec sed -i 's/compileSdkVersion 34/compileSdkVersion 30/g' {} + || true
 
           echo "-> Inyectando propiedades del sistema para estabilizar la GPU Mali y la RAM..."
           find app/src/main/ -name "*.java" -exec sed -i 's|super.onCreate(|System.setProperty("MALLOC_TRIM_THRESHOLD_", "131072"); System.setProperty("DXVK_FILTER_DEVICE_NAME", "Mali"); super.onCreate(|g' {} + || true
@@ -56,7 +54,7 @@ jobs:
 
           echo "-> Configurando los recursos de strings globales para inyectar flags de visibilidad absoluta..."
           find app/src/main/ -name "strings.xml" -exec sed -i 's|</resources>|  <string name="default_malloc_trim">131072</string>\n  <string name="default_dxvk_filter">Mali</string>\n  <string name="show_hardware_cursor">false</string>\n  <string name="cursor_visible">true</string>\n  <string name="force_software_cursor">true</string>\n  <string name="enable_mouse_warp">false</string>\n</resources>|g' {} + || true
-          echo "-> Modificación quirúrgica y actualización de SDK completada de forma segura."
+          echo "-> Modificación quirúrgica y actualización de Target SDK completada de forma segura."
 
       - name: 🔑 6. Conceder Permisos de Ejecución al Compilador Gradle
         run: chmod +x gradlew
@@ -66,7 +64,8 @@ jobs:
           GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx5632m -XX:MaxMetaspaceSize=1024m -XX:+UseParallelGC -Dorg.gradle.daemon=false -Dorg.gradle.parallel=false -Dorg.gradle.configureondemand=false"
         run: |
           ./gradlew clean --no-daemon
-          ./gradlew assembleDebug --no-daemon --stacktrace
+          # Añadimos --no-build-cache para obligar a Gradle a procesar todo de forma lineal y limpia
+          ./gradlew assembleDebug --no-daemon --no-build-cache --stacktrace
 
       - name: 📂 8. Rastrear el APK Cocinado de Factoría
         run: |
