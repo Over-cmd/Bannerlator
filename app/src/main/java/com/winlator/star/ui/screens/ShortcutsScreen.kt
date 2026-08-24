@@ -7381,8 +7381,14 @@ internal fun ShortcutSettingsDialogScreen(
     glossaryQuery?.let { ContainerGlossarySheet(initialQuery = it, onDismiss = { glossaryQuery = null }) }
 
     if (showBox64DownloadSheet) {
+        // Arch-match the download sheet to the selector above it: arm64ec containers use WOWBox64,
+        // everything else Box64 (mirrors ContainerDetailScreen). Was hardcoded to Box64, so the
+        // "download more" button on an arm64ec shortcut opened the wrong content type.
         ContentDownloadSheet(
-            contentType = com.winlator.star.contents.ContentProfile.ContentType.CONTENT_TYPE_BOX64,
+            contentType = if (isArm64EC)
+                com.winlator.star.contents.ContentProfile.ContentType.CONTENT_TYPE_WOWBOX64
+            else
+                com.winlator.star.contents.ContentProfile.ContentType.CONTENT_TYPE_BOX64,
             onDismiss = { showBox64DownloadSheet = false },
             onContentChanged = {}
         )
@@ -7568,7 +7574,7 @@ private fun ScAdvancedTab(
                     contentPadding = PaddingValues(0.dp),
                     shape = RoundedCornerShape(8.dp)
                 ) {
-                    Icon(Icons.Default.Settings, contentDescription = "Download Box64", tint = MaterialTheme.colorScheme.primary)
+                    Icon(Icons.Default.Settings, contentDescription = "Download $emulatorLabel", tint = MaterialTheme.colorScheme.primary)
                 }
             }
             Spacer(Modifier.height(8.dp))
