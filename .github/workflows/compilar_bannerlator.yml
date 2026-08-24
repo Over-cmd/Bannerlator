@@ -11,21 +11,16 @@ jobs:
       - name: Checkout del Repositorio de Bannerlator
         uses: actions/checkout@v4
         with:
-          # Desactivamos la recursividad nativa para evitar que el submódulo inexistente rompa el flujo
           submodules: 'false'
           fetch-depth: 0
 
       - name: Reparación de Submódulos Caídos (Fix bionic-fg)
         run: |
           echo "-> Reparando redirecciones de submódulos huérfanos..."
-          # Si el repositorio de bionic-fg original está roto, lo redirigimos a una copia espejo funcional si existe,
-          # o forzamos a Git a inicializar solo los componentes válidos de vkbasalt y dependencias estables.
           if [ -f ".gitmodules" ]; then
-            sed -i 's|https://github.com/The412Banner/bionic-fg.git|https://github.com|g' .gitmodules || true
+            sed -i 's|https://github.com|https://github.com|g' .gitmodules || true
             git submodule sync
           fi
-          
-          # Inicializamos los submódulos ignorando errores fatales de repositorios borrados
           git submodule update --init --force || true
 
       - name: Restauración de Fábrica del Código
@@ -43,32 +38,29 @@ jobs:
       - name: Activar Android SDK y NDK del Servidor
         uses: android-actions/setup-android@v3
 
-      - name: Modificación Quirúrgica del Silicio (Inyección Anti-Overflow MALI Dinámica)
+      - name: Modificación Segura de Recursos (Inyección de Silicio)
         run: |
-          echo "-> Rastreando dinámicamente el archivo maestro de variables de entorno de Bannerlator..."
-          TARGET_FILE=$(grep -rl "envVars.put" app/src/main/ || grep -rl "environment.put" app/src/main/ || true)
-          if [ -z "$TARGET_FILE" ]; then
-            TARGET_FILE=$(grep -rl "envVars.put" . || grep -rl "environment.put" . | head -n 1)
-          fi
-          ENV_FILE=$(echo "$TARGET_FILE" | head -n 1)
-          
-          if [ -n "$ENV_FILE" ] && [ -f "$ENV_FILE" ]; then
-            echo "-> Archivo core lícito detectado en la ruta: $ENV_FILE"
-            sed -i 's/\r$//' "$ENV_FILE"
-            sed -i 's|envVars.put(|envVars.put("MALLOC_TRIM_THRESHOLD_", "65536"); envVars.put("VK_ICD_FILENAMES_32", "/usr/share/vulkan/icd.d/icd_wrapper.json"); envVars.put("DXVK_FILTER_DEVICE_NAME", "Mali"); envVars.put(|g' "$ENV_FILE" || \
-            sed -i 's|environment.put(|environment.put("MALLOC_TRIM_THRESHOLD_", "65536"); environment.put("VK_ICD_FILENAMES_32", "/usr/share/vulkan/icd.d/icd_wrapper.json"); environment.put("DXVK_FILTER_DEVICE_NAME", "Mali"); environment.put(|g' "$ENV_FILE"
-            echo "-> Inyección de silicio completada con éxito."
-          else
-            echo "-> Alshain: Mapeando inyección de respaldo directa a través de strings globales..."
-            find app/src/main/ -name "strings.xml" -exec sed -i 's|</resources>|  <string name="default_malloc_trim">65536</string>\n  <string name="default_dxvk_filter">Mali</string>\n</resources>|g' {} + || true
-          fi
+          echo "-> Insertando configuraciones optimizadas mediante cadenas globales seguras..."
+          find app/src/main/ -name "strings.xml" -exec sed -i 's|</resources>|  <string name="default_malloc_trim">65536</string>\n  <string name="default_dxvk_filter">Mali</string>\n</resources>|g' {} + || true
+          echo "-> Parche global estático aplicado de forma lícita."
 
       - name: Conceder Permisos de Ejecución al Compilador Gradle
         run: chmod +x gradlew
 
-      - name: Compilar el APK Oficial Modificado (Prensa Gradle Build Debug)
+      - name: Compilar el APK Oficial Modificado (Prensa Gradle Build con Anti-Congelación)
         run: |
-          ./gradlew assembleDebug --no-daemon
+          # 1. Purgamos la caché de compilaciones antiguas
+          ./gradlew clean
+          
+          # 2. Forzamos a Kotlin a compilar "In-Process" de forma nativa desde el inicio.
+          # -Dorg.gradle.daemon=false desactiva el demonio persistente que se congela.
+          # -Dkotlin.compiler.execution.strategy="in-process" evita que salte la estrategia de fallback lenta.
+          # org.gradle.jvmargs aumenta el límite de memoria para que el servidor de GitHub no se asfixie.
+          ./gradlew assembleDebug \
+            --no-daemon \
+            -Dorg.gradle.daemon=false \
+            -Dkotlin.compiler.execution.strategy="in-process" \
+            -Porg.gradle.jvmargs="-Xmx4g -XX:MaxMetaspaceSize=1g -XX:+UseParallelGC"
 
       - name: Rastrear el APK Cocinado de Factoría
         run: |
