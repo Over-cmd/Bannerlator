@@ -1,5 +1,40 @@
 # Star-Compose — Progress Log
 
+## 2026-08-24 — 🖥️🎞️ **Fix: LSFG (lsfg-vk) black-frame flicker — pace the layer (vsync clock + mailbox)**
+> Device-proven root cause (DiRT Rally 2.0 / Adreno 750 live logcat): with lsfg-vk frame-gen on, the
+> generated frames present **BLACK** because the guest layer **free-runs unpaced** and **over-queues the
+> host compositor** — Qualcomm's composer spams `SmoMoState::FrameIsLate: queued_frames >= 2` at ~55/s
+> during flicker (dropping ~4× to ~14/s right after a swapchain recreate), while frame-gen pushes
+> ~124fps with no pacing → the compositor queue backs up and dropped/stale generated frames reach the
+> glass black. NOT a driver-cap gap and NOT the AHB fn-ptr miss (both disproven on-device — all features
+> present, AHB context creates fine). **GameNative ships the byte-identical lsfg-vk `.so` yet does NOT
+> flicker because it PACES the layer** (publishes a vsync clock the layer phase-locks to) and runs the
+> guest layer in **mailbox**; we published neither and hardcoded fifo.
+>
+> **FIX A** (`XServerDisplayActivity.writeLsfgConfig`, ~:2665): guest `experimental_present_mode` fifo →
+> **mailbox while generating (multiplier≥2), fifo in passthrough** (GameNative parity). Mesa's FIFO
+> queue underneath the layer breaks the display cadence and feeds the host-compositor over-queue.
+> **FIX B** (the real fix): port GameNative's vsync clock — `startVsyncClock()`/`stopVsyncClock()` use
+> `Choreographer.postFrameCallback` to write `<home>/.config/lsfg-vk/vsync.txt`
+> (`vsync_ns=<frameTimeNanos>` + `period_ns=<1e9/refreshRate>`, refreshRate from the default display,
+> fallback 60) once a second, off the UI thread (single-thread daemon executor). Started at LSFG launch
+> (:4681, next to `writeLsfgConfig`) and on the in-game FG toggle-on (mult≥2); stopped on toggle-off and
+> in `onDestroy`. Our byte-identical `.so` already consumes vsync.txt → no native change. This gives the
+> layer a display grid to phase-lock to instead of free-running, killing the over-queue at the source.
+> **FIX C SKIPPED** (assessed, not implemented): a forced post-launch guest swapchain recreate is
+> redundant + risky here. A host swapchain recreate already fires ~0.8s in via `applyEffectivePresentMode`,
+> and for the common path (launch passthrough → user toggles FG on live) the toggle already re-touches
+> conf.toml → the layer returns `VK_ERROR_OUT_OF_DATE_KHR` → a clean guest recreate happens naturally.
+> Its only unique coverage (auto-enable-at-launch) is already addressed by FIX B's pacing, and a blind
+> timed re-touch would inject a deliberate extra black frame (and race the 0.8s host recreate + any
+> user toggle in that window). Root cause is over-queue-from-no-pacing → B fixes it directly; C only
+> resets symptoms.
+>
+> Surgical, one file (`app/src/main/java/com/winlator/star/XServerDisplayActivity.java`). **No
+> versionCode bump** (fix build). Branch `fix/lsfg-flicker-pacing` off `origin/main`. Risk: mailbox on a
+> surface that only supports fifo — but the device capture showed host `supportedPresentModes=[1,2]`
+> (mailbox+fifo), and the guest layer applies its own present mode. NOT yet built/device-proven.
+
 ## 2026-08-24 — 📦🛒 **Vendor the JavaSteam fork in-repo (durability follow-up to #408)**
 > After the #408 OOM fix merged (`a586f73d`) with the dep pinned to the immutable timestamped snapshot
 > `io.github.joshuatam:javasteam(-depotdownloader):1.8.0.1-26-20260801.180149-1`, the artifact was still

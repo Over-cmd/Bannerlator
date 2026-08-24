@@ -1536,6 +1536,9 @@ public class XServerDisplayActivity extends AppCompatActivity {
                 // multiplier <= 1 as passthrough, so map anything below 2 to 1 — NOT max(2,mult),
                 // which would force 2x on Off.
                 writeLsfgConfig(mult >= 2 ? mult : 1, flow, dll.getAbsolutePath(), perfMode);
+                // Keep the vsync clock running only while frame-gen is actually generating (mult>=2),
+                // so the layer has a grid to phase-lock to; stop it in passthrough.
+                if (mult >= 2) startVsyncClock(); else stopVsyncClock();
                 if (fgOn) container.setFrameGenMultiplier(mult);
                 container.setFrameGenFlowScale(flow);
                 container.setLsfgPerformanceMode(perfMode);
@@ -2642,6 +2645,11 @@ public class XServerDisplayActivity extends AppCompatActivity {
             File configDir = new File(imageFs.home_path, ".config/lsfg-vk");
             configDir.mkdirs();
             File confFile = new File(configDir, "conf.toml");
+            // Guest layer present mode: mailbox while generating, fifo in passthrough (GameNative parity).
+            // The layer already paces itself against the vsync clock we publish (vsync.txt); mesa's FIFO
+            // queue underneath the layer breaks the display cadence and backs frames up in the host
+            // compositor (device-proven SmoMoState over-queue -> generated frames present black).
+            boolean generating = multiplier >= 2;
             String toml = "# Written by Bannerlator (per-container lsfg-vk frame generation)\n"
                     + "version = 1\n\n"
                     + "[global]\n"
@@ -2653,11 +2661,70 @@ public class XServerDisplayActivity extends AppCompatActivity {
                     + "flow_scale = " + String.format(java.util.Locale.US, "%.2f", flowScale) + "\n"
                     + "performance_mode = " + performanceMode + "\n"
                     + "hdr_mode = false\n"
-                    + "experimental_present_mode = \"fifo\"\n";
+                    + "experimental_present_mode = " + (generating ? "\"mailbox\"" : "\"fifo\"") + "\n";
             FileUtils.writeString(confFile, toml);
         }
         catch (Exception e) {
             Log.e("lsfg-vk", "Failed to write lsfg-vk conf.toml", e);
+        }
+    }
+
+    // === lsfg-vk vsync clock ===================================================================
+    // The lsfg-vk fork layer phase-locks its frame pacing to a display vsync grid published here as
+    // vsync.txt (sibling of conf.toml). Without it the layer free-runs and over-queues the host
+    // compositor — device-proven root cause of the LSFG black-frame flicker: Qualcomm's composer
+    // spams "SmoMoState::FrameIsLate: queued_frames >= 2" while frame-gen pushes ~124fps unpaced, so
+    // dropped/stale generated frames reach the glass BLACK. GameNative ships the byte-identical .so
+    // yet doesn't flicker because it publishes this clock; we did not. Rewritten once a second off the
+    // UI thread. Choreographer frame timestamps are CLOCK_MONOTONIC — the clock the layer paces with.
+    private android.os.Handler vsyncClockHandler;
+    private java.util.concurrent.ExecutorService vsyncWriteExecutor;
+
+    private void startVsyncClock() {
+        stopVsyncClock();
+        if (imageFs == null) return;
+        final File vsyncFile = new File(imageFs.home_path, ".config/lsfg-vk/vsync.txt");
+        if (vsyncWriteExecutor == null) {
+            vsyncWriteExecutor = Executors.newSingleThreadExecutor(r -> {
+                Thread t = new Thread(r, "lsfg-vsync");
+                t.setDaemon(true);
+                return t;
+            });
+        }
+        final android.os.Handler h = new android.os.Handler(android.os.Looper.getMainLooper());
+        vsyncClockHandler = h;
+        final Runnable tick = new Runnable() {
+            @Override public void run() {
+                if (vsyncClockHandler != h) return;
+                android.view.Choreographer.getInstance().postFrameCallback(frameTimeNanos -> {
+                    if (vsyncClockHandler != h) return;
+                    float refreshRate = 60f;
+                    try {
+                        android.view.WindowManager wm = (android.view.WindowManager) getSystemService(WINDOW_SERVICE);
+                        if (wm != null && wm.getDefaultDisplay() != null) {
+                            float rr = wm.getDefaultDisplay().getRefreshRate();
+                            if (rr > 1f) refreshRate = rr;
+                        }
+                    } catch (Exception ignored) {}
+                    final long periodNs = (long) (1_000_000_000.0 / refreshRate);
+                    vsyncWriteExecutor.execute(() -> {
+                        try {
+                            File parent = vsyncFile.getParentFile();
+                            if (parent != null) parent.mkdirs();
+                            FileUtils.writeString(vsyncFile, "vsync_ns=" + frameTimeNanos + "\nperiod_ns=" + periodNs + "\n");
+                        } catch (Exception ignored) {}
+                    });
+                });
+                h.postDelayed(this, 1000);
+            }
+        };
+        h.post(tick);
+    }
+
+    private void stopVsyncClock() {
+        if (vsyncClockHandler != null) {
+            vsyncClockHandler.removeCallbacksAndMessages(null);
+            vsyncClockHandler = null;
         }
     }
 
@@ -4175,6 +4242,12 @@ public class XServerDisplayActivity extends AppCompatActivity {
             wineDebugWriter.close();
             wineDebugWriter = null;
         }
+        // Stop publishing the lsfg-vk vsync clock on game exit.
+        stopVsyncClock();
+        if (vsyncWriteExecutor != null) {
+            vsyncWriteExecutor.shutdownNow();
+            vsyncWriteExecutor = null;
+        }
     }
 
     @Override
@@ -4608,6 +4681,11 @@ public class XServerDisplayActivity extends AppCompatActivity {
                     envVars.put("ENABLE_LSFG", "1");
                     envVars.put("LSFG_CONFIG", lsfgConf.getAbsolutePath());
                     envVars.put("LSFG_PROCESS", "bannerlator-lsfg");
+                    // Publish the display vsync clock so the layer phase-locks its pacing instead of
+                    // free-running and over-queuing the host compositor (the black-frame flicker root
+                    // cause). Runs from launch so it's live the instant FG is toggled on in-game; the
+                    // toggle path stops/restarts it, and onDestroy stops it.
+                    startVsyncClock();
                 } else {
                     Log.w("XServerDisplayActivity", "lsfg-vk selected but no Lossless.dll imported (Settings) — leaving frame gen off");
                 }
