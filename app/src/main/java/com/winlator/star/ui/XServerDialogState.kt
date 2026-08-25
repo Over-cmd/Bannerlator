@@ -286,6 +286,18 @@ object XServerDialogState {
     fun setMenuOpen(v: Boolean) { _menuOpen.value = v }
     @JvmField var onRequestResume: Runnable? = null
 
+    // "Frame generation changed — Resume" overlay. Shown while the guest is paused AND the game
+    // surface is fully torn down after an in-game frame-gen change (Off/On/2×/3×/4×). A plain
+    // swapchain recreate on the same surface does NOT clear the LSFG black-frame flicker — only a
+    // background/foreground-style surface teardown does — so the reset is made explicit with a
+    // Resume prompt: the guest stays frozen and the surface stays down until the user taps Resume,
+    // which fires onFgResetResume (rebuild the surface + SIGCONT the guest). Distinct from `paused`
+    // above so it never collides with the ReShade freeze-preview / manual-pause box.
+    private val _fgResetPaused = MutableStateFlow(false)
+    val fgResetPaused: StateFlow<Boolean> = _fgResetPaused
+    fun setFgResetPaused(v: Boolean) { _fgResetPaused.value = v }
+    @JvmField var onFgResetResume: Runnable? = null
+
     // -------------------------------------------------------------------------
     // Vibration dialog
     // -------------------------------------------------------------------------

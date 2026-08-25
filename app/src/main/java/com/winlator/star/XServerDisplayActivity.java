@@ -1549,6 +1549,12 @@ public class XServerDisplayActivity extends AppCompatActivity {
                 // ... and re-apply the host present mode: mailbox while multiplying (so the generated
                 // frames aren't strangled by FIFO backpressure), back to the user's mode when off.
                 applyEffectivePresentMode();
+                // Frame-gen change (Off/On/2×/3×/4×) → full presentation reset. lsfg-vk restarts on the
+                // conf.toml rewrite above, but a swapchain-only recreate leaves it over-queued → generated
+                // frames present BLACK until a background/foreground cycle. Deterministically replicate
+                // that cycle: pause the guest, tear the surface fully down, and prompt Resume. Fires once
+                // per effective-level change (flow/perf-mode edits keep the level, so they don't reset).
+                maybeTriggerFgReset(mult >= 2 ? mult : 0);
                 return;
             }
             // FPS limiter is no longer part of frame gen — it's a standalone host pacer
@@ -2438,6 +2444,11 @@ public class XServerDisplayActivity extends AppCompatActivity {
         if (isPaused) setPausedState(false);
         // Re-assert the VRR vote — onStop() released it when backgrounded.
         reapplyVrr();
+        // A real foreground IS the bg/fg reset an FG-reset overlay was waiting on, and it already
+        // resumed the guest above — but the game SurfaceView is still torn down (its visibility
+        // isn't restored automatically). Complete the reset so the surface comes back and the
+        // overlay clears (no-op unless a reset was mid-flight).
+        if (fgResetInProgress) resumeFromFgReset();
         // onPause() dropped the gyro listener so it can't drain the battery in the background.
         registerGyroSensor();
         // The user may have been away recalibrating (Input Controls -> Gyroscope), which writes the
@@ -3650,6 +3661,66 @@ public class XServerDisplayActivity extends AppCompatActivity {
         }, 500);
     }
 
+    // === Frame-gen change → full presentation reset (LSFG black-frame flicker fix) ================
+    // Device-proven: with lsfg-vk generating, a plain swapchain recreate on the SAME surface (which
+    // the conf.toml rewrite already triggers) does NOT clear the black-frame flicker — only a real
+    // background/foreground cycle does, because that fully tears down + rebuilds the Android window
+    // surface AND pauses/resumes the guest, resetting the host compositor's over-queue. This
+    // replicates that cycle deterministically on an in-game FG change and gates the resume behind a
+    // user "Resume" tap so the surface is guaranteed rebuilt before input returns to the game.
+    private boolean fgResetInProgress = false;   // a reset is showing / the surface is torn down
+    private int lastCommittedFgLevel = -1;       // effective FG level last committed: 0 = off, else 2/3/4
+
+    // Called from onBionicFgConfigChange (lsfg branch) after each committed change. Fires the reset
+    // ONLY when the effective FG level actually changes (Off/On/2×/3×/4×) — flow-scale / performance-
+    // mode / model edits keep the level, so they never reset. Tracks the latest level regardless so a
+    // change that lands while a reset is already up is still remembered (the Resume rebuild picks up
+    // the newest conf.toml the handler already wrote).
+    private void maybeTriggerFgReset(int newLevel) {
+        boolean changed = (newLevel != lastCommittedFgLevel);
+        lastCommittedFgLevel = newLevel;
+        if (!changed) return;
+        triggerFgPresentationReset();
+    }
+
+    // Background half: freeze the guest (SIGSTOP via the same path onPause() / a manual Pause use),
+    // release the renderer, then tear the Android render surface FULLY down (SurfaceView → GONE →
+    // surfaceDestroyed → nativeDetachSurface), and raise the Resume overlay. Does NOT flip isPaused —
+    // the FG-reset overlay is its own state so it never collides with the manual-pause / ReShade box.
+    private void triggerFgPresentationReset() {
+        if (fgResetInProgress || environment == null) return;
+        // A manual Pause / ReShade freeze is already suspending the guest — mirroring bg/fg needs a
+        // running-then-frozen guest, and stacking another cycle would fight the manual resume. Skip;
+        // the next FG change after the user resumes will reset cleanly.
+        if (isPaused) return;
+        // GL renderer owns its own EGL lifecycle (no detachable window surface to cycle) — no-op.
+        if (xServerView == null || !xServerView.canRecreateSurface()) return;
+        fgResetInProgress = true;
+        environment.onPause();
+        xServerView.onPause();
+        ProcessHelper.pauseAllWineProcesses();
+        xServerView.teardownSurface();
+        XServerDialogState.INSTANCE.setFgResetPaused(true);
+    }
+
+    // Foreground half (Resume tap, or an incidental real foreground while a reset is up): dismiss the
+    // overlay, rebuild a FRESH surface (SurfaceView → VISIBLE → surfaceCreated → nativeReattachSurface
+    // + swapchain recreate), then resume the guest (SIGCONT) and re-assert present mode / VRR. Ordered
+    // so input only returns to the game after the surface is coming back. Idempotent + main-thread.
+    private void resumeFromFgReset() {
+        if (!fgResetInProgress) return;
+        fgResetInProgress = false;
+        XServerDialogState.INSTANCE.setFgResetPaused(false);
+        if (xServerView != null) {
+            xServerView.rebuildSurface();
+            xServerView.onResume();
+        }
+        if (environment != null) environment.onResume();
+        ProcessHelper.resumeAllWineProcesses();
+        applyEffectivePresentMode();
+        reapplyVrr();
+    }
+
     private void savePlaytimeData() {
         long endTime = System.currentTimeMillis();
         long playtime = endTime - startTime;
@@ -4248,6 +4319,10 @@ public class XServerDisplayActivity extends AppCompatActivity {
             vsyncWriteExecutor.shutdownNow();
             vsyncWriteExecutor = null;
         }
+        // Clear the FG-reset overlay state (XServerDialogState is a singleton — a torn-down reset must
+        // not survive into the next game's launch).
+        fgResetInProgress = false;
+        XServerDialogState.INSTANCE.setFgResetPaused(false);
     }
 
     @Override
@@ -4686,6 +4761,10 @@ public class XServerDisplayActivity extends AppCompatActivity {
                     // cause). Runs from launch so it's live the instant FG is toggled on in-game; the
                     // toggle path stops/restarts it, and onDestroy stops it.
                     startVsyncClock();
+                    // Baseline the FG-reset tracker to the launch level so the first in-game change
+                    // fires the presentation reset. Auto-enable containers already generate from frame
+                    // one (lsfgLaunchMult >= 2), so a passthrough launch is level 0.
+                    lastCommittedFgLevel = (lsfgLaunchMult >= 2) ? lsfgLaunchMult : 0;
                 } else {
                     Log.w("XServerDisplayActivity", "lsfg-vk selected but no Lossless.dll imported (Settings) — leaving frame gen off");
                 }
@@ -5720,6 +5799,9 @@ public class XServerDisplayActivity extends AppCompatActivity {
         };
         // Tapping the centered pause box = full resume (covers preview pause AND manual pause).
         ds.onRequestResume = () -> runOnUiThread(() -> setPausedState(false));
+        // Tapping the frame-gen-reset "Resume" = rebuild the surface + SIGCONT the guest so FG
+        // restarts into a clean, non-over-queued state (the LSFG black-frame flicker fix).
+        ds.onFgResetResume = () -> runOnUiThread(this::resumeFromFgReset);
 
         // Input Controls state (renderer-independent: controller profiles + vibration work on
         // BOTH the GL and Vulkan host renderers, so this must run before the GL-only guard below.

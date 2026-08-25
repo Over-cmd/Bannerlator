@@ -1,5 +1,42 @@
 # Star-Compose — Progress Log
 
+## 2026-08-24 — 🖥️🎞️ **Feature: frame-gen change → full presentation reset (LSFG black-frame flicker)**
+> Additive to the pacing fix (A+B) + mailbox-lock-removal already on `fix/lsfg-flicker-pacing`. Device
+> finding: with lsfg-vk generating, only a **background/foreground cycle** clears the black-frame
+> flicker — a plain swapchain recreate on the SAME surface (which the `conf.toml` rewrite already
+> triggers, ~0.8s in too) does **not**, because bg/fg does a **full Android SURFACE teardown + rebuild**
+> plus a **guest pause/resume**, which resets the host-compositor over-queue. So on an in-game frame-gen
+> change we now **deterministically replicate that cycle** and gate the resume behind a user tap.
+>
+> **Trigger + debounce** (`XServerDisplayActivity.onBionicFgConfigChange`, lsfg branch): after each
+> committed change, `maybeTriggerFgReset(mult>=2?mult:0)` fires the reset **only when the effective FG
+> level changes** (Off/On/2×/3×/4×) — flow-scale / performance-mode / model edits keep the level so they
+> never reset; `lastCommittedFgLevel` is baselined at launch (`lsfgLaunchMult`). A reset already up
+> swallows further changes (conf is still rewritten; the Resume rebuild picks up the newest conf).
+> **win-fg unaffected**: the drawer's soft `onFgResetPulse` is now gated to `engine == "bionic"`
+> (`XServerDrawer.kt` FgMultiplierButtons) so lsfg no longer double-fires it against the new full reset.
+>
+> **Pause + teardown** (`triggerFgPresentationReset`): mirrors the `onPause` background half —
+> `environment.onPause()` + `xServerView.onPause()` + `ProcessHelper.pauseAllWineProcesses()` (the same
+> SIGSTOP path backgrounding/manual-pause use) — then a **real surface teardown** via new
+> `XServerView.teardownSurface()` (game `SurfaceView` → `GONE` → `surfaceDestroyed` →
+> `VulkanRenderer.onSurfaceDestroyed`/`nativeDetachSurface`; the load-bearing difference vs a
+> swapchain-only recreate). Does NOT flip `isPaused` (own overlay state, so no collision with the
+> ReShade/manual pause box). No-op for GL (`canRecreateSurface()` false — GLSurfaceView owns its EGL).
+>
+> **Resume overlay**: new `XServerDialogState.fgResetPaused` + `onFgResetResume`, rendered by
+> `FgResetOverlay` (new file, modeled on `PauseBoxOverlay` — a top-level dimmed **modal Dialog window**
+> so it stacks above the game surface; back / tap-outside inert, Resume is the only exit). On Resume,
+> `resumeFromFgReset()` mirrors the `onResume` foreground half: `rebuildSurface()` (`SurfaceView` →
+> `VISIBLE` → `surfaceCreated` → `nativeReattachSurface` + swapchain recreate), resume guest (SIGCONT),
+> re-assert present mode + VRR. Robustness: a real foreground mid-reset auto-completes it in `onResume`
+> (surface visibility isn't auto-restored), and `onDestroy` clears the singleton overlay state.
+>
+> Files: `XServerDisplayActivity.java`, `widget/XServerView.java`, `ui/XServerDialogState.kt`,
+> `ui/XServerDialogHost.kt`, `ui/XServerDrawer.kt`, new `ui/overlays/FgResetOverlay.kt`. **No
+> versionCode bump.** Implementation-only — **NOT device-proven** (see risks: the surface rebuild is
+> async vs the immediate guest resume — same ordering as real bg/fg, renderer buffers until reattach).
+
 ## 2026-08-24 — 🖥️🎞️ **Fix: LSFG (lsfg-vk) black-frame flicker — pace the layer (vsync clock + mailbox)**
 > Device-proven root cause (DiRT Rally 2.0 / Adreno 750 live logcat): with lsfg-vk frame-gen on, the
 > generated frames present **BLACK** because the guest layer **free-runs unpaced** and **over-queues the
