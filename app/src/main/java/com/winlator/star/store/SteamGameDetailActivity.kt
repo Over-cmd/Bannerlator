@@ -2238,7 +2238,7 @@ private fun AchievementCaptionBar(selected: SteamAchievement?) {
             modifier = Modifier
                 .fillMaxWidth()
                 .background(AchvCard2)
-                .padding(horizontal = 16.dp, top = 11.dp, bottom = 14.dp),
+                .padding(start = 16.dp, end = 16.dp, top = 11.dp, bottom = 14.dp),
         ) {
             if (selected == null) {
                 Text("Tap an icon to see details", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = AchvInk)
