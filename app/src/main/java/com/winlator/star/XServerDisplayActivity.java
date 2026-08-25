@@ -1448,6 +1448,19 @@ public class XServerDisplayActivity extends AppCompatActivity {
             if (inputControlsView != null) inputControlsView.setOverlayOpacity(v); // setter invalidates → live redraw
             preferences.edit().putFloat("overlay_opacity", v).apply();
         };
+        // Swipeable OSC (Stage 2): the drawer's Swipe tab toggles → apply live to the overlay + persist.
+        state.onSetSwipeButtons        = (v) -> {
+            if (inputControlsView != null) inputControlsView.setSwipeButtonsEnabled(v);
+            preferences.edit().putBoolean("touchscreen_swipe_buttons_enabled", v).apply();
+        };
+        state.onSetSwipeDpad           = (v) -> {
+            if (inputControlsView != null) inputControlsView.setSwipeDpadEnabled(v);
+            preferences.edit().putBoolean("touchscreen_swipe_dpad_enabled", v).apply();
+        };
+        state.onSetSwipeSticks         = (v) -> {
+            if (inputControlsView != null) inputControlsView.setSwipeSticksEnabled(v);
+            preferences.edit().putBoolean("touchscreen_swipe_sticks_enabled", v).apply();
+        };
         state.onControlsColorChange    = () -> {
             // Per-profile on-screen controls accent. Write the two drawer values onto the ACTIVE
             // profile (the one bound to the running game), persist, and invalidate for a live redraw.
@@ -5426,6 +5439,18 @@ public class XServerDisplayActivity extends AppCompatActivity {
         float savedOverlayOpacity = preferences.getFloat("overlay_opacity", InputControlsView.DEFAULT_OVERLAY_OPACITY);
         inputControlsView.setOverlayOpacity(savedOverlayOpacity);
         XServerDrawerState.INSTANCE.setOverlayOpacity(savedOverlayOpacity); // seed the Controls-tab slider
+
+        // Swipeable OSC (Stage 2): resolve per-category swipe gates (Buttons/D-pad default ON, Sticks
+        // default OFF), apply to the live overlay, and seed the drawer's Swipe tab so its chips match.
+        boolean swipeButtons = preferences.getBoolean("touchscreen_swipe_buttons_enabled", true);
+        boolean swipeDpad = preferences.getBoolean("touchscreen_swipe_dpad_enabled", true);
+        boolean swipeSticks = preferences.getBoolean("touchscreen_swipe_sticks_enabled", false);
+        inputControlsView.setSwipeButtonsEnabled(swipeButtons);
+        inputControlsView.setSwipeDpadEnabled(swipeDpad);
+        inputControlsView.setSwipeSticksEnabled(swipeSticks);
+        XServerDrawerState.INSTANCE.setSwipeButtons(swipeButtons);
+        XServerDrawerState.INSTANCE.setSwipeDpad(swipeDpad);
+        XServerDrawerState.INSTANCE.setSwipeSticks(swipeSticks);
         inputControlsView.setTouchpadView(touchpadView);
         inputControlsView.setXServer(xServer);
         inputControlsView.setVisibility(View.GONE);

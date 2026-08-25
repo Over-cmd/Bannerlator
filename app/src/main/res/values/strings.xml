@@ -169,6 +169,11 @@
     <string name="cursor_speed">Cursor Speed</string>
     <string name="relative_mouse_movement">Relative Mouse Movement</string>
     <string name="toggle_switch">Toggle Switch</string>
+    <string name="input_controls_editor_swipeable">Swipeable</string>
+    <string name="swipe_tab">Swipe</string>
+    <string name="swipe_buttons">Buttons</string>
+    <string name="swipe_dpad">D-pad</string>
+    <string name="swipe_sticks">Sticks</string>
     <string name="profile_exported_to">Profile exported to</string>
     <string name="unable_to_import_profile">Unable to import profile</string>
     <string name="import_control_profile">Import ICP / ICpx</string>

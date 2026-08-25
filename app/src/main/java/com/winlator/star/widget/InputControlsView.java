@@ -124,6 +124,11 @@ public class InputControlsView extends View {
     private ControlElement expandedElement;
     private final SparseBooleanArray swallowedExpandablePointers = new SparseBooleanArray();
     private final SparseBooleanArray touchpadPointers = new SparseBooleanArray();
+    // Stage 2: live per-category swipe gates, mirrored to the drawer's Swipe tab + prefs.
+    // Buttons/D-pad default ON; Sticks slide-to-engage default OFF.
+    private boolean swipeButtonsEnabled = true;
+    private boolean swipeDpadEnabled = true;
+    private boolean swipeSticksEnabled = false;
     private final Map<ExternalController, Set<Integer>> activeControllerKeys = new IdentityHashMap<>();
     private final Map<ExternalController, Set<Binding>> activeControllerBindings = new IdentityHashMap<>();
     private final Map<Binding, Integer> activeControllerBindingCounts = new EnumMap<>(Binding.class);
@@ -1202,11 +1207,60 @@ public class InputControlsView extends View {
                             handled = expandedElement.handleExpandableChildMove(pid);
                         }
                         if (!handled) {
-                            for (ControlElement element : profile.getElements()) {
-                                if (isElementHiddenByGroup(element)) continue;
-                                if (element.handleTouchMove(pid, x, y)) {
+                            // Swipeable OSC: a finger may slide between BUTTON/D_PAD targets without
+                            // lifting (d-pad rolls, face-button chaining). Only pointers that aren't
+                            // driving the touchpad participate; the owner is discovered via currentPointerId.
+                            boolean swipeAllowed = !touchpadPointers.get(pid);
+                            ControlElement owner = swipeAllowed ? findCapturingElement(pid) : null;
+
+                            // (1) A swipeable D_PAD this pointer holds has slid outside its bounds:
+                            // hand the press to whatever swipe target now sits under the finger.
+                            // Gated by the live D-pad category toggle (off -> d-pad keeps today's clamped capture).
+                            if (swipeDpadEnabled && owner != null && owner.getType() == ControlElement.Type.D_PAD
+                                    && owner.isSwipeTarget() && owner.isCapturing(pid)
+                                    && !owner.containsPoint(x, y)) {
+                                ControlElement target = findSwipeTargetAt(pid, x, y, owner);
+                                if (target != null) {
+                                    owner.handleTouchUp(pid);
                                     handled = true;
-                                    break;
+                                    performTouchHaptic();
+                                }
+                            }
+
+                            // (2) Normal per-element move scan (original behavior). A swipeable BUTTON
+                            // releases itself inside handleTouchMove when the finger leaves its bounds.
+                            if (!handled) {
+                                for (ControlElement element : profile.getElements()) {
+                                    if (isElementHiddenByGroup(element)) continue;
+                                    if (element.handleTouchMove(pid, x, y)) {
+                                        handled = true;
+                                        break;
+                                    }
+                                }
+                            }
+
+                            // (3) The pointer now holds nothing pressable: either a swipeable BUTTON
+                            // that just released on slide-off, or a genuinely free finger. Press the
+                            // swipe target under the finger, if any.
+                            if (swipeAllowed) {
+                                boolean ownerReleasedButton = owner != null
+                                        && owner.getType() == ControlElement.Type.BUTTON
+                                        && !owner.isCapturing(pid);
+                                boolean pointerFree = !handled && findCapturingElement(pid) == null;
+                                if (ownerReleasedButton || pointerFree) {
+                                    ControlElement target = findSwipeTargetAt(pid, x, y, owner);
+                                    if (target != null) {
+                                        handled = true;
+                                        performTouchHaptic();
+                                    }
+                                }
+
+                                // Stick slide-to-engage: a genuinely free finger (owns nothing, not a
+                                // touchpad pointer) sliding into a stick's region grabs it via the normal
+                                // DOWN capture path. Gated ONLY by the live Sticks toggle (no per-element
+                                // flag); default OFF -> sticks must be tapped to grab, exactly as today.
+                                if (swipeSticksEnabled && !handled && pointerFree) {
+                                    if (engageStickAt(pid, x, y) != null) handled = true;
                                 }
                             }
                         }
@@ -1287,6 +1341,76 @@ public class InputControlsView extends View {
         }
         return false;
     }
+
+    /** The control element currently capturing this pointer (matched by pointer id), or null. */
+    private ControlElement findCapturingElement(int pointerId) {
+        if (profile == null) return null;
+        for (ControlElement element : profile.getElements()) {
+            if (element.isCapturing(pointerId)) return element;
+        }
+        return null;
+    }
+
+    /**
+     * Find and press the swipe target sitting under (x, y) for this pointer. Iterates topmost-first
+     * (matching the DOWN hit-test order) and presses the first free swipe target the finger is over.
+     * Returns the pressed element, or null when the finger is not over a pressable swipe target.
+     */
+    private ControlElement findSwipeTargetAt(int pointerId, float x, float y, ControlElement exclude) {
+        if (profile == null) return null;
+        List<ControlElement> elements = profile.getElements();
+        for (int index = elements.size() - 1; index >= 0; index--) {
+            ControlElement element = elements.get(index);
+            if (element == exclude || isElementHiddenByGroup(element)) continue;
+            if (!isSwipeCategoryEnabled(element)) continue;
+            if (element.isSwipeTarget() && element.handleTouchDown(pointerId, x, y)) return element;
+        }
+        return null;
+    }
+
+    /** Whether the live per-category toggle allows this element's type to be a swipe target. */
+    private boolean isSwipeCategoryEnabled(ControlElement element) {
+        ControlElement.Type type = element.getType();
+        if (type == ControlElement.Type.BUTTON) return swipeButtonsEnabled;
+        if (type == ControlElement.Type.D_PAD) return swipeDpadEnabled;
+        return false;
+    }
+
+    /**
+     * Engage the stick element under (x, y) for a free pointer via the normal DOWN capture path
+     * (handleTouchDown starts tracking exactly as a tap-down would). Topmost-first; returns the
+     * engaged stick or null. Only called when the live Sticks toggle is on.
+     */
+    private ControlElement engageStickAt(int pointerId, float x, float y) {
+        if (profile == null) return null;
+        List<ControlElement> elements = profile.getElements();
+        for (int index = elements.size() - 1; index >= 0; index--) {
+            ControlElement element = elements.get(index);
+            if (isElementHiddenByGroup(element)) continue;
+            ControlElement.Type type = element.getType();
+            if ((type == ControlElement.Type.STICK || type == ControlElement.Type.DYNAMIC_STICK)
+                    && element.handleTouchDown(pointerId, x, y)) return element;
+        }
+        return null;
+    }
+
+    private void performTouchHaptic() {
+        if (!preferences.getBoolean("touchscreen_haptics_enabled", true)) return;
+        Vibrator vibrator = (Vibrator) getContext().getSystemService(Context.VIBRATOR_SERVICE);
+        if (vibrator != null && vibrator.hasVibrator()) {
+            vibrator.vibrate(VibrationEffect.createOneShot(50, VibrationEffect.DEFAULT_AMPLITUDE));
+        }
+    }
+
+    // ── Live per-category swipe gates (Stage 2). Mirrored to the drawer's Swipe tab + prefs. ──
+    public boolean isSwipeButtonsEnabled() { return swipeButtonsEnabled; }
+    public void setSwipeButtonsEnabled(boolean enabled) { swipeButtonsEnabled = enabled; }
+
+    public boolean isSwipeDpadEnabled() { return swipeDpadEnabled; }
+    public void setSwipeDpadEnabled(boolean enabled) { swipeDpadEnabled = enabled; }
+
+    public boolean isSwipeSticksEnabled() { return swipeSticksEnabled; }
+    public void setSwipeSticksEnabled(boolean enabled) { swipeSticksEnabled = enabled; }
 
     private void routeDirectlyToTouchpad(MotionEvent event) {
         int action = event.getActionMasked();

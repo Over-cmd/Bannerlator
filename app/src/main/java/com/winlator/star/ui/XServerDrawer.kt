@@ -2866,6 +2866,7 @@ private fun ControlsContent(state: XServerDrawerState) {
             Triple("Vibration", subTab == 2) { state.setControlsSubTab(2) },
             Triple("Gyro", subTab == 3) { state.setControlsSubTab(3) },
             Triple("Players", subTab == 4) { state.setControlsSubTab(4) },
+            Triple(stringResource(R.string.swipe_tab), subTab == 5) { state.setControlsSubTab(5) },
         ),
         perRow = 3
     )
@@ -3086,7 +3087,49 @@ private fun ControlsContent(state: XServerDrawerState) {
 
         // ── Players ── manual per-device slot assignment (override when auto-assignment guesses wrong).
         4 -> PlayersSection()
+
+        // ── Swipe ── live per-category on-screen-control swipe gates (Buttons/D-pad/Sticks).
+        5 -> SwipeSection(state)
     }
+}
+
+// ───── Controls > Swipe — live per-category swipe toggles ─────
+// Buttons/D-pad let a finger slide onto (and off) those controls without lifting; Sticks lets a free
+// finger slide into a stick to grab it. Each chip reflects its StateFlow and round-trips through its
+// callback (apply-live-to-InputControlsView + persist), mirroring the Touch sub-tab's flag chips.
+@Composable
+private fun SwipeSection(state: XServerDrawerState) {
+    val accent = MaterialTheme.colorScheme.primary
+    val swipeButtons by state.swipeButtons.collectAsState()
+    val swipeDpad by state.swipeDpad.collectAsState()
+    val swipeSticks by state.swipeSticks.collectAsState()
+
+    Text(stringResource(R.string.swipe_tab), color = accent, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+    Spacer(Modifier.height(4.dp))
+    Text(
+        "Slide a finger onto a control to press it — chain buttons and roll the d-pad without lifting.",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant
+    )
+    Spacer(Modifier.height(8.dp))
+
+    ToggleChipGrid(
+        listOf(
+            ToggleChipItem(stringResource(R.string.swipe_buttons), swipeButtons) {
+                state.setSwipeButtons(it)
+                state.onSetSwipeButtons?.accept(it)
+            },
+            ToggleChipItem(stringResource(R.string.swipe_dpad), swipeDpad) {
+                state.setSwipeDpad(it)
+                state.onSetSwipeDpad?.accept(it)
+            },
+            ToggleChipItem(stringResource(R.string.swipe_sticks), swipeSticks) {
+                state.setSwipeSticks(it)
+                state.onSetSwipeSticks?.accept(it)
+            },
+        ),
+        perRow = 3
+    )
 }
 
 // ───── Controls > Players — manual per-device XInput slot assignment ─────
