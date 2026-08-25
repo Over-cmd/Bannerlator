@@ -1,65 +1,33 @@
-name: Forja del APK de Bannerlator MALI Unisoc T618
+name: Compilar APK de Bannerlator
 
 on:
   workflow_dispatch:
 
 jobs:
-  build-bannerlator-apk:
+  build:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout del Repositorio de Bannerlator
+      - name: Checkout del Repositorio
         uses: actions/checkout@v4
         with:
-          submodules: 'false'
+          submodules: 'recursive' # Clona submódulos si tu proyecto los requiere
           fetch-depth: 0
 
-      - name: Reparación de Submódulos Caídos (Fix bionic-fg)
-        run: |
-          echo "-> Reparando redirecciones de submódulos huérfanos..."
-          if [ -f ".gitmodules" ]; then
-            sed -i 's|https://github.com|https://github.com|g' .gitmodules || true
-            git submodule sync
-          fi
-          git submodule update --init --force || true
-
-      - name: Restauración de Fábrica del Código
-        run: |
-          git reset --hard HEAD
-          git clean -fdx
-
-      - name: Configurar Entorno de Java (JDK 17 de Factoría)
+      - name: Configurar Entorno de Java (JDK 17)
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
           cache: 'gradle'
 
-      - name: Activar Android SDK y NDK del Servidor
+      - name: Configurar Android SDK y NDK
         uses: android-actions/setup-android@v3
 
-      - name: Parche de Memoria Manteniendo Mouse Original
-        run: |
-          echo "-> Buscando el archivo de inicialización nativo de Android..."
-          # Buscamos el archivo principal donde Bannerlator arranca su lógica
-          MAIN_FILE=$(find app/src/main/ -name "MainActivity.java" -o -name "XServerView.java" | head -n 1)
-          
-          if [ -n "$MAIN_FILE" ] && [ -f "$MAIN_FILE" ]; then
-            echo "-> Inyectando recolector de basura agresivo en: $MAIN_FILE"
-            sed -i 's/\r$//' "$MAIN_FILE"
-            
-            # 1. FIX MEMORY LEAK: Forzamos al sistema a liberar la memoria RAM acumulada por las cartas y texturas de 32/64 bits
-            sed -i 's|super.onCreate(|System.setProperty("MALLOC_TRIM_THRESHOLD_", "65536"); System.setProperty("DXVK_FILTER_DEVICE_NAME", "Mali"); super.onCreate(|g' "$MAIN_FILE" || true
-          fi
-
-          # Añadimos compatibilidad extra de memoria en las configuraciones globales sin tocar el cursor
-          find app/src/main/ -name "strings.xml" -exec sed -i 's|</resources>|  <string name="default_malloc_trim">65536</string>\n  <string name="default_dxvk_filter">Mali</string>\n</resources>|g' {} + || true
-          echo "-> Parches de purga de memoria aplicados. Cursor original intacto."
-
-      - name: Conceder Permisos de Ejecución al Compilador Gradle
+      - name: Conceder Permisos de Ejecución a Gradle
         run: chmod +x gradlew
 
-      - name: Compilar el APK Oficial Modificado (Prensa Gradle Build con Anti-Congelación)
+      - name: Compilar APK (Limpieza y Construcción)
         run: |
           ./gradlew clean
           ./gradlew assembleDebug \
@@ -68,18 +36,18 @@ jobs:
             -Dkotlin.compiler.execution.strategy="in-process" \
             -Porg.gradle.jvmargs="-Xmx4g -XX:MaxMetaspaceSize=1g -XX:+UseParallelGC"
 
-      - name: Rastrear el APK Cocinado de Factoría
+      - name: Localizar Archivo APK Generado
         run: |
           APK_PATH=$(find app/build/outputs/apk/ -name "*.apk" | head -n 1)
           if [ -z "$APK_PATH" ]; then
             APK_PATH=$(find . -name "*.apk" | head -n 1)
           fi
           echo "APK_OUTPUT_PATH=$APK_PATH" >> $GITHUB_ENV
-          echo "=== APK MONOLÍTICO SANO DETECTADO: $APK_PATH ==="
+          echo "=== APK Encontrado: $APK_PATH ==="
 
-      - name: Subir APK Modificado a GitHub Artifacts
+      - name: Subir APK como Artefacto
         uses: actions/upload-artifact@v4
         with:
-          name: Bannerlator-Unisoc-T618-Mali
+          name: Bannerlator-Debug-APK
           path: ${{ env.APK_OUTPUT_PATH }}
           if-no-files-found: error
