@@ -5428,9 +5428,6 @@ public class XServerDisplayActivity extends AppCompatActivity {
         XServerDrawerState.INSTANCE.setOverlayOpacity(savedOverlayOpacity); // seed the Controls-tab slider
         inputControlsView.setTouchpadView(touchpadView);
         inputControlsView.setXServer(xServer);
-        // #413 OSC fit: give the overlay the renderer so it can query the game viewport and relocate the
-        // touch controls into the letterbox band when the game is pinned TOP/BOTTOM (inert for CENTER).
-        inputControlsView.setHostRenderer(renderer);
         inputControlsView.setVisibility(View.GONE);
         rootView.addView(inputControlsView);
 
@@ -5486,7 +5483,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
         }
         renderer.setScreenAlignment(screenAlignment);
         XServerDrawerState.INSTANCE.setScreenAlignment(screenAlignment);
-        inputControlsView.setScreenAlignment(screenAlignment); // #413 OSC fit: relocate controls into band
+        inputControlsView.setScreenAlignment(screenAlignment); // #413: size the OSC overlay to its half (TOP/BOTTOM)
         // touchpadView.toggleFullscreen() just re-runs updateXform (it does NOT change the mode), so it
         // also picks up a non-center alignment. CENTER keeps the original OFF-only condition unchanged.
         if (fullscreenMode != Container.FULLSCREEN_OFF || screenAlignment != Container.ALIGN_CENTER) touchpadView.toggleFullscreen();
@@ -5538,7 +5535,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
         r.setScreenAlignment(alignment);
         touchpadView.toggleFullscreen();          // recompute touch->guest map for the new alignment
         XServerDrawerState.INSTANCE.setScreenAlignment(alignment);
-        // #413 OSC fit: relocate the touch controls into the new band live (CENTER restores the layout).
+        // #413: live-resize the OSC overlay to own its half (TOP/BOTTOM), or full screen (CENTER restores).
         if (inputControlsView != null) inputControlsView.setScreenAlignment(alignment);
         if (shortcut != null) {
             shortcut.putExtra("screenAlignment", String.valueOf(alignment));

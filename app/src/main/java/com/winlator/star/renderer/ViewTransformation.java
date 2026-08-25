@@ -23,12 +23,24 @@ public class ViewTransformation {
         update(outerWidth, outerHeight, innerWidth, innerHeight, fullscreenMode, Container.ALIGN_CENTER);
     }
 
-    // Fullscreen aspect-ratio mode (#71) + vertical alignment (#413). A single `aspect` scale factor
+    // Fullscreen aspect-ratio mode (#71) + handheld 50/50 split (#413). A single `aspect` scale factor
     // drives the whole mapping; fullscreenMode only chooses that scale, screenAlignment only moves the
     // resulting rect vertically. CENTER is byte-identical to the historical output.
+    //
+    // #413 handheld split: on a near-square foldable panel, TOP/BOTTOM under a plain letterbox mode
+    // (OFF/FIT) fit the game into HALF the panel height (aspect preserved, pillar/letterboxed WITHIN that
+    // half like a normal phone panel) and pin it to that half, so the OTHER half is free for a full-size
+    // on-screen controller. Only OFF/FIT qualify — FILL/INTEGER/STRETCH have no plain bar to split, so for
+    // those TOP/BOTTOM keep their historical pin (inert). CENTER never splits (gameOuterHeight==outerHeight
+    // -> sy, aspect and every derived value identical to before).
     public void update(int outerWidth, int outerHeight, int innerWidth, int innerHeight, int fullscreenMode, int screenAlignment) {
+        boolean handheldSplit = (screenAlignment == Container.ALIGN_TOP || screenAlignment == Container.ALIGN_BOTTOM)
+                && (fullscreenMode == Container.FULLSCREEN_OFF || fullscreenMode == Container.FULLSCREEN_FIT);
+        int gameOuterHeight = handheldSplit ? outerHeight / 2 : outerHeight;
+
         float sx = (float)outerWidth / innerWidth;
-        float sy = (float)outerHeight / innerHeight;
+        // Fit against the half panel height when splitting; == outerHeight (so identical) otherwise.
+        float sy = (float)gameOuterHeight / innerHeight;
 
         switch (fullscreenMode) {
             case Container.FULLSCREEN_FILL:
@@ -52,21 +64,21 @@ public class ViewTransformation {
         sceneScaleY = (innerHeight * aspect) / outerHeight;
         sceneOffsetX = (innerWidth - innerWidth * sceneScaleX) * 0.5f;
 
-        // Vertical placement of the letterbox rect. CENTER reproduces the exact historical formulas.
-        // TOP pins the game to y=0; BOTTOM sits it flush to the bottom using the already-ceiled
-        // viewHeight (avoids a 1px overflow). sceneOffsetY is kept consistent with viewOffsetY in guest
-        // units (sceneOffsetY = viewOffsetY * innerHeight/outerHeight) so touch mapping + scene render
-        // stay aligned. FILL uses a negative gap (crop overflow) and STRETCH never reaches here, so for
-        // those TOP/BOTTOM are inert — there is no bar to move.
+        // Vertical placement of the letterbox rect. CENTER reproduces the EXACT historical formulas (do
+        // not touch). TOP/BOTTOM: when splitting, center the half-size game inside its half; otherwise keep
+        // the historical top/bottom pin. sceneOffsetY is kept consistent with viewOffsetY in guest units
+        // (sceneOffsetY = viewOffsetY * innerHeight/outerHeight) so touch mapping + scene render stay
+        // aligned — this general form equals sceneGapY*0.5f at CENTER, but CENTER keeps its own line.
         float sceneGapY = innerHeight - innerHeight * sceneScaleY;
         switch (screenAlignment) {
             case Container.ALIGN_TOP:
-                viewOffsetY = 0;
-                sceneOffsetY = 0f;
+                viewOffsetY = handheldSplit ? (gameOuterHeight - viewHeight) / 2 : 0;
+                sceneOffsetY = viewOffsetY * (float)innerHeight / outerHeight;
                 break;
             case Container.ALIGN_BOTTOM:
-                viewOffsetY = outerHeight - viewHeight;
-                sceneOffsetY = sceneGapY;
+                viewOffsetY = handheldSplit ? outerHeight / 2 + (gameOuterHeight - viewHeight) / 2
+                                            : outerHeight - viewHeight;
+                sceneOffsetY = viewOffsetY * (float)innerHeight / outerHeight;
                 break;
             case Container.ALIGN_CENTER:
             default:

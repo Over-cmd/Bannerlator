@@ -907,22 +907,6 @@ public class VulkanRenderer implements WindowManager.OnWindowModificationListene
     public int getSurfaceWidth() { return surfaceWidth; }
     public int getSurfaceHeight() { return surfaceHeight; }
 
-    // OSC fit transform (issue #413) — see HostRenderer.getGameViewportNormalized.
-    @Override public void getGameViewportNormalized(android.graphics.RectF out) {
-        if (out == null) return;
-        int sw = surfaceWidth, sh = surfaceHeight;
-        // STRETCH ignores viewTransformation (it would be stale) and fills the surface anyway.
-        if (sw <= 0 || sh <= 0 || fullscreenMode == Container.FULLSCREEN_STRETCH) {
-            out.set(0f, 0f, 1f, 1f);
-            return;
-        }
-        out.set(
-            viewTransformation.viewOffsetX / (float) sw,
-            viewTransformation.viewOffsetY / (float) sh,
-            (viewTransformation.viewOffsetX + viewTransformation.viewWidth) / (float) sw,
-            (viewTransformation.viewOffsetY + viewTransformation.viewHeight) / (float) sh);
-    }
-
     public void requestRender() {}
 
     // HostRenderer
