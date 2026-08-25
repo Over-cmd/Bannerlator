@@ -169,6 +169,15 @@ object XServerDrawerState {
     private val _screenAlignment = MutableStateFlow(0)
     val screenAlignment: StateFlow<Int> = _screenAlignment
 
+    // Swipeable OSC (Stage 2): live per-category swipe gates driving the drawer's Swipe tab.
+    // Buttons default ON; D-pad and Sticks (slide-to-engage) default OFF.
+    private val _swipeButtons = MutableStateFlow(true)
+    val swipeButtons: StateFlow<Boolean> = _swipeButtons
+    private val _swipeDpad = MutableStateFlow(false)
+    val swipeDpad: StateFlow<Boolean> = _swipeDpad
+    private val _swipeSticks = MutableStateFlow(false)
+    val swipeSticks: StateFlow<Boolean> = _swipeSticks
+
     // ---- External display / TV (Version A) --------------------------------------------------------
     // Whether a TV/external presentation display is currently connected. Gates the TV tab's visibility.
     private val _tvConnected = MutableStateFlow(false)
@@ -318,6 +327,10 @@ object XServerDrawerState {
     // Direct set of the screen alignment (#413): the drawer's Center/Top/Bottom selector picks a
     // value live, without closing the drawer. Takes the target Container.ALIGN_* value.
     @JvmField var onSetScreenAlignment:     java.util.function.IntConsumer? = null
+    // Swipeable OSC (Stage 2): live per-category swipe toggles. Consumer<Boolean> for easy Java assign.
+    @JvmField var onSetSwipeButtons:        java.util.function.Consumer<Boolean>? = null
+    @JvmField var onSetSwipeDpad:           java.util.function.Consumer<Boolean>? = null
+    @JvmField var onSetSwipeSticks:         java.util.function.Consumer<Boolean>? = null
     @JvmField var onPauseResume:            Runnable? = null
     @JvmField var onPipMode:               Runnable? = null
     @JvmField var onActiveWindows:          Runnable? = null
@@ -402,6 +415,10 @@ object XServerDrawerState {
     fun setFullscreenMode(v: Int) { _fullscreenMode.value = v }
 
     fun setScreenAlignment(v: Int) { _screenAlignment.value = v }
+
+    fun setSwipeButtons(v: Boolean) { _swipeButtons.value = v }
+    fun setSwipeDpad(v: Boolean)    { _swipeDpad.value = v }
+    fun setSwipeSticks(v: Boolean)  { _swipeSticks.value = v }
 
     fun setBionicFgActive(v: Boolean)      { _bionicFgActive.value = v }
     fun setFrameGenEnabled(v: Boolean)     { _frameGenEnabled.value = v }
@@ -532,6 +549,9 @@ object XServerDrawerState {
         _supportedRefreshRates.value = emptyList()
         _currentRefreshRate.value = 0
         _cursorExpanded.value = false
+        _swipeButtons.value = true
+        _swipeDpad.value = false
+        _swipeSticks.value = false
         _fpsExpanded.value = false
         _fpsConfig.value = ""
         _overlayOpacity.value = 0.75f
@@ -549,6 +569,7 @@ object XServerDrawerState {
         onClose = null; onKeyboard = null; onInputControls = null
         onScreenEffects = null; onGraphicEngine = null; onVibration = null
         onToggleFullscreen = null; onSetFullscreenMode = null; onSetScreenAlignment = null; onPauseResume = null; onPipMode = null
+        onSetSwipeButtons = null; onSetSwipeDpad = null; onSetSwipeSticks = null
         onActiveWindows = null; onTaskManager = null; onMagnifier = null
         onLogs = null; onExit = null; onMoveCursorToTouchpoint = null; onGestureConfigChange = null
         onRelativeMouseMovement = null; onDisableMouse = null
