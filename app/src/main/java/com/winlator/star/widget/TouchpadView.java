@@ -529,6 +529,14 @@ public class TouchpadView extends View {
 
 
     private void handleFingerUp(Finger finger1) {
+        handleFingerUp(finger1, false);
+    }
+
+    // abandoned=true: the on-screen-controls overlay took this finger over mid-gesture (it slid onto a
+    // swipe control), so run all the lift bookkeeping — release any held click/drag button, reset gesture
+    // state, keep numFingers balanced — but do NOT inject a tap/two-finger CLICK. The finger did not tap,
+    // it slid onto a button; injecting a click here would be a spurious mouse press.
+    private void handleFingerUp(Finger finger1, boolean abandoned) {
         if (gesturesEnabled()) {
             removeCallbacks(longPressRunnable);
             // A finished drag-select or hold has already delivered its press; the tap/two-finger
@@ -551,14 +559,14 @@ public class TouchpadView extends View {
                     };
                     postDelayed(clickDelay, CLICK_DELAYED_TIME);
                 }
-                else if (finger1.isTap()) pressPointerButtonLeft(finger1);
+                else if (!abandoned && finger1.isTap()) pressPointerButtonLeft(finger1);
                 break;
             case 2:
                 Finger finger2 = findSecondFinger(finger1);
-                if (finger2 != null && finger1.isTap()) pressPointerButtonRight(finger1);
+                if (!abandoned && finger2 != null && finger1.isTap()) pressPointerButtonRight(finger1);
                 break;
             case 4:
-                if (fourFingersTapCallback != null) {
+                if (!abandoned && fourFingersTapCallback != null) {
                     for (byte i = 0; i < 4; i++) {
                         if (fingers[i] != null && !fingers[i].isTap()) return;
                     }
@@ -569,6 +577,16 @@ public class TouchpadView extends View {
 
         releasePointerButtonLeft(finger1);
         releasePointerButtonRight(finger1);
+    }
+
+    // Swipeable OSC hand-off: the overlay has taken this finger over (it slid onto a swipe control), so it
+    // will NOT deliver an ACTION_UP for it here. End this finger's touchpad tracking exactly as a real lift
+    // would (minus the tap-click), so numFingers stays balanced and no held button/gesture is left stuck.
+    public void releasePointer(int pointerId) {
+        if (pointerId < 0 || pointerId >= fingers.length || fingers[pointerId] == null) return;
+        handleFingerUp(fingers[pointerId], true);
+        fingers[pointerId] = null;
+        if (numFingers > 0) numFingers--;
     }
 
     private void handleFingerMove(Finger finger1) {

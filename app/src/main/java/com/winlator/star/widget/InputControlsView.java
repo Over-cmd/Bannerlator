@@ -1207,11 +1207,12 @@ public class InputControlsView extends View {
                             handled = expandedElement.handleExpandableChildMove(pid);
                         }
                         if (!handled) {
-                            // Swipeable OSC: a finger may slide between BUTTON/D_PAD targets without
-                            // lifting (d-pad rolls, face-button chaining). Only pointers that aren't
-                            // driving the touchpad participate; the owner is discovered via currentPointerId.
-                            boolean swipeAllowed = !touchpadPointers.get(pid);
-                            ControlElement owner = swipeAllowed ? findCapturingElement(pid) : null;
+                            // Swipeable OSC: a finger may slide onto/between BUTTON/D_PAD targets without
+                            // lifting (d-pad rolls, face-button chaining) — INCLUDING a finger that started
+                            // on empty space and is currently panning the mouse (a touchpad pointer): it
+                            // "converts" to a button press when it slides over a swipe target, and stops
+                            // driving the mouse. The owner (if any) is discovered via currentPointerId.
+                            ControlElement owner = findCapturingElement(pid);
 
                             // (1) A swipeable D_PAD this pointer holds has slid outside its bounds:
                             // hand the press to whatever swipe target now sits under the finger.
@@ -1239,28 +1240,35 @@ public class InputControlsView extends View {
                                 }
                             }
 
-                            // (3) The pointer now holds nothing pressable: either a swipeable BUTTON
-                            // that just released on slide-off, or a genuinely free finger. Press the
-                            // swipe target under the finger, if any.
-                            if (swipeAllowed) {
-                                boolean ownerReleasedButton = owner != null
-                                        && owner.getType() == ControlElement.Type.BUTTON
-                                        && !owner.isCapturing(pid);
-                                boolean pointerFree = !handled && findCapturingElement(pid) == null;
-                                if (ownerReleasedButton || pointerFree) {
-                                    ControlElement target = findSwipeTargetAt(pid, x, y, owner);
-                                    if (target != null) {
-                                        handled = true;
-                                        performTouchHaptic();
-                                    }
+                            // (3) The pointer holds nothing pressable — a swipeable BUTTON that just
+                            // released on slide-off, a genuinely free finger, or a finger currently panning
+                            // the mouse (touchpad pointer). If it's over a swipe target, press it; a
+                            // touchpad finger converts and stops feeding the mouse.
+                            boolean ownerReleasedButton = owner != null
+                                    && owner.getType() == ControlElement.Type.BUTTON
+                                    && !owner.isCapturing(pid);
+                            boolean pointerFree = !handled && findCapturingElement(pid) == null;
+                            if (ownerReleasedButton || pointerFree) {
+                                ControlElement target = findSwipeTargetAt(pid, x, y, owner);
+                                if (target != null) {
+                                    handled = true;
+                                    performTouchHaptic();
+                                    // Converted from mouse-pan to a button press: detach this finger from
+                                    // the touchpad so the mouse stops AND the touchpad's finger count stays
+                                    // balanced. The eventual ACTION_UP then releases the button via the
+                                    // element scan (it's no longer a touchpad pointer).
+                                    detachTouchpadPointer(pid);
                                 }
+                            }
 
-                                // Stick slide-to-engage: a genuinely free finger (owns nothing, not a
-                                // touchpad pointer) sliding into a stick's region grabs it via the normal
-                                // DOWN capture path. Gated ONLY by the live Sticks toggle (no per-element
-                                // flag); default OFF -> sticks must be tapped to grab, exactly as today.
-                                if (swipeSticksEnabled && !handled && pointerFree) {
-                                    if (engageStickAt(pid, x, y) != null) handled = true;
+                            // Stick slide-to-engage: a free OR mouse-panning finger sliding into a stick's
+                            // region grabs it via the normal DOWN capture path (and converts off the
+                            // touchpad). Gated ONLY by the live Sticks toggle (no per-element flag);
+                            // default OFF -> sticks must be tapped to grab, exactly as today.
+                            if (swipeSticksEnabled && !handled && pointerFree) {
+                                if (engageStickAt(pid, x, y) != null) {
+                                    handled = true;
+                                    detachTouchpadPointer(pid);
                                 }
                             }
                         }
@@ -1349,6 +1357,16 @@ public class InputControlsView extends View {
             if (element.isCapturing(pointerId)) return element;
         }
         return null;
+    }
+
+    // A finger that was panning the mouse has just been taken over by a swipe control. Detach it from the
+    // touchpad: stop routing it to the mouse AND tell TouchpadView to end its tracking for that pointer
+    // (releasePointer) so its finger count stays balanced — otherwise, since no ACTION_UP will reach the
+    // touchpad for this pointer, TouchpadView.numFingers would leak and eventually freeze the cursor.
+    private void detachTouchpadPointer(int pointerId) {
+        if (!touchpadPointers.get(pointerId)) return;
+        if (touchpadView != null) touchpadView.releasePointer(pointerId);
+        touchpadPointers.delete(pointerId);
     }
 
     /**
