@@ -125,9 +125,9 @@ public class InputControlsView extends View {
     private final SparseBooleanArray swallowedExpandablePointers = new SparseBooleanArray();
     private final SparseBooleanArray touchpadPointers = new SparseBooleanArray();
     // Stage 2: live per-category swipe gates, mirrored to the drawer's Swipe tab + prefs.
-    // Buttons/D-pad default ON; Sticks slide-to-engage default OFF.
+    // Buttons default ON; D-pad and Sticks (slide-to-engage) default OFF.
     private boolean swipeButtonsEnabled = true;
-    private boolean swipeDpadEnabled = true;
+    private boolean swipeDpadEnabled = false;
     private boolean swipeSticksEnabled = false;
     private final Map<ExternalController, Set<Integer>> activeControllerKeys = new IdentityHashMap<>();
     private final Map<ExternalController, Set<Binding>> activeControllerBindings = new IdentityHashMap<>();

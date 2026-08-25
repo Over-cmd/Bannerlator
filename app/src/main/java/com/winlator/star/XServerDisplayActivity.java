@@ -5440,10 +5440,10 @@ public class XServerDisplayActivity extends AppCompatActivity {
         inputControlsView.setOverlayOpacity(savedOverlayOpacity);
         XServerDrawerState.INSTANCE.setOverlayOpacity(savedOverlayOpacity); // seed the Controls-tab slider
 
-        // Swipeable OSC (Stage 2): resolve per-category swipe gates (Buttons/D-pad default ON, Sticks
+        // Swipeable OSC (Stage 2): resolve per-category swipe gates (Buttons default ON; D-pad and Sticks
         // default OFF), apply to the live overlay, and seed the drawer's Swipe tab so its chips match.
         boolean swipeButtons = preferences.getBoolean("touchscreen_swipe_buttons_enabled", true);
-        boolean swipeDpad = preferences.getBoolean("touchscreen_swipe_dpad_enabled", true);
+        boolean swipeDpad = preferences.getBoolean("touchscreen_swipe_dpad_enabled", false);
         boolean swipeSticks = preferences.getBoolean("touchscreen_swipe_sticks_enabled", false);
         inputControlsView.setSwipeButtonsEnabled(swipeButtons);
         inputControlsView.setSwipeDpadEnabled(swipeDpad);

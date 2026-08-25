@@ -170,10 +170,10 @@ object XServerDrawerState {
     val screenAlignment: StateFlow<Int> = _screenAlignment
 
     // Swipeable OSC (Stage 2): live per-category swipe gates driving the drawer's Swipe tab.
-    // Buttons/D-pad default ON; Sticks slide-to-engage default OFF.
+    // Buttons default ON; D-pad and Sticks (slide-to-engage) default OFF.
     private val _swipeButtons = MutableStateFlow(true)
     val swipeButtons: StateFlow<Boolean> = _swipeButtons
-    private val _swipeDpad = MutableStateFlow(true)
+    private val _swipeDpad = MutableStateFlow(false)
     val swipeDpad: StateFlow<Boolean> = _swipeDpad
     private val _swipeSticks = MutableStateFlow(false)
     val swipeSticks: StateFlow<Boolean> = _swipeSticks
@@ -550,7 +550,7 @@ object XServerDrawerState {
         _currentRefreshRate.value = 0
         _cursorExpanded.value = false
         _swipeButtons.value = true
-        _swipeDpad.value = true
+        _swipeDpad.value = false
         _swipeSticks.value = false
         _fpsExpanded.value = false
         _fpsConfig.value = ""
