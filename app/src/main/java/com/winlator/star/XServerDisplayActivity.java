@@ -3699,6 +3699,16 @@ public class XServerDisplayActivity extends AppCompatActivity {
         environment.onPause();
         xServerView.onPause();
         ProcessHelper.pauseAllWineProcesses();
+        // Mirror onStop()'s display-rate release: a real background DROPS the panel refresh-rate vote
+        // entirely (setDisplayFrameRate 0f) and unhooks the display listener, so the panel re-negotiates
+        // its refresh mode clean on the way back. The old reset skipped this — it only re-asserted the
+        // vote on resume, never released it, so the panel stayed stuck in a stale VRR mode and the
+        // vsync clock (which reads getRefreshRate()) fed the layer the wrong cadence → generated frames
+        // paced against the wrong grid (device symptom: spurty FPS drops after an in-game multiplier
+        // change that ONLY a genuine bg/fg cleared). Release it here, while the surface is still alive,
+        // so the Resume half re-negotiates from scratch exactly like onStop→onResume.
+        if (xServerView != null) xServerView.setDisplayFrameRate(0f, VRR_FRAME_RATE_COMPATIBILITY);
+        unregisterVrrDisplayListener();
         xServerView.teardownSurface();
         XServerDialogState.INSTANCE.setFgResetPaused(true);
     }
@@ -3719,6 +3729,13 @@ public class XServerDisplayActivity extends AppCompatActivity {
         ProcessHelper.resumeAllWineProcesses();
         applyEffectivePresentMode();
         reapplyVrr();
+        // Mirror onResume(): re-hook the display listener and re-read the live panel rate so the vsync
+        // pacing clock picks up the freshly re-negotiated cadence instead of a stale one. Idempotent —
+        // when a REAL foreground drove this (onResume → resumeFromFgReset), onResume already did both;
+        // registerVrrDisplayListener() no-ops if already hooked. Completes the full VRR release→re-
+        // negotiate cycle a genuine bg/fg performs, which the old half-reset was missing.
+        registerVrrDisplayListener();
+        updateCurrentRefreshRate();
     }
 
     private void savePlaytimeData() {
