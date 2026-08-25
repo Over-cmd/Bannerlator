@@ -7498,14 +7498,16 @@ return true;
             && s.getFrameGenMultiplier().getValue() >= 2;
     }
 
-    // Host present mode with the frame-gen mailbox override applied.
+    // Host present mode — the user's chosen mode is always honored (mailbox lock removed:
+    // frame gen no longer forces mailbox, so FIFO/etc. can be used with FG on).
     private String effectivePresentMode() {
-        return frameGenGenerating() ? "mailbox" : resolvedRendererPresentMode();
+        return resolvedRendererPresentMode();
     }
 
-    // (Re)apply the effective host present mode to the live Vulkan renderer — called at launch and
-    // whenever frame gen toggles / the multiplier changes, so the mailbox override tracks FG live
-    // (and reverts to the user's mode when FG goes off). No-op on non-Vulkan renderers / before setup.
+    // (Re)apply the host present mode to the live Vulkan renderer — called at launch and whenever
+    // frame gen toggles / the multiplier changes. Mailbox lock removed: the user's chosen present
+    // mode is honored regardless of FG, and the drawer selector stays unlocked so it can be changed
+    // live with FG on. No-op on non-Vulkan renderers / before setup.
     private void applyEffectivePresentMode() {
         if (xServerView == null) return;
         HostRenderer r = xServerView.getRenderer();
@@ -7513,11 +7515,9 @@ return true;
             String pm = effectivePresentMode();
             int pmInt = "immediate".equals(pm) ? 0 : "mailbox".equals(pm) ? 1 : 2; // VkPresentModeKHR
             ((com.winlator.star.renderer.vulkan.VulkanRenderer) r).setVkPresentMode(pmInt);
-            // Mirror the EFFECTIVE mode into the drawer's live Present Mode selector so the highlight
-            // tracks the auto-switch to Mailbox the instant FG toggles (and reverts to the user's mode
-            // when FG goes off). presentModeLocked drives the drawer's tap-block during FG.
+            // Mirror the mode into the drawer selector; never lock it (mailbox lock removed).
             XServerDrawerState.INSTANCE.setPresentMode(pm);
-            XServerDrawerState.INSTANCE.setPresentModeLocked(frameGenGenerating());
+            XServerDrawerState.INSTANCE.setPresentModeLocked(false);
         }
     }
 
