@@ -7,11 +7,13 @@ import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.Matrix;
 import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.Point;
 import android.graphics.PointF;
 import android.graphics.Rect;
+import android.graphics.RectF;
 import android.os.Handler;
 import android.os.VibrationEffect;
 import android.os.Vibrator;
@@ -30,6 +32,8 @@ import androidx.preference.PreferenceManager;
 
 import com.winlator.star.R;
 import com.winlator.star.ControlsEditorActivity;
+import com.winlator.star.container.Container;
+import com.winlator.star.renderer.HostRenderer;
 import com.winlator.star.inputcontrols.Binding;
 import com.winlator.star.inputcontrols.ControlElement;
 import com.winlator.star.inputcontrols.ControlsProfile;
@@ -89,6 +93,27 @@ public class InputControlsView extends View {
     private volatile float virtualMouseMoveY;
     private final Map<ExternalController, PointF> controllerMouseMoveOffsets = new IdentityHashMap<>();
     private boolean showTouchscreenControls = true;
+
+    // --- OSC fit transform (issue #413) --------------------------------------------------------------
+    // When the game is letterbox-pinned TOP/BOTTOM on a foldable, the authored full-screen touch layout
+    // is non-destructively "contain-fit" into the pooled empty band so no control overlaps the game.
+    // This is a VIEW-TIME transform only: stored ControlElement x/y/scale and the profile JSON are never
+    // mutated, so switching back to CENTER restores the exact original layout and the CENTER path stays
+    // byte-identical to before this change (see computeOscFitTransform / onDraw / onTouchEvent). The
+    // transform is (re)derived every onDraw against the live view size + game viewport, so folds/unfolds,
+    // resolution changes and profile swaps are all picked up without extra plumbing.
+    private HostRenderer hostRenderer;
+    private int screenAlignment = Container.ALIGN_CENTER;
+    private final RectF gameViewportFrac = new RectF(0f, 0f, 1f, 1f); // scratch: viewport as 0..1 fractions
+    private boolean oscFitActive = false;   // false => identity transform (feature inert)
+    private float oscFitScale = 1f;
+    private float oscFitOffsetX = 0f;
+    private float oscFitOffsetY = 0f;
+    private final Matrix oscFitInverse = new Matrix(); // screen -> logical (touch mapping)
+    private final Matrix oscFitForward = new Matrix(); // logical -> screen (touchpad passthrough)
+    // Minimum band height (as a fraction of view height) before we bother relocating; below this there is
+    // effectively no letterbox (CENTER, STRETCH, FILL over-scan, or a razor-thin bar) -> stay identity.
+    private static final float OSC_FIT_MIN_BAND_FRAC = 0.02f;
 
     // Background image for editor reference
     private Bitmap backgroundImage;
@@ -254,6 +279,117 @@ public class InputControlsView extends View {
     }
 
     @Override
+    protected void onSizeChanged(int w, int h, int oldw, int oldh) {
+        super.onSizeChanged(w, h, oldw, oldh);
+        // A resize (fold/unfold, rotation, resolution change) changes both the band and the snapping
+        // grid the element boxes are sized from, so force a redraw -> recompute of the OSC fit transform.
+        invalidate();
+    }
+
+    // OSC fit transform (#413). Recompute oscFitActive/scale/offset (and the touch matrices) for the
+    // CURRENT view size + game viewport + alignment. Called at the top of every onDraw (cheap, and the
+    // most robust way to track folds/resolution changes). Sets an identity (inert) transform for every
+    // case that must behave exactly like before this feature: not in-game (editMode), controls hidden,
+    // no profile/renderer wired, CENTER alignment, an unsized view, no real letterbox band, or an empty
+    // element layout. MUST run AFTER snappingSize is set (element bounding boxes derive from it).
+    private void computeOscFitTransform() {
+        // Default to identity so any early-out below leaves the feature inert.
+        oscFitActive = false;
+        oscFitScale = 1f;
+        oscFitOffsetX = 0f;
+        oscFitOffsetY = 0f;
+
+        if (editMode || !showTouchscreenControls || profile == null || hostRenderer == null) return;
+        if (screenAlignment != Container.ALIGN_TOP && screenAlignment != Container.ALIGN_BOTTOM) return;
+
+        int viewW = getWidth();
+        int viewH = getHeight();
+        if (viewW <= 0 || viewH <= 0) return;
+
+        // Game viewport as 0..1 fractions of the host surface (decoupled from surface px), converted here
+        // into this view's own px. v1 keeps the band full-width even under horizontal letterboxing.
+        hostRenderer.getGameViewportNormalized(gameViewportFrac);
+        float gameTop = gameViewportFrac.top * viewH;
+        float gameBottom = gameViewportFrac.bottom * viewH;
+
+        float bandTop, bandBottom;
+        if (screenAlignment == Container.ALIGN_TOP) {
+            // Game pinned to the top -> empty band pools BELOW it.
+            bandTop = gameBottom;
+            bandBottom = viewH;
+        } else { // ALIGN_BOTTOM: game flush to the bottom -> empty band pools ABOVE it.
+            bandTop = 0f;
+            bandBottom = gameTop;
+        }
+        float bandLeft = 0f;
+        float bandRight = viewW;
+        float bandW = bandRight - bandLeft;
+        float bandH = bandBottom - bandTop;
+        if (bandH <= viewH * OSC_FIT_MIN_BAND_FRAC || bandW <= 0f) return; // no real band -> identity
+
+        // Union bounding box (logical/untransformed px) of all currently-visible elements.
+        int boxL = Integer.MAX_VALUE, boxT = Integer.MAX_VALUE;
+        int boxR = Integer.MIN_VALUE, boxB = Integer.MIN_VALUE;
+        boolean any = false;
+        for (ControlElement element : profile.getElements()) {
+            if (isElementHiddenByGroup(element)) continue;
+            Rect box = element.getBoundingBox();
+            if (box == null || box.isEmpty()) continue;
+            if (box.left < boxL) boxL = box.left;
+            if (box.top < boxT) boxT = box.top;
+            if (box.right > boxR) boxR = box.right;
+            if (box.bottom > boxB) boxB = box.bottom;
+            any = true;
+        }
+        if (!any) return;
+        float boxW = boxR - boxL;
+        float boxH = boxB - boxT;
+        if (boxW <= 0f || boxH <= 0f) return; // degenerate -> identity
+
+        // Uniform contain-fit into the band, never enlarging (scale capped at 1.0).
+        float scale = Math.min(Math.min(bandW / boxW, bandH / boxH), 1.0f);
+        if (!(scale > 0f) || !Float.isFinite(scale)) return;
+
+        // Center the scaled box within the band on both axes: screen = logical*scale + offset.
+        float boxCx = (boxL + boxR) * 0.5f;
+        float boxCy = (boxT + boxB) * 0.5f;
+        float bandCx = (bandLeft + bandRight) * 0.5f;
+        float bandCy = (bandTop + bandBottom) * 0.5f;
+        oscFitScale = scale;
+        oscFitOffsetX = bandCx - boxCx * scale;
+        oscFitOffsetY = bandCy - boxCy * scale;
+        oscFitActive = true;
+
+        // screen -> logical, for mapping incoming touches back to the authored coordinate space.
+        oscFitInverse.reset();
+        oscFitInverse.postTranslate(-oscFitOffsetX, -oscFitOffsetY);
+        oscFitInverse.postScale(1f / oscFitScale, 1f / oscFitScale);
+        // logical -> screen, to hand the untransformed coords to the touchpad passthrough.
+        oscFitForward.reset();
+        oscFitForward.postScale(oscFitScale, oscFitScale);
+        oscFitForward.postTranslate(oscFitOffsetX, oscFitOffsetY);
+
+        // TODO(#413 OSC): full-area/trackpad elements (Type.TRACKPAD / Type.MOUSE_AREA) authored to
+        // overlay the whole game also get contain-fit into the band. Excluding them from the union box
+        // (and drawing/hit-testing them untransformed) is a v2 refinement.
+    }
+
+    // Forward a touch to the touchpad passthrough. While the OSC fit transform is active the event has
+    // been mapped into logical space (for control hit-testing); the touchpad wants real screen coords, so
+    // map back for its call, then restore logical space so any later element logic on the same event is
+    // unaffected. When inert this is a plain pass-through -> byte-identical to the pre-#413 behavior.
+    private void forwardToTouchpad(MotionEvent event) {
+        if (touchpadView == null) return;
+        if (oscFitActive && !editMode) {
+            event.transform(oscFitForward);
+            touchpadView.onTouchEvent(event);
+            event.transform(oscFitInverse);
+        } else {
+            touchpadView.onTouchEvent(event);
+        }
+    }
+
+    @Override
     protected synchronized void onDraw(Canvas canvas) {
         int width = getWidth();
         int height = getHeight();
@@ -277,6 +413,16 @@ public class InputControlsView extends View {
 
         if (profile != null && showTouchscreenControls) {
             if (!profile.isElementsLoaded()) profile.loadElements(this);
+            // Recompute the OSC fit transform (#413) against the live geometry now that elements are
+            // loaded and snappingSize is set. Identity (oscFitActive=false) for CENTER/editMode/etc, so
+            // the block below runs exactly as before in those cases.
+            computeOscFitTransform();
+            int oscFitRestore = -1;
+            if (oscFitActive) {
+                oscFitRestore = canvas.save();
+                canvas.translate(oscFitOffsetX, oscFitOffsetY);
+                canvas.scale(oscFitScale, oscFitScale);
+            }
             for (ControlElement element : profile.getElements()) {
                 if (isElementHiddenByGroup(element)) continue;
                 element.draw(canvas);
@@ -292,6 +438,9 @@ public class InputControlsView extends View {
             if (editMode && selectedElement != null && !isElementHiddenByGroup(selectedElement)) {
                 selectedElement.drawEditorSelectionBorder(canvas);
             }
+            if (oscFitRestore != -1) canvas.restoreToCount(oscFitRestore);
+        } else {
+            oscFitActive = false; // controls not drawn -> keep touch mapping inert (identity)
         }
 
         if (editMode && editorLongPressElement != null && !editorLongPressTriggered) {
@@ -478,6 +627,7 @@ public class InputControlsView extends View {
             deselectAllElements();
         }
         else this.profile = null;
+        if (this.profile == null) oscFitActive = false; // #413: no profile -> touch mapping inert now
         updateTouchscreenMouseButtons();
     }
 
@@ -521,6 +671,7 @@ public class InputControlsView extends View {
     public void setShowTouchscreenControls(boolean showTouchscreenControls) {
         if (this.showTouchscreenControls && !showTouchscreenControls) releaseActiveControls();
         this.showTouchscreenControls = showTouchscreenControls;
+        if (!showTouchscreenControls) oscFitActive = false; // #413: controls hidden -> touch mapping inert now
         updateTouchscreenMouseButtons();
         WinHandler winHandler = xServer != null ? xServer.getWinHandler() : null;
         if (winHandler != null) winHandler.sendGamepadState();
@@ -643,6 +794,26 @@ public class InputControlsView extends View {
         stopMouseMoveTimer();
         this.xServer = xServer;
         updateMouseMoveTimer();
+    }
+
+    // OSC fit transform (#413): supplier of the game viewport (as 0..1 surface fractions). The transform
+    // is recomputed each onDraw, so simply invalidate to pick up a newly-wired renderer.
+    public void setHostRenderer(HostRenderer hostRenderer) {
+        this.hostRenderer = hostRenderer;
+        invalidate();
+    }
+
+    // OSC fit transform (#413): the active screen alignment (Container.ALIGN_CENTER/TOP/BOTTOM). Only
+    // TOP/BOTTOM ever relocate the controls; CENTER (the default) is a no-op that keeps the layout as
+    // authored. Called at launch and live from XServerDisplayActivity.applyScreenAlignment.
+    public void setScreenAlignment(int alignment) {
+        if (this.screenAlignment == alignment) return;
+        this.screenAlignment = alignment;
+        invalidate(); // recompute happens in onDraw against the live geometry
+    }
+
+    public int getScreenAlignment() {
+        return screenAlignment;
     }
 
     public int getMaxWidth() {
@@ -943,6 +1114,14 @@ public class InputControlsView extends View {
 
     @Override
     public boolean onTouchEvent(MotionEvent event) {
+        // OSC fit transform (#413) choke point: when the controls are relocated into the letterbox band,
+        // map incoming pointers screen->logical (logical = (screen - offset)/scale) up front, so every
+        // hit-test below runs unchanged against the authored coordinate space. Multi-pointer + historical
+        // samples are all handled by MotionEvent.transform. Inert (never called) for CENTER/editMode, so
+        // that path is byte-identical. NOTE: this also maps coords handed to the touchpad passthrough, so
+        // those forwards go through forwardToTouchpad(), which maps back to real screen coords first.
+        if (oscFitActive && !editMode) event.transform(oscFitInverse);
+
         boolean hapticsEnabled = preferences.getBoolean("touchscreen_haptics_enabled", true);
         if (!editMode) resetTouchscreenTimeout();
         int actionMasked = event.getActionMasked();
@@ -1099,7 +1278,7 @@ public class InputControlsView extends View {
                         swallowedExpandablePointers.put(pointerId, true);
                     } else if (!handled && touchpadView != null) {
                         touchpadPointers.put(pointerId, true);
-                        touchpadView.onTouchEvent(event);
+                        forwardToTouchpad(event);
                     }
                     break;
                 }
@@ -1122,14 +1301,14 @@ public class InputControlsView extends View {
                             }
                         }
                     }
-                    if (hasTouchpadPointer(event) && touchpadView != null) touchpadView.onTouchEvent(event);
+                    if (hasTouchpadPointer(event)) forwardToTouchpad(event);
                     break;
                 }
                 case MotionEvent.ACTION_UP:
                 case MotionEvent.ACTION_POINTER_UP:
                     if (touchpadPointers.get(pointerId)) {
                         touchpadPointers.delete(pointerId);
-                        if (touchpadView != null) touchpadView.onTouchEvent(event);
+                        forwardToTouchpad(event);
                         handled = true;
                     } else if (swallowedExpandablePointers.get(pointerId)) {
                         swallowedExpandablePointers.delete(pointerId);
@@ -1149,7 +1328,7 @@ public class InputControlsView extends View {
                     break;
                 case MotionEvent.ACTION_CANCEL:
                     releaseActiveControls();
-                    if (touchpadView != null) touchpadView.onTouchEvent(event);
+                    forwardToTouchpad(event);
                     touchpadPointers.clear();
                     break;
             }
