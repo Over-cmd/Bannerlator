@@ -1093,32 +1093,22 @@ private fun TopLevelFields(
         )
         Spacer(Modifier.height(8.dp))
 
-        // Screen alignment (#413): Center / Top / Bottom placement of the letterbox bar on square-ish
-        // foldables. Aspect is preserved — this only moves the bar. Disabled for STRETCH/FILL, which
-        // fill the surface and have no bar to move. Option index maps 1:1 to Container.ALIGN_*.
+        // Screen alignment (#413): Center / Top / Bottom on square-ish foldables. TOP/BOTTOM confine the
+        // game to half the panel (a handheld split) and give the other half to the on-screen controls.
+        // Applies in EVERY fullscreen mode now — Fit/Fill/Stretch/Integer all scale within the game's half
+        // — so it's always available. Option index maps 1:1 to Container.ALIGN_*.
         val screenAlignmentLabels = listOf(
             stringResource(R.string.screen_alignment_center),
             stringResource(R.string.screen_alignment_top),
             stringResource(R.string.screen_alignment_bottom)
         )
-        val alignEnabled = viewModel.fullscreenMode != Container.FULLSCREEN_STRETCH &&
-                           viewModel.fullscreenMode != Container.FULLSCREEN_FILL
         val alignSelIdx = viewModel.screenAlignment.coerceIn(0, screenAlignmentLabels.size - 1)
         LabeledDropdown(
             label = stringResource(R.string.screen_alignment),
             options = screenAlignmentLabels,
             selectedOption = screenAlignmentLabels[alignSelIdx],
-            onSelect = { viewModel.screenAlignment = screenAlignmentLabels.indexOf(it).coerceAtLeast(0) },
-            enabled = alignEnabled
+            onSelect = { viewModel.screenAlignment = screenAlignmentLabels.indexOf(it).coerceAtLeast(0) }
         )
-        if (!alignEnabled) {
-            Text(
-                stringResource(R.string.screen_alignment_disabled_hint),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
-                modifier = Modifier.padding(top = 2.dp, start = 4.dp)
-            )
-        }
         Spacer(Modifier.height(8.dp))
 
         // Frame Generation engine: Off / bionic-fg / lsfg-vk (mutually exclusive). lsfg-vk is grayed

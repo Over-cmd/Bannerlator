@@ -892,28 +892,19 @@ private fun GraphicsContent(state: XServerDrawerState) {
     Spacer(Modifier.height(6.dp))
     FullscreenModeButtons(selected = fullscreenMode) { state.onSetFullscreenMode?.accept(it) }
 
-    // Screen alignment (#413): Center/Top/Bottom placement of the letterbox bar, live like the mode
-    // above. Greyed for STRETCH/FILL (those have no bar to move).
+    // Screen alignment (#413): Center/Top/Bottom, live like the mode above. Now applies in EVERY
+    // fullscreen mode — TOP/BOTTOM confine the game (Fit/Fill/Stretch/Integer alike) to its half and
+    // leave the other half for the controls, so the control is always live (no more STRETCH/FILL greying).
     val screenAlignment by state.screenAlignment.collectAsState()
-    val alignEnabled = fullscreenMode != Container.FULLSCREEN_STRETCH && fullscreenMode != Container.FULLSCREEN_FILL
     Spacer(Modifier.height(8.dp))
     Text(
         stringResource(R.string.screen_alignment),
-        color = if (alignEnabled) MaterialTheme.colorScheme.onSurface
-                else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f),
+        color = MaterialTheme.colorScheme.onSurface,
         modifier = Modifier.fillMaxWidth()
     )
     Spacer(Modifier.height(6.dp))
-    ScreenAlignmentButtons(selected = screenAlignment, enabled = alignEnabled) {
+    ScreenAlignmentButtons(selected = screenAlignment, enabled = true) {
         state.onSetScreenAlignment?.accept(it)
-    }
-    if (!alignEnabled) {
-        Text(
-            stringResource(R.string.screen_alignment_disabled_hint),
-            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f),
-            fontSize = 11.sp,
-            modifier = Modifier.padding(top = 4.dp)
-        )
     }
 
     Spacer(Modifier.height(4.dp))

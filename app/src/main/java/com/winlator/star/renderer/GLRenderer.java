@@ -287,7 +287,10 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
 
         if (viewportNeedsUpdate && magnifierEnabled) {
             if (isStretch()) {
-                GLES20.glViewport(0, 0, surfaceWidth, surfaceHeight);
+                // #413: STRETCH fills its region (== the full surface at CENTER, so identical). On
+                // TOP/BOTTOM the guest maps onto the half; the other half is the cleared black area.
+                GLES20.glViewport(viewTransformation.regionOffsetX, viewTransformation.regionOffsetY,
+                                  viewTransformation.regionWidth, viewTransformation.regionHeight);
             }
             else {
                 GLES20.glViewport(viewTransformation.viewOffsetX, viewTransformation.viewOffsetY, viewTransformation.viewWidth, viewTransformation.viewHeight);
@@ -295,6 +298,11 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
             viewportNeedsUpdate = false;
         }
 
+        // #413: clear the WHOLE surface (scissor OFF) so the controls half + letterbox bars are painted
+        // black every frame BEFORE the region-scissored draw below. At CENTER the scissor was already off
+        // here, so this is a no-op on output; on TOP/BOTTOM it guarantees no stale/garbage frame leaks
+        // into the controls half when FILL/STRETCH overflow is cropped to the region.
+        GLES20.glDisable(GLES20.GL_SCISSOR_TEST);
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
 
         if (magnifierEnabled) {
@@ -322,12 +330,29 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
                 }
 
                 XForm.makeTransform(tmpXForm2, viewTransformation.sceneOffsetX, viewTransformation.sceneOffsetY - pointerY, viewTransformation.sceneScaleX, viewTransformation.sceneScaleY, 0);
-
-                GLES20.glEnable(GLES20.GL_SCISSOR_TEST);
-                GLES20.glScissor(viewTransformation.viewOffsetX, viewTransformation.viewOffsetY, viewTransformation.viewWidth, viewTransformation.viewHeight);
             } else {
                 XForm.identity(tmpXForm2);
             }
+        }
+
+        // #413 region clip. On TOP/BOTTOM the region is a half of the surface: scissor to it on EVERY
+        // path (magnifier + non-magnifier, stretch + non-stretch) so FILL/STRETCH overflow is cropped to
+        // the half and can never spill into the on-screen-controls half — including the default magnifier
+        // path, which previously used no scissor and relied on the framebuffer clip (== the full surface).
+        // At CENTER the region == the full surface, so no region scissor is applied and the historical GL
+        // scissor state is reproduced EXACTLY (draw-rect scissor only on the non-magnifier/non-stretch
+        // path), keeping the output byte-identical.
+        boolean regionIsFullSurface = viewTransformation.regionOffsetX == 0 && viewTransformation.regionOffsetY == 0
+                && viewTransformation.regionWidth == surfaceWidth && viewTransformation.regionHeight == surfaceHeight;
+        if (!regionIsFullSurface) {
+            GLES20.glEnable(GLES20.GL_SCISSOR_TEST);
+            GLES20.glScissor(viewTransformation.regionOffsetX, viewTransformation.regionOffsetY,
+                             viewTransformation.regionWidth, viewTransformation.regionHeight);
+        } else if (!magnifierEnabled && !isStretch()) {
+            // Historical CENTER path (unchanged): scissor to the draw rect.
+            GLES20.glEnable(GLES20.GL_SCISSOR_TEST);
+            GLES20.glScissor(viewTransformation.viewOffsetX, viewTransformation.viewOffsetY,
+                             viewTransformation.viewWidth, viewTransformation.viewHeight);
         }
 
         renderWindows();
@@ -336,7 +361,11 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
         // content), so skip the GL cursor pass to avoid a double-drawn cursor.
         if (cursorVisible && !nativeMode) renderCursor();
 
-        if (!magnifierEnabled && !isStretch()) {
+        // Region clip (TOP/BOTTOM) and the historical CENTER draw-rect scissor both end here. At CENTER
+        // the magnifier path never enabled a scissor and never disabled one; guard the disable to that
+        // exact set so CENTER's GL state stays historical (the next frame's pre-clear disable is the
+        // backstop either way).
+        if (!regionIsFullSurface || (!magnifierEnabled && !isStretch())) {
             GLES20.glDisable(GLES20.GL_SCISSOR_TEST);
         }
 
@@ -698,11 +727,29 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
     // the GL pass uses for its glViewport. Same data the Vulkan updateTransform feeds nativeScanoutSetDst.
     private void updateScanoutDst() {
         if (scanout == null || !nativeMode) return;
+        boolean regionIsFullSurface = viewTransformation.regionOffsetX == 0 && viewTransformation.regionOffsetY == 0
+                && viewTransformation.regionWidth == surfaceWidth && viewTransformation.regionHeight == surfaceHeight;
         if (isStretch()) {
-            scanout.setDst(0, 0, surfaceWidth, surfaceHeight);
-        } else {
+            // #413: STRETCH fills its region (== the full surface at CENTER, so identical to before).
+            scanout.setDst(viewTransformation.regionOffsetX, viewTransformation.regionOffsetY,
+                           viewTransformation.regionWidth, viewTransformation.regionHeight);
+        } else if (regionIsFullSurface) {
+            // CENTER: unchanged. The draw rect (a FILL rect may exceed the surface; SurfaceFlinger clips
+            // it to the display) so this stays byte-identical to the historical scanout dst.
             scanout.setDst(viewTransformation.viewOffsetX, viewTransformation.viewOffsetY,
                            viewTransformation.viewWidth, viewTransformation.viewHeight);
+        } else {
+            // TOP/BOTTOM: clip the draw rect to the region so the scanned-out game stays in its half.
+            // The scanout scales the full guest buffer into this dst, so a FILL draw rect larger than the
+            // region is confined by squishing rather than cropping (acceptable for the experimental Native
+            // Rendering+ combo; the GL compositor path crops FILL properly via the region scissor).
+            int l = Math.max(viewTransformation.viewOffsetX, viewTransformation.regionOffsetX);
+            int t = Math.max(viewTransformation.viewOffsetY, viewTransformation.regionOffsetY);
+            int r = Math.min(viewTransformation.viewOffsetX + viewTransformation.viewWidth,
+                             viewTransformation.regionOffsetX + viewTransformation.regionWidth);
+            int b = Math.min(viewTransformation.viewOffsetY + viewTransformation.viewHeight,
+                             viewTransformation.regionOffsetY + viewTransformation.regionHeight);
+            scanout.setDst(l, t, Math.max(0, r - l), Math.max(0, b - t));
         }
     }
 
