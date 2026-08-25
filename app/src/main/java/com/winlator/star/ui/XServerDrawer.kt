@@ -1232,8 +1232,11 @@ private fun FrameGenSection(state: XServerDrawerState) {
         FgMultiplierButtons(fgMult, engine) { newMult ->
             val wasOff = fgMult == 0
             fgMult = newMult; applyFg()
-            // Turning FG on: pulse a bg/fg reset so win-fg starts clean, not artifacty.
-            if (wasOff && newMult >= 2) state.onFgResetPulse?.run()
+            // Turning FG on: win-fg pulses a soft bg/fg reset so its optical flow starts clean, not
+            // artifacty. lsfg-vk instead does a FULL surface-teardown reset with a Resume prompt —
+            // driven by onBionicFgConfigChange in the activity (the device-proven fix for its
+            // black-frame flicker) — so it must NOT also fire the soft pulse here.
+            if (engine == "bionic" && wasOff && newMult >= 2) state.onFgResetPulse?.run()
         }
 
         // Interpolation model, win-fg only. The layer rebuilds its framegen context when the

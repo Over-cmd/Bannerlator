@@ -154,6 +154,34 @@ public class XServerView extends FrameLayout {
         if (glSurfaceView != null) glSurfaceView.onResume();
     }
 
+    /** True if this renderer uses a SurfaceView we can fully tear down + rebuild (Vulkan / ASR).
+     *  False for GL, whose GLSurfaceView owns its own EGL lifecycle via onPause()/onResume(). */
+    public boolean canRecreateSurface() {
+        return vulkanSurfaceView != null;
+    }
+
+    // Force a REAL Android surface teardown by hiding the game SurfaceView. GONE removes it from the
+    // layout, which destroys its underlying android.view.Surface and fires SurfaceHolder.Callback
+    // surfaceDestroyed -> renderer.onSurfaceDestroyed() (Vulkan: nativeDetachSurface; ASR/native:
+    // full destroy). This is the load-bearing difference vs a swapchain-only recreate on the same
+    // surface: it replicates what a background/foreground cycle does to the window surface, which is
+    // the ONLY thing device-proven to clear the LSFG black-frame flicker. Paired with rebuildSurface().
+    // No-op for GL (canRecreateSurface() is false).
+    public void teardownSurface() {
+        if (vulkanSurfaceView != null && vulkanSurfaceView.getVisibility() != GONE)
+            vulkanSurfaceView.setVisibility(GONE);
+    }
+
+    // Bring the game SurfaceView back (VISIBLE). Android allocates a FRESH android.view.Surface and
+    // fires surfaceCreated -> renderer.onSurfaceCreated() (nativeReattachSurface + swapchain recreate)
+    // then surfaceChanged -> onSurfaceChanged() (resize). The callbacks arrive on a later traversal,
+    // exactly as on a real foreground; the guest can be resumed immediately (the renderer buffers
+    // presents until the surface is back). Paired with teardownSurface().
+    public void rebuildSurface() {
+        if (vulkanSurfaceView != null && vulkanSurfaceView.getVisibility() != VISIBLE)
+            vulkanSurfaceView.setVisibility(VISIBLE);
+    }
+
     public Object getSurfaceControl() {
         // GLSurfaceView extends SurfaceView, so it inherits getSurfaceControl() (API 29+).
         // Returning the GL surface's SurfaceControl lets DirectScanout host child game/cursor

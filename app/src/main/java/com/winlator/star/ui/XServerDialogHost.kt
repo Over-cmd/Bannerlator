@@ -13,6 +13,7 @@ import com.winlator.star.ui.dialogs.ScreenEffectsDialog
 import com.winlator.star.ui.dialogs.VibrationDialog
 import com.winlator.star.ui.overlays.ControllerToastOverlay
 import com.winlator.star.ui.overlays.ExternalModeOverlay
+import com.winlator.star.ui.overlays.FgResetOverlay
 import com.winlator.star.ui.overlays.MagnifierOverlay
 import com.winlator.star.ui.overlays.PauseBoxOverlay
 import com.winlator.star.ui.theme.WinlatorTheme
@@ -34,6 +35,7 @@ fun XServerDialogHost() {
     val controllerToast  by state.controllerToast.collectAsState()
     val playingOnExternal by state.playingOnExternal.collectAsState()
     val menuOpen by state.menuOpen.collectAsState()
+    val fgResetPaused by state.fgResetPaused.collectAsState()
     when (activeDialog) {
         XServerDialogState.ActiveDialog.VIBRATION      -> VibrationDialog(state)
         XServerDialogState.ActiveDialog.DEBUG          -> DebugDialogContent(state)
@@ -54,6 +56,10 @@ fun XServerDialogHost() {
     // Centered pause indicator — above the game surface, shown whenever the guest is frozen
     // (ReShade freeze-frame preview OR a manual Pause). Tap to fully resume.
     if (paused) PauseBoxOverlay(state)
+
+    // Frame-gen change → full presentation reset: the guest is frozen and the surface torn down;
+    // tapping Resume rebuilds the surface + resumes the guest so frame gen restarts clean.
+    if (fgResetPaused) FgResetOverlay(state)
 
     // Controller-status toast (P5b): top-right, below the Fusion HUD; non-interactive, auto-dismissing.
     if (controllerToast != null) ControllerToastOverlay(state)
