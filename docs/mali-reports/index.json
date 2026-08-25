@@ -1,5 +1,15 @@
 [
   {
+    "id": "2026-08-25T05-19-20-e8f9f5",
+    "created": "2026-08-25T05:19:20.584Z",
+    "reporter": "sandz",
+    "device": "anbernic rg vita",
+    "gpu": "g52",
+    "game": "red faction: dashfaction modlauncher",
+    "symptom": "Crashes / closes to home",
+    "logs": 1
+  },
+  {
     "id": "2026-08-24T10-23-22-c4a658",
     "created": "2026-08-24T10:23:22.827Z",
     "reporter": "Tirtogalih",
