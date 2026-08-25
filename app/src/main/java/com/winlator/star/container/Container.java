@@ -423,7 +423,7 @@ public class Container {
     // lsfg-vk runs best at a higher flow scale than bionic-fg (GameNative's proven default). Only the
     // UNSET default differs per engine (see getFrameGenFlowScale) — an explicit user value wins either way.
     public static final float LSFG_DEFAULT_FLOW_SCALE = 0.80f;
-    public static final int FRAMEGEN_DEFAULT_MODEL = 0;
+    public static final int FRAMEGEN_DEFAULT_MODEL = 3;   // win-fg model 3 = Optical flow (~2ms; device-proven best base-FPS retention)
 
     public boolean isFrameGenEnabled() {
         return getExtra("frameGenEnabled", "0").equals("1");
@@ -497,8 +497,9 @@ public class Container {
     //       match window, sub-pixel refinement and a true bidirectional solve whose
     //       forward/backward disagreement gates the flow at occlusion edges. 3 is kept
     //       unchanged alongside it so the two can be compared live in the same scene.
-    // 1-4 are unproven on device; 0 stays the default so behaviour is unchanged unless chosen.
-    // BIONIC_FG_MODEL in the container/shortcut env vars still overrides this at the layer.
+    // win-fg models: 3 = Optical flow (default; ~2ms, best base-FPS retention on GPU-bound titles,
+    // device-proven 2026-08-25), 4 = Bidirectional (~10ms, heavier). An explicit per-container/shortcut
+    // pick still wins; the layer clamps to [3,4].
     public int getFrameGenModel() {
         try {
             int m = Integer.parseInt(getExtra("frameGenModel", String.valueOf(FRAMEGEN_DEFAULT_MODEL)));
