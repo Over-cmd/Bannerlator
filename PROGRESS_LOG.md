@@ -1,5 +1,28 @@
 # Star-Compose — Progress Log
 
+## 2026-08-25 — ⏸️🔖 **CHECKPOINT: LSFG black-frame flicker — paused for device test**
+> **Where we are (resume here):** branch `fix/lsfg-flicker-pacing` @ `6a63e35a`, CI `32795455567` GREEN (all 3 flavors),
+> STAGED `/sdcard/Download/Bannerlator-lsfg-fgreset-pubg.apk` sha `219fa4716886b0210a6d423d8d3a5817fad39f7f5faf0f3f2d4e299841b55f0d`.
+> NOT merged, NOT device-proven.
+>
+> **Root cause (DEVICE-PROVEN, live logcat 2026-08-24):** host-compositor frame OVER-QUEUE from unpaced
+> frame-gen — `SmoMoState::FrameIsLate: queued_frames>=2` ~55/s during flicker → ~14/s after bg/fg; the
+> lsfg-vk GENERATED frames present BLACK (real frames + host HUD fine). **Disproven on-device:** not a driver
+> cap (probe: fp16/memModel/robustness2/sync2 all present); not the AHB fn-ptr miss (AHB context creates fine)
+> → the earlier Wrapper→Turnip lead is dead.
+>
+> **What's on the branch (3 stacked changes):** (A) guest `experimental_present_mode` mailbox-when-generating
+> (`writeLsfgConfig`); (B) vsync clock `vsync.txt` via Choreographer (both VERIFIED live on-disk but did NOT
+> clear the flicker alone); mailbox-lock removal (host present mode user-selectable during FG, `8250c5e9`);
+> (C) FG-CHANGE FULL-RESET (`6a63e35a`) — selecting On/2×/3×/4× (lsfg only) → pause guest → REAL SurfaceView
+> teardown → on-screen Resume overlay → rebuild+resume (only a full surface teardown clears it; a plain
+> swapchain recreate does not).
+>
+> **NEXT (resume):** device-test `219fa471…` — install → set 2× → tap Resume → is the menu clean without
+> manual bg/fg? Also try Present Mode→FIFO with FG on. Optional objective proof: re-run the `scratchpad/lsfgcap/`
+> logcat capture during DiRT+2× and compare `FrameIsLate` vs the ~55/s baseline. Verify installed sha first.
+> Full detail: memory `project_bannerlator_lsfg_black_frame_flicker`.
+
 ## 2026-08-24 — 🖥️🎞️ **Feature: frame-gen change → full presentation reset (LSFG black-frame flicker)**
 > Additive to the pacing fix (A+B) + mailbox-lock-removal already on `fix/lsfg-flicker-pacing`. Device
 > finding: with lsfg-vk generating, only a **background/foreground cycle** clears the black-frame
