@@ -34,7 +34,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import com.winlator.star.ui.screens.MenuItemDivider
 import com.winlator.star.ui.screens.OutlinedAlertDialog
+import com.winlator.star.ui.screens.outlinedMenuCard
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -44,7 +46,6 @@ import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -65,6 +66,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
@@ -73,6 +75,7 @@ import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.ColorMatrix
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
@@ -1153,26 +1156,31 @@ private enum class DetailTab(val label: String) {
 // The tab strip + achievements body follow an approved fixed-colour mockup, NOT MaterialTheme — so
 // these literal values match the spec 1:1 (alpha channels folded into the ARGB hex where the mockup
 // used rgba()). Everything else on the page keeps the app theme.
-private val AchvAccent          = Color(0xFF4FB6E8)
-private val AchvTabActiveBg     = Color(0x244FB6E8) // rgba(79,182,232,.14)
-private val AchvTabActiveText   = Color(0xFFBFE6FA)
-private val AchvTabActiveBorder = Color(0x734FB6E8) // rgba(79,182,232,.45)
-private val AchvTabActiveBadge  = Color(0x2E4FB6E8) // rgba(79,182,232,.18)
+// Non-gold roles now follow the user's theme (composable getters reading MaterialTheme.colorScheme),
+// so tabs / buttons / surfaces / lines recolor with the active preset instead of the mockup blue.
+private val AchvAccent: Color          @Composable get() = MaterialTheme.colorScheme.primary
+private val AchvTabActiveBg: Color     @Composable get() = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)
+private val AchvTabActiveText: Color   @Composable get() = MaterialTheme.colorScheme.primary
+private val AchvTabActiveBorder: Color @Composable get() = MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)
+private val AchvTabActiveBadge: Color  @Composable get() = MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)
+private val AchvInk: Color             @Composable get() = MaterialTheme.colorScheme.onSurface
+private val AchvInk2: Color            @Composable get() = MaterialTheme.colorScheme.onSurfaceVariant
+private val AchvInk3: Color            @Composable get() = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+private val AchvCard: Color            @Composable get() = MaterialTheme.colorScheme.surface
+private val AchvCard2: Color           @Composable get() = MaterialTheme.colorScheme.surfaceContainer
+private val AchvLine: Color            @Composable get() = MaterialTheme.colorScheme.outline
+private val AchvLineSoft: Color        @Composable get() = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)
+private val AchvBadgeBg: Color         @Composable get() = MaterialTheme.colorScheme.surfaceContainerLowest
+private val AchvTrackBg: Color         @Composable get() = MaterialTheme.colorScheme.surfaceContainerLowest
+private val AchvTileUnlockedTop: Color @Composable get() = MaterialTheme.colorScheme.surfaceContainerHigh
+private val AchvTileUnlockedBot: Color @Composable get() = MaterialTheme.colorScheme.surfaceContainer
+private val AchvTileLockedTop: Color   @Composable get() = MaterialTheme.colorScheme.surfaceContainer
+private val AchvTileLockedBot: Color   @Composable get() = MaterialTheme.colorScheme.surfaceContainerLow
+
+// Achievement GOLD — the "earned" identity (Steam-like). Deliberately fixed (NOT themed): used ONLY
+// for the progress-bar fill, the unlocked tile ring + ✓ badge, the "Unlocked" pill, and the legend.
 private val AchvGold            = Color(0xFFE8B652)
 private val AchvGoldDim         = Color(0xFFCAA03E)
-private val AchvInk             = Color(0xFFE9F1F5)
-private val AchvInk2            = Color(0xFF93A3B2)
-private val AchvInk3            = Color(0xFF657483)
-private val AchvCard            = Color(0xFF18202B)
-private val AchvCard2           = Color(0xFF131A23)
-private val AchvLine            = Color(0xFF26313F)
-private val AchvLineSoft        = Color(0xFF1E2732)
-private val AchvBadgeBg         = Color(0xFF0E151D)
-private val AchvTrackBg         = Color(0xFF0D141C)
-private val AchvTileUnlockedTop = Color(0xFF2C3A4D)
-private val AchvTileUnlockedBot = Color(0xFF202B39)
-private val AchvTileLockedTop   = Color(0xFF243244)
-private val AchvTileLockedBot   = Color(0xFF1A2431)
 private val AchvUnlockedBorder  = Color(0x8CE8B652) // rgba(232,182,82,.55)
 private val AchvChkGlyph        = Color(0xFF1A1204)
 private val AchvPillOnBg        = Color(0x21E8B652) // rgba(232,182,82,.13)
@@ -1275,10 +1283,18 @@ private fun SteamGameDetailScreen(
     // The tile tapped in the icon-only grid → drives the caption bar. Reset when the game changes.
     var selectedAch by remember(appId) { mutableStateOf<SteamAchievement?>(null) }
 
+    // The Achievements caption bar is pinned to the screen bottom (outside the page scroll) so it
+    // stays visible while the icon grid scrolls above it. We measure its height and reserve that much
+    // bottom padding in the scroll so the last grid rows aren't hidden behind it.
+    val density = LocalDensity.current
+    var captionHeightPx by remember { mutableIntStateOf(0) }
+    val showPinnedCaption =
+        selectedTab == DetailTab.ACHIEVEMENTS && signedIn && !achLoading && achievements.isNotEmpty()
+
+    Box(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
             .verticalScroll(rememberScrollState()),
     ) {
         // Header bar
@@ -1415,7 +1431,7 @@ private fun SteamGameDetailScreen(
                         .weight(1f)
                         .height(46.dp)
                         .clip(primaryShape)
-                        .background(Color(0xFF17222E))
+                        .background(MaterialTheme.colorScheme.surfaceContainerHigh)
                         .border(1.dp, AchvLine, primaryShape),
                     contentAlignment = Alignment.Center,
                 ) {
@@ -1424,11 +1440,18 @@ private fun SteamGameDetailScreen(
                             .align(Alignment.CenterStart)
                             .fillMaxHeight()
                             .fillMaxWidth(frac)
-                            .background(Brush.horizontalGradient(listOf(Color(0xFF3F9FD0), AchvAccent))),
+                            .background(
+                                Brush.horizontalGradient(
+                                    listOf(
+                                        MaterialTheme.colorScheme.primary.copy(alpha = 0.6f),
+                                        MaterialTheme.colorScheme.primary,
+                                    ),
+                                ),
+                            ),
                     )
                     Text(
                         text = label,
-                        color = Color(0xFFCFE8F6),
+                        color = AchvInk,
                         fontSize = 15.sp,
                         fontWeight = FontWeight.Bold,
                         maxLines = 1,
@@ -1451,7 +1474,7 @@ private fun SteamGameDetailScreen(
                 ) {
                     Text(
                         text = label,
-                        color = Color(0xFF04121B),
+                        color = MaterialTheme.colorScheme.onPrimary,
                         fontSize = 15.sp,
                         fontWeight = FontWeight.Bold,
                         maxLines = 1,
@@ -1470,31 +1493,36 @@ private fun SteamGameDetailScreen(
                         .clickable { gearMenuExpanded = true },
                     contentAlignment = Alignment.Center,
                 ) {
-                    Text("⚙", fontSize = 18.sp, color = AchvInk2)
+                    Text("⚙", fontSize = 18.sp, color = AchvAccent)
                 }
                 DropdownMenu(
                     expanded = gearMenuExpanded,
                     onDismissRequest = { gearMenuExpanded = false },
-                    modifier = Modifier.background(AchvCard),
+                    modifier = Modifier.outlinedMenuCard(),
                 ) {
-                    // Downloading → pause/resume + cancel lead, then the common items.
+                    // Downloading → pause/resume + cancel lead, then the common items; a divider sits
+                    // between every option (matching the app's other outlined menus).
                     if (downloading) {
                         val pauseEmoji = if (pauseAction == PauseAction.RESUME) "▶️" else "⏸️"
                         GearMenuItem(pauseEmoji, pauseBtnText, enabled = pauseBtnEnabled,
                             onClick = { gearMenuExpanded = false; onPauseResumeClick() })
+                        MenuItemDivider()
                         GearMenuItem("✕", "Cancel download", danger = true, // installAction == CANCEL
                             onClick = { gearMenuExpanded = false; onInstallClick() })
-                        HorizontalDivider(color = AchvLineSoft)
+                        MenuItemDivider()
                     }
                     GearMenuItem("🌿", "Choose branch",
                         onClick = { gearMenuExpanded = false; onBranchLineClick() })
+                    MenuItemDivider()
                     GearMenuItem("🧩", "Manage DLC", enabled = dlcEntries.isNotEmpty(),
                         onClick = { gearMenuExpanded = false; onDlcLineClick() })
-                    GearMenuItem("🛡️", "Goldberg mode",
+                    MenuItemDivider()
+                    // Goldberg patches installed game files, so it's only meaningful once installed.
+                    GearMenuItem("🛡️", "Goldberg mode", enabled = installAction == InstallAction.UNINSTALL,
                         onClick = { gearMenuExpanded = false; selectedTab = DetailTab.DETAILS })
                     // Installed → Uninstall at the bottom.
                     if (installAction == InstallAction.UNINSTALL) {
-                        HorizontalDivider(color = AchvLineSoft)
+                        MenuItemDivider()
                         GearMenuItem("🗑️", "Uninstall", danger = true, // installAction == UNINSTALL
                             onClick = { gearMenuExpanded = false; onInstallClick() })
                     }
@@ -1659,6 +1687,25 @@ private fun SteamGameDetailScreen(
                 }
             }
         }
+
+        // Reserve scroll space equal to the pinned caption's height (Achievements tab only), so the
+        // last grid rows can scroll clear of the pinned bar below.
+        if (showPinnedCaption) {
+            Spacer(Modifier.height(with(density) { captionHeightPx.toDp() }))
+        }
+    }
+
+    // Pinned achievements caption — lifted OUT of the page scroll, kept at the screen bottom while
+    // the icon grid scrolls above it. Only for the Achievements tab's grid state.
+    if (showPinnedCaption) {
+        AchievementCaptionBar(
+            selected = selectedAch,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .navigationBarsPadding()
+                .onSizeChanged { captionHeightPx = it.height },
+        )
+    }
     }
 
     // DLC picker sheet — choose which owned DLC download with the game (opt-out).
@@ -1838,7 +1885,7 @@ private fun GearMenuItem(
     enabled: Boolean = true,
     danger: Boolean = false,
 ) {
-    val base = if (danger) Color(0xFFE77565) else AchvInk
+    val base = if (danger) MaterialTheme.colorScheme.error else AchvInk
     DropdownMenuItem(
         text = {
             Text(
@@ -1990,9 +2037,8 @@ private fun AchievementsTabBody(
                         }
                     }
                 }
-                Spacer(Modifier.height(4.dp))
-                // Caption bar spans edge-to-edge (its own top border + card-2 background).
-                AchievementCaptionBar(selected)
+                // NOTE: the caption/legend bar is rendered by the SCREEN, pinned to the bottom of
+                // the page (outside this scroll) so it stays visible while the grid scrolls.
             }
         }
     }
@@ -2231,8 +2277,8 @@ private fun AchievementHelpDialog(a: SteamAchievement, onDismiss: () -> Unit) {
  * unlock date when unlocked). Always ends with the Unlocked / Locked / Hidden legend.
  */
 @Composable
-private fun AchievementCaptionBar(selected: SteamAchievement?) {
-    Column(modifier = Modifier.fillMaxWidth()) {
+private fun AchievementCaptionBar(selected: SteamAchievement?, modifier: Modifier = Modifier) {
+    Column(modifier = modifier.fillMaxWidth()) {
         Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(AchvLineSoft))
         Column(
             modifier = Modifier
