@@ -19,4 +19,15 @@ public final class GogLaunchHelper {
     public static void addToLauncher(Activity activity, String gameName, String exePath) {
         StarLaunchBridge.addToLauncher(activity, gameName, exePath, null);
     }
+
+    /**
+     * As {@link #addToLauncher(Activity, String, String, String)}, but after the container is picked
+     * offers to auto-install the game's required GOG redistributables (gap#3) into that prefix. Use
+     * this from the GOG detail page so the redist trigger fires at the add-to-container moment.
+     */
+    public static void addToLauncherWithPrereqs(Activity activity, String gameName,
+                                                String exePath, String coverArtUrl, String gameId) {
+        StarLaunchBridge.addToLauncher(activity, gameName, exePath, coverArtUrl, null,
+                container -> GogRedistInstaller.promptAndInstall(activity, container, gameId));
+    }
 }

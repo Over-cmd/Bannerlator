@@ -1,5 +1,155 @@
 [
   {
+    "id": "2026-08-25T05-19-20-e8f9f5",
+    "created": "2026-08-25T05:19:20.584Z",
+    "reporter": "sandz",
+    "device": "anbernic rg vita",
+    "gpu": "g52",
+    "game": "red faction: dashfaction modlauncher",
+    "symptom": "Crashes / closes to home",
+    "logs": 1
+  },
+  {
+    "id": "2026-08-24T10-23-22-c4a658",
+    "created": "2026-08-24T10:23:22.827Z",
+    "reporter": "Tirtogalih",
+    "device": "Infinix Note 50x 5G",
+    "gpu": "Mali-G615 MC2",
+    "game": "Need for Speed Underground 2",
+    "symptom": "Black screen (no image)",
+    "logs": 1
+  },
+  {
+    "id": "2026-08-22T04-12-36-08d428",
+    "created": "2026-08-22T04:12:36.614Z",
+    "reporter": "Mohd Ariana Bin Ahmad",
+    "device": "Samsung Galaxy A07 5g",
+    "gpu": "Mali-G57 MC2",
+    "game": "Sarah's House",
+    "symptom": "Other",
+    "logs": 0
+  },
+  {
+    "id": "2026-08-21T06-03-05-1a0791",
+    "created": "2026-08-21T06:03:05.483Z",
+    "reporter": "Mohd Ariana Bin Ahmad",
+    "device": "Samsung Galaxy A07 5g",
+    "gpu": "Mali-G57 MC2",
+    "game": "Grand Theft Auto V",
+    "symptom": "Freezes / hangs",
+    "logs": 0
+  },
+  {
+    "id": "2026-08-15T12-38-00-9521ad",
+    "created": "2026-08-15T12:38:00.759Z",
+    "reporter": "",
+    "device": "Oppo reno2 f",
+    "gpu": "Mail-715",
+    "game": "Grand theft Auto v",
+    "symptom": "Black screen (no image)",
+    "logs": 0
+  },
+  {
+    "id": "2026-08-13T22-48-32-ea612e",
+    "created": "2026-08-13T22:48:32.894Z",
+    "reporter": "Oscar",
+    "device": "S24 ultra",
+    "gpu": "Adreno 750",
+    "game": "Todos los juegos",
+    "symptom": "Otro",
+    "logs": 1
+  },
+  {
+    "id": "2026-08-13T12-45-26-770e94",
+    "created": "2026-08-13T12:45:26.336Z",
+    "reporter": "",
+    "device": "Redmi Pad 2",
+    "gpu": "Mali G57 MC2",
+    "game": "GTA IV",
+    "symptom": "Runs but very low FPS",
+    "logs": 0
+  },
+  {
+    "id": "2026-08-13T05-50-55-ffe524",
+    "created": "2026-08-13T05:50:55.663Z",
+    "reporter": "Rayhan",
+    "device": "Iqoo Z10x",
+    "gpu": "Mali-G615 MC2",
+    "game": "Pro Evolution Soccer - 2017",
+    "symptom": "Graphical glitches (corruption, flicker, missing textures)",
+    "logs": 1
+  },
+  {
+    "id": "2026-08-12T11-49-37-4097a6",
+    "created": "2026-08-12T11:49:37.637Z",
+    "reporter": "Inigo",
+    "device": "Poco X7 Pro",
+    "gpu": "Mali-G720 MC7",
+    "game": "Project Cars 1 GOTY (Game Of The Year)",
+    "symptom": "Freezes / hangs",
+    "logs": 2
+  },
+  {
+    "id": "2026-08-10T22-33-57-72de83",
+    "created": "2026-08-10T22:33:57.214Z",
+    "reporter": "Dr. Waleed Arain",
+    "device": "Motorola Edge Plus 2020",
+    "gpu": "Adreno 650",
+    "game": "A plague Tale: Innocence",
+    "symptom": "Crashes / closes to home",
+    "logs": 1
+  },
+  {
+    "id": "2026-08-08T17-33-36-13900e",
+    "created": "2026-08-08T17:33:36.184Z",
+    "reporter": "",
+    "device": "Poco X8 Pro",
+    "gpu": "Mali-G720 MC8",
+    "game": "Re2R",
+    "symptom": "Tela preta (sem imagem)",
+    "logs": 1
+  },
+  {
+    "id": "2026-08-08T17-00-15-be74e5",
+    "created": "2026-08-08T17:00:15.020Z",
+    "reporter": "Krabkush",
+    "device": "Pixel 9 pro 256gb",
+    "gpu": "Mali-g715",
+    "game": "Fallen aces",
+    "symptom": "Other",
+    "logs": 5
+  },
+  {
+    "id": "2026-08-08T05-28-30-2d5cef",
+    "created": "2026-08-08T05:28:30.622Z",
+    "reporter": "josh",
+    "device": "poco f5 pro",
+    "gpu": "adreno 730",
+    "game": "nba 2k16",
+    "symptom": "Other",
+    "logs": 0
+  },
+  {
+    "id": "2026-08-08T00-38-07-a4ead5",
+    "created": "2026-08-08T00:38:07.202Z",
+    "reporter": "split",
+    "device": "vivo x200s",
+    "gpu": "Mali-G925-Immortalis MC12",
+    "game": "Forza Horizon 4",
+    "symptom": "图形故障(损坏、闪烁、缺少纹理)",
+    "logs": 3
+  },
+  {
+    "id": "2026-08-07T14-41-10-021a5c",
+    "created": "2026-08-07T14:41:10.621Z",
+    "reporter": "Wawa",
+    "device": "17t pro",
+    "gpu": "Mali g1 ultra",
+    "game": "Dishonored",
+    "symptom": "Crashes / closes to home",
+    "logs": 0
+  },
+  {
     "id": "2026-08-06T03-29-24-7e68f0",
     "created": "2026-08-06T03:29:24.870Z",
     "reporter": "Split",

@@ -40,6 +40,23 @@ class GogLoginActivity : ComponentActivity() {
             "&redirect_uri=https%3A%2F%2Fembed.gog.com%2Fon_login_success%3Forigin%3Dclient" +
             "&response_type=token&layout=client2"
 
+        private const val KEY_STATE = "bh_gog_oauth_state"
+
+        /** Appends the CSRF [state] to the base AUTH_URL. */
+        @JvmStatic
+        fun buildAuthUrl(state: String): String = "$AUTH_URL&state=${Uri.encode(state)}"
+
+        /** Random URL-safe CSRF state (24 bytes → ~32 chars, well over the 16-byte floor). */
+        @JvmStatic
+        fun generateState(): String {
+            val bytes = ByteArray(24)
+            java.security.SecureRandom().nextBytes(bytes)
+            return android.util.Base64.encodeToString(
+                bytes,
+                android.util.Base64.URL_SAFE or android.util.Base64.NO_WRAP or android.util.Base64.NO_PADDING,
+            )
+        }
+
         @JvmStatic
         fun parseJsonStringField(json: String?, key: String?): String? {
             if (json == null || key == null) return null
@@ -55,8 +72,12 @@ class GogLoginActivity : ComponentActivity() {
 
     private var webViewRef: WebView? = null
 
+    // CSRF state we sent on AUTH_URL; must survive WebView/Activity recreation.
+    private var oauthState: String? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        oauthState = savedInstanceState?.getString(KEY_STATE) ?: generateState()
         val webView = WebView(this).apply {
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
@@ -74,7 +95,12 @@ class GogLoginActivity : ComponentActivity() {
         }
         webViewRef = webView
         setContentView(webView)
-        webView.loadUrl(AUTH_URL)
+        webView.loadUrl(buildAuthUrl(oauthState!!))
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        oauthState?.let { outState.putString(KEY_STATE, it) }
     }
 
     private inner class GogWebViewClient : WebViewClient() {
@@ -122,6 +148,20 @@ class GogLoginActivity : ComponentActivity() {
         private fun handleImplicitRedirect(uri: Uri) {
             val fragment = uri.fragment ?: return
             val frag = Uri.parse("x://x?$fragment")
+
+            // CSRF: the auth server echoes back the `state` we sent. Reject a redirect
+            // whose state is missing or does not match (defeats forged login responses).
+            // NOTE: depends on auth.gog.com echoing `state` in the implicit-flow fragment.
+            // If device-test shows valid logins being rejected, relax to mismatch-only
+            // (i.e. allow a null returnedState).
+            val expected = oauthState
+            val returnedState = frag.getQueryParameter("state")
+            if (expected != null && returnedState != expected) {
+                Log.e(TAG, "OAuth state mismatch (got=${returnedState != null}) — rejecting redirect")
+                rejectLogin("Login verification failed, please try again")
+                return
+            }
+
             val accessToken = frag.getQueryParameter("access_token") ?: return
             val refreshToken = frag.getQueryParameter("refresh_token")
             val userId = frag.getQueryParameter("user_id")
@@ -136,6 +176,21 @@ class GogLoginActivity : ComponentActivity() {
             lifecycleScope.launch(Dispatchers.IO) {
                 loginRunnable(accessToken, refreshToken, userId)
             }
+        }
+    }
+
+    /** Shows a themed error and reloads the login page with a fresh CSRF state. */
+    private fun rejectLogin(message: String) {
+        runOnUiThread {
+            if (!isFinishing && !isDestroyed) {
+                android.app.AlertDialog.Builder(this, R.style.StoreAlertDialogDark)
+                    .setMessage(message)
+                    .setPositiveButton("OK", null)
+                    .show()
+            }
+            val fresh = generateState()
+            oauthState = fresh
+            webViewRef?.loadUrl(buildAuthUrl(fresh))
         }
     }
 
@@ -182,7 +237,9 @@ class GogLoginActivity : ComponentActivity() {
                         .setPositiveButton("OK", null)
                         .show()
                 }
-                webViewRef?.loadUrl(AUTH_URL)
+                val fresh = generateState()
+                oauthState = fresh
+                webViewRef?.loadUrl(buildAuthUrl(fresh))
             }
         }
     }

@@ -705,9 +705,10 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
         } else {
             cd = rootCursorDrawable;
         }
-        if (cd != null && cd.getBuffer() != null) {
+        if (cd != null) {
             synchronized (cd.renderLock) {
                 ByteBuffer buf = cd.getBuffer();
+                if (buf == null) return;
                 short stride = (short) (buf.capacity() / (cd.height * 4));
                 scanout.setCursorImage(buf, cd.width, cd.height, stride);
             }

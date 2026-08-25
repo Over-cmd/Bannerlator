@@ -11,7 +11,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 
 enum class TabType {
-    GRAPHICS, HUD, RESHADE, CONTROLS, ADVANCED, TASK_MANAGER
+    GRAPHICS, HUD, RESHADE, CONTROLS, ADVANCED, TASK_MANAGER, TV, AUDIO
 }
 
 object XServerDrawerState {
@@ -163,6 +163,107 @@ object XServerDrawerState {
     // to the in-game "Toggle Fullscreen" row so the user sees which mode the cycle landed on.
     private val _fullscreenMode = MutableStateFlow(0)
     val fullscreenMode: StateFlow<Int> = _fullscreenMode
+
+    // ---- External display / TV (Version A) --------------------------------------------------------
+    // Whether a TV/external presentation display is currently connected. Gates the TV tab's visibility.
+    private val _tvConnected = MutableStateFlow(false)
+    val tvConnected: StateFlow<Boolean> = _tvConnected
+    fun setTvConnected(v: Boolean) { _tvConnected.value = v }
+
+    // Human-readable name of the connected external display (for the TV tab readout).
+    private val _tvDisplayName = MutableStateFlow("")
+    val tvDisplayName: StateFlow<String> = _tvDisplayName
+    fun setTvDisplayName(v: String) { _tvDisplayName.value = v }
+
+    // "Play on TV" master switch and "Auto-switch on connect" (both default on). When auto-switch is
+    // off, connecting a display only notifies and waits for the user to move the game from this tab.
+    private val _tvPlayOnTv = MutableStateFlow(true)
+    val tvPlayOnTv: StateFlow<Boolean> = _tvPlayOnTv
+    fun setTvPlayOnTv(v: Boolean) { _tvPlayOnTv.value = v }
+
+    private val _tvAutoSwap = MutableStateFlow(true)
+    val tvAutoSwap: StateFlow<Boolean> = _tvAutoSwap
+    fun setTvAutoSwap(v: Boolean) { _tvAutoSwap.value = v }
+
+    // Whether the game is currently shown on the external display (drives the Move / Bring-back button).
+    private val _tvGameOnExternal = MutableStateFlow(false)
+    val tvGameOnExternal: StateFlow<Boolean> = _tvGameOnExternal
+    fun setTvGameOnExternal(v: Boolean) { _tvGameOnExternal.value = v }
+
+    // Activity wires these to ExternalDisplayController. Consumer<Boolean> / Runnable for easy Java assign.
+    @JvmField var onTvPlayOnTvChange: java.util.function.Consumer<Boolean>? = null
+    @JvmField var onTvAutoSwapChange: java.util.function.Consumer<Boolean>? = null
+    @JvmField var onMoveToTv: Runnable? = null
+    @JvmField var onBringBackFromTv: Runnable? = null
+    // Rebuild the guest audio sink (fixes silence after backgrounding / HDMI route changes).
+    @JvmField var onResetAudio: Runnable? = null
+    // Re-apply the audio config live in-game after the preset/fine-tune dialog saves (sink recreate
+    // reads the just-written banner_audio prefs). Guest latency change still needs a relaunch.
+    @JvmField var onReapplyAudio: Runnable? = null
+    // Brief auto pause-pulse (SIGSTOP ~0.4s then SIGCONT, no pause UI) fired on an FG toggle-on /
+    // model change: the guest goes momentarily still so win-fg's optical flow restarts from a
+    // near-zero-motion frame pair instead of coming up artifacty.
+    @JvmField var onFgResetPulse: Runnable? = null
+    // Engine that actually launched ("PulseAudio" / "ALSA"), shown at the top of the in-game AUDIO tab
+    // so the user knows which engine these settings hit. Set by the activity at launch.
+    @JvmField var audioDriverLabel: String = ""
+    // Engine id ("alsa" / "pulseaudio") — selects the per-engine prefs file the in-game tab reads/writes.
+    @JvmField var audioDriverId: String = ""
+
+    // TV output display modes (resolution + refresh rate). Seeded by the activity from the connected
+    // display's getSupportedModes() so the user can switch off e.g. 4K@30 to 1080p@60. id 0 = default.
+    data class TvDisplayMode(val id: Int, val label: String)
+
+    private val _tvModes = MutableStateFlow<List<TvDisplayMode>>(emptyList())
+    val tvModes: StateFlow<List<TvDisplayMode>> = _tvModes
+    fun setTvModes(v: List<TvDisplayMode>) { _tvModes.value = v }
+
+    private val _tvCurrentModeId = MutableStateFlow(0)
+    val tvCurrentModeId: StateFlow<Int> = _tvCurrentModeId
+    fun setTvCurrentModeId(v: Int) { _tvCurrentModeId.value = v }
+
+    // Fired with the chosen Display.Mode id (0 = system default): activity → controller.setPreferredModeId.
+    @JvmField var onTvModeChange: java.util.function.Consumer<Int>? = null
+
+    // Read-only HDR capability of the connected display (e.g. "HDR10, Dolby Vision"); "" if none.
+    private val _tvHdr = MutableStateFlow("")
+    val tvHdr: StateFlow<String> = _tvHdr
+    fun setTvHdr(v: String) { _tvHdr.value = v }
+
+    // Wireless casting (screen mirroring to a Google TV / Chromecast / Miracast) is available on this
+    // device (Google Cast / Wireless Display present). Gates the TV tab so a "Cast" button is reachable
+    // even with no wired display connected. onOpenCastPicker opens the system cast/mirror device chooser.
+    private val _castSupported = MutableStateFlow(false)
+    val castSupported: StateFlow<Boolean> = _castSupported
+    fun setCastSupported(v: Boolean) { _castSupported.value = v }
+    @JvmField var onOpenCastPicker: Runnable? = null
+
+    // ---- TV Options v2 (NEW behaviours, TV-scoped via tv.* container extras) ----------------------
+    // Overscan / safe-area inset for TVs that crop edges: 0..8 % padding on GamePresentation.root.
+    private val _tvOverscan = MutableStateFlow(0)
+    val tvOverscan: StateFlow<Int> = _tvOverscan
+    fun setTvOverscan(v: Int) { _tvOverscan.value = v.coerceIn(0, 8) }
+    @JvmField var onTvOverscanChange: java.util.function.IntConsumer? = null
+
+    // Dim the handheld screen while the game is on the TV (battery/heat saver). Default on.
+    private val _tvDimHandheld = MutableStateFlow(true)
+    val tvDimHandheld: StateFlow<Boolean> = _tvDimHandheld
+    fun setTvDimHandheld(v: Boolean) { _tvDimHandheld.value = v }
+    @JvmField var onTvDimHandheldChange: java.util.function.Consumer<Boolean>? = null
+
+    // Audio output preference while on TV: 0 = follow system, 1 = force TV/HDMI, 2 = force handheld.
+    // Experimental — routes the Android media output; the guest AAudio sink may not always follow.
+    private val _tvAudioOut = MutableStateFlow(0)
+    val tvAudioOut: StateFlow<Int> = _tvAudioOut
+    fun setTvAudioOut(v: Int) { _tvAudioOut.value = v }
+    @JvmField var onTvAudioOutChange: java.util.function.IntConsumer? = null
+
+    // TV render resolution: 0 = Match TV, 1 = Match handheld, 2 = 1080p, 3 = 1440p. Applied on next
+    // launch (the X server resolution is fixed at bring-up), so this only stores the choice + notifies.
+    private val _tvRenderRes = MutableStateFlow(0)
+    val tvRenderRes: StateFlow<Int> = _tvRenderRes
+    fun setTvRenderRes(v: Int) { _tvRenderRes.value = v }
+    @JvmField var onTvRenderResChange: java.util.function.IntConsumer? = null
 
     private val _fpsExpanded = MutableStateFlow(false)
     val fpsExpanded: StateFlow<Boolean> = _fpsExpanded
@@ -374,8 +475,10 @@ object XServerDrawerState {
     // Fired when a root toggle flips: the Activity writes the per-game override (or the global default
     // for a container-direct launch) and applies it live via PerfRootApplier.
     @JvmField var onRootToggleChange: java.util.function.BiConsumer<String, Boolean>? = null
-    // One-shot free-memory action (drop_caches).
+    // TIER 1 — one-shot drop-file-caches action (drop_caches; light, near-invisible RAM).
     @JvmField var onFreeMemory: Runnable? = null
+    // TIER 2 — one-shot deep clean (root-only): `am kill-all` frees real RAM without touching the game.
+    @JvmField var onDeepClean: Runnable? = null
     // Drawer asks the Activity to refresh the live readouts (cheap sysfs/HudMetrics reads).
     @JvmField var onRootReadoutPoll: Runnable? = null
     // Reset ONE perf key's per-game override so it re-inherits the global default (Activity removes the
@@ -431,7 +534,7 @@ object XServerDrawerState {
         _overriddenKeys.value = emptySet()
         _rootToggles.value = emptyMap()
         _rootReadouts.value = emptyMap()
-        onRootToggleChange = null; onFreeMemory = null; onRootReadoutPoll = null
+        onRootToggleChange = null; onFreeMemory = null; onDeepClean = null; onRootReadoutPoll = null
         onResetPerfKey = null; onResetAllPerf = null
         onClose = null; onKeyboard = null; onInputControls = null
         onScreenEffects = null; onGraphicEngine = null; onVibration = null

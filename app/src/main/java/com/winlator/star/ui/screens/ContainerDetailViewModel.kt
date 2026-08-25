@@ -125,6 +125,9 @@ class ContainerDetailViewModel(app: Application) : AndroidViewModel(app) {
     // Advanced Vulkan present options — backed by the container's dedicated renderer* fields
     // (NOT graphicsDriverConfig, whose KeyValueSet/semicolon mismatch made these never apply).
     var rendererNative      by mutableStateOf(false)
+    // Native backend for Native Rendering: "auto"/"asr" -> hardened SurfaceFlinger (ASR) reroute;
+    // "flip" -> force the leaner Vulkan FLIP direct-scanout. Default "auto" = unchanged behaviour.
+    var rendererNativeBackend by mutableStateOf("auto")
     var rendererPresentMode by mutableStateOf("fifo")
     var rendererDriverId    by mutableStateOf("system")
     var rendererFilterMode  by mutableStateOf(0)
@@ -217,6 +220,20 @@ class ContainerDetailViewModel(app: Application) : AndroidViewModel(app) {
     // are also live-tunable from the in-game drawer — this is just the launch-time default.
     var vibrationMode by mutableStateOf(Container.VIBRATION_MODE_DEFAULT)
     var vibrationIntensity by mutableStateOf(Container.VIBRATION_INTENSITY_DEFAULT)
+
+    // Manual controller->player-slot pins for this container (Player Slots section). Opaque JSON string
+    // (descriptor -> slot), the exact schema the in-game Players tab + launch pre-assignment use — the
+    // editor UI mutates it only through WinHandler.parse/buildSlotOverridesJson. "{}" = all auto.
+    var controllerSlotOverridesJson by mutableStateOf("{}")
+
+    // On-screen-controls vs physical-pad priority for this container (KEEP/YIELD/SHARE). Default KEEP so
+    // existing containers are unchanged; a new container is seeded from the app-drawer global at creation.
+    var onScreenControllerMode by mutableStateOf(Container.ON_SCREEN_MODE_DEFAULT)
+
+    // Auto-hide on-screen controls when a controller takes the on-screen slot (#333). Container-level
+    // default FALSE (existing containers untouched); a new container is seeded from the app-drawer global
+    // (default ON) at creation, same discipline as onScreenControllerMode.
+    var autoHideControlsOnPad by mutableStateOf(Container.AUTO_HIDE_CONTROLS_ON_PAD_DEFAULT)
 
     // Gyro (motion aim), per-container. Target: 0=Right stick 1=Left stick 2=Mouse; activator is the
     // button that gates the tilt (4 = always on), with the activation mode deciding whether that
@@ -465,6 +482,7 @@ class ContainerDetailViewModel(app: Application) : AndroidViewModel(app) {
         selectedGraphicsDriver   = identifierToDisplay(seed?.graphicsDriver ?: defaultGraphicsDriverForNewContainer(), graphicsDriverEntries)
         graphicsDriverConfig     = seed?.graphicsDriverConfig ?: Container.DEFAULT_GRAPHICSDRIVERCONFIG
         rendererNative           = seed?.isRendererNative() ?: false
+        rendererNativeBackend    = seed?.getRendererNativeBackend() ?: "auto"
         rendererPresentMode      = seed?.getRendererPresentMode() ?: "fifo"
         rendererDriverId         = seed?.getRendererDriverId() ?: "system"
         rendererFilterMode       = seed?.getRendererFilterMode() ?: 0
@@ -477,6 +495,9 @@ class ContainerDetailViewModel(app: Application) : AndroidViewModel(app) {
 
         // Audio driver (load as display name). Emulator is arch-dependent → seedArchDependentDefaults.
         selectedAudioDriver = identifierToDisplay(seed?.audioDriver ?: Container.DEFAULT_AUDIO_DRIVER, audioDriverEntries)
+        // A container saved with DirectAudio but on (or later moved to) an unsupported layer self-heals
+        // to the default here, so the greyed dropdown never shows an unselectable value as "selected".
+        coerceAudioDriverForWine()
 
         // MIDI
         val midiVal = seed?.getMIDISoundFont() ?: ""
@@ -524,6 +545,9 @@ class ContainerDetailViewModel(app: Application) : AndroidViewModel(app) {
         }
         vibrationMode      = seed?.getVibrationMode() ?: Container.VIBRATION_MODE_DEFAULT
         vibrationIntensity = seed?.getVibrationIntensity() ?: Container.VIBRATION_INTENSITY_DEFAULT
+        controllerSlotOverridesJson = seed?.getControllerSlotOverrides() ?: "{}"
+        onScreenControllerMode = seed?.getOnScreenControllerMode() ?: Container.ON_SCREEN_MODE_DEFAULT
+        autoHideControlsOnPad = seed?.isAutoHideControlsOnPad() ?: Container.AUTO_HIDE_CONTROLS_ON_PAD_DEFAULT
 
         gyroEnabled     = seed?.isGyroEnabled() ?: Container.GYRO_ENABLED_DEFAULT
         gyroTarget      = seed?.getGyroTarget() ?: Container.GYRO_TARGET_DEFAULT
@@ -713,9 +737,24 @@ class ContainerDetailViewModel(app: Application) : AndroidViewModel(app) {
             ?: entries.firstOrNull()
             ?: id
 
+    /**
+     * DirectAudio only loads on the four supported arm64ec Proton builds; on any other layer it does
+     * nothing / breaks audio. So it must never survive as the chosen driver on an unsupported layer:
+     * if the currently-selected driver is DirectAudio but [selectedWineVersion] isn't one of those
+     * builds, fall back to the app default (PulseAudio). Called on load, on a Wine-version change, and
+     * again at save — the UI grey-out stops a fresh pick, this stops an already-set one from persisting.
+     */
+    private fun coerceAudioDriverForWine() {
+        if (StringUtils.parseIdentifier(selectedAudioDriver) == "directaudio" &&
+            !com.winlator.star.core.DirectAudioSupport.isSupported(selectedWineVersion)) {
+            selectedAudioDriver = identifierToDisplay(Container.DEFAULT_AUDIO_DRIVER, audioDriverEntries)
+        }
+    }
+
     fun onWineVersionChanged(version: String) {
         val wasArm64 = isArm64EC
         selectedWineVersion = version
+        coerceAudioDriverForWine()      // a switch to an unsupported layer drops a stale DirectAudio pick
         refreshWineDependent(version)   // updates isArm64EC + swaps the box64/wowbox64 list
 
         // CREATE mode only: a wine change can FLIP the architecture. applyArch() swapped the box64 list
@@ -838,6 +877,11 @@ class ContainerDetailViewModel(app: Application) : AndroidViewModel(app) {
         colorAsString: String,
         onComplete: () -> Unit
     ) {
+        // Belt-and-suspenders: never write Audio=directaudio for a layer that can't load it. The UI
+        // grey-out already blocks a fresh pick, but a container loaded already-set (or edited without
+        // touching the audio row) reaches here — drop it back to the default first.
+        coerceAudioDriverForWine()
+
         // Finalize graphics driver config (ensure version is set)
         var finalGDConfig = gdConfig
         try {
@@ -900,6 +944,9 @@ class ContainerDetailViewModel(app: Application) : AndroidViewModel(app) {
             c.setExclusiveXInput(exclusiveXInput)
             c.setVibrationMode(vibrationMode)
             c.setVibrationIntensity(vibrationIntensity)
+            c.setControllerSlotOverrides(controllerSlotOverridesJson)
+            c.setOnScreenControllerMode(onScreenControllerMode)
+            c.setAutoHideControlsOnPad(autoHideControlsOnPad)
             c.setGyroEnabled(gyroEnabled)
             c.setGyroTarget(gyroTarget)
             c.setGyroActivator(gyroActivator)
@@ -912,6 +959,7 @@ class ContainerDetailViewModel(app: Application) : AndroidViewModel(app) {
             c.setGyroInvertY(gyroInvertY)
             c.setRenderer(StringUtils.parseIdentifier(selectedRenderer))
             c.setRendererNative(rendererNative)
+            c.setRendererNativeBackend(rendererNativeBackend)
             c.setRendererPresentMode(rendererPresentMode)
             c.setRendererDriverId(rendererDriverId)
             c.setRendererFilterMode(rendererFilterMode)
@@ -954,6 +1002,29 @@ class ContainerDetailViewModel(app: Application) : AndroidViewModel(app) {
                     created.setLsfgAutoEnable(lsfgAutoEnable)
                     created.setVibrationMode(vibrationMode)
                     created.setVibrationIntensity(vibrationIntensity)
+                    // Player Slots + On-screen mode: a NEW container is SEEDED from the app-drawer global
+                    // default ONLY at creation (never a live launch-time fallback, and existing containers
+                    // are never retroactively changed). An explicit edit in this create screen wins over
+                    // the global — so only fall back to the global when the field is still the all-auto
+                    // default the user didn't touch.
+                    val seededSlotOverrides =
+                        if (controllerSlotOverridesJson.isBlank() || controllerSlotOverridesJson == "{}")
+                            com.winlator.star.ui.components.GlobalControllerPrefs.getSlotOverridesJson(context)
+                        else controllerSlotOverridesJson
+                    created.setControllerSlotOverrides(seededSlotOverrides)
+                    created.setOnScreenControllerMode(
+                        if (onScreenControllerMode == Container.ON_SCREEN_MODE_DEFAULT)
+                            com.winlator.star.ui.components.GlobalControllerPrefs.getOnScreenMode(context)
+                        else onScreenControllerMode
+                    )
+                    // Seed auto-hide from the global default (ON) when the user didn't turn it on in the
+                    // create screen; an explicit ON in the create screen is kept. Existing containers never
+                    // hit this path, so they stay on the FALSE container-level fallback.
+                    created.setAutoHideControlsOnPad(
+                        if (!autoHideControlsOnPad)
+                            com.winlator.star.ui.components.GlobalControllerPrefs.getAutoHideControlsOnPad(context)
+                        else true
+                    )
                     // Same set as the edit path above — a new container must not silently drop these.
                     created.setGyroEnabled(gyroEnabled)
                     created.setGyroTarget(gyroTarget)
@@ -1014,6 +1085,7 @@ class ContainerDetailViewModel(app: Application) : AndroidViewModel(app) {
         put("exclusiveXInput", exclusiveXInput)
         put("renderer", StringUtils.parseIdentifier(selectedRenderer))
         put("rendererNative", rendererNative)
+        put("rendererNativeBackend", rendererNativeBackend)
         put("rendererPresentMode", rendererPresentMode)
         put("rendererDriverId", rendererDriverId)
         put("rendererFilterMode", rendererFilterMode)
@@ -1089,6 +1161,9 @@ class ContainerDetailViewModel(app: Application) : AndroidViewModel(app) {
             template.setLsfgAutoEnable(lsfgAutoEnable)
             template.setVibrationMode(vibrationMode)
             template.setVibrationIntensity(vibrationIntensity)
+            template.setControllerSlotOverrides(controllerSlotOverridesJson)
+            template.setOnScreenControllerMode(onScreenControllerMode)
+            template.setAutoHideControlsOnPad(autoHideControlsOnPad)
             template.setGyroEnabled(gyroEnabled)
             template.setGyroTarget(gyroTarget)
             template.setGyroActivator(gyroActivator)

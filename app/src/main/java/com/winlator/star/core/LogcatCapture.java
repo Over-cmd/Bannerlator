@@ -30,7 +30,7 @@ public final class LogcatCapture {
 
     private static final String TAG = "LogcatCapture";
     /** Lines to take. Matches GameNative's crash-report depth; plenty for a diagnosis, small on disk. */
-    public static final int DEFAULT_LINES = 1000;
+    public static final int DEFAULT_LINES = 10000;
 
     private LogcatCapture() {}
 

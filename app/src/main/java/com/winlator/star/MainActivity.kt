@@ -340,7 +340,11 @@ private fun AppShell(
 
     // Big Picture is a full-bleed couch/TV launcher: no top bar, no drawer gestures, no scaffold
     // content padding (it draws its own immersive layout).
+    // Big Picture now renders the landscape "games wall", which draws its OWN rail header + nav rail +
+    // footer, so it gets the chrome-free full-bleed treatment. The Games route is the normal phone-grid
+    // library again (top bar + drawer), so it is NOT full-bleed.
     val isBigPicture = currentRoute == Screen.BigPicture.route
+    val isFullBleed = isBigPicture
 
     // In-app update banner: only when a newer stable exists, notify is on, and
     // this version wasn't skipped.
@@ -398,7 +402,7 @@ private fun AppShell(
     CompositionLocalProvider(LocalTopBarActions provides topBarActionsState) {
     ModalNavigationDrawer(
         drawerState = drawerState,
-        gesturesEnabled = !currentRoute.startsWith("container_detail") && !isBigPicture,
+        gesturesEnabled = !currentRoute.startsWith("container_detail") && !isFullBleed,
         drawerContent = {
             AppDrawerContent(
                 currentRoute = currentRoute,
@@ -435,7 +439,7 @@ private fun AppShell(
         Scaffold(
             modifier = Modifier.fillMaxSize(),
             topBar = {
-                if (!isBigPicture) {
+                if (!isFullBleed) {
                     AppTopBar(
                         title = screenTitle,
                         showBack = false,
@@ -452,9 +456,9 @@ private fun AppShell(
                 }
             },
         ) { innerPadding ->
-            Column(modifier = Modifier.padding(if (isBigPicture) PaddingValues(0.dp) else innerPadding)) {
+            Column(modifier = Modifier.padding(if (isFullBleed) PaddingValues(0.dp) else innerPadding)) {
                 val upd = bannerUpdate
-                if (upd != null && !bannerDismissed && !isBigPicture) {
+                if (upd != null && !bannerDismissed && !isFullBleed) {
                     UpdateBanner(
                         versionName = upd.versionName,
                         onUpdate = {
@@ -474,7 +478,7 @@ private fun AppShell(
                 // App-wide minimized progress pill for a running archive unpack. Renders nothing when
                 // idle; sits below the nav content so it floats over every screen. Hidden in Big
                 // Picture (fullscreen) mode.
-                if (!isBigPicture) {
+                if (!isFullBleed) {
                     com.winlator.star.ui.UnpackProgressPill()
                 }
             }

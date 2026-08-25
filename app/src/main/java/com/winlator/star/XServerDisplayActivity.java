@@ -59,6 +59,9 @@ import com.winlator.star.container.Container;
 import com.winlator.star.container.ContainerManager;
 import com.winlator.star.container.Shortcut;
 import com.winlator.star.core.CustomSaveVault;
+import com.winlator.star.store.EpicOverlayManager;
+import com.winlator.star.store.GogCloudSaveManager;
+import com.winlator.star.store.GogCloudSavePaths;
 import com.winlator.star.store.SteamCloudSaveManager;
 import com.winlator.star.store.SteamDatabase;
 import com.winlator.star.store.SteamRepository;
@@ -82,6 +85,7 @@ import com.winlator.star.core.PreloaderDialog;
 import com.winlator.star.core.ProcessHelper;
 import com.winlator.star.core.StringUtils;
 import com.winlator.star.core.TarCompressorUtils;
+import com.winlator.star.core.DirectAudioSupport;
 import com.winlator.star.core.WineInfo;
 import com.winlator.star.core.WineRegistryEditor;
 import com.winlator.star.core.WineRequestHandler;
@@ -106,6 +110,7 @@ import com.winlator.star.renderer.effects.FXAAEffect;
 import com.winlator.star.renderer.effects.NTSCCombinedEffect;
 import com.winlator.star.renderer.effects.ToonEffect;
 import com.winlator.star.renderer.effects.HDREffect;
+import com.winlator.star.widget.EpicOverlayPill;
 import com.winlator.star.widget.FpsCounter;
 import com.winlator.star.widget.FrameRating;
 import com.winlator.star.widget.FrameRatingHorizontal;
@@ -130,11 +135,13 @@ import com.winlator.star.xenvironment.components.PulseAudioComponent;
 import com.winlator.star.xenvironment.components.SysVSharedMemoryComponent;
 import com.winlator.star.xenvironment.components.XServerComponent;
 import com.winlator.star.xserver.Pointer;
+import com.winlator.star.xserver.Atom;
 import com.winlator.star.xserver.Property;
 import com.winlator.star.xserver.ScreenInfo;
 import com.winlator.star.xserver.extensions.RandrExtension;
 import com.winlator.star.xserver.Window;
 import com.winlator.star.xserver.WindowManager;
+import com.winlator.star.xserver.XKeycode;
 import com.winlator.star.xserver.XServer;
 
 import org.json.JSONArray;
@@ -170,7 +177,47 @@ public class XServerDisplayActivity extends AppCompatActivity {
     public static String NOTIFICATION_CHANNEL_ID = "Winlator";
     public static int NOTIFICATION_ID = 9004;
     private XServerView xServerView;
+    // Version-A spike: auto-swaps the game onto a connected external display (TV), handheld = controller.
+    private com.winlator.star.display.ExternalDisplayController externalDisplayController;
+    // Set on a real background (onPause outside PiP) so onResume rebuilds the guest audio sink.
+    private boolean wasBackgrounded = false;
+    // Mid-game output-route watcher: plugging/unplugging wired (or USB/BT/HDMI) headphones during play
+    // changes Android's default output, but the guest's PulseAudio AAudioSink keeps its already-open
+    // stream on the old device (and on unplug the stream dies without reopening -> muted speaker). We
+    // catch add/remove and fire the same resetGuestAudio() the HDMI/background path uses. Registered in
+    // onResume / dropped in onPause. `primed` swallows the initial device list delivered at register.
+    private android.media.AudioDeviceCallback audioRouteCallback;
+    private boolean audioRouteCallbackPrimed = false;
+    // In-app wireless-cast device discovery (Google Cast via mDNS) for the Cast dialog.
+    private com.winlator.star.cast.CastDiscovery castDiscovery;
+    // Version B Part 2: captures + H.264-encodes the game for casting (Step 1 records to a file).
+    private com.winlator.star.cast.GameCaster gameCaster;
+    // Part 2 Step 2a: Cast v2 session + local HTTP server that serve/cast the captured clip to the TV.
+    private com.winlator.star.cast.CastSession castSession;
+    private com.winlator.star.cast.HttpFileServer castHttp;
+    private com.winlator.star.cast.TsSegmenter castSegmenter;   // live HLS segmenter fed by the encoder
+    private Runnable pendingCastStart; // (unused in live mode) cancelable delayed step
     private InputControlsView inputControlsView;
+
+    // ---- Controller-status toast (P5b) — debounced hot-plug plumbing ----
+    // Coalesce a burst of add/remove/change callbacks (fast replug, or a pad that fans out into
+    // several sibling sub-devices) into ONE toast within this window.
+    private static final long CONTROLLER_TOAST_DEBOUNCE_MS = 300;
+    private final android.os.Handler controllerToastHandler = new android.os.Handler(android.os.Looper.getMainLooper());
+    private String pendingToastReason = null;
+    private String pendingToastDescriptor = null;
+    private final Runnable fireControllerToast = () -> {
+        showControllerStatusToast(pendingToastReason != null ? pendingToastReason : "connected", pendingToastDescriptor);
+        pendingToastReason = null;
+        pendingToastDescriptor = null;
+        // #333: re-evaluate auto-hide on the same debounced tick, once slot assignment has settled.
+        updateAutoHideForControllers();
+        // #333: keep the in-game Players tab list current on hot-plug — it otherwise only rebuilds at
+        // launch / manual slot change / Reset Input, so a controller connected or removed mid-session
+        // wouldn't appear/disappear in the list until one of those fired. Via a method (not an inline
+        // field ref) so the field initializer doesn't forward-reference winHandler.
+        refreshInGamePlayerSlotList();
+    };
     private TouchpadView touchpadView;
     private XEnvironment environment;
     private DrawerLayout drawerLayout;
@@ -198,8 +245,19 @@ public class XServerDisplayActivity extends AppCompatActivity {
     private boolean inGameEditorPreviousShowTouchscreen;
     private boolean inGameEditorPreviousTimeoutEnabled;
     private ControlsProfile inGameEditorPreviousProfile;
+    // #333 auto-hide OSC controls: the baseline visibility the USER chose (launch pref + live drawer
+    // toggles). Auto-hide hides/restores relative to this so it never forces controls on when the user
+    // wanted them off, and a manual re-show is remembered. controlsEditorOpen suspends auto-hide while
+    // the in-game controls editor is up (it force-shows controls for editing).
+    private boolean userWantsControlsShown;
+    private boolean controlsEditorOpen;
     private Shortcut shortcut;
     private String graphicsDriver = Container.DEFAULT_GRAPHICS_DRIVER;
+    // Which Vulkan driver the host compositor/present layer runs on ("system" = Android's own driver,
+    // or an installed adrenotools Turnip). Separate from graphicsDriver (which the guest game renders
+    // through). Default "system" — a Turnip compositor can black-screen on builds whose WSI doesn't
+    // support the surface, so it's opt-in. Applied via VulkanRenderer.setDriverInfo before nativeInit.
+    private String rendererDriverId = "system";
     private HashMap<String, String> graphicsDriverConfig;
     private String audioDriver = Container.DEFAULT_AUDIO_DRIVER;
     private String emulator = Container.DEFAULT_EMULATOR;
@@ -413,6 +471,99 @@ public class XServerDisplayActivity extends AppCompatActivity {
         }
     };
 
+    // Drift-detected CPU-affinity re-pin. A user-selected affinity (Task Manager Processor Affinity
+    // dialog from the in-game side menu, Prefer Big Cores, or per-window task affinity) is a ONE-SHOT
+    // SetProcessAffinityMask: it pins only the threads that exist at call time. Game engines spawn the
+    // bulk of their job/worker threads once real gameplay starts (after menus/loading), and under
+    // wow64/FEX those new Windows threads don't reliably inherit the process mask — they escape back
+    // to all cores and Android's EAS scheduler parks them on the little (efficiency) cluster (hotice77
+    // report: WD2 ~52% usage, 12fps, load on the wrong cluster). Nothing in this stack enforces
+    // affinity persistently, and previously the ONLY re-pin lived inside the TM-OPEN refresh loop, so
+    // closing the Task Manager stopped all enforcement.
+    //
+    // Rather than re-pin on a blind timer (which re-walks every thread each tick even when nothing
+    // changed — a periodic cost that can surface as micro-stutter on heavy titles), we DRIFT-DETECT:
+    // watch each pinned pid's Linux thread count (/proc/<pid>/task) and re-apply the mask ONLY when it
+    // grows, i.e. exactly when new unpinned threads appeared. In steady-state gameplay (thread pool
+    // stable) nothing fires, so there is no rhythmic re-pin and no stutter; at the load→gameplay
+    // transition the new engine threads are caught within one interval and pinned once. wine maps
+    // SetProcessAffinityMask onto the process's current Linux threads, so a single re-apply re-pins
+    // them all. (Native DXVK/Turnip driver threads stay unreachable by any Windows affinity API — the
+    // complete fix for those would be host-side per-tid sched_setaffinity, deliberately not done here.)
+    private static final long AFFINITY_DRIFT_CHECK_INTERVAL_MS = 2000;
+    private final Handler affinityReapplyHandler = new Handler(Looper.getMainLooper());
+    // pid -> highest thread count seen at the last re-pin; a higher count means new threads escaped.
+    private final java.util.HashMap<Integer, Integer> affinityThreadHighWater = new java.util.HashMap<>();
+    // The winhandler affinity pid is a Wine "Windows" pid that doesn't exist under /proc (device-proven:
+    // win pid 324 vs real Linux pid 5062), so the checker can't read thread info by it. Instead we track
+    // the game's exe + chosen mask and resolve its real LINUX pid by exe name, then drift-detect + re-pin
+    // HOST-SIDE (taskset), which also reaches the native FEX/driver threads the Windows path can't.
+    private volatile String affinityTargetExe = null;
+    private volatile int affinityTargetMask = 0;
+    private int affinityLinuxPid = -1;
+    private final Runnable affinityReapplyRunnable = new Runnable() {
+        @Override
+        public void run() {
+            try {
+                final int mask = affinityTargetMask;
+                final String exe = affinityTargetExe;
+                if (mask != 0 && exe != null) {
+                    // Resolve/refresh the game's LINUX pid (winhandler pids are Windows pids, unusable with
+                    // /proc). Cheap in steady state — only re-scans /proc when the cached pid has died.
+                    int lpid = affinityLinuxPid;
+                    if (lpid <= 0 || ProcessHelper.getThreadCount(lpid) < 0) {
+                        lpid = ProcessHelper.findLinuxPidByExe(exe);
+                        if (lpid != affinityLinuxPid) affinityThreadHighWater.remove(affinityLinuxPid);
+                        affinityLinuxPid = lpid;
+                    }
+                    if (lpid > 0) {
+                        int threads = ProcessHelper.getThreadCount(lpid);
+                        Integer prev = affinityThreadHighWater.get(lpid);
+                        if (threads >= 0 && (prev == null || threads > prev)) {
+                            // First sighting, or new threads spawned since the last pin -> re-pin HOST-SIDE so
+                            // the fresh (all-core) threads get pulled onto the chosen cores. taskset -a hits
+                            // every current thread, including the native FEX/driver threads the Windows API misses.
+                            boolean ok = ProcessHelper.setLinuxAffinity(lpid, mask);
+                            affinityThreadHighWater.put(lpid, threads);
+                            if (ProcessHelper.PRINT_DEBUG) {
+                                Log.d("AffinityDrift", "lpid=" + lpid + " exe=" + exe + " threads " + prev + "->"
+                                        + threads + " host-repin mask=0x" + Integer.toHexString(mask) + " ok=" + ok
+                                        + " achieved=0x" + Integer.toHexString(ProcessHelper.getProcessAffinityMask(lpid)));
+                            }
+                        } else if (threads >= 0 && ProcessHelper.PRINT_DEBUG) {
+                            // Steady state (no new threads): verify the mask is actually being honored. If the
+                            // real Cpus_allowed differs from what we asked, something below us — a vendor cpuset
+                            // cgroup / scheduler (e.g. HyperOS/MIUI) — is overriding the pin. Surfacing it turns
+                            // "affinity didn't help" into a concrete, testable cause.
+                            int got = ProcessHelper.getProcessAffinityMask(lpid);
+                            if (got != 0 && got != mask) {
+                                Log.w("AffinityDrift", "lpid=" + lpid + " NOT-HONORED requested=0x"
+                                        + Integer.toHexString(mask) + " achieved=0x" + Integer.toHexString(got)
+                                        + ((got & ~mask) != 0
+                                            ? " (ROM re-allowed excluded cores — likely cpuset/scheduler override)"
+                                            : " (cpuset allows only a subset of the requested cores)"));
+                            }
+                        }
+                    }
+                }
+            } catch (Throwable t) {
+                Log.w("XServerDisplayActivity", "Affinity drift-check tick failed", t);
+            }
+            affinityReapplyHandler.postDelayed(this, AFFINITY_DRIFT_CHECK_INTERVAL_MS);
+        }
+    };
+
+    /**
+     * Idempotently (re)start the periodic affinity drift check. Safe to call from every affinity
+     * set-site — it clears any pending tick first, so repeated calls never stack. The runnable
+     * self-gates on {@link WinHandler#hasManualAffinity()}, so starting it before any mask is set is
+     * harmless; it is torn down in {@link #exit()}.
+     */
+    private void startAffinityReapply() {
+        affinityReapplyHandler.removeCallbacks(affinityReapplyRunnable);
+        affinityReapplyHandler.postDelayed(affinityReapplyRunnable, AFFINITY_DRIFT_CHECK_INTERVAL_MS);
+    }
+
     // Live detection of which Direct3D API the running game actually uses, so the FPS-counter
     // overlay can show VKD3D for D3D12 titles instead of always printing the D3D9/10/11 wrapper
     // name (DXVK/VEGAS). Both wrappers are always present in the prefix, so the only reliable tell
@@ -449,6 +600,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
                     new java.io.FileReader(new java.io.File(p, "maps")))) {
                 String line;
                 while ((line = r.readLine()) != null) {
+                    line = line.toLowerCase();   // module names can differ in case; match case-insensitively
                     if (line.indexOf(".dll") < 0) continue;
                     // NOTE: do NOT break on the d3d12 hit — a dual-API build maps d3d12core.dll for a
                     // startup probe yet renders on d3d11 (both resident), so we must keep scanning this
@@ -506,6 +658,30 @@ public class XServerDisplayActivity extends AppCompatActivity {
     private long lastEngineLogMtime = -1;
     private long lastEngineLogLen = -1;
     private String lastEngineLogApi = null;
+
+    // ---- P3 (arm64ec-proof wrapper-log API resolver) state ---------------------------------------
+    // Where DXVK/VKD3D write their startup logs THIS launch: the user's log dir when the "DXVK & VKD3D"
+    // logging switch is ON, else a tiny PRIVATE hudapi dir we keep alive purely so the HUD always has
+    // ground truth. Needed because on arm64ec Proton the DX wrappers (d3d11/d3d12/dxgi) are PE-only —
+    // they never appear in /proc/<pid>/maps, so detectActiveDxApi is structurally blind to the DX API;
+    // the wrapper logs are the only host-visible signal. Set in dxvkLogDir(); read by
+    // resolveApiFromWrapperLogs(). May stay null (e.g. a WineD3D container), in which case P3 is inert.
+    private File wrapperLogDir;
+    // Wall-clock at launch (set in onCreate) — the freshness gate for P3.
+    private long sessionStartMs;
+    // Cache for resolveApiFromWrapperLogs, mirroring resolveDualApiFromEngineLog's (file,mtime,len)
+    // shortcut so the 2s poll doesn't re-parse a static log. Only one game runs per activity, so a
+    // cached winner can never point at a different title.
+    private String lastWrapperLogPath = null;
+    private long lastWrapperLogMtime = -1;
+    private long lastWrapperLogLen = -1;
+    private String lastWrapperLogApi = null;
+
+    // Wine spins up a fixed set of system .exes alongside the game; never mistake one for the game exe.
+    private static final java.util.Set<String> WINE_SYSTEM_EXES = new java.util.HashSet<>(java.util.Arrays.asList(
+            "services.exe", "winedevice.exe", "plugplay.exe", "explorer.exe", "svchost.exe", "rpcss.exe",
+            "wineboot.exe", "conhost.exe", "start.exe", "cmd.exe", "rundll32.exe", "tabtip.exe",
+            "winedbg.exe", "wineconsole.exe", "regsvr32.exe", "msiexec.exe", "wscript.exe", "cscript.exe"));
 
     /**
      * Disambiguate a dual-API build (BOTH d3d11 and d3d12 mapped) by asking the game engine which
@@ -619,6 +795,210 @@ public class XServerDisplayActivity extends AppCompatActivity {
     }
 
     /**
+     * P2: ask the running game's ENGINE log which graphics device it actually created, at TOP LEVEL —
+     * not only inside {@link #detectActiveDxApi}'s dual-API branch, which never fires on arm64ec Proton
+     * (the DX DLLs aren't file-backed in /proc/maps, so the "both d3d11 and d3d12 mapped" trigger is
+     * unreachable). Finds the running game pid and delegates to the existing Unity {@code Player.log}
+     * resolver, which self-gates to Unity titles (correlating by install-dir token) and returns null for
+     * everything else. Runs BEFORE the wrapper-log resolver (P3) so a Unity {@code -force-d3d11} title
+     * that ALSO leaves a vkd3d capability-probe log is still pinned to D3D11 by its own engine log.
+     * Never throws; any miss returns null and falls through.
+     */
+    private String resolveApiFromEngineLogTopLevel(String wrapper) {
+        try {
+            String pid = findRunningGamePid();
+            if (pid == null) return null;
+            return resolveDualApiFromEngineLog(wrapper, pid);
+        } catch (Exception ignore) { return null; }
+    }
+
+    /**
+     * P3: the arm64ec-proof ground truth. On arm64ec Proton the DX wrappers (d3d11/d3d12/dxgi) are
+     * PE-only — no unix {@code .so} half — so they NEVER show up in /proc/&lt;pid&gt;/maps and the module
+     * scan can't see the DX API. But the wrappers still WRITE their startup logs, and we force those logs
+     * to always exist this launch (see {@link #dxvkLogDir()} + {@code DXVKConfigDialog.setEnvVars}). Read
+     * them from {@link #wrapperLogDir}, gated by IDENTITY (the log must belong to the running game's exe)
+     * and FRESHNESS ({@code lastModified() >= sessionStartMs}), and report the real API. Never throws; any
+     * miss returns null and falls through to {@link #detectActiveDxApi}.
+     *
+     * <p>vkd3d-proton.log has a FIXED name shared across games, so its identity is proven strictly by its
+     * header ({@code Program name: "<exe>"}). DXVK writes per-API files named after the exe
+     * ({@code <stem>_d3d11.log} etc.), so matching that filename to the running exe IS the identity check.
+     */
+    private String resolveApiFromWrapperLogs(String wrapper) {
+        try {
+            File dir = wrapperLogDir;
+            if (dir == null || !dir.isDirectory()) return null;
+
+            // Fast path: the previously-resolved log is unchanged (static startup log) — reuse it. Safe
+            // because exactly one game runs per activity, so the cached winner can't be another title.
+            if (lastWrapperLogPath != null) {
+                File prev = new File(lastWrapperLogPath);
+                if (prev.isFile() && prev.lastModified() == lastWrapperLogMtime
+                        && prev.length() == lastWrapperLogLen) return lastWrapperLogApi;
+            }
+
+            // wrapperLogDir is THIS game's per-launch log folder (its LogLocation dir, or the private
+            // hudapi dir), so a log written THIS session already belongs to the running game — NO exe-name
+            // gate. That gate broke two-process titles: the launcher exe found running (e.g. PlayGTAV.exe)
+            // is NOT the renderer the wrapper logs are named after (e.g. GTA5_Enhanced.exe). Identity =
+            // per-game folder + freshness. DXVK per-API files are matched by suffix (any renderer stem).
+            File[] files = dir.listFiles();
+            if (files == null) return null;
+            File vkd3d = null, dxvk11 = null, dxvk10 = null, dxvk9 = null;
+            for (File f : files) {
+                if (!f.isFile()) continue;
+                String n = f.getName().toLowerCase();
+                if (n.equals("vkd3d-proton.log")) vkd3d = f;
+                else if (n.endsWith("_d3d11.log")) dxvk11 = newerLog(dxvk11, f);
+                else if (n.endsWith("_d3d10.log")) dxvk10 = newerLog(dxvk10, f);
+                else if (n.endsWith("_d3d9.log"))  dxvk9  = newerLog(dxvk9, f);
+            }
+
+            final String SEP = " · ";
+            // 1) D3D12 on VKD3D — highest rank, but ONLY when vkd3d actually RENDERED (a swapchain /
+            //    command queue), not merely PROBED D3D12 support at startup. Dual-API titles (e.g. Deus
+            //    Ex: Mankind Divided) run on D3D11 yet still create a throwaway D3D12 device to query
+            //    support — that probe log has instance/device/pipeline-cache lines but no swapchain, so it
+            //    must NOT win over the game's real D3D11 (its large DXVK _d3d11.log, matched below).
+            if (isFreshWrapperLog(vkd3d) && vkd3dLogShowsRendering(vkd3d)) {
+                return cacheWrapperResult(vkd3d, "D3D12" + SEP + "VKD3D");
+            }
+            // 2) DXVK per-API files (D3D11/10/9) — the file exists only when DXVK created that device.
+            if (isFreshWrapperLog(dxvk11)) return cacheWrapperResult(dxvk11, "D3D11" + SEP + wrapper);
+            if (isFreshWrapperLog(dxvk10)) return cacheWrapperResult(dxvk10, "D3D10" + SEP + wrapper);
+            if (isFreshWrapperLog(dxvk9))  return cacheWrapperResult(dxvk9,  "D3D9"  + SEP + wrapper);
+            // dxgi-only / nothing identifying => fall through.
+            return null;
+        } catch (Exception ignore) { return null; }
+    }
+
+    /** The newer of two candidate logs (either may be null) — used when several DXVK per-API files match. */
+    private File newerLog(File a, File b) {
+        if (a == null) return b;
+        if (b == null) return a;
+        return b.lastModified() >= a.lastModified() ? b : a;
+    }
+
+    /** Whether {@code log}'s header (first ~60 lines) has a line containing {@code needle} (lowercased).
+     *  Confirms a fresh vkd3d-proton.log is a REAL run (has a "Program name" line) rather than an empty/
+     *  aborted stub — without requiring it to name any specific exe (two-process games log the renderer,
+     *  not the launcher we find running). */
+    private boolean logHasHeaderLine(File log, String needle) {
+        try (java.io.BufferedReader r = new java.io.BufferedReader(new java.io.FileReader(log))) {
+            String line;
+            int n = 0;
+            while ((line = r.readLine()) != null && n++ < 60) {
+                if (line.toLowerCase().indexOf(needle) >= 0) return true;
+            }
+        } catch (Exception ignore) {}
+        return false;
+    }
+
+    /** Whether a vkd3d-proton.log shows the game ACTUALLY rendered D3D12 — created a swapchain / command
+     *  queue / submitted command lists — versus merely PROBING D3D12 support at startup (a throwaway
+     *  device: instance + device-caps + pipeline-cache lines, but never a swapchain). Dual-API titles
+     *  (Deus Ex: Mankind Divided, many engines) run on D3D11 yet emit such a probe log, so this gate is
+     *  what stops them being mislabelled "D3D12 · VKD3D". Scans the whole (small, KB-sized) log. */
+    private boolean vkd3dLogShowsRendering(File log) {
+        try (java.io.BufferedReader r = new java.io.BufferedReader(new java.io.FileReader(log))) {
+            String line;
+            int n = 0;
+            while ((line = r.readLine()) != null && n++ < 4000) {
+                String l = line.toLowerCase();
+                if (l.indexOf("swapchain") >= 0 || l.indexOf("command_queue") >= 0
+                        || l.indexOf("executecommandlists") >= 0) return true;
+            }
+        } catch (Exception ignore) {}
+        return false;
+    }
+
+    /** A wrapper log is trusted only when it exists, has real content, and was written THIS session. */
+    private boolean isFreshWrapperLog(File f) {
+        return f != null && f.isFile() && f.length() > 0 && f.lastModified() >= sessionStartMs;
+    }
+
+    /** Remember the winning log's (path,mtime,len) so the next poll can skip re-parsing a static log. */
+    private String cacheWrapperResult(File f, String result) {
+        lastWrapperLogPath = f.getPath();
+        lastWrapperLogMtime = f.lastModified();
+        lastWrapperLogLen = f.length();
+        lastWrapperLogApi = result;
+        return result;
+    }
+
+    /** Whether {@code log}'s header (first ~60 lines) has a line containing {@code needle} that also names
+     *  {@code exeBase} — the identity gate for the fixed-name vkd3d-proton.log. Both compared lowercase. */
+    private boolean logHeaderNamesExe(File log, String needle, String exeBase) {
+        try (java.io.BufferedReader r = new java.io.BufferedReader(new java.io.FileReader(log))) {
+            String line;
+            int n = 0;
+            while ((line = r.readLine()) != null && n++ < 60) {
+                String l = line.toLowerCase();
+                if (l.indexOf(needle) >= 0 && l.indexOf(exeBase) >= 0) return true;
+            }
+        } catch (Exception ignore) {}
+        return false;
+    }
+
+    /**
+     * PID of the running GAME process — the wine process whose argv[0] is the game's own {@code .exe},
+     * as opposed to a wine system service (services.exe, explorer.exe, winedevice.exe, …) or a
+     * C:\windows\system32 helper. Prefers the process whose exe basename matches the launched shortcut;
+     * otherwise returns the first plausible game exe found. Null when none is running yet (caller keeps
+     * polling). Never throws.
+     */
+    private String findRunningGamePid() {
+        java.io.File[] pids = new java.io.File("/proc").listFiles();
+        if (pids == null) return null;
+        String wanted = shortcutExeBasename();     // preferred match; may be null
+        String fallbackPid = null;
+        for (java.io.File p : pids) {
+            if (!p.isDirectory() || !android.text.TextUtils.isDigitsOnly(p.getName())) continue;
+            String exe = readArgv0Exe(p.getName());
+            if (exe == null) continue;
+            String base = exe.substring(exe.lastIndexOf('/') + 1);
+            if (wanted != null && wanted.equals(base)) return p.getName();       // exact shortcut match wins
+            if (fallbackPid == null && looksLikeGameExe(exe, base)) fallbackPid = p.getName();
+        }
+        return fallbackPid;
+    }
+
+    /** argv[0] of /proc/&lt;pid&gt; as a normalized (forward-slash, lowercase) Windows path ending in
+     *  {@code .exe}, or null if the process has no cmdline or isn't a wine {@code .exe}. */
+    private String readArgv0Exe(String pid) {
+        try (java.io.FileReader fr = new java.io.FileReader(new java.io.File("/proc/" + pid + "/cmdline"))) {
+            StringBuilder sb = new StringBuilder();
+            int c;
+            while ((c = fr.read()) != -1 && c != 0) sb.append((char) c);   // argv[0] only (stop at first NUL)
+            String norm = sb.toString().trim().replace('\\', '/').toLowerCase();
+            return norm.endsWith(".exe") ? norm : null;
+        } catch (Exception ignore) { return null; }
+    }
+
+    /** Whether {@code normPath}/{@code base} looks like a GAME exe rather than a wine system exe: it must
+     *  sit on a DOS drive path ({@code <letter>:/…}) and be neither under a C:\windows dir nor a known
+     *  wine-service basename. */
+    private boolean looksLikeGameExe(String normPath, String base) {
+        if (normPath.indexOf(":/") != 1) return false;                 // "c:/…" — drive letter, then ":/"
+        if (normPath.indexOf("/windows/") >= 0) return false;          // system32/syswow64/etc. helpers
+        return !WINE_SYSTEM_EXES.contains(base);
+    }
+
+    /** Basename (lowercased, with extension) of the launched shortcut's exe, or null. A preference hint
+     *  for {@link #findRunningGamePid}; null just means "no preferred match", never an error. */
+    private String shortcutExeBasename() {
+        try {
+            if (shortcut == null || shortcut.path == null) return null;
+            String norm = shortcut.path.trim().replace('\\', '/').toLowerCase();
+            int e = norm.indexOf(".exe");                 // shortcut.path may carry launch args after the exe
+            if (e < 0) return null;
+            String full = norm.substring(0, e + 4);
+            return full.substring(full.lastIndexOf('/') + 1);
+        } catch (Exception ignore) { return null; }
+    }
+
+    /**
      * Whether guest OpenGL is served by Mesa's Zink (GL-on-Vulkan) gallium driver. This build routes
      * the guest GL stack through Zink unconditionally (see {@link #extractGraphicsDriverFiles}, which
      * sets GALLIUM_DRIVER=zink for the wrapper ICD), so we read the real env we hand the guest rather
@@ -694,7 +1074,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
      * or {@code mesaDrvWindowIds} here (those are owned by the WM thread) — the volatile int is enough.
      */
     private void driveHudFrameTick(int wid) {
-        if (frameRatingWindowId == -1) return;                 // HUD inactive -> never count
+        if (frameRatingWindowId == -1 || !hudCounterEnabled) return;   // HUD inactive or toggled off -> never count
         if (wid != frameRatingWindowId && wid != glZinkHealedWindowId) {
             if (!guestGlIsZink()) return;                      // only the GL/Zink present topology
             // Device-observed (Stronghold Crusader / Zink): the window the game actually presents to is
@@ -720,6 +1100,64 @@ public class XServerDisplayActivity extends AppCompatActivity {
     }
 
     /**
+     * Build the in-game perf HUD for the resolved config's style, seeding orientation, the master toggle,
+     * and the renderer label, then kick off live D3D-API detection. Idempotent: a no-op once any HUD view
+     * exists. Called both at launch (behind {@code container.isShowFPS()}) and live from the in-game drawer
+     * when the user turns "Show HUD" on with FPS previously off — one place so the two paths can't drift.
+     */
+    private void ensureHudBuilt() {
+        if (perfHud != null || gameNativeHud != null || fusionHud != null
+                || frameRating != null || frameRatingHorizontal != null) return;   // already built
+
+        String fpsConfigString = resolvedFPSCounterConfig();
+        com.winlator.star.core.KeyValueSet fpsConfig = new com.winlator.star.core.KeyValueSet(fpsConfigString);
+        fpsHudHorizontal = fpsConfig.get("hudMode", "vertical").equals("horizontal");
+        // Master toggle: the HUD is still BUILT (so it can be revealed live), but stays GONE while off.
+        hudCounterEnabled = fpsConfig.get("hudEnabled", "1").equals("1");
+        String hudStyle = fpsConfig.get("hudStyle", "fusion");
+
+        String resolvedR = resolvedRenderer();
+        String rendererMode = "vulkan".equals(resolvedR) ? "Vulkan"
+            : "surfaceflinger".equals(resolvedR) ? "SurfaceFlinger" : "OpenGL";
+        String dxName = dxwrapper.contains("dxvk") ? "DXVK" : dxwrapper.contains("vegas") ? "VEGAS" : "WineD3D";
+        hudRendererLabel = rendererMode + " | " + dxName;
+        hudEngineShort = dxName;
+
+        // Build whichever HUD the config selected. The other styles are created on demand if the user
+        // swaps hudStyle in the in-game drawer (see buildPerfHud/buildClassicHud/buildGameNativeHud).
+        if (hudStyle.equals("gamehub")) buildPerfHud(fpsConfigString);
+        else if (hudStyle.equals("gamenative")) buildGameNativeHud(fpsConfigString);
+        else if (hudStyle.equals("fusion")) buildFusionHud(fpsConfigString);
+        else buildClassicHud(fpsConfigString);
+
+        // The label above is the configured D3D9/10/11 wrapper; probe what the game actually loads and
+        // upgrade it to the real API — "D3D12 · VKD3D" for D3D12 titles, "D3D11 · DXVK" etc. for the
+        // wrapped path, or "Vulkan"/"Zink"/"OpenGL" for native-API games.
+        startDxApiDetection(rendererMode, dxName);
+    }
+
+    /**
+     * When the HUD is built LIVE (user flipped "Show HUD" on mid-game after launching with FPS off), the
+     * game's {@code _MESA_DRV} property already fired while no HUD existed, so changeFrameRatingVisibility
+     * dropped it (it early-returns when every HUD view is null) and {@code frameRatingWindowId} is still -1
+     * — driveHudFrameTick would never count and the HUD would sit at 0 fps. Bind to the currently focused
+     * game window so counting starts immediately; the normal _MESA_DRV bind/upgrade path in
+     * changeFrameRatingVisibility takes over on the next real render-window event. Mirrors the focused-
+     * application-window logic driveHudFrameTick already uses. frameRatingWindowId is a plain cross-thread
+     * field by existing design; we write it on the UI thread like the rest of onFpsConfigApply.
+     */
+    private void ensureHudBoundToGameWindow() {
+        if (frameRatingWindowId != -1) return;   // already bound (e.g. HUD was built at launch)
+        try {
+            Window focused = xServer.windowManager.getFocusedWindow();
+            if (focused != null && focused.isApplicationWindow() && !focused.isDesktopWindow()) {
+                frameRatingWindowId = focused.id;
+                Log.d("XServerDisplayActivity", "Live HUD build: binding FPS counter to focused game window " + focused.id);
+            }
+        } catch (Exception ignore) {}
+    }
+
+    /**
      * Continuously track the active graphics API and keep EVERY HUD's label live, like the other
      * metrics. Runs on a background thread at a ~2s cadence (off the render path, so it never stalls a
      * frame). We only push to the HUDs when the API actually CHANGES — the label is near-static — and
@@ -736,13 +1174,25 @@ public class XServerDisplayActivity extends AppCompatActivity {
         dxApiThread = new Thread(() -> {
             String lastApi = null;
             while (!Thread.currentThread().isInterrupted()) {
+                // HUD off -> don't do the /proc/maps API scan or push a label; idle-sleep and re-check.
+                // Keeps the thread alive so the label resumes when "Show HUD" is turned back on, and
+                // matches driveHudFrameTick's hudCounterEnabled gate so NOTHING HUD-related runs while off.
+                if (!hudCounterEnabled) {
+                    try { Thread.sleep(2000); } catch (InterruptedException e) { return; }
+                    continue;
+                }
                 // App-declared override wins ONLY while fresh: a guest app can publish its true active
                 // API into the shared tmp (see readAppDeclaredApi). Otherwise fall back to the
                 // /proc/maps present-path detection, so normal games (which never write the file) are
                 // unaffected. When the declaration goes stale the label reverts naturally on the next
                 // poll, because the detected api then differs from lastApi and re-pushes.
-                String api = readAppDeclaredApi();
-                if (api == null) api = detectActiveDxApi(fallback);
+                // Layered resolver, highest-confidence signal first (each returns null to fall through):
+                //   P1 guest self-report (AIO Graphics Test) · P2 engine log (Unity Player.log) ·
+                //   P3 wrapper logs (arm64ec-proof DXVK/VKD3D ground truth) · P4 /proc/maps module scan.
+                String api = readAppDeclaredApi();                                  // P1
+                if (api == null) api = resolveApiFromEngineLogTopLevel(fallback);   // P2
+                if (api == null) api = resolveApiFromWrapperLogs(fallback);         // P3
+                if (api == null) api = detectActiveDxApi(fallback);                 // P4
                 if (api != null && !api.equals(lastApi)) {
                     lastApi = api;
                     // Classic FrameRating renderer line = "<host renderer> | <api>". Skip the prefix
@@ -781,7 +1231,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
     private void createNotifcationChannel() {
         String name = "Winlator";
         String description = "Winlator XServer Messages";
-        int importance = NotificationManager.IMPORTANCE_HIGH;
+        int importance = NotificationManager.IMPORTANCE_LOW;
         NotificationChannel channel = new NotificationChannel(NOTIFICATION_CHANNEL_ID, name, importance);
         channel.setDescription(description);
         NotificationManager notificationManager = getSystemService(NotificationManager.class);
@@ -865,6 +1315,9 @@ public class XServerDisplayActivity extends AppCompatActivity {
     @Override
     public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        // Stamp the launch time up front: the HUD wrapper-log resolver (P3) only trusts a DXVK/VKD3D
+        // log written THIS session, so a previous game's stale log in a shared dir can never leak in.
+        sessionStartMs = System.currentTimeMillis();
         AppUtils.hideSystemUI(this);
         AppUtils.keepScreenOn(this);
                
@@ -951,9 +1404,18 @@ public class XServerDisplayActivity extends AppCompatActivity {
 
         drawerLayout.addDrawerListener(new DrawerLayout.SimpleDrawerListener() {
             @Override public void onDrawerOpened(@NonNull View drawerView) {
-
+                // Hide the on-handheld "playing on external display" badge while the menu is open so
+                // it doesn't overlap the drawer content.
+                XServerDialogState.INSTANCE.setMenuOpen(true);
+                // Menu owns the controller while open — flush a neutral state
+                // once so a held stick / pressed button / latched trigger from
+                // the last frame doesn't stay applied in the guest.
+                if (winHandler != null) {
+                    winHandler.neutralizeControllers();
+                }
             }
             @Override public void onDrawerClosed(@NonNull View drawerView) {
+                XServerDialogState.INSTANCE.setMenuOpen(false);
                 // If the user left Relative Mouse enabled, recapture.
                 if (isRelativeMouseMovement && !pointerCaptureRequested) {
                     drawerLayout.postDelayed(() -> ensurePointerCapture("drawer-closed"), 2000);
@@ -1007,6 +1469,13 @@ public class XServerDisplayActivity extends AppCompatActivity {
                 showToast(this, "Native Rendering isn't available on the OpenGL renderer yet — use the Vulkan renderer");
                 return;
             }
+            // ASR (SurfaceFlinger renderer) is inherently native/passthrough and can't be live-switched to
+            // a compositor mode — keep the flag on and no-op the toggle (change it via the container setting).
+            if (xServerView.getRenderer() instanceof com.winlator.star.renderer.ASurfaceRenderer) {
+                XServerDrawerState.INSTANCE.setNativeRenderingEnabled(true);
+                showToast(this, "Native Rendering is always on under the SurfaceFlinger renderer");
+                return;
+            }
             boolean next = !XServerDrawerState.INSTANCE.getNativeRenderingEnabled();
             XServerDrawerState.INSTANCE.setNativeRenderingEnabled(next);
             // Native (direct scanout) puts one opaque game SurfaceControl on top; secondary guest
@@ -1046,6 +1515,8 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // layer) and persist to the container. Only effective when the layer is loaded this session
         // (bionicFgActive). NOTE: initial drawer state is synced after `container` is loaded (below);
         // this callback is lazy so it safely captures the field.
+        // Auto bg/fg pulse to reset win-fg cleanly on an FG toggle-on / model change.
+        state.onFgResetPulse = () -> runOnUiThread(this::pulseFgReset);
         state.onBionicFgConfigChange = () -> {
             XServerDrawerState s = XServerDrawerState.INSTANCE;
             if (!s.getBionicFgActive().getValue()) return; // layer not loaded -> needs a relaunch
@@ -1080,7 +1551,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
             // FPS limiter is no longer part of frame gen — it's a standalone host pacer
             // (onFpsLimitChange). bionic-fg conf carries frame gen only; pass the limiter off.
             int fgModel = s.getFrameGenModel().getValue();
-            writeBionicFgConfig(mult, flow, false, 0, fgModel);
+            writeWinFgConfig(mult, flow, false, 0, fgModel);
             if (fgOn) container.setFrameGenMultiplier(mult);
             container.setFrameGenFlowScale(flow);
             container.setFrameGenModel(fgModel);
@@ -1172,6 +1643,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
         state.onResetPerfKey = key -> resetPerfKey(key);
         state.onResetAllPerf = this::resetAllPerfOverrides;
         state.onFreeMemory = () -> com.winlator.star.perf.PerfRootApplier.INSTANCE.freeMemoryNow();
+        state.onDeepClean = () -> com.winlator.star.perf.PerfRootApplier.INSTANCE.deepCleanMemory();
         state.onRootReadoutPoll = this::refreshRootReadouts;
         // Cycle OFF -> FIT -> STRETCH -> FILL -> INTEGER -> OFF (legacy path; kept for any
         // cycle-style trigger). The drawer selector uses onSetFullscreenMode below instead.
@@ -1227,6 +1699,27 @@ public class XServerDisplayActivity extends AppCompatActivity {
                     : gameNativeHud != null ? "gamenative"
                     : fusionHud != null ? "fusion"
                     : (frameRating != null || frameRatingHorizontal != null) ? "classic" : null;
+                // Lazy build (container-wide scope): the user flipped "Show HUD" on but no HUD exists —
+                // FPS was off for this launch so nothing was built at onCreate. Enable the container-wide
+                // FPS gate (so ContainerDetailScreen's "Show FPS" reflects it next open) and build the HUD
+                // now so it appears this instant, no relaunch, no trip to container settings. Fires only on
+                // the OFF->build transition (haveStyle == null); turning OFF never flips the gate back.
+                if (hudCounterEnabled && haveStyle == null) {
+                    if (container != null && !container.isShowFPS()) {
+                        container.setShowFPS(true);
+                        container.saveData();
+                    }
+                    ensureHudBuilt();               // builds the configured style (idempotent)
+                    ensureHudBoundToGameWindow();   // bind to the presenting game window so FPS counts, not 0
+                    // ensureHudBuilt() re-seeds hudCounterEnabled from the *persisted* (pre-toggle) config,
+                    // which still reads hudEnabled=0 here (persist runs after this UI block). Re-assert the
+                    // live ON state before the visibility push below.
+                    hudCounterEnabled = true;
+                    haveStyle = perfHud != null ? "gamehub"
+                        : gameNativeHud != null ? "gamenative"
+                        : fusionHud != null ? "fusion"
+                        : (frameRating != null || frameRatingHorizontal != null) ? "classic" : null;
+                }
                 // Live style swap: build the requested HUD and tear down the others, but only if a
                 // HUD is already on screen (FPS was enabled for this launch). View mutation is safe
                 // here — this callback runs on the UI thread.
@@ -1418,7 +1911,11 @@ public class XServerDisplayActivity extends AppCompatActivity {
             rootEffective.put(rk, resolvedRootBool(rk));
         }
         XServerDrawerState.INSTANCE.setRootToggles(rootEffective);
-        com.winlator.star.perf.PerfRootApplier.INSTANCE.applyEffective(rootEffective);
+        // Auto deep-clean on launch (Tier 2, root-only, global default). deepCleanMemory() self-gates
+        // on root and uses `am kill-all`, which never touches this game's foreground session.
+        boolean autoDeepClean = com.winlator.star.perf.PerformanceSettings.INSTANCE
+            .rootDefaultValue(com.winlator.star.perf.PerfRootApplier.KEY_AUTO_DEEP_CLEAN);
+        com.winlator.star.perf.PerfRootApplier.INSTANCE.applyEffective(rootEffective, autoDeepClean);
 
         // Unified per-game override tracking + two-way sync for ALL 9 keys: seed the overridden set
         // from the shortcut's extras (a key present = per-game override; absent = inherit + mirror the
@@ -1480,6 +1977,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
         }
 
         graphicsDriver = container.getGraphicsDriver();
+        rendererDriverId = container.getRendererDriverId();
         String graphicsDriverConfig = container.getGraphicsDriverConfig();
         audioDriver = container.getAudioDriver();
         emulator = container.getEmulator();
@@ -1497,6 +1995,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
 
         if (shortcut != null) {
             graphicsDriver = shortcut.getExtra("graphicsDriver", container.getGraphicsDriver());
+            rendererDriverId = shortcut.getExtra("rendererDriverId", container.getRendererDriverId());
             graphicsDriverConfig = shortcut.getExtra("graphicsDriverConfig", container.getGraphicsDriverConfig());
             audioDriver = shortcut.getExtra("audioDriver", container.getAudioDriver());
             emulator = shortcut.getExtra("emulator", container.getEmulator());
@@ -1517,6 +2016,15 @@ public class XServerDisplayActivity extends AppCompatActivity {
                 vkbasaltConfig = "effects=" + sharpnessEffect.toLowerCase() + ";" + "casSharpness=" + sharpnessLevel / 100 + ";" + "dlsSharpness=" + sharpnessLevel / 100  + ";" + "dlsDenoise=" + sharpnessDenoise / 100 + ";" + "enableOnLaunch=True";
             }
             Log.d("XServerDisplayActivity", "XInput Disabled from Shortcut: " + xinputDisabledFromShortcut);
+        }
+
+        // DirectAudio's winedirectaudio.drv only loads on the four supported arm64ec Proton builds; on
+        // any other layer it does nothing / breaks audio. The editors grey it out and coerce it on save,
+        // but a container/shortcut written before this gate (or whose layer was swapped elsewhere) can
+        // still arrive here as "directaudio" — the last place it could be applied to the guest registry.
+        // Fall back to the default driver so an unsupported layer never gets Audio=directaudio.
+        if ("directaudio".equals(audioDriver) && !DirectAudioSupport.isSupported(wineVersion)) {
+            audioDriver = Container.DEFAULT_AUDIO_DRIVER;
         }
 
         // Gyro (motion aim) — resolve the whole config ONCE here and push it into WinHandler in a
@@ -1586,6 +2094,21 @@ public class XServerDisplayActivity extends AppCompatActivity {
         }
         preloaderDialog.step(1, "Preparing container…");
 
+        // TV render resolution (v2): when launching with an external display connected, honor the TV
+        // render-resolution choice (2 = 1080p, 3 = 1440p) before ScreenInfo is built. "Match TV" (0) /
+        // "Match handheld" (1) keep the container's screen size. Guarded to a TV being present at launch
+        // so it never changes handheld-only sessions.
+        try {
+            int tvRes = Integer.parseInt(container.getExtra("tv.renderRes", "0"));
+            if (tvRes == 2 || tvRes == 3) {
+                android.hardware.display.DisplayManager tvDm =
+                        (android.hardware.display.DisplayManager) getSystemService(DISPLAY_SERVICE);
+                boolean tvPresent = tvDm != null && tvDm.getDisplays(
+                        android.hardware.display.DisplayManager.DISPLAY_CATEGORY_PRESENTATION).length > 0;
+                if (tvPresent) screenSize = (tvRes == 2) ? "1920x1080" : "2560x1440";
+            }
+        } catch (Exception ignored) {}
+
         // Supersampling ("Render scale"): multiply the game's render resolution so it renders above
         // display res, then let the Vulkan compositor Lanczos-downscale it (see setHqDownscale below).
         // Stored via the "renderScale" extra; the per-game shortcut overrides the container default.
@@ -1635,9 +2158,13 @@ public class XServerDisplayActivity extends AppCompatActivity {
                     xServerView.getRenderer().setCursorVisible(true);
                     cancelLaunchTimers();
                     // First real game frame: hold the launch screen a few more seconds (the game
-                    // renders behind it) so the boot steps are actually seen, then close.
-                    new android.os.Handler(getMainLooper()).postDelayed(
-                        preloaderDialog::closeOnUiThread, LAUNCH_OVERLAY_GRACE_MS);
+                    // renders behind it) so the boot steps are actually seen, then close and pop the
+                    // controller-status toast (game now visible, preloader gone; runs on the main thread
+                    // so getPlayerSlotAssignments is safe).
+                    new android.os.Handler(getMainLooper()).postDelayed(() -> {
+                        preloaderDialog.closeOnUiThread();
+                        showControllerStatusToast("launch", null);
+                    }, LAUNCH_OVERLAY_GRACE_MS);
                 }
                     
                 // SHM/copyArea present path — count the frame (self-heals onto the real presenting
@@ -1658,7 +2185,15 @@ public class XServerDisplayActivity extends AppCompatActivity {
             @Override
             public void onModifyWindowProperty(Window window, Property property) {
                 changeFrameRatingVisibility(window, property);
-            }    
+                // The guest publishes its pid via _NET_WM_PID, which for many titles (e.g. DiRT 3)
+                // arrives AFTER the window maps — so at onMapWindow assignTaskAffinity could only pin by
+                // class name, which never registers a pid and left the drift checker dormant on the
+                // container/shortcut CPU-list path. Now that the pid is known, re-run it so the mask is
+                // (re-)applied by pid (the exe/mask the drift checker uses is captured either way).
+                if (property != null && property.name == Atom.getId("_NET_WM_PID")) {
+                    assignTaskAffinity(window);
+                }
+            }
 
             @Override
             public void onUnmapWindow(Window window) {
@@ -1713,11 +2248,23 @@ public class XServerDisplayActivity extends AppCompatActivity {
                 // Track which app-side stage is running so a failure surfaces on the right card.
                 final String[] stage = { "Preparing Wine & graphics driver" };
                 try {
+                    // A previous session may have been killed without a clean exit (recents-swipe /
+                    // background optimisation / force-stop) — none of those run onDestroy, so exit()
+                    // (the only caller of terminateAllWineProcesses) never fired and the old
+                    // wineserver + wine tree can still be alive as orphans. A new session then
+                    // recreates the fake-input ring files those stale processes still hold mmap'd,
+                    // and the stale reader faults with SIGBUS the moment the new session touches
+                    // them → "The game exited before rendering / exit code 1" on the SECOND launch.
+                    // Sweep before starting anything; this is a fresh launch, so every wine process
+                    // found here is stale by construction. (A paused-session in-app resume never
+                    // re-enters this runnable, so a live session can't be swept.)
+                    sweepStaleWineProcesses();
                     preloaderDialog.step(2, "Preparing Wine & graphics driver…");
                     setupWineSystemFiles();
                     extractGraphicsDriverFiles();
                     changeWineAudioDriver();
                     applyGameRefreshRateUnlock();
+                    provisionEpicOverlay();
                     stage[0] = "Building environment";
                     setupXEnvironment();
                 } catch (Exception e) {
@@ -1877,6 +2424,8 @@ public class XServerDisplayActivity extends AppCompatActivity {
         if (environment != null) {
             xServerView.onResume();
             environment.onResume();
+            // Re-assert the Samsung Galaxy performance profile (released while backgrounded).
+            com.winlator.star.perf.galaxy.GalaxyPerfManager.resume();
         }
         startTime = System.currentTimeMillis();
         handler.postDelayed(savePlaytimeRunnable, SAVE_INTERVAL_MS);
@@ -1895,6 +2444,18 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // Track the live panel rate again (the readout shows it while Auto is on).
         registerVrrDisplayListener();
         updateCurrentRefreshRate();
+        // Re-check the external display in case a TV was (un)plugged while we were backgrounded.
+        if (externalDisplayController != null) externalDisplayController.onResume();
+        // Returning from the background can leave the guest's AAudio output route dead (the stream is
+        // torn down while backgrounded) — on the TV OR the handheld. Rebuild the audio sink shortly
+        // after resume so sound comes back. Only after a real background (not a PiP/dialog pause).
+        if (wasBackgrounded) {
+            wasBackgrounded = false;
+            handler.postDelayed(this::resetGuestAudio, 600); // smooth: suspend/resume the CURRENT sink for a plain background/foreground; real route changes are recreated live by the always-registered watcher
+        }
+        applyHandheldDim(); // re-assert the handheld dim state after resume (brightness can reset)
+        // Watch for headphone/USB/BT/HDMI plug changes during play so audio follows the new route.
+        registerAudioRouteWatcher();
     }
 
     @Override
@@ -1912,7 +2473,16 @@ public class XServerDisplayActivity extends AppCompatActivity {
             if (environment != null) {
                 environment.onPause();
                 xServerView.onPause();
+                // Drop the Samsung Galaxy boost while backgrounded (the guest is frozen anyway).
+                // Guarded by the same non-PiP check so PiP playback keeps its profile.
+                com.winlator.star.perf.galaxy.GalaxyPerfManager.pause();
             }
+            // Backgrounding auto-pauses the guest; if the game is on the TV, show the pause pill there
+            // so the external display reads as paused (not a frozen frame) while the user is away.
+            if (externalDisplayController != null) externalDisplayController.setPaused(true);
+            // Mark a real background so onResume rebuilds the audio sink (the AAudio route dies while
+            // backgrounded, on TV or handheld). Distinct from PiP/dialog pauses, which don't set this.
+            wasBackgrounded = true;
         }
 
         savePlaytimeData();
@@ -2040,28 +2610,27 @@ public class XServerDisplayActivity extends AppCompatActivity {
     }
 
 
-    // Writes the bionic-fg layer config (TOML) into the guest HOME so it is present before the
-    // first swapchain present. The layer hot-reloads this file, so it doubles as the live-control
-    // path (see in-game drawer). Keys: multiplier (2-4), flow_scale (0.2-1.0), model (0-3).
-    // multiplier: 0 = frame gen off (Off in the menu), else 2-4. fpsLimit: 0 = no cap, else 10-200.
-    private void writeBionicFgConfig(int multiplier, float flowScale, boolean fpsLimiterEnabled, int fpsLimitValue, int model) {
+    // Writes the win-fg layer config (TOML) into the guest HOME so it is present before the first
+    // swapchain present. The layer hot-reloads this file, so it doubles as the live-control path
+    // (see in-game drawer). win-fg keys: enabled (0/1), multiplier (2-4), flowScale, model (3-4).
+    // multiplier: 0 = frame gen off (Off in the menu / not yet enabled), else 2-4.
+    // (win-fg is the clean-room replacement for the removed bionic-fg layer; the fpsLimiter args are
+    //  retained for call-site compatibility — the host pacer owns limiting, not this layer.)
+    private void writeWinFgConfig(int multiplier, float flowScale, boolean fpsLimiterEnabled, int fpsLimitValue, int model) {
         try {
-            File configDir = new File(imageFs.home_path, ".config/bionic-fg");
+            File configDir = new File(imageFs.home_path, ".config/win-fg");
             configDir.mkdirs();
             File confFile = new File(configDir, "conf.toml");
-            // conf.toml is self-describing: the enabled flag and the remembered cap
-            // value are written separately so toggling the limiter off in the UI does
-            // not throw away the chosen value (the layer keeps it as the remembered cap).
+            boolean on = multiplier >= 2;
             String toml = "# Written by Bannerlator (per-container frame generation)\n"
-                    + "multiplier = " + multiplier + "\n"
-                    + "flow_scale = " + String.format(java.util.Locale.US, "%.2f", flowScale) + "\n"
-                    + "model = " + Math.max(0, Math.min(4, model)) + "\n"
-                    + "fps_limit_enabled = " + (fpsLimiterEnabled ? "true" : "false") + "\n"
-                    + "fps_limit = " + fpsLimitValue + "\n";
+                    + "enabled = " + (on ? "1" : "0") + "\n"
+                    + "multiplier = " + Math.max(2, Math.min(4, on ? multiplier : 2)) + "\n"
+                    + "flowScale = " + String.format(java.util.Locale.US, "%.2f", flowScale) + "\n"
+                    + "model = " + Math.max(3, Math.min(4, model)) + "\n";
             FileUtils.writeString(confFile, toml);
         }
         catch (Exception e) {
-            Log.e("BionicFG", "Failed to write bionic-fg conf.toml", e);
+            Log.e("WinFG", "Failed to write win-fg conf.toml", e);
         }
     }
 
@@ -2436,6 +3005,544 @@ public class XServerDisplayActivity extends AppCompatActivity {
     // preview-ownership flag on any resume, and mirrors to BOTH Compose holders (the drawer Pause
     // button + the centered pause box). Everything that pauses/resumes (manual Pause, the ReShade
     // preview, the box tap, lifecycle) routes through here so the flag never disagrees with reality.
+    private static String audioDriverLabel(String d) {
+        if ("alsa".equals(d)) return "ALSA";
+        if ("pulseaudio".equals(d)) return "PulseAudio";
+        if ("directaudio".equals(d)) return "DirectAudio";
+        return d == null ? "" : d;
+    }
+
+    // Engine tag for the per-scope env keys BANNER_AUDIO_<ENG>_* — must match AudioSettingsDialog.engTag.
+    private static String audioEngTag(String d) {
+        if ("alsa".equals(d)) return "ALSA";
+        if ("directaudio".equals(d)) return "DIRECT";
+        return "PULSE";
+    }
+
+    // ALSA and DirectAudio both drive AAudio directly and default to PERFORMANCE_MODE_NONE (proven
+    // crackle-free); PulseAudio defaults to LOW_LATENCY/Auto.
+    private static boolean audioNoneDefault(String d) {
+        return "alsa".equals(d) || "directaudio".equals(d);
+    }
+
+    private static Integer envInt(EnvVars ev, String key) {
+        if (ev == null || !ev.has(key)) return null;
+        try { return Integer.parseInt(ev.get(key).trim()); } catch (Exception ex) { return null; }
+    }
+
+    private String audioPrefsName(String driverId) {
+        if ("alsa".equals(driverId)) return "banner_audio_alsa";
+        if ("directaudio".equals(driverId)) return "banner_audio_directaudio";
+        return "banner_audio_pulseaudio";
+    }
+
+    /** DirectAudio's shipping buffer in ms (DA_DEFAULT_MS in winedirectaudio.drv) => ~33 ms total. */
+    private static final int DIRECT_DEFAULT_MS = 12;
+
+    /** The latency field means the guest winepulse buffer on Pulse (100 ms) but the DRIVER's own buffer
+     *  on DirectAudio, where 100 ms would be eight times its default - so the default cannot be shared.
+     *  ALSA ignores the field entirely. */
+    private static int defaultLatencyMsec(String driverId) {
+        return "directaudio".equals(driverId) ? DIRECT_DEFAULT_MS : 100;
+    }
+
+    // Reseed the launching engine's EPHEMERAL runtime prefs (banner_audio_<engine>) from the resolved
+    // per-scope config: engine-scoped env keys BANNER_AUDIO_<ENG>_* (already merged shortcut-over-
+    // container), else the engine default. A FULL write EVERY launch — the runtime file carries no
+    // cross-launch/cross-game memory; persistence lives only in the per-scope env. Reads only THIS
+    // engine's keys, so Pulse and ALSA never touch each other's config.
+    private void seedAudioPrefsForLaunch(EnvVars ev, String driverId) {
+        String kp = "BANNER_AUDIO_" + audioEngTag(driverId) + "_";
+        int defPerf = audioNoneDefault(driverId) ? 0 : 1;         // ALSA/DirectAudio NONE (proven) vs Pulse Auto
+        // ALSA keeps Stable (its floor is unmeasured, and it pays an extra server hop);
+        // DirectAudio moves to Auto - Stable is 83 ms of total latency against 33 ms
+        // measured holding through 7 minutes of gameplay on one underrun. See
+        // AudioSettingsDialogKt.defaultPresetFor, which must agree with this.
+        String defPreset = "alsa".equals(driverId) ? "stable" : "auto";
+        boolean hasPreset   = ev != null && ev.has(kp + "PRESET");
+        boolean hasAdaptive = ev != null && ev.has(kp + "ADAPTIVE");
+        Integer perf = envInt(ev, kp + "PERF");
+        Integer bf   = envInt(ev, kp + "BF");
+        Integer mbf  = envInt(ev, kp + "MBF");
+        Integer lat  = envInt(ev, kp + "LAT");
+        getSharedPreferences(audioPrefsName(driverId), MODE_PRIVATE).edit()
+                .putString("preset", hasPreset ? ev.get(kp + "PRESET") : defPreset)
+                .putInt("perf_mode", perf != null ? perf : defPerf)
+                .putBoolean("adaptive", hasAdaptive ? !"0".equals(ev.get(kp + "ADAPTIVE")) : true)
+                .putInt("buffer_frames", bf != null ? bf : 0)
+                .putInt("max_buffer_frames", mbf != null ? mbf : 0)
+                .putInt("latency_msec", lat != null ? lat : defaultLatencyMsec(driverId))
+                .apply();
+    }
+
+    // Persist an in-game audio change to the LAUNCHING SHORTCUT only (never the container, never another
+    // game). Reads the just-updated runtime prefs for the active engine and writes them into the
+    // shortcut's env under that engine's key prefix, replacing only this engine's keys (the other
+    // engine's config + all non-audio env survive). Mirrors resetPerfKey's putExtra+saveData pattern.
+    // The exact engine-scoped keys persistAudioToShortcut re-emits. Everything else carrying the same
+    // prefix belongs to whoever typed it — the audio cog owns the keys it writes, not the whole
+    // BANNER_AUDIO_<ENG>_ namespace. Blanket-dropping the prefix silently deleted hand-set driver knobs
+    // (DirectAudio's _MS/_MAXMS/_DECAY and its watchdog/decay tuning) the first time the cog was applied:
+    // they survived every launch, then vanished on the first in-game audio change. Keeping this list
+    // narrow means a knob added to a driver later is preserved without touching this code.
+    private static final String[] COG_OWNED_AUDIO_KEYS = { "PRESET", "PERF", "ADAPTIVE", "LAT", "BF", "MBF" };
+
+    private static boolean isCogOwnedAudioKey(String tok, String kp) {
+        if (!tok.startsWith(kp)) return false;
+        int eq = tok.indexOf('=');
+        String name = eq >= 0 ? tok.substring(kp.length(), eq) : tok.substring(kp.length());
+        for (String k : COG_OWNED_AUDIO_KEYS) if (k.equals(name)) return true;
+        return false;
+    }
+
+    private void persistAudioToShortcut(String driverId) {
+        if (shortcut == null) return;   // no per-game store (e.g. direct/installer launch)
+        try {
+            android.content.SharedPreferences p = getSharedPreferences(audioPrefsName(driverId), MODE_PRIVATE);
+            String kp = "BANNER_AUDIO_" + audioEngTag(driverId) + "_";
+            int perf = p.getInt("perf_mode", audioNoneDefault(driverId) ? 0 : 1);
+            boolean adaptive = p.getBoolean("adaptive", true);
+            int bf = p.getInt("buffer_frames", 0), mbf = p.getInt("max_buffer_frames", 0);
+            int lat = p.getInt("latency_msec", defaultLatencyMsec(driverId));
+            String preset = p.getString("preset", audioNoneDefault(driverId) ? "stable" : "auto");
+            StringBuilder sb = new StringBuilder();
+            String existing = shortcut.getExtra("envVars");
+            if (existing != null) for (String tok : existing.split(" ")) {
+                if (tok.isEmpty() || isCogOwnedAudioKey(tok, kp)) continue;   // drop only what we rewrite below
+                if (sb.length() > 0) sb.append(' ');
+                sb.append(tok);
+            }
+            if (sb.length() > 0) sb.append(' ');
+            sb.append(kp).append("PRESET=").append(preset).append(' ')
+              .append(kp).append("PERF=").append(perf).append(' ')
+              .append(kp).append("ADAPTIVE=").append(adaptive ? 1 : 0).append(' ')
+              .append(kp).append("LAT=").append(lat);
+            if (bf > 0)  sb.append(' ').append(kp).append("BF=").append(bf);
+            if (mbf > 0) sb.append(' ').append(kp).append("MBF=").append(mbf);
+            shortcut.putExtra("envVars", sb.toString());
+            shortcut.saveData();
+        } catch (Throwable t) {
+            android.util.Log.w("ALSAAudio", "persistAudioToShortcut failed", t);
+        }
+    }
+
+    // Resolve the effective ALSA config from the ALSA engine's OWN prefs file (banner_audio_alsa — a
+    // per-game cog was written here at launch if present, else it's the remembered/in-game config) and
+    // push it to the native ALSA player. Defaults to NONE — the device-proven crackle-free mode — for a
+    // fresh file. Never reads Pulse's file, so no cross-engine bleed. Safe before streams open (config is
+    // process-global) and again on in-game apply, where the bumped generation reopens streams live.
+    private void applyAlsaAudioConfig() {
+        try {
+            android.content.SharedPreferences p = getSharedPreferences("banner_audio_alsa", MODE_PRIVATE);
+            String preset = p.getString("preset", "stable");
+            int perf, adaptive, bf, mbf;
+            if ("custom".equals(preset)) {
+                perf = p.contains("perf_mode") ? p.getInt("perf_mode", 0) : 0; // ALSA proven default = NONE
+                adaptive = p.getBoolean("adaptive", true) ? 1 : 0;
+                bf  = p.getInt("buffer_frames", 0);
+                mbf = p.getInt("max_buffer_frames", 0);
+            } else {
+                // Named presets come from alsaPresetConfig(), so the greyed fine-tune rows in the cog
+                // show the values actually pushed to the native player. It gives the two SAFER rungs a
+                // real buffer - without it Auto, Balanced and Stable differed only by performance mode
+                // - while leaving Auto/Low on the native default (framesPerBurst * 2), which is both
+                // device-adaptive and lower than any fixed number we could pick here.
+                com.winlator.star.ui.components.AudioConfig c =
+                        com.winlator.star.ui.components.AudioSettingsDialogKt.alsaPresetConfig(preset);
+                perf = c.getPerfMode();
+                adaptive = c.getAdaptive() ? 1 : 0;
+                bf  = c.getBufferFrames();
+                mbf = c.getMaxBufferFrames();
+            }
+            com.winlator.star.alsaserver.ALSAClient.nativeSetAudioConfig(perf, adaptive, bf, mbf);
+        } catch (Throwable t) {
+            android.util.Log.w("ALSAAudio", "applyAlsaAudioConfig failed", t);
+        }
+    }
+
+    // Resolve the DirectAudio cog preset to the engine-scoped env the unixlib reads at stream open
+    // (BANNER_AUDIO_DIRECT_PERF/BF/ADAPTIVE/MBF). Unlike ALSA/Pulse — which read prefs into a native
+    // player / PULSE_LATENCY_MSEC — the DirectAudio driver takes its config straight from the guest env,
+    // so without this the cog never reaches it and it runs the driver's compiled defaults. Named presets
+    // map to a CONCRETE buffer and ALWAYS force LOW_LATENCY (device-proven; NONE = normal-priority thread
+    // the guest preempts under box64/FEX -> choppy). Custom honours the user's own knobs. Initial buffers
+    // stay within the proven-safe LOW_LATENCY envelope (<=62.5 ms; the adaptive path grows on xruns). The
+    // cog is authoritative for DirectAudio, so we OVERWRITE any keys the shared-preset env carried (its
+    // perfMode/latency are tuned for ALSA/Pulse). Reads only DirectAudio's own prefs -> no cross-engine bleed.
+    private void applyDirectAudioConfig(EnvVars envVars) {
+        try {
+            android.content.SharedPreferences p = getSharedPreferences("banner_audio_directaudio", MODE_PRIVATE);
+            String preset = p.getString("preset", "stable");
+            int perf, bf, mbf = 0, ms = 0; boolean adaptive;
+            if ("custom".equals(preset)) {
+                perf = p.getInt("perf_mode", 1);
+                bf   = p.getInt("buffer_frames", 0);
+                mbf  = p.getInt("max_buffer_frames", 0);
+                ms   = p.getInt("latency_msec", DIRECT_DEFAULT_MS);
+                adaptive = p.getBoolean("adaptive", true);
+            } else {
+                // Named presets come from directPresetConfig() rather than a switch of their own, so
+                // the greyed fine-tune rows in the audio cog show these exact values instead of a
+                // second copy that can drift from them. It forces LOW_LATENCY for every preset -
+                // device-proven, NONE is a normal-priority thread the guest preempts under box64/FEX.
+                com.winlator.star.ui.components.AudioConfig c =
+                        com.winlator.star.ui.components.AudioSettingsDialogKt.directPresetConfig(preset);
+                perf = c.getPerfMode();
+                bf   = c.getBufferFrames();
+                mbf  = c.getMaxBufferFrames();
+                adaptive = c.getAdaptive();
+            }
+            // POWER_SAVING (2) churns on DirectAudio under box64/FEX (stream errors + reopens); the cog no
+            // longer offers it, but coerce here too so a legacy pref or hand-set env can't select it.
+            if (perf == 2) perf = 1;
+            envVars.put("BANNER_AUDIO_DIRECT_PERF", String.valueOf(perf));
+            envVars.put("BANNER_AUDIO_DIRECT_ADAPTIVE", adaptive ? "1" : "0");
+            // Exactly ONE buffer key, never both. _MS overrides _BF inside the driver, so emitting the
+            // pair would make the frame stepper silently lose to the millisecond slider. Frames win when
+            // set - that stepper is the advanced control and 0 means "not set" - otherwise the latency
+            // slider is what the user actually moved, and on DirectAudio it IS the buffer. Named presets
+            // carry their own frame count and never reach here with ms.
+            if (bf  > 0) envVars.put("BANNER_AUDIO_DIRECT_BF", String.valueOf(bf));
+            else if (ms > 0) envVars.put("BANNER_AUDIO_DIRECT_MS", String.valueOf(ms));
+            if (mbf > 0) envVars.put("BANNER_AUDIO_DIRECT_MBF", String.valueOf(mbf));
+            // Live-config "mailbox": tell the driver where to watch for in-game changes, and clear any
+            // stale file from a previous session so THIS launch starts from the env above, not an old
+            // override. The driver reads config from the env at stream open; the mailbox lets an in-game
+            // cog save reach the ALREADY-RUNNING driver (see writeDirectAudioRuntime / onReapplyAudio).
+            java.io.File rt = new java.io.File(getFilesDir(), "banner_audio_directaudio.rt");
+            rt.delete();
+            envVars.put("BANNER_AUDIO_DIRECT_RUNTIME", rt.getAbsolutePath());
+        } catch (Throwable t) {
+            android.util.Log.w("DirectAudio", "applyDirectAudioConfig failed", t);
+        }
+    }
+
+    // Map a Proton layer name to the bundled DirectAudio asset set, or null if the build is unsupported.
+    // The driver is BUILD-SPECIFIC (a driver built against Wine major X only initializes on Wine X), but
+    // device-proven interchangeable WITHIN the Wine-11 point-release family (11.0-1/-3/-5): the same
+    // complete 3-file set drives any arm64ec 11.0-x layer. Wine 10 (10.0-4) has its own ABI, its own set.
+    private static String directAudioAssetDir(String layerName) {
+        if (layerName == null) return null;
+        if (layerName.contains("11.0-")) return "wine11";   // any arm64ec Wine-11 point release
+        if (layerName.contains("10.0-4")) return "wine10";  // the arm64ec Wine-10 build we ship for
+        return null;                                         // not a supported build -> leave its own driver
+    }
+
+    // Deliver the bundled, BUILD-MATCHED DirectAudio driver into the shared Proton layer at launch, so a
+    // user's dormant/old winedirectaudio.drv auto-upgrades to the APK's v1.3.1 before the guest loads it.
+    // The shared-layer copy is the one Wine actually loads, so overlaying it upgrades EVERY container on
+    // that layer. Per-build dispatch (wine11 for any 11.0-x, wine10 for 10.0-4; arm64ec only), version-gated
+    // by a per-layer marker, page-size aware (4KB -> sdk28, 16KB -> sdk35). Copies the COMPLETE 3-file set -
+    // BOTH PE arches (aarch64-windows + i386-windows) plus the shared aarch64-unix unixlib - because which
+    // PE actually loads is decided by the GUEST GAME's bitness (64-bit -> aarch64, 32-bit/wow64 -> i386),
+    // not the Proton build; shipping both closes the latent 32-bit gap the old aarch64-only overlay left.
+    // Idempotent + best-effort (any failure just leaves the existing driver); metadata only, no GPU probing.
+    private void overlayDirectAudioDriver() {
+        try {
+            if (container == null) return;
+            com.winlator.star.contents.ContentProfile prof =
+                    contentsManager.getProfileByEntryName(container.getWineVersion());
+            if (prof == null) return;
+            java.io.File layer = com.winlator.star.contents.ContentsManager.getInstallDir(this, prof);
+            java.io.File unixDir  = new java.io.File(layer, "lib/wine/aarch64-unix");     // shared unixlib
+            java.io.File winDir   = new java.io.File(layer, "lib/wine/aarch64-windows");  // 64-bit (arm64ec) guest PE
+            java.io.File win32Dir = new java.io.File(layer, "lib/wine/i386-windows");     // 32-bit (wow64) guest PE
+            // ABI gate: these two dirs exist only on an arm64ec Proton layer, and the name carries the build.
+            if (!unixDir.isDirectory() || !winDir.isDirectory()) return;
+            String build = directAudioAssetDir(layer.getName());
+            if (build == null) return;   // not one of the supported builds -> leave its own driver
+
+            String base = "directaudio/" + build + "/";
+            String want = FileUtils.readString(this, base + "version.txt");
+            if (want == null) return;
+            want = want.trim();
+            // Per-layer marker records "<build> <version>"; re-overlay if either changes. The pre-existing
+            // "1.3.1" marker (old aarch64-only overlay) mismatches "wine11 1.3.1", so P11-5 layers get a
+            // one-time re-overlay that finally delivers the i386 PE.
+            java.io.File marker = new java.io.File(unixDir, ".directaudio_bundled");
+            String tag = build + " " + want;
+            String have = marker.isFile() ? FileUtils.readString(marker) : null;
+            if (have != null && tag.equals(have.trim())) return;   // already current for this build
+
+            String sdk = (android.system.Os.sysconf(android.system.OsConstants._SC_PAGESIZE) >= 16384)
+                    ? "sdk35" : "sdk28";
+            String src = base + sdk + "/";
+            // Complete set: unixlib + both PE arches. The i386 PE goes to i386-windows/ if the layer has it.
+            assetToFile(src + "winedirectaudio.so",          new java.io.File(unixDir,  "winedirectaudio.so"));
+            assetToFile(src + "winedirectaudio-aarch64.drv", new java.io.File(winDir,   "winedirectaudio.drv"));
+            if (win32Dir.isDirectory())
+                assetToFile(src + "winedirectaudio-i386.drv", new java.io.File(win32Dir, "winedirectaudio.drv"));
+            FileUtils.writeString(marker, tag);
+            android.util.Log.i("DirectAudio", "overlaid bundled driver v" + want + " (" + build + "/" + sdk + ") -> " + layer.getName());
+        } catch (Throwable t) {
+            android.util.Log.w("DirectAudio", "driver overlay failed (keeping existing)", t);
+        }
+    }
+
+    // Copy an APK asset to a file, then make it readable+executable (Wine dlopen's the .so). Overwrites.
+    private void assetToFile(String assetPath, java.io.File dst) throws java.io.IOException {
+        try (java.io.InputStream in = getAssets().open(assetPath);
+             java.io.FileOutputStream out = new java.io.FileOutputStream(dst)) {
+            byte[] buf = new byte[65536];
+            int n;
+            while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+        }
+        dst.setReadable(true, false);
+        dst.setExecutable(true, false);
+    }
+
+    // Write the live-config "mailbox" the winedirectaudio.drv watcher polls, so an in-game cog SAVE
+    // reaches the running driver (which otherwise only reads config at stream open). Same resolution as
+    // applyDirectAudioConfig, emitted as the mailbox's ms/perf keys (it takes milliseconds, not frames;
+    // a frame count converts at 48 kHz). PERF stays 0/1/2 - the driver maps it to the AAudio enum.
+    private void writeDirectAudioRuntime() {
+        try {
+            android.content.SharedPreferences p = getSharedPreferences("banner_audio_directaudio", MODE_PRIVATE);
+            String preset = p.getString("preset", "stable");
+            int perf, bf, mbf = 0, ms = 0;
+            if ("custom".equals(preset)) {
+                perf = p.getInt("perf_mode", 1);
+                bf   = p.getInt("buffer_frames", 0);
+                mbf  = p.getInt("max_buffer_frames", 0);
+                ms   = p.getInt("latency_msec", DIRECT_DEFAULT_MS);
+            } else {
+                com.winlator.star.ui.components.AudioConfig c =
+                        com.winlator.star.ui.components.AudioSettingsDialogKt.directPresetConfig(preset);
+                perf = c.getPerfMode();
+                bf   = c.getBufferFrames();
+                mbf  = c.getMaxBufferFrames();
+            }
+            if (perf == 2) perf = 1;   // no POWER_SAVING on DirectAudio (churns) - same as applyDirectAudioConfig
+            int outMs = bf > 0 ? (bf * 1000 + 47999) / 48000 : ms;   // frames -> ms, round up
+            StringBuilder sb = new StringBuilder();
+            if (outMs > 0) sb.append("MS=").append(outMs).append('\n');
+            if (mbf  > 0) sb.append("MAXMS=").append((mbf * 1000 + 47999) / 48000).append('\n');
+            sb.append("PERF=").append(perf).append('\n');
+            java.io.File f = new java.io.File(getFilesDir(), "banner_audio_directaudio.rt");
+            try (java.io.FileOutputStream os = new java.io.FileOutputStream(f)) {
+                os.write(sb.toString().getBytes());
+            }
+        } catch (Throwable t) {
+            android.util.Log.w("DirectAudio", "writeDirectAudioRuntime failed", t);
+        }
+    }
+
+    // Restart the guest audio server (PulseAudio + its AAudio sink). The AAudio output stream can be
+    // torn down when the app is backgrounded or the HDMI audio route changes, and the sink does not
+    // always re-establish it — leaving the game silent (notably after returning to a game on the TV).
+    // Rebuilding the sink re-grabs the current default output route. Runs off the main thread (it does
+    // file IO + spawns a process). Exposed to the TV tab's "Reset audio" button and the auto-reset.
+    public void resetGuestAudio() {
+        final XEnvironment env = environment;
+        if (env == null) return;
+        new Thread(() -> {
+            try {
+                PulseAudioComponent audio = env.getComponent(PulseAudioComponent.class);
+                // Suspend/resume the sink (reopens the AAudio route) instead of restarting the daemon,
+                // so the guest's audio connection survives. Falls back to a restart only if unreachable.
+                if (audio != null) audio.resetAudioSink();
+            } catch (Exception e) {
+                android.util.Log.w("XServerDisplay", "guest audio reset failed", e);
+            }
+        }, "audio-reset").start();
+    }
+
+    // Recover audio after a MID-PLAY output-route change. A route change (headphone/USB/BT/HDMI plug or
+    // unplug) DISCONNECTS the guest's AAudio stream, which can never be restarted — so the suspend/
+    // resume in resetGuestAudio() is useless here. Instead we build a fresh sink on the new route and
+    // move the guest's streams onto it (see PulseAudioComponent.recreateSinkForRouteChange). Runs off
+    // the main thread (native PulseAudio client IO). Distinct from resetGuestAudio(), which stays the
+    // right tool for background/foreground + the TV "Reset audio" button (stream idle, not disconnected).
+    public void resetGuestAudioForRouteChange() {
+        final XEnvironment env = environment;
+        if (env == null) return;
+        new Thread(() -> {
+            try {
+                PulseAudioComponent audio = env.getComponent(PulseAudioComponent.class);
+                if (audio != null) audio.recreateSinkForRouteChange();
+            } catch (Exception e) {
+                android.util.Log.w("XServerDisplay", "guest audio route recovery failed", e);
+            }
+        }, "audio-route-recreate").start();
+    }
+
+    // True for the physical output routes that, when (un)plugged mid-game, require the AAudio sink to
+    // reopen onto the new default (3.5mm, USB-C, Bluetooth, HDMI). Internal speaker/earpiece are the
+    // fallback route resetGuestAudio() re-grabs, so a change involving one of these still needs a reset.
+    private static boolean isRouteChangingOutput(android.media.AudioDeviceInfo d) {
+        if (d == null || !d.isSink()) return false;
+        switch (d.getType()) {
+            case android.media.AudioDeviceInfo.TYPE_WIRED_HEADPHONES:
+            case android.media.AudioDeviceInfo.TYPE_WIRED_HEADSET:
+            case android.media.AudioDeviceInfo.TYPE_USB_HEADSET:
+            case android.media.AudioDeviceInfo.TYPE_USB_DEVICE:
+            case android.media.AudioDeviceInfo.TYPE_BLUETOOTH_A2DP:
+            case android.media.AudioDeviceInfo.TYPE_BLUETOOTH_SCO:
+            case android.media.AudioDeviceInfo.TYPE_HDMI:
+            case android.media.AudioDeviceInfo.TYPE_HDMI_ARC:
+            case android.media.AudioDeviceInfo.TYPE_HDMI_EARC:
+            case android.media.AudioDeviceInfo.TYPE_AUX_LINE:
+                return true;
+            default:
+                return d.getType() == 26 /* TYPE_BLE_HEADSET, API 31 */
+                    || d.getType() == 27 /* TYPE_BLE_SPEAKER, API 31 */;
+        }
+    }
+
+    // Debounced recovery: a single plug event can surface as several add/remove callbacks in quick
+    // succession, so coalesce them into one recovery ~350ms after the last one settles.
+    private final Runnable audioRouteResetRunnable = this::resetGuestAudioForRouteChange;
+
+    private void onAudioRouteChanged(android.media.AudioDeviceInfo[] devices) {
+        boolean relevant = false;
+        if (devices != null) {
+            for (android.media.AudioDeviceInfo d : devices) {
+                if (isRouteChangingOutput(d)) { relevant = true; break; }
+            }
+        }
+        if (!relevant) return;
+        handler.removeCallbacks(audioRouteResetRunnable);
+        handler.postDelayed(audioRouteResetRunnable, 350);
+    }
+
+    /** Start watching for mid-game output-route changes (headphone plug/unplug etc.). Idempotent. */
+    private void registerAudioRouteWatcher() {
+        if (audioRouteCallback != null) return;
+        try {
+            final android.media.AudioManager am =
+                (android.media.AudioManager) getSystemService(AUDIO_SERVICE);
+            if (am == null) return;
+            audioRouteCallbackPrimed = false;
+            audioRouteCallback = new android.media.AudioDeviceCallback() {
+                @Override
+                public void onAudioDevicesAdded(android.media.AudioDeviceInfo[] addedDevices) {
+                    // The first callback after register is the current device list — not a route change.
+                    if (!audioRouteCallbackPrimed) { audioRouteCallbackPrimed = true; return; }
+                    onAudioRouteChanged(addedDevices);
+                }
+                @Override
+                public void onAudioDevicesRemoved(android.media.AudioDeviceInfo[] removedDevices) {
+                    onAudioRouteChanged(removedDevices);
+                }
+            };
+            am.registerAudioDeviceCallback(audioRouteCallback, handler);
+        } catch (Exception e) {
+            android.util.Log.w("XServerDisplay", "audio route watcher register failed", e);
+            audioRouteCallback = null;
+        }
+    }
+
+    /** Stop watching output-route changes and cancel any pending debounced reset. Idempotent. */
+    private void unregisterAudioRouteWatcher() {
+        handler.removeCallbacks(audioRouteResetRunnable);
+        if (audioRouteCallback == null) return;
+        try {
+            final android.media.AudioManager am =
+                (android.media.AudioManager) getSystemService(AUDIO_SERVICE);
+            if (am != null) am.unregisterAudioDeviceCallback(audioRouteCallback);
+        } catch (Exception e) {
+            android.util.Log.w("XServerDisplay", "audio route watcher unregister failed", e);
+        } finally {
+            audioRouteCallback = null;
+        }
+    }
+
+    /** Dim the handheld (host) window while the game is on the TV, if the user enabled it (battery/heat
+     *  saver). Restores full brightness once the game is back on the phone or the toggle is off. */
+    private void applyHandheldDim() {
+        final boolean dim = XServerDrawerState.INSTANCE.getTvDimHandheld().getValue()
+                && externalDisplayController != null && externalDisplayController.isGameOnExternal();
+        runOnUiThread(() -> {
+            try {
+                android.view.WindowManager.LayoutParams lp = getWindow().getAttributes();
+                lp.screenBrightness = dim ? 0.02f
+                        : android.view.WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE;
+                getWindow().setAttributes(lp);
+            } catch (Exception ignored) {}
+        });
+    }
+
+    /** Best-effort media output routing while on TV (EXPERIMENTAL — the guest's PulseAudio AAudio sink
+     *  may not follow, as we don't own its output track). 0 = follow system, 1 = TV/HDMI, 2 = handheld. */
+    private void applyTvAudioRoute(int mode) {
+        try {
+            android.media.AudioManager am = (android.media.AudioManager) getSystemService(AUDIO_SERVICE);
+            if (am == null || android.os.Build.VERSION.SDK_INT < 31) return;
+            if (mode == 0) { am.clearCommunicationDevice(); resetGuestAudio(); return; }
+            for (android.media.AudioDeviceInfo d : am.getAvailableCommunicationDevices()) {
+                int t = d.getType();
+                boolean match = (mode == 1)
+                        ? (t == android.media.AudioDeviceInfo.TYPE_HDMI
+                            || t == android.media.AudioDeviceInfo.TYPE_HDMI_ARC
+                            || t == android.media.AudioDeviceInfo.TYPE_HDMI_EARC
+                            || t == android.media.AudioDeviceInfo.TYPE_AUX_LINE)
+                        : (t == android.media.AudioDeviceInfo.TYPE_BUILTIN_SPEAKER);
+                if (match) { am.setCommunicationDevice(d); break; }
+            }
+            // Nudge PulseAudio to reopen its AAudio stream onto the new route.
+            resetGuestAudio();
+        } catch (Exception e) {
+            android.util.Log.w("XServerDisplay", "tv audio route failed", e);
+        }
+    }
+
+    /** Step 2b: wait for the first HLS segment, host the live playlist, and cast it to the TV. */
+    private void startLiveCast(com.winlator.star.cast.CastDiscovery.Device device,
+                              com.winlator.star.cast.TsSegmenter seg) {
+        new Thread(() -> {
+            try {
+                // Wait for the first segment (~2-4s of video) before pointing the TV at the playlist.
+                long deadline = System.currentTimeMillis() + 15000;
+                while (!seg.hasSegments() && System.currentTimeMillis() < deadline) Thread.sleep(200);
+                if (!seg.hasSegments()) { castFail("No video yet — try again."); return; }
+                String ip = com.winlator.star.cast.HttpFileServer.localIpv4();
+                if (ip == null) { castFail("Couldn't find this phone's Wi-Fi address."); return; }
+                castHttp = new com.winlator.star.cast.HttpFileServer(seg);
+                int port = castHttp.start();
+                // Cast the master (multivariant) playlist so the receiver sees the CODECS up front.
+                String url = "http://" + ip + ":" + port + "/master.m3u8";
+                android.util.Log.i("CastSession", "live url: " + url);
+                runOnUiThread(() -> XServerDialogState.INSTANCE.setCastStatusDetail("Sending to the TV…"));
+                castSession = new com.winlator.star.cast.CastSession(device.host,
+                        new com.winlator.star.cast.CastSession.Callback() {
+                    @Override public void onConnected() {
+                        runOnUiThread(() -> XServerDialogState.INSTANCE.setCastStatusDetail("Loading on the TV…"));
+                    }
+                    @Override public void onLoaded() {
+                        runOnUiThread(() -> {
+                            XServerDialogState.INSTANCE.setCastStatus(XServerDialogState.CastStatus.CONNECTED);
+                            XServerDialogState.INSTANCE.setCastStatusDetail("Live on your TV (a few seconds behind).");
+                        });
+                    }
+                    @Override public void onError(String message) { castFail(message); }
+                });
+                castSession.connectAndLoad(url, "application/vnd.apple.mpegurl", "LIVE");
+            } catch (Exception e) {
+                castFail("Cast failed: " + e.getMessage());
+            }
+        }, "cast-start").start();
+    }
+
+    private void castFail(String message) {
+        runOnUiThread(() -> {
+            XServerDialogState.INSTANCE.setCastStatus(XServerDialogState.CastStatus.FAILED);
+            XServerDialogState.INSTANCE.setCastStatusDetail(message);
+        });
+    }
+
+    /** Tear down a cast: cancel a pending start, stop capture/session/server, return the game. */
+    private void stopCast() {
+        if (pendingCastStart != null) { handler.removeCallbacks(pendingCastStart); pendingCastStart = null; }
+        try { if (gameCaster != null) gameCaster.stop(); } catch (Exception ignored) {}
+        try { if (castSession != null) { castSession.close(); castSession = null; } } catch (Exception ignored) {}
+        try { if (castHttp != null) { castHttp.stop(); castHttp = null; } } catch (Exception ignored) {}
+        castSegmenter = null;
+        if (externalDisplayController != null) externalDisplayController.resumeAfterCast();
+        XServerDialogState.INSTANCE.setCastStatus(XServerDialogState.CastStatus.IDLE);
+        XServerDialogState.INSTANCE.setCastTargetName("");
+        XServerDialogState.INSTANCE.setCastStatusDetail("");
+    }
+
     private void setPausedState(boolean paused) {
         isPaused = paused;
         if (paused) {
@@ -2446,6 +3553,34 @@ public class XServerDisplayActivity extends AppCompatActivity {
         }
         XServerDrawerState.INSTANCE.setIsPaused(paused);
         XServerDialogState.INSTANCE.setPaused(paused);
+        // Mirror the paused state onto the TV (the pause pill shows on the external display too).
+        if (externalDisplayController != null) externalDisplayController.setPaused(paused);
+    }
+
+    // Brief automatic "background + foreground" pulse used to reset frame generation on an FG
+    // toggle-on / model change. A bare SIGSTOP/SIGCONT is not enough — win-fg comes up artifacty
+    // because its optical flow starts on a moving frame pair. Replicating the FULL bg/fg cycle
+    // (pause the X server + render view, freeze the guest, then resume all of it ~0.5s later) makes
+    // the guest go fully still so win-fg restarts from a near-zero-motion pair. Does NOT flip
+    // isPaused (no pause UI, no user tap needed); debounced; bails if a real pause is active.
+    private boolean fgResetPulseInProgress = false;
+    private void pulseFgReset() {
+        if (fgResetPulseInProgress || isPaused || environment == null) return;
+        fgResetPulseInProgress = true;
+        // --- background half (mirrors the onPause path) ---
+        environment.onPause();
+        if (xServerView != null) xServerView.onPause();
+        ProcessHelper.pauseAllWineProcesses();
+        // --- resume half ~0.5s later (mirrors the onResume path) ---
+        handler.postDelayed(() -> {
+            if (!isPaused) {
+                if (xServerView != null) xServerView.onResume();
+                environment.onResume();
+                ProcessHelper.resumeAllWineProcesses();
+                reapplyVrr();
+            }
+            fgResetPulseInProgress = false;
+        }, 500);
     }
 
     private void savePlaytimeData() {
@@ -2478,13 +3613,28 @@ public class XServerDisplayActivity extends AppCompatActivity {
         editor.apply();
     }
 
+    // Re-entry guard: exit() has several callers (menu quit / onCancel, the game-exit watcher, the
+    // installer auto-exit watcher, autoClose). Before the save phase ran on a worker thread they
+    // serialized harmlessly on the main thread, but now a second exit() would spawn a SECOND save/upload
+    // worker whose restart can kill the first upload mid-flight (observed: two concurrent GOG uploads on
+    // one exit). Latch the first call; ignore the rest. exit() is always on the main thread.
+    private volatile boolean exiting = false;
+
     private void exit() {
+        if (exiting) return;
+        exiting = true;
         // A frozen (SIGSTOP'd) guest can't act on the SIGTERM below — resume before tearing down so
         // graceful termination isn't stuck waiting on a suspended process (any pending pulse aside).
         reshadePulseInProgress = false;
         ProcessHelper.resumeAllWineProcesses();
+        // Epic EOS Phase 2: remove this game's short-lived Denuvo ownership token (.ovt)
+        // from the wine prefix now that the session is ending. No-op for non-Epic games.
+        try {
+            if (shortcut != null) com.winlator.star.store.EpicLaunchArgs.cleanupOwnershipToken(this, shortcut);
+        } catch (Throwable ignored) {}
         installerWatchHandler.removeCallbacks(installerWatchRunnable);
         gameExitWatchHandler.removeCallbacks(gameExitWatchRunnable);
+        affinityReapplyHandler.removeCallbacks(affinityReapplyRunnable);
         stopDxApiDetection();
         // Stop the session foreground service (also removes its ongoing notification).
         stopService(new Intent(this, com.winlator.star.core.GameSessionForegroundService.class));
@@ -2497,7 +3647,6 @@ public class XServerDisplayActivity extends AppCompatActivity {
                 if (midiHandler != null) midiHandler.stop();
                 // Unregister sensor listener to avoid memory leaks
                 if (environment != null) environment.stopEnvironmentComponents();
-                if (preloaderDialog != null && preloaderDialog.isShowing()) preloaderDialog.closeOnUiThread();
                 if (winHandler != null) winHandler.stop();
                 if (wineRequestHandler != null) wineRequestHandler.stop();
                 /* Gracefully terminate all running wine processes */
@@ -2511,23 +3660,61 @@ public class XServerDisplayActivity extends AppCompatActivity {
                     }
                 }
                 // Best-effort save backup on exit, now that the game has terminated (and flushed).
-                // Steam-library games → their per-appId local Library (Collect, no cloud); custom
-                // imports → the persistent local vault. Runs BEFORE restartApplication() because that
-                // kills the process (exit(0)), which would otherwise abort the copy. Both are bounded
-                // + fully guarded so they can never hang or break game-exit. Nothing is ever uploaded.
-                // Each auto-back-up branch is gated by its Save Manager toggle (shared prefs, both
-                // default true → behavior unchanged unless the user turns it off). When off, we skip
-                // cleanly — no worker thread, no latch, no work.
-                SharedPreferences savePrefs = getSharedPreferences("save_manager_prefs", MODE_PRIVATE);
-                if (isGenuineSteamShortcut()) {
-                    if (savePrefs.getBoolean("auto_collect_steam_on_exit", true)) autoCollectSteamSavesBlocking();
-                } else {
-                    if (savePrefs.getBoolean("auto_backup_custom_on_exit", true)) autoSnapshotCustomSavesBlocking();
-                }
-                preloaderDialog.closeOnUiThread();
-                AppUtils.restartApplication(getApplicationContext());
+                // Steam-library games → their per-appId local Library (Collect, no cloud); GOG-library
+                // games → GOG cloud upload (Galaxy-parity); custom imports → the persistent local vault.
+                // Runs BEFORE restartApplication() because that kills the process (exit(0)), which would
+                // otherwise abort the copy. Each branch is bounded + fully guarded, gated by its Save
+                // Manager toggle (shared prefs, all default true).
+                //
+                // CRITICAL: this phase can be SLOW — the GOG cloud upload is a NETWORK op (bounded to
+                // ~15s). It used to run inline on THIS main-thread runnable, which froze the "Shutting
+                // down…" overlay's progress animation for the whole upload → users thought the app hung
+                // and swiped it off recents, killing the upload mid-flight. So the save phase now runs on
+                // a WORKER thread: the main thread returns, the Compose preloader keeps animating, we
+                // surface a live "Backing up… / Uploading…" hint, and only once the phase finishes (or
+                // its own internal bounds elapse) do we post the overlay close + process restart back to
+                // the main thread. (Teardown above stays on-main; it's short.)
+                preloaderDialog.hint(getString(R.string.saving_on_exit));
+                new Thread(() -> {
+                    try {
+                        SharedPreferences savePrefs = getSharedPreferences("save_manager_prefs", MODE_PRIVATE);
+                        if (isGenuineSteamShortcut()) {
+                            if (savePrefs.getBoolean("auto_collect_steam_on_exit", true)) autoCollectSteamSavesBlocking();
+                        } else {
+                            // GOG-library games (untagged, installed under gog_games/) push their saves to
+                            // GOG cloud — the Galaxy-parity auto-trigger. Additive: they ALSO keep the local
+                            // vault snapshot below, so a game with no cloud support (or a stalled upload)
+                            // still gets its usual offline backup.
+                            if (isGogShortcut() && savePrefs.getBoolean("auto_upload_gog_on_exit", true))
+                                autoUploadGogSavesBlocking();
+                            if (savePrefs.getBoolean("auto_backup_custom_on_exit", true)) autoSnapshotCustomSavesBlocking();
+                        }
+                    } catch (Throwable t) {
+                        Log.w("XServerDisplayActivity", "exit save-backup phase errored", t);
+                    } finally {
+                        // Always finalize — close the overlay + restart the process — on the main thread,
+                        // whatever happened above. Guarded so a torn-down activity can't crash the restart.
+                        runOnUiThread(() -> {
+                            try { if (preloaderDialog != null) preloaderDialog.close(); } catch (Throwable ignored) {}
+                            AppUtils.restartApplication(getApplicationContext());
+                        });
+                    }
+                }, "BH-ExitSaveBackup").start();
             }
         }, 1000);
+    }
+
+    /**
+     * Terminate any wine processes orphaned by a previous session that was killed without a clean
+     * exit (recents-swipe, background optimisation, force-stop) — none of those run {@link #exit()},
+     * the only other caller of the wine teardown, so the stale wineserver + wine tree can survive as
+     * orphans. Only called on the fresh-launch path, where every wine process is stale by
+     * construction; a paused-session in-app resume never re-enters the launch runnable, so a live
+     * session can never be swept.
+     */
+    private void sweepStaleWineProcesses() {
+        Log.d("XServerDisplayActivity", "Sweeping stale wine processes from previous session");
+        ProcessHelper.terminateAllWineProcessesAndWait(1500, true);
     }
 
     /**
@@ -2541,6 +3728,17 @@ public class XServerDisplayActivity extends AppCompatActivity {
         if ("steam".equals(shortcut.getExtra("storeSource"))) return true;
         String p = shortcut.path;
         return p != null && p.toLowerCase().contains("steam_games");
+    }
+
+    /**
+     * Whether this shortcut is a GOG-library game: GOG shortcuts are UNTAGGED (StarLaunchBridge only
+     * stamps steam/epic), so the only signal is the exec path living under the {@code gog_games} install
+     * root ({@link GogInstallPath}). Used to fire GOG cloud auto-upload on exit.
+     */
+    private boolean isGogShortcut() {
+        if (shortcut == null) return false;
+        String p = shortcut.path;
+        return p != null && p.toLowerCase().contains("gog_games");
     }
 
     /**
@@ -2720,6 +3918,151 @@ public class XServerDisplayActivity extends AppCompatActivity {
         }
     }
 
+    /**
+     * On game exit, push a GOG-library game's saves to GOG cloud (local → cloud), the Galaxy-parity
+     * auto-trigger for gap #2-P2. Mirrors {@link #autoCollectSteamSavesBlocking()}'s robustness
+     * envelope: application context (not this dying activity), all work off a worker thread, and a
+     * bound-wait on a latch so the upload finishes BEFORE {@link AppUtils#restartApplication}'s exit(0)
+     * aborts it — while a stalled network can never freeze game-exit.
+     *
+     * Fully guarded + silent (logs to "BH_SAVE_SYNC"). Skips cleanly (no upload) when the game can't be
+     * reverse-mapped to a gameId, has no resolvable save dir (missing container / no GOG cloud support),
+     * or the save dir doesn't exist yet (unplayed → nothing to upload). Safe by construction: the
+     * transport's newest-wins logic ({@link GogCloudSaveManager#uploadSaves}) never overwrites a newer
+     * cloud save, so an automatic push can't clobber progress made on another device.
+     */
+    private void autoUploadGogSavesBlocking() {
+        try {
+            final Shortcut sc = shortcut;
+            final Container ctn = container;
+            if (sc == null || sc.path == null || ctn == null) return;
+
+            final Context appCtx = getApplicationContext();
+            // Reverse-map the running shortcut's gog_games/<dir> exec path to its GOG gameId (offline).
+            final String gameId = GogCloudSavePaths.INSTANCE.gameIdForExecPath(appCtx, sc.path);
+            if (gameId == null) {
+                Log.i("BH_SAVE_SYNC", "auto-upload GOG: no gameId for " + sc.path + " — skip");
+                return;
+            }
+
+            final CountDownLatch latch = new CountDownLatch(1);
+            new Thread(() -> {
+                try {
+                    // Resolve the concrete save dir inside the RUNNING container's prefix. Off-main:
+                    // hits the network on a cloud-location cache-miss (remote-config fetch).
+                    File dir = GogCloudSavePaths.INSTANCE.resolveSaveDirectory(appCtx, gameId, ctn);
+                    if (dir == null) {
+                        Log.i("BH_SAVE_SYNC", "auto-upload GOG (" + gameId + "): no resolvable save dir — skip");
+                        latch.countDown();
+                        return;
+                    }
+                    if (!dir.isDirectory()) {
+                        Log.i("BH_SAVE_SYNC", "auto-upload GOG (" + gameId + "): save dir absent (no saves yet) — skip");
+                        latch.countDown();
+                        return;
+                    }
+                    // uploadSaves runs on its OWN worker thread; the latch is released by its callback.
+                    GogCloudSaveManager.uploadSaves(appCtx, gameId, dir, new GogCloudSaveManager.Callback() {
+                        @Override public void onStatus(String message) {
+                            // Surface live upload progress on the "Shutting down…" overlay so the user
+                            // sees it's actively working (not frozen) and doesn't swipe it away mid-upload.
+                            try { if (preloaderDialog != null) preloaderDialog.hint(message); } catch (Throwable ignored) {}
+                        }
+                        @Override public void onDone(String summary) {
+                            Log.i("BH_SAVE_SYNC", "auto-upload GOG on exit (" + gameId + "): " + summary);
+                            try { if (preloaderDialog != null) preloaderDialog.hint(summary); } catch (Throwable ignored) {}
+                            latch.countDown();
+                        }
+                        @Override public void onError(String message) {
+                            Log.w("BH_SAVE_SYNC", "auto-upload GOG on exit failed (" + gameId + "): " + message);
+                            latch.countDown();
+                        }
+                    });
+                } catch (Throwable t) {
+                    Log.w("BH_SAVE_SYNC", "auto-upload GOG on exit errored", t);
+                    latch.countDown();
+                }
+            }, "BH-GogCloudAutoUpload").start();
+
+            // Network op, so more headroom than the local copies (8s) — but still bounded so a stalled
+            // upload never hangs game-exit. GOG saves are small (config + slot files), so this is ample.
+            if (!latch.await(20, TimeUnit.SECONDS))
+                Log.w("BH_SAVE_SYNC", "auto-upload GOG on exit timed out (20s) — proceeding with exit");
+        } catch (Throwable t) {
+            Log.w("BH_SAVE_SYNC", "auto-upload GOG on exit wrapper errored", t);
+        }
+    }
+
+    /**
+     * Before the guest boots, pull a GOG-library game's saves DOWN from GOG cloud (cloud → local) so
+     * the game starts with the latest progress — the Galaxy-parity download-on-launch trigger, paired
+     * with {@link #autoUploadGogSavesBlocking()}. Called from {@link #setupXEnvironment()} on the launch
+     * WORKER thread immediately before {@code startEnvironmentComponents()}, so blocking here is safe
+     * (the UI thread is free, the launch preloader keeps animating) and naturally GATES the guest start
+     * until the pull completes or its bound elapses.
+     *
+     * Best-effort + fully guarded: no-op for non-GOG games / when the toggle is off / when the game
+     * can't be reverse-mapped or has no resolvable save dir (missing container / no cloud support).
+     * Offline or a slow network just times out (bounded) and the game launches with its local saves —
+     * a pre-launch download must NEVER block or fail a launch. Safe by construction: the transport's
+     * newest-wins ({@link GogCloudSaveManager#downloadSaves}) SKIPS any file whose local copy is
+     * newer-or-equal, so a save made offline since the last upload is never overwritten by an older
+     * cloud copy.
+     */
+    private void autoDownloadGogSavesBlocking() {
+        try {
+            final Shortcut sc = shortcut;
+            final Container ctn = container;
+            if (sc == null || sc.path == null || ctn == null) return;
+            if (!isGogShortcut()) return;
+
+            SharedPreferences savePrefs = getSharedPreferences("save_manager_prefs", MODE_PRIVATE);
+            if (!savePrefs.getBoolean("auto_download_gog_on_launch", true)) return;
+
+            final Context appCtx = getApplicationContext();
+            final String gameId = GogCloudSavePaths.INSTANCE.gameIdForExecPath(appCtx, sc.path);
+            if (gameId == null) {
+                Log.i("BH_SAVE_SYNC", "auto-download GOG: no gameId for " + sc.path + " — skip");
+                return;
+            }
+
+            // Resolve the save dir inside the RUNNING container's prefix. We're already on the launch
+            // worker thread, so this (network on a cloud-location cache-miss) is safely off-main.
+            File dir = GogCloudSavePaths.INSTANCE.resolveSaveDirectory(appCtx, gameId, ctn);
+            if (dir == null) {
+                Log.i("BH_SAVE_SYNC", "auto-download GOG (" + gameId + "): no resolvable save dir — skip");
+                return;
+            }
+
+            preloaderDialog.hint(getString(R.string.downloading_on_launch));
+            final CountDownLatch latch = new CountDownLatch(1);
+            // downloadSaves runs on its OWN worker thread; the latch is released by its callback.
+            GogCloudSaveManager.downloadSaves(appCtx, gameId, dir, new GogCloudSaveManager.Callback() {
+                @Override public void onStatus(String message) {
+                    // Show live download progress on the launch overlay's reassurance line.
+                    try { if (preloaderDialog != null) preloaderDialog.hint(message); } catch (Throwable ignored) {}
+                }
+                @Override public void onDone(String summary) {
+                    Log.i("BH_SAVE_SYNC", "auto-download GOG on launch (" + gameId + "): " + summary);
+                    // Show the outcome (e.g. "Already up to date (13 files)" / "Downloaded N") so a skip
+                    // reads as up-to-date, not a silent "was it downloading?".
+                    try { if (preloaderDialog != null) preloaderDialog.hint(summary); } catch (Throwable ignored) {}
+                    latch.countDown();
+                }
+                @Override public void onError(String message) {
+                    Log.w("BH_SAVE_SYNC", "auto-download GOG on launch failed (" + gameId + "): " + message);
+                    latch.countDown();
+                }
+            });
+            // Bounded so a stalled/offline network never delays the launch indefinitely; on timeout we
+            // launch with whatever local saves exist (newest-wins already protected them).
+            if (!latch.await(20, TimeUnit.SECONDS))
+                Log.w("BH_SAVE_SYNC", "auto-download GOG on launch timed out (20s) — launching with local saves");
+        } catch (Throwable t) {
+            Log.w("BH_SAVE_SYNC", "auto-download GOG on launch wrapper errored", t);
+        }
+    }
+
     // Whether Wine/box64 logging is on — the single source of truth for the failure card's guidance
     // and for whether we open wine_debug.log at all (see setupXEnvironment).
     private boolean isLaunchLoggingEnabled() {
@@ -2727,16 +4070,32 @@ public class XServerDisplayActivity extends AppCompatActivity {
                 || preferences.getBoolean("enable_box64_logs", false);
     }
 
-    // Where DXVK/VKD3D should write, or null when the Log Manager's "DXVK & VKD3D" switch is off.
-    // Deliberately returns null instead of resolving a path the callee will then ignore: resolving
-    // CREATES the folder, so the old unconditional call left an empty per-game folder behind on
-    // every launch even with logging fully switched off. DXVKConfigDialog silences DXVK explicitly
-    // when the switch is off, so a null here loses nothing.
+    // Where DXVK/VKD3D write their logs this launch. When the Log Manager's "DXVK & VKD3D" switch is ON
+    // that's the user's (per-game) log dir — visible, co-located with wine_debug.log, unchanged. When it
+    // is OFF we no longer silence the wrappers: we point them at a tiny PRIVATE hudapi dir at a minimal
+    // level (see DXVKConfigDialog.setEnvVars) so the in-game HUD API resolver (P3) always has ground
+    // truth — critical on arm64ec, where the DX DLLs are invisible to /proc/maps. Either way the chosen
+    // dir is cached in wrapperLogDir for P3 to read. The user-facing log toggle still governs VISIBLE logs.
     private File dxvkLogDir() {
         boolean dxvkLogs = preferences.getBoolean("enable_dxvk_logs", true);
-        return dxvkLogs
+        File dir = dxvkLogs
                 ? com.winlator.star.core.LogLocation.resolveGameLogDir(this, currentLogGameName())
-                : null;
+                : hudApiLogDir();
+        wrapperLogDir = dir;
+        return dir;
+    }
+
+    // Tiny PRIVATE wrapper-log dir the HUD API resolver (P3) always has, even with the user's "DXVK &
+    // VKD3D" logging switch OFF. Lives under the container's shared tmp (host-readable at
+    // imageFs.getTmpDir()). setupXEnvironment clears that whole tmp per launch (so this is emptied for
+    // free); we re-create it AFTER that clear (see setupXEnvironment) so the guest can write into it.
+    // Startup-level logs only — no per-frame spam. Null on failure => P3 falls through to /proc/maps.
+    private File hudApiLogDir() {
+        try {
+            File dir = new File(imageFs.getTmpDir(), "hudapi");
+            if (!dir.exists()) dir.mkdirs();
+            return dir.isDirectory() && dir.canWrite() ? dir : null;
+        } catch (Exception ignore) { return null; }
     }
 
     // Arm/cancel the two "not-frozen" reassurance timers.
@@ -2776,9 +4135,34 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // exit (no-op unless a root toggle wrote something this session).
         com.winlator.star.perf.TempWatchdog.INSTANCE.stop();
         com.winlator.star.perf.PerfRevertRegistry.INSTANCE.revertAll();
+        // Release the no-root Samsung Galaxy performance boost on game exit (no-op off Samsung).
+        com.winlator.star.perf.galaxy.GalaxyPerfManager.stop();
+        // Clear the cross-vendor "game is running" signal.
+        com.winlator.star.perf.GameModeSignal.exitGameplay(this);
         unregisterGyroSensor();
+        unregisterAudioRouteWatcher();
         stopDxApiDetection();
         cancelLaunchTimers();
+        // Version-A spike: unregister the display listener, dismiss the Presentation, and pull the
+        // game back to the phone so nothing leaks a window on the external display.
+        if (externalDisplayController != null) {
+            externalDisplayController.stop();
+            externalDisplayController = null;
+        }
+        if (castDiscovery != null) {
+            castDiscovery.stop();
+            castDiscovery = null;
+        }
+        if (gameCaster != null) {
+            try { gameCaster.stop(); } catch (Exception ignored) {}
+            gameCaster = null;
+        }
+        try { if (castSession != null) { castSession.close(); castSession = null; } } catch (Exception ignored) {}
+        try { if (castHttp != null) { castHttp.stop(); castHttp = null; } } catch (Exception ignored) {}
+        // Controller-status toast: drop the listener + any pending debounced toast so a late callback
+        // can't run against a tearing-down activity.
+        if (winHandler != null) winHandler.setControllerAssignmentListener(null);
+        controllerToastHandler.removeCallbacks(fireControllerToast);
         // Drop the failure-card callbacks so this activity isn't retained via the static holder.
         com.winlator.star.core.PreloaderState.setOnClose(null);
         com.winlator.star.core.PreloaderState.setOnOpenLog(null);
@@ -2907,7 +4291,11 @@ public class XServerDisplayActivity extends AppCompatActivity {
     //          "6" = drop Pale Moon DESKTOP shortcut (kept in Start Menu only); the repacked
     //                pattern no longer ships it, and existing containers get it deleted on next
     //                launch via removePaleMoonDesktopShortcut() (2026-08-06).
-    private static final String PATTERN_CONTENT_VERSION = "6";
+    //          "7" = adaptive PulseAudio module: repacked pulseaudio.tzst carries the new
+    //                module-aaudio-sink (performance_mode/adaptive/buffer modargs). MUST bump so
+    //                existing containers re-extract it — vc is frozen, so without this the old module
+    //                lingers and the new default.pa args are rejected → silence (2026-08-10).
+    private static final String PATTERN_CONTENT_VERSION = "7";
 
     private void setupWineSystemFiles() {
         String appVersion = String.valueOf(AppUtils.getVersionCode(this));
@@ -2997,6 +4385,21 @@ public class XServerDisplayActivity extends AppCompatActivity {
         else {
             startupSelection = String.valueOf(container.getStartupSelection());
             startupServices = container.getStartupServices();
+        }
+
+        // Epic Friends Overlay (Phase 3) needs full Wine services alive: the EOS SDK spins the overlay
+        // up through services.exe (RpcSs + BITS). An AGGRESSIVE startup kills services.exe, so the
+        // overlay can't render. When the per-shortcut overlay toggle is ON, bump an aggressive selection
+        // to NORMAL for THIS launch (in-memory; it flows through changeServicesStatus below). Only the
+        // aggressive case is touched — ESSENTIAL/NORMAL already keep services running.
+        if (isEpicOverlayEnabledForLaunch()) {
+            try {
+                if (Byte.parseByte(startupSelection) == Container.STARTUP_SELECTION_AGGRESSIVE) {
+                    Log.i("XServerDisplayActivity", "Epic overlay ON: overriding AGGRESSIVE startup -> NORMAL "
+                            + "so Wine services (RpcSs/BITS) survive for the EOS overlay");
+                    startupSelection = String.valueOf(Container.STARTUP_SELECTION_NORMAL);
+                }
+            } catch (NumberFormatException ignored) {}
         }
 
         // Cache signature: for the three presets it's just the selection (unchanged behaviour — the
@@ -3143,6 +4546,12 @@ public class XServerDisplayActivity extends AppCompatActivity {
         String rootPath = imageFs.getRootDir().getPath();
         FileUtils.clear(imageFs.getTmpDir());
 
+        // The tmp clear above just wiped the private hudapi wrapper-log dir (a subdir of tmp) if the
+        // "DXVK & VKD3D" switch is off. Re-create it now, before the guest starts, so DXVK/VKD3D can
+        // write their startup logs there for the HUD API resolver (P3). No-op when logging is on
+        // (wrapperLogDir then points at the user's log dir, outside tmp) or on a WineD3D container (null).
+        if (wrapperLogDir != null) wrapperLogDir.mkdirs();
+
 
         guestProgramLauncherComponent = new GuestProgramLauncherComponent(
                 contentsManager,
@@ -3208,8 +4617,8 @@ public class XServerDisplayActivity extends AppCompatActivity {
                 // to load. multiplier=0 -> frame gen starts Off in-game (layer loaded, enable live).
                 boolean fgOn = resolvedFrameGenEngine().equals("bionic");
                 if (fgOn) {
-                    envVars.put("BIONIC_FG_ENABLE", "1");
-                    writeBionicFgConfig(
+                    envVars.put("WIN_FG_ENABLE", "1");
+                    writeWinFgConfig(
                             0,
                             container.getFrameGenFlowScale(),
                             false,
@@ -3225,6 +4634,17 @@ public class XServerDisplayActivity extends AppCompatActivity {
             }
 
             if (shortcut != null) envVars.putAll(shortcut.getExtra("envVars"));
+
+            // Epic per-game launch fixes (Feature #7). Runs on the background launch setup thread.
+            //  • applyEnv: merge required WINEDLLOVERRIDES (Kingdom Hearts III) into the launch env,
+            //    after the shortcut env so a user override still wins.
+            //  • applyPreLaunch: write the Bethesda "Installed Path" registry value + wipe the
+            //    Hogwarts Legacy ProgramData cache folder before the guest process starts.
+            // Both no-op for non-Epic shortcuts and Epic games without a registered fix.
+            if (shortcut != null) {
+                com.winlator.star.store.EpicGameFixes.applyEnv(this, shortcut, envVars);
+                com.winlator.star.store.EpicGameFixes.applyPreLaunch(this, shortcut);
+            }
 
             if (!envVars.has("WINEESYNC")) {
                 envVars.put("WINEESYNC", "1");
@@ -3272,10 +4692,16 @@ public class XServerDisplayActivity extends AppCompatActivity {
                 )
         );
 
-        // Audio driver logic
+        // Audio driver logic. Reseed the launching engine's EPHEMERAL runtime prefs from the resolved
+        // per-scope config (engine-scoped BANNER_AUDIO_<ENG>_* env, shortcut-over-container, else engine
+        // default). Full write every launch = no cross-launch/cross-game memory in the runtime file;
+        // persistence lives only in each scope's env. Reads only this engine's keys → no cross-engine
+        // bleed. In-game saves persist back to THIS shortcut's env (persistAudioToShortcut).
+        seedAudioPrefsForLaunch(envVars, audioDriver);
         if (audioDriver.equals("alsa")) {
             envVars.put("ANDROID_ALSA_SERVER", rootPath + UnixSocketConfig.ALSA_SERVER_PATH);
             envVars.put("ANDROID_ASERVER_USE_SHM", "true");
+            applyAlsaAudioConfig();   // push perf/adaptive/buffer to the native ALSA player before streams open
             environment.addComponent(
                     new ALSAServerComponent(
                             UnixSocketConfig.createSocket(rootPath, UnixSocketConfig.ALSA_SERVER_PATH)
@@ -3283,11 +4709,27 @@ public class XServerDisplayActivity extends AppCompatActivity {
             );
         } else if (audioDriver.equals("pulseaudio")) {
             envVars.put("PULSE_SERVER", rootPath + UnixSocketConfig.PULSE_SERVER_PATH);
+            // Guest-side audio buffer (winepulse). Paired with the sink-side adaptive buffer, this is
+            // the other half of the crackle/latency tradeoff. Default comes from the Pulse engine's own
+            // prefs ("banner_audio_pulseaudio", default 100ms); a container/shortcut PULSE_LATENCY_MSEC
+            // still wins (env is already merged above, so only set it when the user hasn't).
+            if (!envVars.has("PULSE_LATENCY_MSEC")) {
+                int lat = getSharedPreferences("banner_audio_pulseaudio", MODE_PRIVATE).getInt("latency_msec", 100);
+                if (lat > 0) envVars.put("PULSE_LATENCY_MSEC", String.valueOf(lat));
+            }
             environment.addComponent(
                     new PulseAudioComponent(
                             UnixSocketConfig.createSocket(rootPath, UnixSocketConfig.PULSE_SERVER_PATH)
                     )
             );
+        } else if (audioDriver.equals("directaudio")) {
+            // Native AAudio via winedirectaudio.drv: no host audio server and no ALSA/Pulse socket — the
+            // guest reaches AAudio directly and the unixlib reads BANNER_AUDIO_DIRECT_* from the env at
+            // stream open. Resolve the cog preset to concrete env here (LOW_LATENCY + a real per-preset
+            // buffer) so the menu actually controls the driver. The Wine "Audio" registry driver is set
+            // by changeWineAudioDriver(); route changes are handled inside the driver.
+            overlayDirectAudioDriver();   // ensure a supported layer (any 11.0-x / 10.0-4) has the bundled driver before the guest loads it
+            applyDirectAudioConfig(envVars);
         }
 
         // Turnip TU_DEBUG composition (per-container + per-game). Runs AFTER every env source is
@@ -3330,6 +4772,29 @@ public class XServerDisplayActivity extends AppCompatActivity {
              // Cleanup moved to onCreate
         }
 
+        // Manual per-device slot overrides (in-game Players sub-tab), per-container — pushed BEFORE
+        // pre-assignment so launch-time slotting honors the user's pins/ignores first (a pinned pad
+        // claims its exact player slot; an ignored device never takes one). Resolve shortcut-override
+        // -else-container, the same owner discipline as the vibration/gyro tuning.
+        winHandler.setManualSlotOverrides(parseSlotOverrides(resolvedControllerSlotOverridesJson()));
+
+        // Pre-assign any controllers that are already connected, BEFORE Wine boots. This opens
+        // their slot rings up front so the guest sees them from its first device enumeration
+        // instead of only after the first input event. The fake-input path was set in onCreate
+        // (setFakeInputPath), and the launcher component builds FAKE_EVDEV_MEMFD_PATHS during
+        // startEnvironmentComponents below, so this must sit here — after the path is known and
+        // before the guest starts reading the rings.
+        winHandler.preAssignConnectedControllers();
+
+        // Pre-launch: pull the freshest GOG cloud saves INTO the prefix before the guest boots, so the
+        // game reads current progress (Galaxy-parity download-on-launch). We're on the launch worker
+        // thread here (not main), so this can block briefly — which naturally GATES the guest start
+        // below until the pull finishes. Bounded + best-effort: offline / slow / no-cloud-support just
+        // logs and launches with local saves; newest-wins ensures a newer LOCAL save is never
+        // overwritten by an older cloud copy (e.g. a save made offline since the last upload). No-op
+        // for non-GOG games and when the download toggle is off.
+        autoDownloadGogSavesBlocking();
+
         // Start all environment components (XServer, Audio, Wine, etc.)
         preloaderDialog.step(4, "Launching Windows…");
         environment.startEnvironmentComponents();
@@ -3371,6 +4836,24 @@ public class XServerDisplayActivity extends AppCompatActivity {
         FrameLayout rootView = findViewById(R.id.FLXServerDisplay);
         xServerView = new XServerView(this, xServer);
         String rendererType = container != null ? resolvedRenderer() : "vulkan";
+        // Native Rendering now routes to the hardened SurfaceFlinger (ASR) renderer instead of the
+        // leaner inline Vulkan FLIP scanout. ASR carries the full GN #1582/#1620 hardening the FLIP
+        // path lacks: acquire-fence wait + BGRA->RGBA colour correction + release-fence recycling
+        // (OnComplete) + ordered shutdown (anti-ANR) + reparent-to-null layer-leak guard. Reroute a
+        // Vulkan container to ASR when Native Rendering is on, no compositor-bound preset upscaler is
+        // active (>=3 lives in the compositor pass ASR bypasses), Colors=RGBA (swapRB) is off (the
+        // FLIP path's swapRB fallback is preserved as-is for now), and ASR is available (API 29+). If
+        // ASR is unsupported we fall through to the old Vulkan FLIP native path (nativeOn) below.
+        // The user-facing "Native backend" pref gates the reroute: "auto"/"asr" reroute (as above),
+        // while "flip" opts out and keeps the leaner Vulkan FLIP direct-scanout path.
+        if ("vulkan".equalsIgnoreCase(rendererType)
+                && resolvedRendererNative()
+                && resolveScalingMode() < 3
+                && !resolvedRendererSwapRB()
+                && !"flip".equalsIgnoreCase(resolvedNativeBackend())
+                && com.winlator.star.renderer.ASurfaceRenderer.isSupported()) {
+            rendererType = "surfaceflinger";
+        }
         // SurfaceFlinger (ASR) requires API 29+; fall back to Vulkan if unsupported.
         if ("surfaceflinger".equalsIgnoreCase(rendererType)
                 && !com.winlator.star.renderer.ASurfaceRenderer.isSupported()) {
@@ -3393,6 +4876,16 @@ public class XServerDisplayActivity extends AppCompatActivity {
                 () -> com.winlator.star.perf.PerfPriority.INSTANCE.boost(GuestProgramLauncherComponent.getPid()), 5000);
         }
 
+        // No-root Samsung Galaxy Performance SDK: load and apply this container's saved power
+        // profile for the session (dormant off Samsung / without the bundled SDK jar).
+        if (container != null) {
+            com.winlator.star.perf.galaxy.GalaxyPerfManager.start(container.getRootDir());
+        }
+
+        // Cross-vendor "a game is running" signal -> lets each OEM's own game-mode booster engage
+        // (OnePlus/OPPO/Red Magic/Xiaomi/Pixel/...). No-op below Android 13. No jar, no root.
+        com.winlator.star.perf.GameModeSignal.enterGameplay(this);
+
         // Standalone FPS limiter (guest-side, via the X11 Present extension): apply the resolved
         // per-game/container value up front, independent of the frame-gen engine. The in-game toggle
         // (onFpsLimitChange) updates it live afterwards.
@@ -3406,6 +4899,26 @@ public class XServerDisplayActivity extends AppCompatActivity {
         if (useVulkan && renderer instanceof com.winlator.star.renderer.vulkan.VulkanRenderer) {
             com.winlator.star.renderer.vulkan.VulkanRenderer vkRenderer =
                 (com.winlator.star.renderer.vulkan.VulkanRenderer) renderer;
+            // Compositor (present-layer) Vulkan driver. "system"/empty => leave driverPath null so
+            // nativeInit falls back to the system libvulkan (the safe default). An installed Turnip =>
+            // point the compositor at it. Vulkan-renderer only (SurfaceFlinger/OpenGL composite through
+            // the system path and have no ICD to swap). MUST run before the async surface nativeInit.
+            if (rendererDriverId != null && !rendererDriverId.isEmpty()
+                    && !rendererDriverId.equalsIgnoreCase("system")) {
+                try {
+                    AdrenotoolsManager adm = new AdrenotoolsManager(this);
+                    if (adm.enumarateInstalledDrivers().contains(rendererDriverId)) {
+                        String rp = adm.getDriverPath(rendererDriverId);
+                        String rl = adm.getLibraryName(rendererDriverId);
+                        if (rl != null && !rl.isEmpty()) {
+                            vkRenderer.setDriverInfo(rp, rl, getApplicationInfo().nativeLibraryDir);
+                            Log.d("RendererDriver", "compositor driver = " + rendererDriverId + " (" + rl + ")");
+                        }
+                    }
+                } catch (Exception e) {
+                    Log.w("RendererDriver", "failed to apply renderer driver '" + rendererDriverId + "', staying on system", e);
+                }
+            }
             // Present mode (with the mailbox-while-FG override) AND the drawer's live selector seed both
             // flow through the single choke point applyEffectivePresentMode() — see that method.
             applyEffectivePresentMode();
@@ -3424,16 +4937,21 @@ public class XServerDisplayActivity extends AppCompatActivity {
             // Supersampling: when the launch resolution was scaled above display res (see onCreate),
             // run the compositor's quality Lanczos downscale. No-op when render scale is Off.
             vkRenderer.setHqDownscale(hqDownscale);
-            // Composable CAS / fake-HDR + real upscaler sharpness — drawer-only / session-live,
-            // default off (sharpness defaults to the legacy 0.25 RCAS stops == slider 75). Seed
-            // the renderer and mirror the defaults into the drawer state.
-            vkRenderer.setUpscaleSharpness(75);
-            vkRenderer.setCas(false, 60);
-            vkRenderer.setHdr(false);
-            XServerDialogState.INSTANCE.setUpscaleSharpness(75);
-            XServerDialogState.INSTANCE.setCasEnabled(false);
-            XServerDialogState.INSTANCE.setCasSharpness(60);
-            XServerDialogState.INSTANCE.setHdrVkEnabled(false);
+            // Composable CAS / fake-HDR + real upscaler sharpness — remembered PER GAME (shortcut
+            // override, else container) so an in-game change survives relaunch (#382). Defaults match
+            // the legacy seed (sharpness 75 == 0.25 RCAS stops, CAS off @60, HDR off), so first launch
+            // with no saved value is byte-identical. Seed the renderer AND mirror into the drawer state.
+            int vkUpscaleSharpness = resolveExtraInt("upscaleSharpness", 75);
+            boolean vkCasEnabled = resolveExtraBool("casEnabled", false);
+            int vkCasSharpness = resolveExtraInt("casSharpness", 60);
+            boolean vkHdrEnabled = resolveExtraBool("hdrEnabled", false);
+            vkRenderer.setUpscaleSharpness(vkUpscaleSharpness);
+            vkRenderer.setCas(vkCasEnabled, vkCasSharpness);
+            vkRenderer.setHdr(vkHdrEnabled);
+            XServerDialogState.INSTANCE.setUpscaleSharpness(vkUpscaleSharpness);
+            XServerDialogState.INSTANCE.setCasEnabled(vkCasEnabled);
+            XServerDialogState.INSTANCE.setCasSharpness(vkCasSharpness);
+            XServerDialogState.INSTANCE.setHdrVkEnabled(vkHdrEnabled);
             // Phase 2 screen effects (GL parity) — drawer-only / session-live, default
             // off / neutral grade. Seed the renderer and mirror into the drawer state.
             vkRenderer.setScreenEffects(0f, 0f, 1.0f, false, false, false, false);
@@ -3507,6 +5025,12 @@ public class XServerDisplayActivity extends AppCompatActivity {
             // of swapRB. Default TRUE = correct colours.
             asr.setSfCompatMode(resolvedSfCompatMode());
             asr.setHudFrameTick(this::driveHudFrameTick);
+            // ASR IS the native/passthrough path (a per-window SurfaceControl SurfaceFlinger composites);
+            // there is no non-native mode to switch to, and the renderer can't be swapped mid-session. So
+            // reflect Native Rendering as ON and hide the in-game live toggle (turning it "off" would need
+            // a renderer re-init) — changing it is a container setting + relaunch, like any renderer choice.
+            XServerDrawerState.INSTANCE.setNativeRenderingEnabled(true);
+            XServerDrawerState.INSTANCE.setNativeRenderingSupported(false);
         }
 
         if (shortcut != null) {
@@ -3515,6 +5039,197 @@ public class XServerDisplayActivity extends AppCompatActivity {
 
         xServer.setRenderer(renderer);
         rootView.addView(xServerView);
+
+        // Version A: watch for an external (TV) display and reparent the game onto it, using the
+        // handheld as the controller. The listener updates the in-game TV tab + raises Compose toasts.
+        // Gated behind FeatureFlags.TV_OUTPUT_ENABLED — while off, none of this is constructed or
+        // started, so a TV/DeX display never triggers an auto-swap and the in-game TV tab stays hidden
+        // (tvConnected / castSupported are left false). All external call sites null-guard the
+        // controller / caster, so leaving them null is safe. See issue #339.
+        if (com.winlator.star.FeatureFlags.TV_OUTPUT_ENABLED) {
+        com.winlator.star.display.ExternalDisplayController.Listener tvListener =
+                new com.winlator.star.display.ExternalDisplayController.Listener() {
+                    @Override public void onTvConnectedChanged(boolean connected, String displayName) {
+                        XServerDrawerState.INSTANCE.setTvConnected(connected);
+                        XServerDrawerState.INSTANCE.setTvDisplayName(displayName != null ? displayName : "");
+                        // Populate the TV tab's display-mode picker + HDR readout from the display.
+                        if (connected && externalDisplayController != null) {
+                            java.util.List<XServerDrawerState.TvDisplayMode> ms = new java.util.ArrayList<>();
+                            for (android.view.Display.Mode m : externalDisplayController.getSupportedModes()) {
+                                String label = m.getPhysicalWidth() + "×" + m.getPhysicalHeight()
+                                        + " @ " + Math.round(m.getRefreshRate()) + "Hz";
+                                ms.add(new XServerDrawerState.TvDisplayMode(m.getModeId(), label));
+                            }
+                            XServerDrawerState.INSTANCE.setTvModes(ms);
+                            XServerDrawerState.INSTANCE.setTvCurrentModeId(externalDisplayController.getActiveModeId());
+                            XServerDrawerState.INSTANCE.setTvHdr(externalDisplayController.getHdrSummary());
+                        } else {
+                            XServerDrawerState.INSTANCE.setTvModes(java.util.Collections.emptyList());
+                            XServerDrawerState.INSTANCE.setTvHdr("");
+                        }
+                        // When auto-switch is off we only notify and wait for the user to open the TV tab.
+                        if (connected && externalDisplayController != null && !externalDisplayController.isAutoSwap()) {
+                            XServerDialogState.INSTANCE.showInfoToast(
+                                    "EXTERNAL DISPLAY DETECTED", "TV",
+                                    "Open the TV tab in the menu to switch displays");
+                        }
+                    }
+                    @Override public void onGameOnExternalChanged(boolean onExternal) {
+                        XServerDrawerState.INSTANCE.setTvGameOnExternal(onExternal);
+                        // Show the on-handheld "playing on external display" indicator (the phone would
+                        // otherwise be a black screen once the game surface moves to the TV).
+                        XServerDialogState.INSTANCE.setPlayingOnExternal(onExternal);
+                        applyHandheldDim(); // dim the phone when the game is on the TV (restore when back)
+                        if (onExternal) {
+                            XServerDialogState.INSTANCE.showInfoToast(
+                                    "GAME MOVED TO TV", "now", "Use the handheld as the controller");
+                        } else {
+                            XServerDialogState.INSTANCE.showInfoToast(
+                                    "GAME ON HANDHELD", "now", "Returned to the phone screen");
+                        }
+                    }
+                };
+        externalDisplayController = new com.winlator.star.display.ExternalDisplayController(this, xServerView, rootView, tvListener);
+
+        // Seed the master "Play on TV" / "Auto-switch" state from the container BEFORE start(): start()
+        // runs the first update() and would auto-swap immediately, so the persisted off-switch has to be
+        // applied first (issue #339 — the toggle previously reset to ON every launch).
+        try {
+            boolean tvEnabled = !"0".equals(container.getExtra("tv.enabled", "1"));
+            boolean tvAutoSwap = !"0".equals(container.getExtra("tv.autoSwap", "1"));
+            externalDisplayController.setEnabled(tvEnabled);
+            externalDisplayController.setAutoSwap(tvAutoSwap);
+            XServerDrawerState.INSTANCE.setTvPlayOnTv(tvEnabled);
+            XServerDrawerState.INSTANCE.setTvAutoSwap(tvAutoSwap);
+        } catch (Exception ignored) {}
+
+        externalDisplayController.start();
+
+        // Wire the in-game TV tab controls to the controller. Both master switches persist per-container.
+        XServerDrawerState.INSTANCE.onTvPlayOnTvChange = (b) -> {
+            externalDisplayController.setEnabled(b);
+            container.putExtra("tv.enabled", b ? "1" : "0");
+            container.saveData();
+        };
+        XServerDrawerState.INSTANCE.onTvAutoSwapChange = (b) -> {
+            externalDisplayController.setAutoSwap(b);
+            container.putExtra("tv.autoSwap", b ? "1" : "0");
+            container.saveData();
+        };
+        XServerDrawerState.INSTANCE.onMoveToTv = () -> externalDisplayController.requestMoveToExternal();
+        XServerDrawerState.INSTANCE.onBringBackFromTv = () -> externalDisplayController.bringBackToHandheld();
+        XServerDrawerState.INSTANCE.onTvModeChange = (id) -> externalDisplayController.setPreferredModeId(id);
+
+        // TV Options v2: seed from the container (TV settings are display-scoped, stored as tv.* extras).
+        try {
+            int tvOs = Integer.parseInt(container.getExtra("tv.overscan", "0"));
+            XServerDrawerState.INSTANCE.setTvOverscan(tvOs);
+            externalDisplayController.setOverscanPercent(tvOs);
+            XServerDrawerState.INSTANCE.setTvDimHandheld(!container.getExtra("tv.dim", "1").equals("0"));
+            XServerDrawerState.INSTANCE.setTvAudioOut(Integer.parseInt(container.getExtra("tv.audioOut", "0")));
+            XServerDrawerState.INSTANCE.setTvRenderRes(Integer.parseInt(container.getExtra("tv.renderRes", "0")));
+        } catch (Exception ignored) {}
+
+        XServerDrawerState.INSTANCE.onTvOverscanChange = (p) -> {
+            externalDisplayController.setOverscanPercent(p);
+            container.putExtra("tv.overscan", String.valueOf(p));
+            container.saveData();
+        };
+        XServerDrawerState.INSTANCE.onTvDimHandheldChange = (b) -> {
+            container.putExtra("tv.dim", b ? "1" : "0");
+            container.saveData();
+            applyHandheldDim();
+        };
+        XServerDrawerState.INSTANCE.onTvAudioOutChange = (i) -> {
+            container.putExtra("tv.audioOut", String.valueOf(i));
+            container.saveData();
+            applyTvAudioRoute(i);
+        };
+        XServerDrawerState.INSTANCE.onTvRenderResChange = (i) -> {
+            // Stored only — the render resolution is fixed at X-server bring-up, so it applies next launch.
+            container.putExtra("tv.renderRes", String.valueOf(i));
+            container.saveData();
+        };
+
+        // Wireless cast: in-app device picker. We discover Google Cast devices ourselves (mDNS) and show
+        // them in our own dialog (Refresh + per-device Connecting/Connected status + Disconnect), instead
+        // of bouncing to the Android cast screen. NOTE: this build ships the PICKER — the live game
+        // streaming pipeline is the next increment, so "connect" verifies the device is reachable.
+        XServerDrawerState.INSTANCE.setCastSupported(true);
+        castDiscovery = new com.winlator.star.cast.CastDiscovery(this, devices -> runOnUiThread(() -> {
+            XServerDialogState.INSTANCE.setCastDevices(devices);
+            XServerDialogState.INSTANCE.setCastScanning(false);
+        }));
+        XServerDrawerState.INSTANCE.onOpenCastPicker = () -> {
+            // Keep the connected state if a cast is active — only clear when idle (not casting).
+            if (XServerDialogState.INSTANCE.getCastStatus().getValue() == XServerDialogState.CastStatus.IDLE) {
+                XServerDialogState.INSTANCE.setCastTargetName("");
+                XServerDialogState.INSTANCE.setCastStatusDetail("");
+            }
+            XServerDialogState.INSTANCE.setCastScanning(true);
+            castDiscovery.refresh();
+            XServerDialogState.INSTANCE.show(XServerDialogState.ActiveDialog.CAST);
+        };
+        XServerDialogState.INSTANCE.onCastRefresh = () -> {
+            XServerDialogState.INSTANCE.setCastScanning(true);
+            castDiscovery.refresh();
+        };
+        // Part 2 (Step 1): the game→VirtualDisplay→H.264 capture engine. Reports state to the dialog.
+        gameCaster = new com.winlator.star.cast.GameCaster(this, xServerView, rootView, (castState, detail) -> {
+            switch (castState) {
+                case "STREAMING":
+                    XServerDialogState.INSTANCE.setCastStatus(XServerDialogState.CastStatus.CONNECTED);
+                    XServerDialogState.INSTANCE.setCastStatusDetail("Capturing the game (test recording). " +
+                            "TV playback is the next update — tap Disconnect to stop & save.");
+                    break;
+                case "FAILED":
+                    XServerDialogState.INSTANCE.setCastStatus(XServerDialogState.CastStatus.FAILED);
+                    XServerDialogState.INSTANCE.setCastStatusDetail(detail);
+                    if (externalDisplayController != null) externalDisplayController.resumeAfterCast();
+                    break;
+                default:
+                    XServerDialogState.INSTANCE.setCastStatus(XServerDialogState.CastStatus.IDLE);
+                    XServerDialogState.INSTANCE.setCastStatusDetail(detail);
+            }
+        });
+        XServerDialogState.INSTANCE.onCastConnect = (device) -> {
+            XServerDialogState.INSTANCE.setCastTargetName(device.name);
+            XServerDialogState.INSTANCE.setCastStatus(XServerDialogState.CastStatus.CONNECTING);
+            XServerDialogState.INSTANCE.setCastStatusDetail("Starting the live stream…");
+            // Step 2b: encode the game live into HLS segments, host them, and cast the live playlist.
+            if (externalDisplayController != null) externalDisplayController.pauseForCast();
+            castSegmenter = new com.winlator.star.cast.TsSegmenter();
+            boolean ok = gameCaster.startStream(1280, 720, 6_000_000, castSegmenter);
+            if (!ok) {
+                if (externalDisplayController != null) externalDisplayController.resumeAfterCast();
+                return;
+            }
+            startLiveCast(device, castSegmenter);
+        };
+        XServerDialogState.INSTANCE.onCastDisconnect = () -> stopCast();
+        } // end FeatureFlags.TV_OUTPUT_ENABLED
+
+        // Audio-tab callbacks — independent of the TV feature, so wired unconditionally. Routed to the
+        // engine that actually launched: PulseAudio recreates its sink; ALSA re-pushes its native config
+        // (which bumps the generation so live streams reopen). The drawer shows this label at the top.
+        XServerDrawerState.INSTANCE.audioDriverLabel = audioDriverLabel(audioDriver);
+        XServerDrawerState.INSTANCE.audioDriverId = audioDriver;   // "alsa"/"pulseaudio" → per-engine prefs file
+        // Reset audio = live route recovery only (no persist). Reapply = user saved in-game → apply live
+        // AND persist to THIS shortcut's env (per-game; never the container/other games).
+        XServerDrawerState.INSTANCE.onResetAudio = () -> {
+            if ("alsa".equals(audioDriver)) applyAlsaAudioConfig();
+            else if ("pulseaudio".equals(audioDriver)) resetGuestAudioForRouteChange();
+            // directaudio: route recovery is handled inside winedirectaudio.drv (AAudio disconnect ->
+            // reopen); no host-side action.
+        };
+        XServerDrawerState.INSTANCE.onReapplyAudio = () -> {
+            if ("alsa".equals(audioDriver)) applyAlsaAudioConfig();
+            else if ("pulseaudio".equals(audioDriver)) resetGuestAudioForRouteChange();
+            // directaudio applies LIVE by writing its mailbox file, which the running winedirectaudio.drv
+            // watcher picks up and reopens the stream from (no relaunch); it also persists below.
+            else if ("directaudio".equals(audioDriver)) writeDirectAudioRuntime();
+            persistAudioToShortcut(audioDriver);
+        };
 
         globalCursorSpeed = preferences.getFloat("cursor_speed", 1.0f);
         touchpadView = new TouchpadView(this, xServer, timeoutHandler, hideControlsRunnable);
@@ -3556,33 +5271,10 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // container (and the live overlay below) are configured for the GameHub HUD.
         if (container != null) XServerDrawerState.INSTANCE.setFpsConfig(resolvedFPSCounterConfig());
 
+        // Container-gated launch build. The live in-game "Show HUD" toggle can also drive this later
+        // (see onFpsConfigApply -> ensureHudBuilt), so the build body lives in one idempotent method.
         if (container != null && container.isShowFPS()) {
-            String fpsConfigString = resolvedFPSCounterConfig();
-            com.winlator.star.core.KeyValueSet fpsConfig = new com.winlator.star.core.KeyValueSet(fpsConfigString);
-            fpsHudHorizontal = fpsConfig.get("hudMode", "vertical").equals("horizontal");
-            // Master toggle: the HUD is still BUILT (so it can be revealed live), but stays GONE while off.
-            hudCounterEnabled = fpsConfig.get("hudEnabled", "1").equals("1");
-            String hudStyle = fpsConfig.get("hudStyle", "fusion");
-
-            String resolvedR = resolvedRenderer();
-            String rendererMode = "vulkan".equals(resolvedR) ? "Vulkan"
-                : "surfaceflinger".equals(resolvedR) ? "SurfaceFlinger" : "OpenGL";
-            String dxName = dxwrapper.contains("dxvk") ? "DXVK" : dxwrapper.contains("vegas") ? "VEGAS" : "WineD3D";
-            hudRendererLabel = rendererMode + " | " + dxName;
-            hudEngineShort = dxName;
-
-            // Build whichever HUD the container selected. The other styles are created on demand
-            // if the user swaps hudStyle in the in-game drawer (see buildPerfHud/buildClassicHud/
-            // buildGameNativeHud).
-            if (hudStyle.equals("gamehub")) buildPerfHud(fpsConfigString);
-            else if (hudStyle.equals("gamenative")) buildGameNativeHud(fpsConfigString);
-            else if (hudStyle.equals("fusion")) buildFusionHud(fpsConfigString);
-            else buildClassicHud(fpsConfigString);
-
-            // The label above is the configured D3D9/10/11 wrapper; probe what the game actually
-            // loads and upgrade it to the real API — "D3D12 · VKD3D" for D3D12 titles, "D3D11 · DXVK"
-            // etc. for the wrapped path, or "Vulkan"/"Zink"/"OpenGL" for native-API games.
-            startDxApiDetection(rendererMode, dxName);
+            ensureHudBuilt();
         }
 
         // Resolve the fullscreen aspect-ratio mode (#71): a per-game shortcut override wins, else the
@@ -3619,6 +5311,10 @@ public class XServerDisplayActivity extends AppCompatActivity {
 
         // Initialize inline tab states (Graphics, Controls, HUD)
         initInlineTabStates(renderer);
+
+        // Epic Friends Overlay pill — added last so it sits above the HUD/controls (only for an Epic
+        // shortcut with the overlay toggle on).
+        attachEpicOverlayPill();
     }
 
     // Apply a fullscreen aspect-ratio mode (#71) live and remember it PER GAME: the per-game shortcut
@@ -3664,6 +5360,48 @@ public class XServerDisplayActivity extends AppCompatActivity {
             } catch (NumberFormatException ignored) {}
         }
         return container != null && container.getRendererFilterMode() == 2 ? 2 : 1;
+    }
+
+    // --- Generic drawer graphics quick-settings persistence (per game) -------------------------
+    // The upscale/CAS/HDR sharpness sliders + SGSR/deband toggles mirror a live renderer config, so
+    // an in-game change must stick per game the same way the scaling-mode picker does (#scaling-persist).
+    // These follow persistScalingMode/resolveScalingMode exactly: write to the shortcut if launched from
+    // one, else the container, then saveData(); read the shortcut override first, else the container,
+    // else the supplied default. Booleans persist as "1"/"0" and parse either "1" or "true" on read.
+    private void persistExtraInt(String key, int value) {
+        if (shortcut != null) {
+            shortcut.putExtra(key, String.valueOf(value));
+            shortcut.saveData();
+        } else if (container != null) {
+            container.putExtra(key, String.valueOf(value));
+            container.saveData();
+        }
+    }
+
+    private void persistExtraBool(String key, boolean value) {
+        if (shortcut != null) {
+            shortcut.putExtra(key, value ? "1" : "0");
+            shortcut.saveData();
+        } else if (container != null) {
+            container.putExtra(key, value ? "1" : "0");
+            container.saveData();
+        }
+    }
+
+    private int resolveExtraInt(String key, int def) {
+        String v = shortcut != null ? shortcut.getExtra(key) : null;
+        if ((v == null || v.isEmpty()) && container != null) v = container.getExtra(key);
+        if (v != null && !v.isEmpty()) {
+            try { return Integer.parseInt(v); } catch (NumberFormatException ignored) {}
+        }
+        return def;
+    }
+
+    private boolean resolveExtraBool(String key, boolean def) {
+        String v = shortcut != null ? shortcut.getExtra(key) : null;
+        if ((v == null || v.isEmpty()) && container != null) v = container.getExtra(key);
+        if (v != null && !v.isEmpty()) return v.equals("1") || v.equalsIgnoreCase("true");
+        return def;
     }
 
     // --- FPS / perf HUD position persistence (per game) ----------------------------------------
@@ -3723,6 +5461,8 @@ public class XServerDisplayActivity extends AppCompatActivity {
      *  repeated toast) when native is already off, since screen-effect sliders fire continuously. */
     private void disableNativeRenderingForPreset() {
         if (!XServerDrawerState.INSTANCE.getNativeRenderingEnabled()) return;
+        // ASR bypasses the compositor entirely and can't be switched to a preset mode live; leave it on.
+        if (xServerView.getRenderer() instanceof com.winlator.star.renderer.ASurfaceRenderer) return;
         HostRenderer r = xServerView.getRenderer();
         if (r instanceof com.winlator.star.renderer.vulkan.VulkanRenderer)
             ((com.winlator.star.renderer.vulkan.VulkanRenderer) r).setNativeMode(false);
@@ -3843,20 +5583,32 @@ public class XServerDisplayActivity extends AppCompatActivity {
             ds.onCasApply = (enabled, sharpness) -> {
                 if (enabled) disableNativeRenderingForPreset();
                 vkr.setCas(enabled, sharpness);
+                persistExtraBool("casEnabled", enabled);   // remember per game (#382)
+                persistExtraInt("casSharpness", sharpness);
             };
             ds.onHdrApply = (enabled) -> {
                 if (enabled) disableNativeRenderingForPreset();
                 vkr.setHdr(enabled);
+                persistExtraBool("hdrEnabled", enabled);    // remember per game (#382)
             };
             // Terminal debanding (TPDF dither) — runs in the compositor post pass, so enabling
-            // it (like CAS/HDR) turns Native Rendering off. Default off; seed the drawer state.
-            ds.setDebandEnabled(false);
-            ds.setDebandStrength(100);
+            // it (like CAS/HDR) turns Native Rendering off. Remembered per game (#382); defaults
+            // off @100 so first launch is unchanged. Seed the renderer too so a saved value applies.
+            boolean vkDebandEnabled = resolveExtraBool("debandEnabled", false);
+            int vkDebandStrength = resolveExtraInt("debandStrength", 100);
+            ds.setDebandEnabled(vkDebandEnabled);
+            ds.setDebandStrength(vkDebandStrength);
+            if (vkDebandEnabled) vkr.setDeband(true, vkDebandStrength);
             ds.onDebandApply = (enabled, strength) -> {
                 if (enabled) disableNativeRenderingForPreset();
                 vkr.setDeband(enabled, strength);
+                persistExtraBool("debandEnabled", enabled); // remember per game (#382)
+                persistExtraInt("debandStrength", strength);
             };
-            ds.onUpscaleSharpnessApply = (sharpness) -> vkr.setUpscaleSharpness(sharpness);
+            ds.onUpscaleSharpnessApply = (sharpness) -> {
+                vkr.setUpscaleSharpness(sharpness);
+                persistExtraInt("upscaleSharpness", sharpness); // remember per game (#382)
+            };
             ds.onVulkanScreenEffectsApply = (brightness, contrast, gamma, fxaa, toon, crt, ntsc) -> {
                 // color grade neutral = brightness 0 / contrast 0 / gamma 1.0
                 if (fxaa || toon || crt || ntsc || brightness != 0f || contrast != 0f || gamma != 1.0f)
@@ -3915,9 +5667,13 @@ public class XServerDisplayActivity extends AppCompatActivity {
         ds.onInputControlsConfirm = (profileIndex, showTouchscreen, timeout, haptics) -> {
             ds.setSelectedProfileIdx(profileIndex);
             inputControlsView.setShowTouchscreenControls(showTouchscreen);
+            userWantsControlsShown = showTouchscreen;   // #333: remember the user's manual choice
             SharedPreferences.Editor editor = preferences.edit();
             editor.putBoolean("touchscreen_timeout_enabled", timeout);
             editor.putBoolean("touchscreen_haptics_enabled", haptics);
+            // #338: remember an explicit "-- Disabled --" choice (profileIndex 0) so the #333 smart
+            // default never re-seeds the phantom pad on later launches; picking a real profile clears it.
+            editor.putBoolean("smart_default_touch_optout", profileIndex == 0);
             editor.apply();
             if (timeout) startTouchscreenTimeout();
             else touchpadView.setOnTouchListener(null);
@@ -3956,6 +5712,15 @@ public class XServerDisplayActivity extends AppCompatActivity {
             int vibMode = resolvedVibrationMode();
             int vibIntensity = resolvedVibrationIntensity();
             winHandler.setVibrationTuning(vibMode, vibIntensity);
+
+            // On-screen-controls priority (KEEP/YIELD/SHARE), same seed-after-container discipline as the
+            // vibration tuning above: resolve per-game override else the container value and push it in.
+            // #333: when auto-hide is on, unpinned pads take over the on-screen pad's slot (YIELD
+            // semantics) so a connecting controller becomes the touch player and the overlay can hide.
+            // This is also how "auto-hide wins over SHARE/KEEP" is realized. Pinned pads are still
+            // honored (handleOnScreenModeForNewPad skips explicit pins).
+            winHandler.setOnScreenControllerMode(resolvedAutoHideControlsOnPad()
+                    ? Container.ON_SCREEN_MODE_YIELD : resolvedOnScreenControllerMode());
             ds.setVibrationMode(vibMode);
             ds.setVibrationIntensity(vibIntensity);
             ds.onVibrationModeChanged = (mode) -> {
@@ -3978,6 +5743,44 @@ public class XServerDisplayActivity extends AppCompatActivity {
                     container.saveData();
                 }
             };
+
+            // Player Slots (manual per-device slot assignment) — Controls > Players sub-tab. Seeds the
+            // drawer list from WinHandler's live device/slot state, then wires the refresh + change
+            // callbacks. A change is applied LIVE (WinHandler.setDeviceSlotAssignment: physical devices
+            // are torn down + re-seated so the guest sees the move; OSC softReleases and only its slot
+            // index changes) and the FULL override map is persisted per-container (shortcut-override
+            // -else-container, same owner as the vibration/gyro writes above), so it survives relaunch.
+            final Runnable refreshPlayerSlots = () -> ds.setPlayerSlots(buildPlayerSlotRows());
+            refreshPlayerSlots.run();
+            ds.onPlayerSlotsRefresh = refreshPlayerSlots;
+            ds.onPlayerSlotChanged = (descriptor, desiredSlot) -> {
+                winHandler.setDeviceSlotAssignment(descriptor, desiredSlot);
+                persistControllerSlotOverridesJson(buildSlotOverridesJson());
+                refreshPlayerSlots.run();
+                // Manual reassignment → status toast (may be a "PLAYER n · SHARED" state).
+                showControllerStatusToast("reassign", null);
+                // #333: a manual slot change alters who owns the on-screen slot (e.g. pinning a pad to
+                // Player 2 = 2-player → restore the overlay; pinning to Player 1 = takeover → hide), so
+                // re-evaluate auto-hide live. Also makes Ignore↔Auto a clean connect/disconnect sim.
+                updateAutoHideForControllers();
+            };
+            ds.onResetInput = () -> {
+                winHandler.resetInputPipeline();
+                refreshPlayerSlots.run();
+                showControllerStatusToast("reset", null);
+                // #333: pipeline reset re-seats slots → re-evaluate auto-hide against the fresh state.
+                updateAutoHideForControllers();
+            };
+
+            // Hot-plug (add/remove/progressive-change) → status toast. WinHandler fires a plain callback
+            // on the main looper; we DEBOUNCE a burst (a fast unplug/replug, or a pad that fans out into
+            // several sibling sub-devices) into a single toast, keeping only the latest reason/descriptor.
+            winHandler.setControllerAssignmentListener((reason, descriptor) -> {
+                pendingToastReason = reason;
+                pendingToastDescriptor = descriptor;
+                controllerToastHandler.removeCallbacks(fireControllerToast);
+                controllerToastHandler.postDelayed(fireControllerToast, CONTROLLER_TOAST_DEBOUNCE_MS);
+            });
 
             // Gyro (motion aim) state — WinHandler holds the live values (already resolved at launch
             // from the shortcut/container chain), so this seeds the drawer straight off it. Each
@@ -4120,14 +5923,20 @@ public class XServerDisplayActivity extends AppCompatActivity {
 
         ds.onInitGraphicsTab = () -> {};
 
-        // SGSR state
+        // SGSR state — the CAS-sharpen toggle + sharpness are remembered per game (#382); defaults
+        // (off @50) keep first launch unchanged. HDR presence stays derived from the live composer
+        // (GL HDR is not in this persistence pass — see follow-up note).
         HDREffect hdr = (HDREffect) glRenderer.getEffectComposer().getEffect(HDREffect.class);
-        ds.setSgsrEnabled(false);
-        ds.setSgsrSharpness(50);
+        boolean glSgsrEnabled = resolveExtraBool("sgsrEnabled", false);
+        int glSgsrSharpness = resolveExtraInt("sgsrSharpness", 50);
+        ds.setSgsrEnabled(glSgsrEnabled);
+        ds.setSgsrSharpness(glSgsrSharpness);
         ds.setHdrEnabled(hdr != null);
 
         ds.onSgsrUpdate = (enabled, sharpness, hdrEn) -> {
             if (glRenderer == null) return;
+            persistExtraBool("sgsrEnabled", enabled);   // remember per game (#382)
+            persistExtraInt("sgsrSharpness", sharpness);
             // Direction A: CAS sharpen / HDR are EffectComposer post passes that GL native bypasses.
             if (enabled || hdrEn) disableNativeRenderingForPreset();
             com.winlator.star.renderer.effects.FSREffect cur = (com.winlator.star.renderer.effects.FSREffect) glRenderer.getEffectComposer().getEffect(com.winlator.star.renderer.effects.FSREffect.class);
@@ -4150,6 +5959,11 @@ public class XServerDisplayActivity extends AppCompatActivity {
                 glRenderer.getEffectComposer().addEffect(newHdr);
             }
         };
+        // Restore a persisted CAS-sharpen pass on relaunch (#382): replay the apply with the seeded
+        // values so the effect is actually live, not just shown in the drawer. hdrEn stays at the
+        // live composer state so this never toggles HDR. No-op when nothing was saved (default off).
+        if (glSgsrEnabled && ds.onSgsrUpdate != null)
+            ds.onSgsrUpdate.invoke(true, glSgsrSharpness, hdr != null);
 
         // GL "Scaling mode" (real SGSR / FSR1 spatial upscalers) — parity with the Vulkan
         // picker; drawer-only / session-live, default None. Seed the drawer state + a default
@@ -4160,9 +5974,10 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // Restore the per-game scaling mode (0-7) into the drawer picker + composer so an in-game
         // SGSR/FSR/etc. choice survives relaunch (not just the Linear/Nearest base filter).
         int glSeedMode = resolveScalingMode();
+        int glUpscaleSharpness = resolveExtraInt("glUpscaleSharpness", 75); // remembered per game (#382)
         ds.setGlUpscalerMode(glSeedMode);
-        ds.setGlUpscaleSharpness(75);
-        glRenderer.getEffectComposer().setUpscaler(glSeedMode, 0.75f);
+        ds.setGlUpscaleSharpness(glUpscaleSharpness);
+        glRenderer.getEffectComposer().setUpscaler(glSeedMode, glUpscaleSharpness / 100.0f);
         ds.onGlUpscalerApply = (mode) -> {
             if (glRenderer == null) return;
             // Direction A: a spatial scaling mode lives in the EffectComposer low-res stage, which
@@ -4178,16 +5993,23 @@ public class XServerDisplayActivity extends AppCompatActivity {
         ds.onGlUpscaleSharpnessApply = (sharpness) -> {
             if (glRenderer == null) return;
             glRenderer.getEffectComposer().setUpscaleSharpness(sharpness / 100.0f);
+            persistExtraInt("glUpscaleSharpness", sharpness); // remember per game (#382)
         };
 
-        // GL terminal debanding (TPDF dither) — drawer-only / session-live, default off.
-        ds.setDebandEnabled(false);
-        ds.setDebandStrength(100);
+        // GL terminal debanding (TPDF dither) — remembered per game (#382); defaults off @100 so
+        // first launch is unchanged. Seed the composer too so a saved value applies on relaunch.
+        boolean glDebandEnabled = resolveExtraBool("debandEnabled", false);
+        int glDebandStrength = resolveExtraInt("debandStrength", 100);
+        ds.setDebandEnabled(glDebandEnabled);
+        ds.setDebandStrength(glDebandStrength);
+        if (glDebandEnabled) glRenderer.getEffectComposer().setDeband(true, glDebandStrength);
         ds.onDebandApply = (enabled, strength) -> {
             if (glRenderer == null) return;
             // Direction A: terminal debanding is a final EffectComposer pass that GL native bypasses.
             if (enabled) disableNativeRenderingForPreset();
             glRenderer.getEffectComposer().setDeband(enabled, strength);
+            persistExtraBool("debandEnabled", enabled); // remember per game (#382)
+            persistExtraInt("debandStrength", strength);
         };
 
         // NOTE: setupTmCallbacks() is intentionally called earlier (before the GL-only early
@@ -4246,9 +6068,13 @@ public class XServerDisplayActivity extends AppCompatActivity {
         ds.onInputControlsConfirm = (profileIndex, showTouchscreen, timeout, haptics) -> {
             ds.setSelectedProfileIdx(profileIndex);
             inputControlsView.setShowTouchscreenControls(showTouchscreen);
+            userWantsControlsShown = showTouchscreen;   // #333: remember the user's manual choice
             SharedPreferences.Editor editor = preferences.edit();
             editor.putBoolean("touchscreen_timeout_enabled", timeout);
             editor.putBoolean("touchscreen_haptics_enabled", haptics);
+            // #338: remember an explicit "-- Disabled --" choice (profileIndex 0) so the #333 smart
+            // default never re-seeds the phantom pad on later launches; picking a real profile clears it.
+            editor.putBoolean("smart_default_touch_optout", profileIndex == 0);
             editor.apply();
             if (timeout) startTouchscreenTimeout();
             else touchpadView.setOnTouchListener(null);
@@ -4291,6 +6117,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
         inputControlsView.setShowTouchscreenControls(true);
         inputControlsView.setEditorBackgroundVisible(false);
         inputControlsView.setEditMode(true);
+        controlsEditorOpen = true;   // #333: suspend auto-hide while editing controls
 
         FrameLayout container = findViewById(R.id.FLXServerDisplay);
         inGameControlsEditor = new InGameControlsEditor(
@@ -4307,6 +6134,8 @@ public class XServerDisplayActivity extends AppCompatActivity {
         inGameControlsEditor.dispose();
         inputControlsView.setEditorBackgroundVisible(true);
         inputControlsView.setEditMode(false);
+        controlsEditorOpen = false;   // #333: resume auto-hide after editing
+        updateAutoHideForControllers();
         if (inGameEditorPreviousProfile != null) showInputControls(inGameEditorPreviousProfile);
         else hideInputControls();
         inGameEditorPreviousProfile = null;
@@ -4331,6 +6160,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
 
         boolean isShowTouchscreenControls = preferences.getBoolean("show_touchscreen_controls_enabled", false); // default is false (hidden)
         inputControlsView.setShowTouchscreenControls(isShowTouchscreenControls);
+        userWantsControlsShown = isShowTouchscreenControls;   // #333: baseline for auto-hide restore
 
         boolean isTimeoutEnabled = preferences.getBoolean("touchscreen_timeout_enabled", false);
         boolean isHapticsEnabled = preferences.getBoolean("touchscreen_haptics_enabled", false);
@@ -4349,8 +6179,31 @@ public class XServerDisplayActivity extends AppCompatActivity {
             ControlsProfile profile = inputControlsManager.getProfiles().get(selectedProfileIndex);
             showInputControls(profile);
         } else {
-            // No profile selected, ensure the controls are hidden
-            hideInputControls();
+            // #333 smart default layout: a fresh user who hasn't picked a profile gets the bundled
+            // "Virtual Gamepad" touch layout so there's a working touch controller out of the box —
+            // but ONLY when auto-hide is on (new/opted-in containers), so existing setups with no
+            // profile are unchanged. The overlay then auto-hides once a controller takes over.
+            //
+            // #338: two suppressions so an explicit "Disabled" is honored and the phantom pad never
+            // fights a real one. (a) If the user has explicitly confirmed "-- Disabled --" in the
+            // controls dialog we persist an opt-out and never re-seed. (b) If a physical controller is
+            // already connected at launch, the out-of-box need ("a working touch controller") is
+            // already met — seeding a phantom pad here is unwanted AND grabs a player slot, which then
+            // defeats auto-hide's own same-slot rule (real pad on P1, phantom pad bumped to P2 reads as
+            // a second player, so the overlay is kept). Not seeding it removes the whole chain.
+            boolean smartDefaultOptOut = preferences.getBoolean("smart_default_touch_optout", false);
+            ControlsProfile defaultVg = (resolvedAutoHideControlsOnPad()
+                    && !smartDefaultOptOut
+                    && !hasConnectedGameController())
+                    ? findVirtualGamepadProfile() : null;
+            if (defaultVg != null) {
+                inputControlsView.setShowTouchscreenControls(true);
+                userWantsControlsShown = true;
+                showInputControls(defaultVg);
+            } else {
+                // No profile selected, ensure the controls are hidden
+                hideInputControls();
+            }
         }
 
         // Timeout logic should only apply if the controls are visible
@@ -4361,6 +6214,10 @@ public class XServerDisplayActivity extends AppCompatActivity {
         }
 
         Log.d("XServerDisplayActivity", "Input controls simulated confirmation executed.");
+
+        // #333: apply auto-hide at launch — a pad connected before/at launch should already have the
+        // overlay hidden, and the pad seated on the on-screen slot (YIELD pushed above).
+        updateAutoHideForControllers();
     }
 
     private void startTouchscreenTimeout() {
@@ -4649,34 +6506,34 @@ public class XServerDisplayActivity extends AppCompatActivity {
     }
 
     // --- Environment Variable Setup ---
+    // 2.8.1 structure restored: WRAPPER_VK_VERSION = chosenMinor + probePatch,
+    // unconditionally. The clamp introduced between 2.9 and 2.9.1 (WinNative PR
+    // #669) compared the user's chosen minor against the app-process probe's —
+    // but on a wrapper graphics driver the probe measures the SYSTEM ICD, not
+    // the Turnip the guest actually wraps. On low-tier Adreno (e.g. 610) the
+    // system blob reports Vulkan 1.0/1.1, so min(chosen, probe) collapsed
+    // WRAPPER_VK_VERSION below every DXVK's floor ("Device does not support
+    // Vulkan 1.3" on DXVK 2.x; "Skipping Vulkan 1.0 adapter" on Sarek) even
+    // though the guest-side wrapper enumerated the inner Turnip fine. The
+    // probe supplies ONLY the patch digit here, as in 2.8.1.
+    // The safe split fallback is retained so a non-dotted probe result
+    // ("Unknown") degrades to patch "0" instead of crashing the launch.
     String vulkanVersion = graphicsDriverConfig.get("vulkanVersion");
-    if (vulkanVersion == null) vulkanVersion = "1.4";
+    if (vulkanVersion == null) vulkanVersion = "1.3";
     String driverVkVersion = GPUInformation.getVulkanVersion(adrenoToolsDriverId, this);
-    // The probe can return a short or non-dotted string for a driver it can't describe; the old
-    // direct-ICD turnip used to be special-cased here. Fall back rather than crash the launch on
-    // split(".")[2] — 1.3's patch level is the safe floor and the clamp below still applies.
     String[] driverVkParts = (driverVkVersion != null && driverVkVersion.split("\\.").length >= 3)
         ? driverVkVersion.split("\\.")
         : new String[] { "1", "3", "0" };
     String vulkanVersionPatch = driverVkParts[2];
-    // Never advertise a Vulkan minor the driver does not implement. We append the DRIVER's patch
-    // level to the USER's chosen minor, so an unclamped "1.4" pick on a 1.3.289 driver would export
-    // WRAPPER_VK_VERSION=1.4.289 and lie to DXVK/VKD3D about what the ICD actually supports.
-    // Ported from WinNative PR #669.
-    try {
-        int driverMinor = Integer.parseInt(driverVkParts[1]);
-        int chosenMinor = Integer.parseInt(vulkanVersion.split("\\.")[1]);
-        if (driverMinor < chosenMinor) {
-            Log.i("XServerVulkan", "Clamping Vulkan " + vulkanVersion + " to driver-supported "
-                + driverVkParts[0] + "." + driverVkParts[1]);
-            vulkanVersion = driverVkParts[0] + "." + driverVkParts[1];
-        }
-    } catch (NumberFormatException | ArrayIndexOutOfBoundsException e) {
-        Log.w("XServerVulkan", "Vulkan version clamp skipped — unparseable driver='"
-            + driverVkVersion + "' chosen='" + vulkanVersion + "'");
-    }
     vulkanVersion = vulkanVersion + "." + vulkanVersionPatch;
+    Log.i("XServerVulkan", "WRAPPER_VK_VERSION=" + vulkanVersion
+        + " driverId=" + adrenoToolsDriverId + " graphicsDriver=" + graphicsDriver
+        + " driverVkVersion=" + driverVkVersion);
     envVars.put("WRAPPER_VK_VERSION", vulkanVersion);
+    if (wineDebugWriter != null) {
+        wineDebugWriter.println("XServerVulkan: WRAPPER_VK_VERSION=" + vulkanVersion
+            + " driverVkVersion=" + driverVkVersion + " driverId=" + adrenoToolsDriverId);
+    }
 
     String blacklistedExtensions = graphicsDriverConfig.get("blacklistedExtensions");
     envVars.put("WRAPPER_EXTENSION_BLACKLIST", blacklistedExtensions != null ? blacklistedExtensions : "");
@@ -5017,6 +6874,28 @@ public class XServerDisplayActivity extends AppCompatActivity {
 
     public InputControlsView getInputControlsView() {
         return inputControlsView;
+    }
+
+    /** Snapshot the current input-device/slot state as UI rows. Main-thread only (reads
+     *  WinHandler.getPlayerSlotAssignments). Shared by the Players sub-tab refresh and the toast. */
+    private java.util.List<XServerDialogState.PlayerSlotRow> buildPlayerSlotRows() {
+        java.util.List<com.winlator.star.winhandler.WinHandler.PlayerSlotInfo> infos =
+                winHandler.getPlayerSlotAssignments();
+        java.util.List<XServerDialogState.PlayerSlotRow> uiRows = new java.util.ArrayList<>();
+        for (com.winlator.star.winhandler.WinHandler.PlayerSlotInfo info : infos) {
+            uiRows.add(new XServerDialogState.PlayerSlotRow(
+                    info.displayName, info.descriptor, info.currentSlot,
+                    info.override, info.isOnScreen, info.isGameController));
+        }
+        return uiRows;
+    }
+
+    /** Build + show the in-game controller-status toast for an event. Main-thread only. reason ∈
+     *  {"launch","connected","disconnected","reassign","reset"}; changedDescriptor marks a hot-plugged
+     *  row NEW (may be null). */
+    private void showControllerStatusToast(String reason, String changedDescriptor) {
+        if (winHandler == null) return;
+        XServerDialogState.INSTANCE.showControllerToastFor(reason, buildPlayerSlotRows(), changedDescriptor);
     }
 
     protected boolean isInGameControlsEditorOpen() {
@@ -5384,6 +7263,17 @@ return true;
                 args += "\"wfm.exe\"";
             }
         }
+        // Epic Online Services (EOS) Phase 1: for Epic-origin shortcuts with EOS auth
+        // enabled, append the real-Epic launch args (-EpicPortal + fresh exchange code).
+        // This runs on the background launch worker, so the synchronous exchange-code
+        // fetch is ANR-safe. buildArgString silent-no-ops (returns "") on any failure.
+        if (shortcut != null
+                && "epic".equals(shortcut.getExtra("storeSource"))
+                && !"0".equals(shortcut.getExtra("epicEos"))) {
+            String epicArgs = com.winlator.star.store.EpicLaunchArgs.buildArgString(this, shortcut);
+            if (epicArgs != null && !epicArgs.isEmpty()) args += " " + epicArgs;
+        }
+
         // Construct the final command
         String command = "winhandler.exe " + args;
 
@@ -5497,6 +7387,15 @@ return true;
         return shortcut != null
                 ? shortcut.getExtra("swapRB", container.getRendererSwapRB() ? "true" : "false").equals("true")
                 : container.getRendererSwapRB();
+    }
+    // Native backend pref: "auto"/"asr" -> hardened SurfaceFlinger (ASR) reroute when eligible;
+    // "flip" -> force the leaner inline Vulkan FLIP direct-scanout (opt out of the reroute). Same
+    // read-only shortcut-extra-then-container discipline as the siblings above.
+    private String resolvedNativeBackend() {
+        if (container == null) return "auto";
+        String def = container.getRendererNativeBackend();
+        if (def == null || def.isEmpty()) def = "auto";
+        return shortcut != null ? shortcut.getExtra("nativeBackend", def) : def;
     }
     private String resolvedRendererPresentMode() {
         if (container == null) return "fifo";
@@ -5633,6 +7532,20 @@ return true;
                 }
                 // ...AND re-pin the ALREADY-RUNNING guest tree so the current game moves now.
                 reapplyBigCoresToRunningGuest(on);
+                // Keep the game pinned against later-spawned threads while Prefer Big Cores is ON: point the
+                // drift checker at the game exe + big mask so it resolves the real Linux pid and re-pins
+                // host-side on thread growth. OFF -> clear the target so the checker stops maintaining it.
+                if (on) {
+                    String exe = gameExeBasename();
+                    if (exe != null && Integer.bitCount(taskAffinityMask & 0xff) < Runtime.getRuntime().availableProcessors()) {
+                        if (!exe.equals(affinityTargetExe)) affinityLinuxPid = -1;
+                        affinityTargetExe = exe;
+                        affinityTargetMask = taskAffinityMask & 0xff;
+                        startAffinityReapply();
+                    }
+                } else {
+                    affinityTargetMask = 0;
+                }
                 break;
             default: // root six
                 com.winlator.star.perf.PerfRootApplier.INSTANCE.apply(key, on);
@@ -5681,13 +7594,17 @@ return true;
             Integer cpuT = rootHudMetrics.getCpuTempC();
             Integer gpuT = rootHudMetrics.getGpuTempC();
             Integer soc = (cpuT != null && gpuT != null) ? Math.max(cpuT, gpuT) : (cpuT != null ? cpuT : gpuT);
-            m.put("socTemp", soc != null ? soc + "°C" : "—");
-            // GPU current clock (MHz).
-            String gpuMhz = readGpuMhz();
-            m.put("gpuMhz", gpuMhz != null ? gpuMhz + "MHz" : "—");
+            // Raw numbers only — the dashboard gauges format their own units, so appending them here
+            // would double up ("47°C °C").
+            m.put("socTemp", soc != null ? String.valueOf(soc) : "—");
+            // GPU current clock (MHz). Prefer HudMetrics' accessor (multi-path, works where the bare
+            // kgsl gpuclk node is SELinux-blocked, e.g. SD8Gen3); fall back to the raw sysfs read.
+            Integer gpuClk = rootHudMetrics.getGpuClockMhz();
+            String gpuMhz = gpuClk != null ? String.valueOf(gpuClk) : readGpuMhz();
+            m.put("gpuMhz", gpuMhz != null ? gpuMhz : "—");
             // Fan RPM (hwmon fanN_input), if any.
             String fan = readFanRpm();
-            m.put("fanRpm", fan != null ? fan + "rpm" : "n/a");
+            m.put("fanRpm", fan != null ? fan : "n/a");
             XServerDrawerState.INSTANCE.setRootReadouts(m);
         } catch (Exception ignored) {}
     }
@@ -5769,6 +7686,100 @@ return true;
         }
     }
 
+    private int resolvedOnScreenControllerMode() {
+        int fallback = container != null ? container.getOnScreenControllerMode() : Container.ON_SCREEN_MODE_DEFAULT;
+        if (shortcut == null) return fallback;
+        try {
+            return Integer.parseInt(shortcut.getExtra("onScreenControllerMode", String.valueOf(fallback)));
+        } catch (NumberFormatException e) {
+            return fallback;
+        }
+    }
+
+    // #333 smart default: the bundled "Virtual Gamepad" touch layout (controls-3.icp), used as the
+    // default overlay for a fresh user who hasn't picked a profile. Matched by name; null if absent.
+    private ControlsProfile findVirtualGamepadProfile() {
+        for (ControlsProfile p : inputControlsManager.getProfiles()) {
+            if (p != null && "Virtual Gamepad".equalsIgnoreCase(p.getName())) return p;
+        }
+        return null;
+    }
+
+    // #338: is a physical game controller connected right now? Used to suppress the #333 smart-default
+    // touch overlay at launch — if a real pad is already present there's no out-of-box need for a
+    // phantom one, and seeding it would grab a player slot that defeats auto-hide. Reads the same live
+    // slot data as updateAutoHideForControllers(); on-screen ("virtual") pads are excluded.
+    private boolean hasConnectedGameController() {
+        if (winHandler == null) return false;
+        for (WinHandler.PlayerSlotInfo s : winHandler.getPlayerSlotAssignments()) {
+            if (s.isGameController && !s.isOnScreen) return true;
+        }
+        return false;
+    }
+
+    // #333: auto-hide on-screen controls when a controller takes the on-screen slot. Resolved
+    // shortcut-override-else-container, same discipline as resolvedOnScreenControllerMode above.
+    private boolean resolvedAutoHideControlsOnPad() {
+        boolean fallback = container != null ? container.isAutoHideControlsOnPad()
+                : Container.AUTO_HIDE_CONTROLS_ON_PAD_DEFAULT;
+        if (shortcut == null) return fallback;
+        String extra = shortcut.getExtra("autoHideControlsOnPad");
+        if (extra == null || extra.isEmpty()) return fallback;
+        return extra.equals("1");
+    }
+
+    /**
+     * #333 slot-aware auto-hide. When enabled for this game/container, hide the on-screen touch controls
+     * once a physical controller takes over the on-screen pad's player slot, and restore them (to the
+     * user's chosen baseline) when none does. Locked disambiguation rule: only a controller that is
+     * UNPINNED (solo takeover) or PINNED to the on-screen slot triggers the hide; a controller pinned to
+     * a DIFFERENT player is treated as a separate player and leaves the overlay up. No-op while the
+     * controls editor is open, and never forces controls on that the user chose to keep off. Main-thread
+     * only (called from the debounced assignment listener, at launch, and on editor close).
+     */
+    // #333: rebuild the in-game Players tab list from live slot state. In a method (not the
+    // fireControllerToast field initializer) to avoid an illegal forward reference to winHandler.
+    private void refreshInGamePlayerSlotList() {
+        if (winHandler != null) XServerDialogState.INSTANCE.setPlayerSlots(buildPlayerSlotRows());
+    }
+
+    private void updateAutoHideForControllers() {
+        if (controlsEditorOpen) return;
+        if (winHandler == null || inputControlsView == null) return;
+        if (!resolvedAutoHideControlsOnPad()) return;
+
+        java.util.List<WinHandler.PlayerSlotInfo> slots = winHandler.getPlayerSlotAssignments();
+        // The on-screen pad's "home" slot: its explicit pin if any, else Player 1 (slot 0).
+        int oscHomeSlot = 0;
+        for (WinHandler.PlayerSlotInfo s : slots) {
+            if (s.isOnScreen) { if (s.override >= 0) oscHomeSlot = s.override; break; }
+        }
+        // Does a physical controller actually OCCUPY the on-screen slot? Key off the resolved current
+        // slot, not the pin: a solo pad yields onto the on-screen slot (hide); a pad on a DIFFERENT
+        // player (pinned to P2, or bumped to P2 because the on-screen pad is pinned to P1) is a separate
+        // player and leaves the overlay up; an Ignored/unassigned pad (currentSlot -1) never triggers.
+        boolean padTakingOver = false;
+        for (WinHandler.PlayerSlotInfo s : slots) {
+            if (!s.isGameController) continue;
+            if (s.currentSlot >= 0 && s.currentSlot == oscHomeSlot) { padTakingOver = true; break; }
+        }
+
+        if (padTakingOver) {
+            if (inputControlsView.isShowTouchscreenControls()) {
+                timeoutHandler.removeCallbacks(hideControlsRunnable);
+                inputControlsView.setShowTouchscreenControls(false);
+                inputControlsView.setVisibility(View.GONE);
+                Log.d("XServerDisplayActivity", "#333 auto-hide: controller took the on-screen slot -> hiding touch controls");
+            }
+        } else if (userWantsControlsShown && !inputControlsView.isShowTouchscreenControls()) {
+            // No controller owns the on-screen slot: restore to the user's baseline (never force on).
+            inputControlsView.setShowTouchscreenControls(true);
+            inputControlsView.setVisibility(View.VISIBLE);
+            if (preferences.getBoolean("touchscreen_timeout_enabled", false)) startTouchscreenTimeout();
+            Log.d("XServerDisplayActivity", "#333 auto-hide: no controller on the on-screen slot -> restoring touch controls");
+        }
+    }
+
     private int resolvedVibrationIntensity() {
         int fallback = container != null ? container.getVibrationIntensity() : Container.VIBRATION_INTENSITY_DEFAULT;
         if (shortcut == null) return fallback;
@@ -5777,6 +7788,36 @@ return true;
         } catch (NumberFormatException e) {
             return fallback;
         }
+    }
+
+    // Manual controller-slot overrides (Players sub-tab): the same per-game-override-else-container
+    // discipline as the vibration resolvers above. The value is an opaque JSON object string
+    // (descriptor -> desired slot); WinHandler parses/serializes it via parseSlotOverrides/
+    // buildSlotOverridesJson.
+    private String resolvedControllerSlotOverridesJson() {
+        String fallback = container != null ? container.getControllerSlotOverrides() : "{}";
+        if (shortcut == null) return fallback;
+        return shortcut.getExtra("controllerSlotOverrides", fallback);
+    }
+
+    private void persistControllerSlotOverridesJson(String json) {
+        if (shortcut != null && shortcut.hasExtra("controllerSlotOverrides")) {
+            shortcut.putExtra("controllerSlotOverrides", json);
+            shortcut.saveData();
+        } else if (container != null) {
+            container.setControllerSlotOverrides(json);
+            container.saveData();
+        }
+    }
+
+    // Delegate to the shared schema helpers on WinHandler so the in-game Players tab, launch
+    // pre-assign, and the out-of-game container/shortcut editors all read/write ONE JSON format.
+    private java.util.Map<String, Integer> parseSlotOverrides(String json) {
+        return com.winlator.star.winhandler.WinHandler.parseSlotOverridesJson(json);
+    }
+
+    private String buildSlotOverridesJson() {
+        return com.winlator.star.winhandler.WinHandler.buildSlotOverridesJson(winHandler.getManualSlotOverrides());
     }
 
     // bionic-fg interpolation model for this launch: per-game override else the container value.
@@ -6118,6 +8159,9 @@ return true;
                 else if (audioDriver.equals("pulseaudio")) {
                     registryEditor.setStringValue("Software\\Wine\\Drivers", "Audio", "pulse");
                 }
+                else if (audioDriver.equals("directaudio")) {
+                    registryEditor.setStringValue("Software\\Wine\\Drivers", "Audio", "directaudio");
+                }
             }
             container.putExtra("audioDriver", audioDriver);
             container.saveData();
@@ -6188,6 +8232,95 @@ return true;
         return com.winlator.star.core.WineRandrSupport.isXrandrCapable(wineInfo);
     }
 
+    // ── Epic Friends Overlay (Phase 3) ────────────────────────────────────────────────────────
+    // Provision-only: we drop Epic's REAL overlay component into the prefix and write ONE HKCU
+    // pointer; the game's own bundled EOS SDK loads it and owns the hotkey (Shift+F3). We render
+    // nothing. Gated per-shortcut by storeSource=epic + epicOverlay=1.
+
+    /**
+     * True when the launching shortcut is an Epic game with the Friends-Overlay toggle on AND the
+     * feature is enabled at build time. This is the single authoritative predicate: it gates the
+     * pill attach, the AGGRESSIVE-startup override, and (via the strip branch below) provisioning.
+     * While {@link com.winlator.star.FeatureFlags#EPIC_OVERLAY_ENABLED} is false this always returns
+     * false, so every Epic launch takes the strip-and-do-nothing path — inert and self-cleaning.
+     */
+    private boolean isEpicOverlayEnabledForLaunch() {
+        return com.winlator.star.FeatureFlags.EPIC_OVERLAY_ENABLED
+                && shortcut != null
+                && "epic".equals(shortcut.getExtra("storeSource"))
+                && "1".equals(shortcut.getExtra("epicOverlay"));
+    }
+
+    // Install the overlay component (idempotent CDN download) and write the OverlayPath pointer when
+    // the toggle is on; strip the pointer when it's off so a disabled overlay leaves no stale key.
+    // Runs on the background launch worker (sync file/reg/network I/O is ANR-safe there). Never throws.
+    private void provisionEpicOverlay() {
+        if (shortcut == null || !"epic".equals(shortcut.getExtra("storeSource"))) return;
+        File prefixDir = new File(ImageFs.find(this).wineprefix);
+        try {
+            if (!isEpicOverlayEnabledForLaunch()) {
+                EpicOverlayManager.stripRegistry(prefixDir);
+                return;
+            }
+            boolean ok = EpicOverlayManager.ensureOverlayInstalled(this, prefixDir);
+            if (ok) {
+                EpicOverlayManager.writeRegistry(prefixDir);
+                // DXVK guarantee note: the EOS overlay renders through the guest's D3D/DXVK path; a
+                // software (no3d) wrapper yields a grey overlay. We don't force-rewrite the user's
+                // wrapper (that could break the game), but warn when it isn't a DXVK-based one.
+                if (this.dxwrapper == null || !this.dxwrapper.contains("dxvk")) {
+                    Log.w("XServerDisplayActivity", "Epic overlay ON but dxwrapper is not DXVK-based ("
+                            + this.dxwrapper + ") — overlay may render grey; DXVK is recommended");
+                }
+                Log.i("XServerDisplayActivity", "Epic overlay provisioned for launch");
+            } else {
+                Log.w("XServerDisplayActivity", "Epic overlay provisioning failed; leaving registry untouched");
+            }
+        } catch (Throwable t) {
+            Log.w("XServerDisplayActivity", "provisionEpicOverlay failed", t);
+        }
+    }
+
+    // Synthesise the EOS overlay hotkey (Shift+F3) into the guest — four ordered X calls, mirroring a
+    // real keyboard chord. UI-thread only (that's where the OSC injects too). The overlay is ALSO
+    // summonable by a physical Shift+F3 independently — this is just a touch-friendly synthesiser.
+    private void injectEpicOverlayHotkey() {
+        if (xServer == null) return;
+        if (XKeycode.KEY_SHIFT_L.id == 0 || XKeycode.KEY_F3.id == 0) return; // guard KEY_NONE/id 0
+        try {
+            xServer.injectKeyPress(XKeycode.KEY_SHIFT_L);
+            xServer.injectKeyPress(XKeycode.KEY_F3);
+            xServer.injectKeyRelease(XKeycode.KEY_F3);
+            xServer.injectKeyRelease(XKeycode.KEY_SHIFT_L);
+        } catch (Throwable t) {
+            Log.w("XServerDisplayActivity", "injectEpicOverlayHotkey failed", t);
+        }
+    }
+
+    // Add the draggable edge-snap Epic pill over the game, only for an Epic shortcut with the overlay
+    // toggle on. The pill just synthesises Shift+F3 — it is never a prerequisite for the overlay
+    // rendering (a hardware keyboard works regardless). Position is persisted per game.
+    private void attachEpicOverlayPill() {
+        if (!isEpicOverlayEnabledForLaunch()) return;
+        FrameLayout rootView = findViewById(R.id.FLXServerDisplay);
+        if (rootView == null) return;
+        float density = getResources().getDisplayMetrics().density;
+        EpicOverlayPill pill = new EpicOverlayPill(this);
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            android.view.Gravity.TOP | android.view.Gravity.START
+        );
+        lp.leftMargin = Math.round(8 * density);
+        lp.topMargin  = Math.round(120 * density);
+        pill.setLayoutParams(lp);
+        pill.setOnTapListener(this::injectEpicOverlayHotkey);
+        pill.setOnMovedListener((x, y) -> persistHudPosition("epicPillPos", x, y));
+        restoreHudPosition(pill, "epicPillPos");
+        rootView.addView(pill);
+        pill.bringToFront();
+    }
+
     private void applyGeneralPatches(Container container) {
         File rootDir = imageFs.getRootDir();
         TarCompressorUtils.extract(TarCompressorUtils.Type.ZSTD, this, "container_pattern_common.tzst", rootDir);
@@ -6214,17 +8347,47 @@ return true;
         if (desktop.isFile()) desktop.delete();
     }
 
+    /**
+     * The running game's exe basename (e.g. {@code dirt3_game.exe}) that the drift checker resolves to a
+     * real Linux pid. Prefers the value already captured from the mapped window's class name; falls back to
+     * the shortcut's Exec line. Lower-cased for matching. Null when neither is available.
+     */
+    private String gameExeBasename() {
+        if (affinityTargetExe != null) return affinityTargetExe;
+        try {
+            if (shortcut != null) {
+                String e = shortcut.getExecutable();
+                if (e != null && !e.isEmpty()) return e.trim().toLowerCase();
+            }
+        } catch (Exception ignored) {}
+        return null;
+    }
+
     private void assignTaskAffinity(Window window) {
         if (taskAffinityMask == 0 || taskAffinityMaskWoW64 == 0) return;
         int processId = window.getProcessId();
         String className = window.getClassName();
         int processAffinity = window.isWoW64() ? taskAffinityMaskWoW64 : taskAffinityMask;
 
-        if (processId > 0) {
-            winHandler.setProcessAffinity(processId, processAffinity);
-        }
-        else if (!className.isEmpty()) {
-            winHandler.setProcessAffinity(window.getClassName(), processAffinity);
+        // Apply immediately via winhandler so the cores take effect right now (by pid when known, else by
+        // class name — _NET_WM_PID often arrives after the window maps).
+        if (processId > 0) winHandler.setProcessAffinity(processId, processAffinity);
+        else if (!className.isEmpty()) winHandler.setProcessAffinity(className, processAffinity);
+
+        // Arm the drift checker — but only for a genuine restriction (fewer cores than available); no point
+        // maintaining an "all cores" default. The checker resolves the game's real LINUX pid by exe name and
+        // re-pins HOST-SIDE, so it no longer depends on the winhandler Windows-pid (which isn't a /proc pid).
+        if (!className.isEmpty()) {
+            boolean restrict = Integer.bitCount(processAffinity & 0xff) < Runtime.getRuntime().availableProcessors();
+            if (restrict) {
+                String exe = className.toLowerCase();
+                int slash = Math.max(exe.lastIndexOf('/'), exe.lastIndexOf('\\'));
+                if (slash >= 0) exe = exe.substring(slash + 1);
+                if (!exe.equals(affinityTargetExe)) affinityLinuxPid = -1; // new target -> re-resolve
+                affinityTargetExe = exe;
+                affinityTargetMask = processAffinity & 0xff;
+                startAffinityReapply();
+            }
         }
     }
 
@@ -7040,7 +9203,27 @@ return true;
         };
 
         ds.onTmSetAffinity = (pid, mask) -> {
-            if (winHandler != null) winHandler.setProcessAffinity(pid, mask);
+            if (winHandler != null) {
+                winHandler.setProcessAffinity(pid, mask);
+                // Point the drift checker at the game exe + this mask so it survives past the TM close: it
+                // resolves the real Linux pid and re-pins host-side on thread growth. A restriction arms it;
+                // "all cores" clears the target. (Targets the game exe — the common case of pinning the game.)
+                String exe = gameExeBasename();
+                if (exe != null && Integer.bitCount(mask & 0xff) < Runtime.getRuntime().availableProcessors()) {
+                    if (!exe.equals(affinityTargetExe)) affinityLinuxPid = -1;
+                    affinityTargetExe = exe;
+                    affinityTargetMask = mask & 0xff;
+                    startAffinityReapply();
+                } else if (Integer.bitCount(mask & 0xff) >= Runtime.getRuntime().availableProcessors()) {
+                    affinityTargetMask = 0;
+                }
+            }
+        };
+
+        ds.onTmQueryAffinity = pid -> {
+            if (winHandler == null) return -1;
+            Integer m = winHandler.getManualAffinity(pid);
+            return m != null ? m : -1;
         };
 
         registerTmProcessInfoListener();
@@ -7076,6 +9259,7 @@ return true;
         if (winHandler != null) {
             winHandler.setOnGetProcessInfoListener(new OnGetProcessInfoListener() {
                 private final ArrayList<XServerDialogState.TmProcess> buffer = new ArrayList<>();
+                private final java.util.HashSet<Integer> livePids = new java.util.HashSet<>();
 
                 @Override
                 public void onGetProcessInfo(int index, int numProcesses, ProcessInfo info) {
@@ -7087,13 +9271,31 @@ return true;
 
                     final android.graphics.Bitmap finalIcon = icon;
                     runOnUiThread(() -> {
-                        if (index == 0) buffer.clear();
+                        if (index == 0) { buffer.clear(); livePids.clear(); }
+                        livePids.add(info.pid);
+                        // Show the mask the USER applied, not the guest's stale GetProcessAffinityMask
+                        // readback (which keeps reporting the full mask under wow64/FEX). Falls back to
+                        // the guest value when the user never set an affinity for this pid.
+                        Integer override = winHandler != null ? winHandler.getManualAffinity(info.pid) : null;
+                        int displayMask = override != null ? override : info.affinityMask;
                         buffer.add(new XServerDialogState.TmProcess(
                             index, info.pid, info.name,
-                            info.getFormattedMemoryUsage(), info.wow64Process, info.affinityMask, finalIcon));
+                            info.getFormattedMemoryUsage(), info.wow64Process, displayMask, finalIcon));
                         if (numProcesses == 0 || index == numProcesses - 1) {
                             ds.setTmProcesses(new ArrayList<>(buffer));
                             ds.setTmCount(numProcesses);
+                            if (winHandler != null) {
+                                // Enumerations overlap and share buffer/livePids (a concurrent one's
+                                // index-0 reset wipes livePids mid-cycle), so only prune on a clean,
+                                // complete pass -- every pid seen exactly once. Pruning off a truncated
+                                // livePids would wrongly drop a still-valid override the instant it's set.
+                                if (numProcesses > 0 && livePids.size() == numProcesses) {
+                                    winHandler.retainManualAffinities(livePids);
+                                }
+                                // Re-pin survivors so threads spawned since the last set (which escape
+                                // back to all cores) get bound. Idempotent and race-free.
+                                winHandler.reapplyManualAffinities();
+                            }
                         }
                     });
                 }

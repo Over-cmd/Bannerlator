@@ -7,8 +7,38 @@ import kotlinx.coroutines.flow.StateFlow
 object XServerDialogState {
 
     enum class ActiveDialog {
-        NONE, VIBRATION, DEBUG, INPUT_CONTROLS, SCREEN_EFFECTS, ACTIVE_WINDOWS, NEW_TASK
+        NONE, VIBRATION, DEBUG, INPUT_CONTROLS, SCREEN_EFFECTS, ACTIVE_WINDOWS, NEW_TASK, CAST
     }
+
+    // -------------------------------------------------------------------------
+    // Wireless cast — in-app device picker (Google Cast devices via mDNS).
+    // -------------------------------------------------------------------------
+    enum class CastStatus { IDLE, CONNECTING, CONNECTED, FAILED }
+
+    private val _castDevices = MutableStateFlow<List<com.winlator.star.cast.CastDiscovery.Device>>(emptyList())
+    val castDevices: StateFlow<List<com.winlator.star.cast.CastDiscovery.Device>> = _castDevices
+    fun setCastDevices(v: List<com.winlator.star.cast.CastDiscovery.Device>) { _castDevices.value = v }
+
+    private val _castScanning = MutableStateFlow(false)
+    val castScanning: StateFlow<Boolean> = _castScanning
+    fun setCastScanning(v: Boolean) { _castScanning.value = v }
+
+    private val _castStatus = MutableStateFlow(CastStatus.IDLE)
+    val castStatus: StateFlow<CastStatus> = _castStatus
+    fun setCastStatus(v: CastStatus) { _castStatus.value = v }
+
+    // Name of the device currently connecting/connected, and a human-readable detail line.
+    private val _castTargetName = MutableStateFlow("")
+    val castTargetName: StateFlow<String> = _castTargetName
+    fun setCastTargetName(v: String) { _castTargetName.value = v }
+
+    private val _castStatusDetail = MutableStateFlow("")
+    val castStatusDetail: StateFlow<String> = _castStatusDetail
+    fun setCastStatusDetail(v: String) { _castStatusDetail.value = v }
+
+    @JvmField var onCastRefresh: Runnable? = null
+    @JvmField var onCastConnect: java.util.function.Consumer<com.winlator.star.cast.CastDiscovery.Device>? = null
+    @JvmField var onCastDisconnect: Runnable? = null
 
     // -------------------------------------------------------------------------
     // Active dialog
@@ -242,6 +272,18 @@ object XServerDialogState {
     private val _paused = MutableStateFlow(false)
     val paused: StateFlow<Boolean> = _paused
     fun setPaused(v: Boolean) { _paused.value = v }
+
+    // True while the game is shown on an external display (TV). Drives the on-handheld "playing on
+    // external display" indicator so the phone isn't just a black screen once the game surface moves.
+    private val _playingOnExternal = MutableStateFlow(false)
+    val playingOnExternal: StateFlow<Boolean> = _playingOnExternal
+    fun setPlayingOnExternal(v: Boolean) { _playingOnExternal.value = v }
+
+    // True while the in-game side menu (drawer) is open — used to hide the external-display badge so
+    // it doesn't overlap the menu.
+    private val _menuOpen = MutableStateFlow(false)
+    val menuOpen: StateFlow<Boolean> = _menuOpen
+    fun setMenuOpen(v: Boolean) { _menuOpen.value = v }
     @JvmField var onRequestResume: Runnable? = null
 
     // -------------------------------------------------------------------------
@@ -290,6 +332,159 @@ object XServerDialogState {
 
     fun interface VibrationIntensityCallback { fun invoke(intensity: Int) }
     @JvmField var onVibrationIntensityChanged: VibrationIntensityCallback? = null
+
+    // -------------------------------------------------------------------------
+    // Player Slots (manual per-device slot assignment) — Controls > Players sub-tab. One row per
+    // detected input device (plus the on-screen pad). `override` is the user's choice: SLOT_AUTO
+    // (-1) leaves auto-assignment alone, SLOT_IGNORE (-2) drops the device, 0..3 pins it to that
+    // XInput player slot. `currentSlot` is the slot the device actually holds right now (-1 =
+    // unassigned) and is shown as a subtitle. The list is re-read from WinHandler via
+    // onPlayerSlotsRefresh (devices hot-plug), and each edit fires onPlayerSlotChanged, which the
+    // activity applies live (WinHandler.setDeviceSlotAssignment) + persists per-container.
+    // -------------------------------------------------------------------------
+    const val SLOT_AUTO = -1
+    const val SLOT_IGNORE = -2 // mirrors WinHandler.SLOT_IGNORE
+
+    data class PlayerSlotRow(
+        val displayName: String,
+        val descriptor: String,
+        val currentSlot: Int,
+        val override: Int,
+        val isOnScreen: Boolean,
+        val isGameController: Boolean,
+    )
+
+    private val _playerSlots = MutableStateFlow<List<PlayerSlotRow>>(emptyList())
+    val playerSlots: StateFlow<List<PlayerSlotRow>> = _playerSlots
+    fun setPlayerSlots(rows: List<PlayerSlotRow>) { _playerSlots.value = rows }
+
+    fun interface PlayerSlotCallback { fun invoke(descriptor: String, desiredSlot: Int) }
+    /** Fired when the user changes a device's slot selection. desiredSlot = 0..3 pin, SLOT_IGNORE, or
+     *  SLOT_AUTO. The activity applies it live and re-seeds the list afterwards. */
+    @JvmField var onPlayerSlotChanged: PlayerSlotCallback? = null
+    /** Re-reads the device list from WinHandler (call when the sub-tab opens / after a change). */
+    @JvmField var onPlayerSlotsRefresh: Runnable? = null
+    /** Manual "Reset Input" recovery — rebuilds the fake-input transport in place (no relaunch). */
+    @JvmField var onResetInput: Runnable? = null
+
+    // -------------------------------------------------------------------------
+    // Controller-status TOAST (P5b) — a small app-themed card that fades into the TOP-RIGHT of the
+    // in-game screen (below the Fusion HUD), lists each detected input device (type icon + name +
+    // player badge), holds a few seconds, then fades out. Fired on: launch, controller hot-plug
+    // (add/remove), manual slot reassignment, and Reset Input. Purely informational / non-interactive
+    // (see ControllerToastOverlay). The activity reads getPlayerSlotAssignments (main-thread only) and
+    // calls showControllerToastFor with the SAME PlayerSlotRow list the Players sub-tab uses, so the
+    // toast and the editor never disagree.
+    // -------------------------------------------------------------------------
+    enum class ToastIconType { CONTROLLER, TOUCH, MOUSE, KEYBOARD }
+    enum class ToastBadgeType { PLAYER, SHARE, IGNORED, DETECTED }
+
+    data class ControllerToastRow(
+        val name: String,
+        val kind: String,
+        val icon: ToastIconType,
+        val badge: ToastBadgeType,
+        val slot: Int,        // 0-based player slot for PLAYER/SHARE badges; -1 otherwise
+        val isNew: Boolean,   // true for the device that just hot-plugged (drives the "NEW" tag)
+    )
+
+    data class ControllerToastData(
+        val title: String,
+        val subLabel: String,
+        val rows: List<ControllerToastRow>,
+        // Incremented on every event; the overlay keys its fade-in/hold/fade-out animation on this so a
+        // new event fired while the toast is showing restarts the cycle with fresh content.
+        val token: Long,
+        // Optional full-width message line (used by info toasts that have no device rows, e.g. the
+        // external-display / TV notification). Null for the controller toast.
+        val message: String? = null,
+    )
+
+    private val _controllerToast = MutableStateFlow<ControllerToastData?>(null)
+    val controllerToast: StateFlow<ControllerToastData?> = _controllerToast
+    private var _toastToken = 0L
+
+    /** Called by the overlay once the fade-out finishes (auto-dismiss). */
+    fun clearControllerToast() { _controllerToast.value = null }
+
+    /**
+     * Show a simple informational toast that reuses the controller-toast card (title + right-aligned
+     * subLabel + one full-width message line, no device rows). Used for external-display / TV
+     * notifications so they match the existing input notifications. Main-thread only.
+     */
+    fun showInfoToast(title: String, subLabel: String, message: String?) {
+        _toastToken += 1
+        _controllerToast.value = ControllerToastData(title, subLabel, emptyList(), _toastToken, message)
+    }
+
+    /**
+     * Build + show the controller-status toast from the current player-slot rows. Main-thread only
+     * (the caller must have just read WinHandler.getPlayerSlotAssignments on the main thread).
+     *
+     * @param reason one of "launch", "connected", "disconnected", "reassign", "reset" — drives the
+     *   header title + sub-label.
+     * @param slots  the SAME PlayerSlotRow list the Players sub-tab renders (OSC first, then devices).
+     * @param changedDescriptor descriptor of a just-hot-plugged device (marks its row NEW); may be null.
+     */
+    fun showControllerToastFor(reason: String, slots: List<PlayerSlotRow>, changedDescriptor: String?) {
+        // OSC only appears as a row when it is actually seated as a player (has a slot); physical
+        // controllers + any slot-holder always appear (getPlayerSlotAssignments already filtered those).
+        val visible = slots.filter { !it.isOnScreen || it.currentSlot >= 0 }
+
+        // Shared-slot detection: two visible rows holding the same real slot.
+        val slotCounts = HashMap<Int, Int>()
+        visible.forEach { if (it.currentSlot >= 0) slotCounts[it.currentSlot] = (slotCounts[it.currentSlot] ?: 0) + 1 }
+
+        val rows = visible.map { r ->
+            val lname = r.displayName.lowercase()
+            val icon = when {
+                r.isOnScreen -> ToastIconType.TOUCH
+                r.isGameController -> ToastIconType.CONTROLLER
+                lname.contains("mouse") -> ToastIconType.MOUSE
+                lname.contains("keyboard") || lname.contains("keypad") -> ToastIconType.KEYBOARD
+                else -> ToastIconType.CONTROLLER
+            }
+            val badge = when {
+                r.override == SLOT_IGNORE -> ToastBadgeType.IGNORED
+                r.currentSlot >= 0 && (slotCounts[r.currentSlot] ?: 0) > 1 -> ToastBadgeType.SHARE
+                r.currentSlot >= 0 -> ToastBadgeType.PLAYER
+                else -> ToastBadgeType.DETECTED
+            }
+            val kind = when {
+                r.isOnScreen -> "Virtual gamepad"
+                badge == ToastBadgeType.IGNORED -> "Controller · filtered"
+                icon == ToastIconType.MOUSE -> "Pointer"
+                icon == ToastIconType.KEYBOARD -> "Keys"
+                else -> "Controller"
+            }
+            ControllerToastRow(
+                name = r.displayName, kind = kind, icon = icon, badge = badge, slot = r.currentSlot,
+                isNew = changedDescriptor != null && r.descriptor == changedDescriptor,
+            )
+        }
+        if (rows.isEmpty()) return
+
+        val hasShare = rows.any { it.badge == ToastBadgeType.SHARE }
+        val hasMouseKb = rows.any { it.icon == ToastIconType.MOUSE || it.icon == ToastIconType.KEYBOARD }
+        val sharedSlot = rows.firstOrNull { it.badge == ToastBadgeType.SHARE }?.slot ?: 0
+
+        val (title, sub) = when (reason) {
+            "connected"    -> "CONTROLLER CONNECTED" to "just now"
+            "disconnected" -> "CONTROLLER DISCONNECTED" to "just now"
+            "reset"        -> "INPUT RESET" to "just now"
+            "reassign"     ->
+                if (hasShare) "PLAYER ${sharedSlot + 1} · SHARED" to "updated"
+                else "INPUT UPDATED" to "updated"
+            else /* launch */ -> when {
+                hasMouseKb     -> "INPUT DETECTED"
+                rows.size == 1 -> "CONTROLLER DETECTED"
+                else           -> "CONTROLLERS DETECTED"
+            } to "on launch"
+        }
+
+        _toastToken += 1
+        _controllerToast.value = ControllerToastData(title, sub, rows, _toastToken)
+    }
 
     // -------------------------------------------------------------------------
     // Gyro (motion aim) — Controls tab. WinHandler owns the values and persists them to
@@ -587,6 +782,12 @@ object XServerDialogState {
     fun interface TmAffinityCallback { fun invoke(pid: Int, mask: Int) }
     @JvmField var onTmSetAffinity: TmAffinityCallback? = null
 
+    // Live lookup of the mask the user last applied to a pid (or -1 if none). Lets the affinity
+    // dialog show the user's real choice the instant it opens, without waiting on the async
+    // process-list rebuild to carry the override into TmProcess.affinityMask.
+    fun interface TmAffinityQuery { fun invoke(pid: Int): Int }
+    @JvmField var onTmQueryAffinity: TmAffinityQuery? = null
+
     fun interface FpsConfigCallback { fun invoke(config: String) }
 
     // -------------------------------------------------------------------------
@@ -625,9 +826,11 @@ object XServerDialogState {
         _reshadeLoadout.value  = emptyList()
         _reshadeLivePreview.value = false
         _paused.value          = false
+        _controllerToast.value = null
         _vibrationSlots.value  = emptyList()
         _vibrationMode.value   = 1
         _vibrationIntensity.value = 100
+        _playerSlots.value     = emptyList()
         _gyroSupported.value   = false
         _gyroOrientationSupported.value = false
         _gyroEnabled.value     = true
@@ -674,6 +877,7 @@ object XServerDialogState {
         onRequestResume = null
         onVibrationSlotChanged = null
         onVibrationModeChanged = null; onVibrationIntensityChanged = null
+        onPlayerSlotChanged = null; onPlayerSlotsRefresh = null; onResetInput = null
         onGyroEnabledChanged = null; onGyroTargetChanged = null
         onGyroSensitivityChanged = null; onGyroDeadzoneChanged = null; onGyroSmoothingChanged = null
         onGyroInvertXChanged = null; onGyroInvertYChanged = null; onGyroActivatorChanged = null
@@ -683,7 +887,7 @@ object XServerDialogState {
         onScreenEffectsApply = null; onSeAddProfile = null; onSeRemoveProfile = null
         onWindowClick = null
         onTmRefresh = null; onTmDismissed = null; onTmNewTask = null; onTmNewTaskSubmit = null
-        onTmBringToFront = null; onTmKillProcess = null; onTmSetAffinity = null
+        onTmBringToFront = null; onTmKillProcess = null; onTmSetAffinity = null; onTmQueryAffinity = null
         onInitGraphicsTab = null
     }
 }

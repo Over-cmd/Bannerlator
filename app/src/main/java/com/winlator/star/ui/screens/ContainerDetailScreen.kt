@@ -71,6 +71,9 @@ import com.winlator.star.core.ImageUtils
 import com.winlator.star.util.InAppFilePicker
 import java.io.File
 import com.winlator.star.core.StringUtils
+import com.winlator.star.ui.components.AudioSettingsDialog
+import com.winlator.star.ui.components.audioConfigFromEnv
+import com.winlator.star.ui.components.audioConfigToEnv
 import com.winlator.star.core.WineThemeManager
 import com.winlator.star.core.WineUtils
 import android.graphics.Bitmap
@@ -80,6 +83,8 @@ import android.widget.Toast
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.json.JSONArray
 import java.util.concurrent.Executors
 import com.winlator.star.container.Container
@@ -90,10 +95,15 @@ import com.winlator.star.widget.CPUListView
 import com.winlator.star.ui.components.CollapsibleRail
 import com.winlator.star.ui.components.ContainerGlossarySheet
 import com.winlator.star.ui.components.EnvVarsEditor
+import com.winlator.star.ui.components.PlayerSlotsEditor
 import com.winlator.star.ui.components.RailItem
 import com.winlator.star.ui.components.RailLink
 import com.winlator.star.ui.components.RailSection
 import com.winlator.star.ui.components.rememberRailState
+
+// Serializes all native adrenotools probing (isDriverSupported + enumerateExtensions) off the
+// main thread. Serial = no concurrent AdrenoTools hooks (old SIGSEGV); off-main = no ANR.
+private val graphicsProbeMutex = Mutex()
 
 // ─────────────────────────────────────────────────────────────────────────────
 @Composable
@@ -348,7 +358,8 @@ fun ContainerDetailScreen(
                 ";driverId=${viewModel.rendererDriverId}" +
                 ";filterMode=${viewModel.rendererFilterMode}" +
                 ";swapRB=${viewModel.rendererSwapRB}" +
-                ";sfCompatMode=${viewModel.rendererSfCompatMode}",
+                ";sfCompatMode=${viewModel.rendererSfCompatMode}" +
+                ";nativeBackend=${viewModel.rendererNativeBackend}",
             onConfirm = { newConfig ->
                 val m = parseVulkanConfig(newConfig)
                 viewModel.rendererNative      = m["native"] == "true"
@@ -358,6 +369,8 @@ fun ContainerDetailScreen(
                 viewModel.rendererSwapRB      = m["swapRB"] == "true"
                 // Default ON: absent token (old config) resolves to true (correct colours).
                 viewModel.rendererSfCompatMode = m["sfCompatMode"] != "false"
+                // Default "auto": absent token (old config) preserves the current reroute behaviour.
+                viewModel.rendererNativeBackend = m["nativeBackend"] ?: "auto"
                 showVulkanConfig = false
             },
             onDismiss = { showVulkanConfig = false },
@@ -577,6 +590,10 @@ internal fun VulkanSettingsDialog(
     // SurfaceFlinger (ASR) BGRA->RGBA colour correction (GN #1620). Default ON — an absent token
     // (old config) resolves to true. ASR-only; independent of swapRB (Vulkan/GL).
     var sfCompatMode by remember { mutableStateOf(cfg["sfCompatMode"] != "false") }
+    // Native backend for Native Rendering: "auto"/"asr" -> hardened SurfaceFlinger (ASR) reroute;
+    // "flip" -> force the leaner Vulkan FLIP direct-scanout. Default "auto" — an absent token (old
+    // config) resolves to auto (unchanged behaviour). Only meaningful while Native Rendering is on.
+    var nativeBackend by remember { mutableStateOf(cfg["nativeBackend"] ?: "auto") }
 
     // Per-field "?" help — this dialog is its own composable, so it carries its own helpRes.
     // HelpDialog renders as a Dialog on top of this AlertDialog (fine — same pattern as elsewhere).
@@ -604,6 +621,31 @@ internal fun VulkanSettingsDialog(
                         Icon(Icons.Default.Help, contentDescription = "What is this?", modifier = Modifier.size(18.dp))
                     }
                     Switch(checked = nativeRender, onCheckedChange = { nativeRender = it })
+                }
+
+                // Native backend picker — only meaningful while Native Rendering is on, so it's shown
+                // only then. "auto"/"asr" route to the hardened SurfaceFlinger (ASR) renderer when
+                // eligible; "flip" forces the leaner legacy Vulkan direct-scanout path.
+                if (nativeRender) {
+                    val nativeBackends = listOf("auto", "asr", "flip")
+                    val nativeBackendLabels = listOf(
+                        stringResource(R.string.renderer_native_backend_auto),
+                        stringResource(R.string.renderer_native_backend_asr),
+                        stringResource(R.string.renderer_native_backend_flip)
+                    )
+                    val selectedBackendIdx = nativeBackends.indexOf(nativeBackend).coerceAtLeast(0)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        LabeledDropdown(
+                            label = stringResource(R.string.renderer_native_backend),
+                            options = nativeBackendLabels,
+                            selectedOption = nativeBackendLabels[selectedBackendIdx],
+                            onSelect = { nativeBackend = nativeBackends[nativeBackendLabels.indexOf(it)] },
+                            modifier = Modifier.weight(1f)
+                        )
+                        IconButton(onClick = { helpRes = R.string.help_renderer_native_backend }) {
+                            Icon(Icons.Default.Help, contentDescription = "What is this?", modifier = Modifier.size(18.dp))
+                        }
+                    }
                 }
 
                 val presentModes = listOf("fifo", "mailbox", "immediate")
@@ -637,10 +679,32 @@ internal fun VulkanSettingsDialog(
                     )
                 }
 
-                // NOTE: the "Renderer Driver" (System/Turnip) dropdown was removed — it was vestigial:
-                // its value (driverId) was stored + round-tripped but NEVER read at runtime (the actual
-                // driver is the top-level "Graphics Driver" setting). The `driverId` config field is
-                // still preserved below so existing containers round-trip byte-identically.
+                // Renderer (compositor) driver: which Vulkan driver the present layer itself runs on —
+                // "System" (Android's own driver, the safe default) or an installed Turnip. This is the
+                // compositor, NOT where your game renders (that's the top-level Graphics Driver). Applied
+                // at launch by XServerDisplayActivity (VulkanRenderer.setDriverInfo before nativeInit).
+                // Vulkan-renderer only; a no-op on SurfaceFlinger/OpenGL. Options = System + installed
+                // adrenotools drivers; default stays System because a Turnip compositor can black-screen
+                // on builds whose WSI doesn't support the surface.
+                val vkCtx = androidx.compose.ui.platform.LocalContext.current
+                val rendererDriverOptions = remember {
+                    val installed = try {
+                        com.winlator.star.contents.AdrenotoolsManager(vkCtx).enumarateInstalledDrivers()
+                    } catch (e: Exception) { arrayListOf<String>() }
+                    (listOf("system") + installed).distinct()
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    LabeledDropdown(
+                        label = stringResource(R.string.renderer_driver_id),
+                        options = rendererDriverOptions,
+                        selectedOption = if (rendererDriverOptions.contains(driverId)) driverId else "system",
+                        onSelect = { driverId = it },
+                        modifier = Modifier.weight(1f)
+                    )
+                    IconButton(onClick = { helpRes = R.string.help_renderer_driver }) {
+                        Icon(Icons.Default.Help, contentDescription = "What is this?", modifier = Modifier.size(18.dp))
+                    }
+                }
 
                 // Filter mode (Nearest/Linear) is no longer edited here: the in-game
                 // drawer's "Scaling mode" picker is the single source of truth for
@@ -676,7 +740,7 @@ internal fun VulkanSettingsDialog(
         },
         confirmButton = {
             TextButton(onClick = {
-                val config = "native=$nativeRender;presentMode=$presentMode;driverId=$driverId;filterMode=$filterMode;swapRB=$swapRB;sfCompatMode=$sfCompatMode"
+                val config = "native=$nativeRender;presentMode=$presentMode;driverId=$driverId;filterMode=$filterMode;swapRB=$swapRB;sfCompatMode=$sfCompatMode;nativeBackend=$nativeBackend"
                 onConfirm(config)
             }) {
                 Text(stringResource(android.R.string.ok))
@@ -705,6 +769,7 @@ private fun TopLevelFields(
     // Per-field "?" help — a centered, scrollable Compose dialog (HelpDialog), replacing the old
     // top-left PopupWindow. null = no dialog; otherwise the string res of the field's help text.
     var helpRes by remember { mutableStateOf<Int?>(null) }
+    var showAudioSettings by remember { mutableStateOf(false) }
     helpRes?.let { HelpDialog(it) { helpRes = null } }
 
     Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
@@ -913,17 +978,65 @@ private fun TopLevelFields(
         Spacer(Modifier.height(8.dp))
 
         // Audio Driver
+        // DirectAudio only loads on the four arm64ec Proton builds its .drv is built for; off those
+        // layers it does nothing / breaks audio. Grey the option out (keyed on the selected layer so it
+        // re-evaluates when the Wine version changes) and never let it be picked there. The ViewModel
+        // also coerces it back to the default on save / layer-change, so the two can't drift.
+        val directAudioSupported = remember(viewModel.selectedWineVersion) {
+            com.winlator.star.core.DirectAudioSupport.isSupported(viewModel.selectedWineVersion)
+        }
+        val directAudioEntry = remember(viewModel.audioDriverEntries) {
+            viewModel.audioDriverEntries.firstOrNull { StringUtils.parseIdentifier(it) == "directaudio" }
+        }
         Row(verticalAlignment = Alignment.CenterVertically) {
             LabeledDropdown(
                 label = stringResource(R.string.audio_driver),
                 options = viewModel.audioDriverEntries,
                 selectedOption = viewModel.selectedAudioDriver,
-                onSelect = { viewModel.selectedAudioDriver = it },
+                disabledOptions = if (!directAudioSupported && directAudioEntry != null) setOf(directAudioEntry) else emptySet(),
+                onSelect = {
+                    viewModel.selectedAudioDriver = it
+                    // DirectAudio is experimental — warn on select (reuses the HelpDialog surface).
+                    if (StringUtils.parseIdentifier(it) == "directaudio") helpRes = R.string.directaudio_experimental_warning
+                },
                 modifier = Modifier.weight(1f)
             )
+            // Cog → adaptive audio presets & fine-tuning. Both engines honor the same presets/knobs
+            // (PulseAudio sink + ALSA player), so it's shown for either driver.
+            val audioId = StringUtils.parseIdentifier(viewModel.selectedAudioDriver)
+            if (audioId == "pulseaudio" || audioId == "alsa" || audioId == "directaudio") {
+                IconButton(onClick = { showAudioSettings = true }) {
+                    Icon(Icons.Default.Settings, contentDescription = "Audio settings", modifier = Modifier.size(18.dp))
+                }
+            }
             IconButton(onClick = { helpRes = R.string.help_audio_driver }) {
                 Icon(Icons.Default.Help, contentDescription = "What is this?", modifier = Modifier.size(18.dp))
             }
+        }
+        if (!directAudioSupported && directAudioEntry != null) {
+            Text(
+                "DirectAudio requires Proton ${com.winlator.star.core.DirectAudioSupport.SUPPORTED_LABEL}",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontSize = 11.5.sp,
+                modifier = Modifier.padding(start = 4.dp, top = 2.dp)
+            )
+        }
+        if (showAudioSettings) {
+            AudioSettingsDialog(
+                initial = audioConfigFromEnv(viewModel.envVarsStr, StringUtils.parseIdentifier(viewModel.selectedAudioDriver)),
+                scopeLabel = "this container",
+                latencyLive = true,
+                driverLabel = when (StringUtils.parseIdentifier(viewModel.selectedAudioDriver)) {
+                    "alsa" -> "ALSA"; "pulseaudio" -> "PulseAudio"; "directaudio" -> "DirectAudio"
+                    else -> StringUtils.parseIdentifier(viewModel.selectedAudioDriver)
+                },
+                driverId = StringUtils.parseIdentifier(viewModel.selectedAudioDriver),
+                onDismiss = { showAudioSettings = false },
+                onSave = { cfg ->
+                    viewModel.envVarsStr = audioConfigToEnv(viewModel.envVarsStr, cfg, StringUtils.parseIdentifier(viewModel.selectedAudioDriver))
+                    showAudioSettings = false
+                }
+            )
         }
         Spacer(Modifier.height(8.dp))
 
@@ -1777,6 +1890,48 @@ private fun AdvancedTab(
             }
         }
 
+        // Player Slots section — manual controller->player-slot pins that the launch pre-assignment
+        // applies. Same JSON schema and editor the in-game "Players" drawer tab uses, but here it's a
+        // saved default (applied on next launch), not a live reassignment.
+        SectionBox(title = "Player Slots") {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "Pin controllers to players; assign two to one player to share control.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f)
+                )
+                IconButton(onClick = { helpRes = R.string.help_player_slots }) {
+                    Icon(Icons.Default.Help, contentDescription = "What is this?", modifier = Modifier.size(18.dp))
+                }
+            }
+            // On-screen priority: what happens to the on-screen pad when a physical pad connects mid-game.
+            val onScreenModeLabels = listOf("Keep on-screen player", "Yield Player 1 to pad", "Share the player")
+            LabeledDropdown(
+                label = "On-screen priority",
+                options = onScreenModeLabels,
+                selectedOption = onScreenModeLabels.getOrElse(viewModel.onScreenControllerMode) { onScreenModeLabels[0] },
+                onSelect = { viewModel.onScreenControllerMode = onScreenModeLabels.indexOf(it).coerceAtLeast(0) },
+            )
+            Spacer(Modifier.height(8.dp))
+            // #333: auto-hide the on-screen touch controls when a physical controller takes over the
+            // on-screen pad's player slot; they reappear when it leaves. Slot-aware — a controller pinned
+            // to a DIFFERENT player (2-player setup) leaves the overlay up. Overrides Share while active.
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Switch(
+                    checked = viewModel.autoHideControlsOnPad,
+                    onCheckedChange = { viewModel.autoHideControlsOnPad = it }
+                )
+                Spacer(Modifier.width(8.dp))
+                Text("Hide on-screen controls when a controller connects")
+            }
+            Spacer(Modifier.height(8.dp))
+            PlayerSlotsEditor(
+                savedOverridesJson = viewModel.controllerSlotOverridesJson,
+                onOverridesChange = { viewModel.controllerSlotOverridesJson = it },
+            )
+        }
+
         // Gyro (motion aim) section — the default a session (and a new shortcut) launches with.
         // Enabled/target/activator/sensitivity/invert can be overridden per game in the shortcut
         // editor; deadzone/smoothing stay container-wide because they track the hand and the device,
@@ -2368,6 +2523,13 @@ internal fun GraphicsDriverConfigDialog(
     var blacklisted   by remember { mutableStateOf(initialBlacklist) }
     var showAllDrivers by remember { mutableStateOf(false) }
     var showExtPicker by remember { mutableStateOf(false) }
+    // True when the picked custom driver couldn't load on this GPU and the native probe fell
+    // back to the system ICD (instead of crashing). Drives the inline note under the dropdown.
+    var driverFellBack by remember { mutableStateOf(false) }
+    // True when the selected version is an installed custom (Qualcomm proprietary) Adreno
+    // driver, whose extensions we intentionally don't probe here — the UI shows an explanatory
+    // note instead of a misleading "0/0 extensions".
+    var isCustomDriver by remember { mutableStateOf(false) }
 
     LaunchedEffect(showAllDrivers) {
         val atVersions = withContext(Dispatchers.IO) {
@@ -2382,13 +2544,16 @@ internal fun GraphicsDriverConfigDialog(
             } catch (_: Exception) {}
             list
         }
-        // isDriverSupported() is a native JNI call — must run on main thread to avoid
-        // concurrent AdrenoTools hook invocations that cause SIGSEGV.
+        // isDriverSupported() is a native JNI call. It used to run on the main thread to keep
+        // AdrenoTools hook calls serial (concurrency caused SIGSEGV); running it there blocked
+        // the UI and caused ANRs. Run it off-main but serialized via graphicsProbeMutex instead.
         val wrapperVersions = context.resources
             .getStringArray(R.array.wrapper_graphics_driver_version_entries)
             .let { arr ->
                 if (showAllDrivers) arr.toList()
-                else arr.filter { GPUInformation.isDriverSupported(it, context) }
+                else withContext(Dispatchers.IO) {
+                    graphicsProbeMutex.withLock { arr.filter { GPUInformation.isDriverSupported(it, context) } }
+                }
             }
 
         driverVersions = wrapperVersions + atVersions
@@ -2401,11 +2566,49 @@ internal fun GraphicsDriverConfigDialog(
     }
 
     LaunchedEffect(version) {
-        if (version.isNotEmpty()) {
-            val exts = GPUInformation.enumerateExtensions(version, context)?.toList() ?: emptyList()
-            allExtensions = exts
-            if (version != cfg["version"]) blacklisted = emptySet()
+        if (version.isEmpty()) {
+            allExtensions = emptyList()
+            driverFellBack = false
+            isCustomDriver = false
+            return@LaunchedEffect
         }
+        // Proprietary Qualcomm (Adreno) blobs must NEVER be probed in-process: on some a6xx
+        // devices the in-app instance creation aborts inside the vendor app-profile/log path
+        // with a -fstack-protector stack smash (SIGABRT) — uncatchable by the SEGV/BUS guard —
+        // or corrupts the linker heap on dlopen (hotice77's Redmi Note 11, Aug 2026). Mesa
+        // wrappers (Turnip/freedreno, panfrost, ...) export libvulkan_*.so and ARE safe to
+        // probe, so they still list their real extensions. Anything that isn't a libvulkan_*
+        // Mesa wrapper (a vulkan.ad*.so Qualcomm blob, or an unreadable meta) is skipped here
+        // and shows the "applied in-game" note; the driver still loads at game launch.
+        val probeUnsafe = withContext(Dispatchers.IO) {
+            graphicsProbeMutex.withLock {
+                val mgr = AdrenotoolsManager(context)
+                val installed = mgr.enumarateInstalledDrivers()
+                if (installed.none { it.equals(version, ignoreCase = true) }) {
+                    false // wrapper/bundled entry (not a custom import) -> safe to probe
+                } else {
+                    !mgr.getLibraryName(version).startsWith("libvulkan", ignoreCase = true)
+                }
+            }
+        }
+        if (probeUnsafe) {
+            allExtensions = emptyList()
+            driverFellBack = false
+            isCustomDriver = true
+            if (version != cfg["version"]) blacklisted = emptySet()
+            return@LaunchedEffect
+        }
+        // Soft-probe the (Mesa/wrapper) driver. Serialized + off-main via the mutex so it can
+        // never wedge the UI thread (ANR) or run concurrently with the isDriverSupported filter.
+        val exts = withContext(Dispatchers.IO) {
+            graphicsProbeMutex.withLock {
+                GPUInformation.enumerateExtensions(version, context)?.toList() ?: emptyList()
+            }
+        }
+        allExtensions = exts
+        driverFellBack = GPUInformation.driverLoadedFellBack()
+        isCustomDriver = exts.isEmpty()
+        if (version != cfg["version"]) blacklisted = emptySet()
     }
 
     if (showExtPicker) {
@@ -2465,16 +2668,25 @@ internal fun GraphicsDriverConfigDialog(
                     }
                 }
                 Spacer(Modifier.height(8.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    OutlinedButton(
-                        onClick = { showExtPicker = true },
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        val enabled = allExtensions.size - blacklisted.size
-                        Text(stringResource(R.string.graphics_driver_available_extensions) + " ($enabled/${allExtensions.size})")
-                    }
-                    IconButton(onClick = { helpRes = R.string.help_available_extensions }) {
-                        Icon(Icons.Default.Help, contentDescription = "What is this?", modifier = Modifier.size(18.dp))
+                if (isCustomDriver) {
+                    Text(
+                        text = "Custom Qualcomm (Adreno) driver — its extensions load when a game starts, so none are listed here. That's expected, not an error: the driver is applied in-game, where your HUD will show it's active.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(start = 4.dp, end = 4.dp)
+                    )
+                } else if (allExtensions.isNotEmpty()) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        OutlinedButton(
+                            onClick = { showExtPicker = true },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            val enabled = allExtensions.size - blacklisted.size
+                            Text(stringResource(R.string.graphics_driver_available_extensions) + " ($enabled/${allExtensions.size})")
+                        }
+                        IconButton(onClick = { helpRes = R.string.help_available_extensions }) {
+                            Icon(Icons.Default.Help, contentDescription = "What is this?", modifier = Modifier.size(18.dp))
+                        }
                     }
                 }
                 Spacer(Modifier.height(8.dp))
@@ -3176,6 +3388,17 @@ internal fun DxvkConfigDialog(
                             Icon(Icons.Default.FolderOpen, contentDescription = "Install from file", tint = MaterialTheme.colorScheme.primary)
                         }
                     }
+                }
+                // When VKD3D is on, filteredDxvk hides DXVK 1.x (it can't back VKD3D-Proton's DXGI, #113).
+                // Tell the user why those versions vanished — but only when the filter is actually active
+                // (the Mali relaxDxvkFilter driver keeps 1.x visible, so no reminder there).
+                if (selectedVkd3d != "None" && !relaxDxvkFilter) {
+                    Text(
+                        text = "VKD3D needs DXVK 2.0 or newer — older 1.x versions are hidden.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 4.dp, start = 4.dp)
+                    )
                 }
                 if (isProcessing) {
                     LinearProgressIndicator(modifier = Modifier.fillMaxWidth().padding(top = 4.dp))

@@ -81,7 +81,7 @@ fun PreloaderOverlay() {
 
     // Centered status/shutdown screen — calm logo + message + slim indeterminate bar.
     if (ui.centered) {
-        CenteredStatus(ui.tailLabel.ifEmpty { ui.title })
+        CenteredStatus(ui.tailLabel.ifEmpty { ui.title }, ui.hint)
         return
     }
 
@@ -177,6 +177,7 @@ fun PreloaderOverlay() {
                         driverLabel = spec.driverLabel,
                         vkd3dVersion = spec.vkd3dVersion,
                         backendLabel = spec.backendLabel,
+                        eosEnabled = spec.eosEnabled,
                     )
                 }
                 Spacer(Modifier.height(18.dp))
@@ -288,7 +289,7 @@ private fun StepPips(stepIndex: Int, stepTotal: Int) {
  * message + slim indeterminate bar sit low so they clear the centered logo art above.
  */
 @Composable
-private fun CenteredStatus(message: String) {
+private fun CenteredStatus(message: String, subMessage: String? = null) {
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -329,7 +330,21 @@ private fun CenteredStatus(message: String) {
                     fontWeight = FontWeight.Bold,
                     color = HeroText,
                 )
-                Spacer(Modifier.height(20.dp))
+                Spacer(Modifier.height(if (!subMessage.isNullOrEmpty()) 8.dp else 20.dp))
+            }
+            // Live sub-status (e.g. "Backing up your saves…" / "Uploading: <file>") — lets slow
+            // operations like the GOG cloud upload show they're actively working, not frozen.
+            AnimatedVisibility(visible = !subMessage.isNullOrEmpty()) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        text = subMessage ?: "",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = HeroText.copy(alpha = 0.75f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Spacer(Modifier.height(16.dp))
+                }
             }
             LinearProgressIndicator(
                 color = HeroAccent,

@@ -65,12 +65,14 @@ android {
     defaultConfig {
         minSdkVersion 26
         targetSdkVersion 28
-        // Version code stays FROZEN across dev/pre builds — it only bumps on a STABLE cut. Reinstalling
-        // the same build number over-the-top works, so pre-build installs are unaffected.
+        // Version code bumps on ANY cut delivered through the in-app updater — a STABLE cut OR an
+        // opt-in pre-release — because the updater only offers a build whose number is higher than
+        // installed. It stays frozen only across manually-sideloaded dev/nightly builds (reinstalling
+        // the same number over-the-top works, so those sideload installs are unaffected).
         // NB: do NOT write the camel-case build-code token in these comments — release.yml greps
         //     for it and takes head -1; a comment match feeds jq an empty value and the job dies.
-        versionCode 68
-        versionName "2.9.6"
+        versionCode 74
+        versionName "3.0.0"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
 
         externalNativeBuild {
@@ -211,8 +213,27 @@ dependencies {
     implementation 'androidx.activity:activity-ktx:1.8.2'
     implementation 'androidx.fragment:fragment-ktx:1.6.2'
     implementation files('libs/MidiSynth/MidiSynth.jar')
-    implementation 'in.dragonbra:javasteam:1.8.0'
-    implementation 'in.dragonbra:javasteam-depotdownloader:1.8.0'
+
+    // Samsung Galaxy Performance SDK (proprietary, not GPL) — picked up ONLY when the user has
+    // supplied the jar (see app/libs/GalaxyPerf/README.md). It is git-ignored and absent in CI;
+    // the app loads it by reflection, so this guard keeps builds green with or without it.
+    def perfSdkJar = file('libs/GalaxyPerf/perfsdk-v1.0.0.jar')
+    if (perfSdkJar.exists()) {
+        implementation files(perfSdkJar)
+        logger.lifecycle("Galaxy Performance SDK found; bundling ${perfSdkJar.name}")
+    }
+
+    // JavaSteam — GameNative's fork (joshuatam/JavaSteam @ gamenative-latest). The depot-downloader
+    // module was rewritten to disk-spool chunks (temp files, not RAM) + drop the 8 MB per-thread
+    // ThreadLocal decompress window, fixing the large-game OOM (#408/#380: HITMAN 87 GB crashed at
+    // every speed tier on the public in.dragonbra:1.8.0 in-memory pipeline). Same published artifact
+    // GameNative ships. PINNED to the exact timestamped snapshot (buildNumber 1, the only build that
+    // exists) so it is immutable — a re-published -SNAPSHOT cannot silently change what we ship, and
+    // byte-identical to the artifact the #408 device-proof build (CI run 32710611783) resolved. The
+    // jars+metadata are VENDORED in-repo under vendor/maven/ (see its README) so the build no longer
+    // reaches Sonatype at all; transitive deps still come from mavenCentral.
+    implementation 'io.github.joshuatam:javasteam:1.8.0.1-26-20260801.180149-1'
+    implementation 'io.github.joshuatam:javasteam-depotdownloader:1.8.0.1-26-20260801.180149-1'
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
     implementation 'com.google.zxing:core:3.5.3'
     implementation 'androidx.recyclerview:recyclerview:1.2.0'

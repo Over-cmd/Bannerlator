@@ -409,9 +409,19 @@
         <b>Native Renderer</b><br /><br />
         Sends the game\'s image straight to the screen instead of through Bannerlator\'s compositor. This lowers latency and can improve performance, but disables features that need the compositor — colour swapping (RGBA) and the present-mode control. Turn it off if a game shows the wrong colours or won\'t display correctly.
     ]]></string>
+    <string name="help_renderer_native_backend"><![CDATA[
+        <b>Native backend</b><br /><br />
+        <b>Auto</b> and <b>SurfaceFlinger</b> use the hardened SurfaceFlinger renderer (acquire-fence wait, colour correction, and safer teardown). <b>Vulkan direct-scanout</b> is the leaner legacy path (lower overhead, with an FPS-cap refresh-rate vote) for devices where it works better. Falls back automatically below Android 10.
+    ]]></string>
     <string name="help_renderer_sf_compat"><![CDATA[
         <b>Correct SurfaceFlinger colours</b><br /><br />
         On the SurfaceFlinger renderer, a game\'s red and blue channels can come out swapped. This fixes that (BGRA→RGBA). Leave it <b>ON</b> — turn it off only if a game\'s colours already look correct without it, or look wrong with it on.
+    ]]></string>
+    <string name="help_renderer_driver"><![CDATA[
+        <b>Renderer Driver</b><br /><br />
+        Which Vulkan driver the on-screen <b>compositor</b> runs on — the layer that takes your game\'s finished frame and puts it on screen. This is <b>not</b> where your game renders; that\'s the top-level <b>Graphics Driver</b>.<br /><br />
+        <b>System</b> (default) uses Android\'s own Vulkan driver — the safe, always-compatible choice. Picking an installed <b>Turnip</b> points the compositor at that build instead. It mostly affects present/compatibility behaviour, not your game\'s FPS (the compositor isn\'t where rendering happens).<br /><br />
+        Leave it on <b>System</b> unless you know you need otherwise: a Turnip compositor can black-screen on builds whose window-system support doesn\'t match your device. Vulkan renderer only — has no effect on SurfaceFlinger or OpenGL.
     ]]></string>
     <string name="help_fps_limiter"><![CDATA[
         <b>FPS Limiter</b><br /><br />
@@ -426,7 +436,13 @@
     ]]></string>
     <string name="help_audio_driver"><![CDATA[
         <b>Audio Driver</b><br /><br />
-        How the game\'s sound reaches Android. <b>ALSA</b> is the simple, low-overhead default and works for most games. <b>PulseAudio</b> is a more capable sound server that some games or voice features need. Switch to PulseAudio if a game has no sound or crackles; otherwise leave it on ALSA.
+        How the game\'s sound reaches Android. <b>PulseAudio</b> is the default — a capable sound server that works for most games and voice features. <b>ALSA</b> is a lighter, low-overhead alternative. <b>DirectAudio (Experimental)</b> sends sound straight to Android with no server in between (lowest latency), but it\'s new — see its warning. Switch drivers if a game has no sound or crackles.
+    ]]></string>
+    <string name="directaudio_experimental_warning"><![CDATA[
+        <b>DirectAudio is experimental</b><br /><br />
+        It sends the game\'s sound straight to Android\'s audio system with <b>no PulseAudio or ALSA server</b> in between — the lowest-latency path, and it mixes all the game\'s sounds itself.<br /><br />
+        Because it\'s new, some games may have audio quirks — occasional skips, or a preset that doesn\'t stick. The <b>Auto</b> preset is the smoothest.<br /><br />
+        If you hit audio problems, switch back to <b>PulseAudio</b> or <b>ALSA</b>.
     ]]></string>
     <string name="help_fexcore_preset"><![CDATA[
         <b>FEXCore Preset</b><br /><br />
@@ -810,7 +826,7 @@
     <string name="fullscreen_mode_integer_short">Integer</string>
     <string name="frame_generation">Frame Generation (AI)</string>
     <string name="frame_generation_off">Off</string>
-    <string name="frame_generation_bionic">bionic-fg</string>
+    <string name="frame_generation_bionic">win-fg</string>
     <string name="frame_generation_lsfg">lsfg-vk (Lossless Scaling)</string>
     <string name="frame_generation_multiplier">Multiplier</string>
     <string name="frame_generation_lsfg_needs_dll">lsfg-vk is unavailable — import a Lossless.dll at the bottom of Settings to enable it.</string>
@@ -818,11 +834,11 @@
     <string name="present_mode_fg_locked">Mailbox is required while frame generation is on.</string>
     <string name="frame_generation_ingame_hint">Tune the multiplier &amp; flow scale live from the in-game side menu.</string>
     <string name="frame_generation_model">Interpolation model</string>
-    <string name="frame_generation_model_default">Default</string>
-    <string name="frame_generation_model_traced">Traced graph (experimental)</string>
-    <string name="frame_generation_model_v2">V2 engine (experimental)</string>
-    <string name="frame_generation_model_fsr3">FidelityFX optical flow (experimental)</string>
-    <string name="frame_generation_model_fsr3_v2">FidelityFX optical flow v2 (experimental)</string>
+    <string name="frame_generation_model_default">Optical flow</string>
+    <string name="frame_generation_model_traced">Optical flow</string>
+    <string name="frame_generation_model_v2">Optical flow</string>
+    <string name="frame_generation_model_fsr3">Optical flow</string>
+    <string name="frame_generation_model_fsr3_v2">Optical flow · bidirectional</string>
     <string name="frame_generation_model_experimental_hint">Experimental model — may render incorrectly or cost more performance than it gains. Switch back to Default if a game misbehaves.</string>
     <string name="frame_generation_lsfg_hint">Uses your imported Lossless.dll (set it at the bottom of Settings). Tune the multiplier &amp; flow scale live from the in-game side menu.</string>
     <string name="fg_performance_mode">Performance mode</string>
@@ -1041,6 +1057,10 @@ E.g. <b>META</b> for <i>META key</i>, \n
     <string name="vkbasalt_sharpness_denoise">Sharpeness Denoise</string>
     <string name="vulkan_settings">Vulkan Settings</string>
     <string name="renderer_native">Native Renderer</string>
+    <string name="renderer_native_backend">Native backend</string>
+    <string name="renderer_native_backend_auto">Auto (recommended)</string>
+    <string name="renderer_native_backend_asr">SurfaceFlinger</string>
+    <string name="renderer_native_backend_flip">Vulkan direct-scanout</string>
     <string name="renderer_present_mode">Present Mode</string>
     <string name="renderer_driver_id">Renderer Driver</string>
     <string name="renderer_filter_mode">Filter Mode</string>
@@ -1056,6 +1076,8 @@ E.g. <b>META</b> for <i>META key</i>, \n
     <string name="renderer_driver_system">System</string>
     <string name="renderer_driver_turnip">Turnip</string>
     <string name="shutdown">Shutting down…</string>
+    <string name="saving_on_exit">Backing up your saves…</string>
+    <string name="downloading_on_launch">Syncing cloud saves…</string>
     <string name="disable_mouse">Toggle Mouse</string>
     <string name="custom_icon">Custom Icon</string>
     <string name="select_png_jpg_jpeg_ico">Select PNG/JPG/JPEG/ICO</string>
@@ -1152,4 +1174,107 @@ E.g. <b>META</b> for <i>META key</i>, \n
     <string name="wrapper_catalog_download_failed">Couldn\'t download %1$s</string>
     <string name="wrapper_catalog_close">Done</string>
     <string name="no_wine_version_installed">No Wine version installed — download a Proton from the in-app catalog first (Containers → download icon).</string>
+    <string name="help_player_slots"><![CDATA[
+        <b>Player Slots</b><br /><br />
+        Decides which XInput <b>player</b> each controller becomes in the game. <b>Player 1</b> is slot 0, Player 2 is slot 1, and so on.<br /><br />
+        <b>Auto</b> — the controller takes the next free player in the order pads connect (the normal behaviour).<br />
+        <b>Player 1–4</b> — pins that controller to that exact player, every launch.<br />
+        <b>Ignore</b> — that controller never takes a player slot.<br /><br />
+        <b>Shared / combined control</b> — assign TWO (or more) devices to the SAME player and they BOTH drive that player at once (for example the on-screen controls plus a physical pad). Their inputs are combined, not fought over.<br /><br />
+        <b>On-screen controls</b> — the touch pad can be pinned to any player too. A physical pad connected BEFORE launch takes priority in the connect order. The On-screen priority setting decides what happens when a pad connects mid-game: <b>Keep</b> leaves the touch pad where it is, <b>Yield</b> hands Player 1 to the pad and moves the touch pad up, <b>Share</b> makes the pad share the touch pad\'s player.<br /><br />
+        <b>Reset Input</b> (in-game side menu) rebuilds the controller connection without restarting the game.<br /><br />
+        Changes made here (out of game) apply on the game\'s <b>next launch</b>; the in-game side menu changes players live. The app-drawer Input Controls copy of this sets the default for <b>newly-created</b> containers.
+    ]]></string>
+    <!-- ── Audio settings: per-preset and per-row "?" help ────────────────────────────────────
+         Latency figures are TOTALS (driver buffer + Android's fixed ~21 ms mixer/HAL cost), because
+         the total is what a player hears; a bare buffer number is not comparable to it. -->
+    <string name="help_audio_preset_auto"><![CDATA[
+        <b>Auto / Smart</b> — the recommended setting.<br /><br />
+        Starts at a low delay and only adds more if it actually hears crackling. On DirectAudio that is a
+        576-frame buffer, about <b>33 ms total</b>.<br /><br />
+        The safety net is the point: a fixed low buffer crackles the moment a heavy scene stalls the GPU,
+        while this one grows just enough to stop that and no further.<br /><br />
+        Pick this unless you have a reason not to.
+    ]]></string>
+    <string name="help_audio_preset_low"><![CDATA[
+        <b>Low latency</b> — the floor.<br /><br />
+        One hardware burst: about <b>25 ms total</b> on DirectAudio, which is as low as anything on Android
+        goes. Adaptive stays on, so a title that cannot hold it grows a step rather than crackling all
+        session.<br /><br />
+        Measured across three games, one held this comfortably and two needed a step up. Nothing breaks
+        either way — but if you hear anything, Auto is the setting to return to.
+    ]]></string>
+    <string name="help_audio_preset_balanced"><![CDATA[
+        <b>Balanced</b> — a calmer buffer that still adapts.<br /><br />
+        About <b>47 ms total</b> on DirectAudio (1248 frames). Noticeably later than Auto, and noticeably
+        safer on a device that struggles.<br /><br />
+        Worth trying if Auto crackles during loading screens or busy scenes.
+    ]]></string>
+    <string name="help_audio_preset_stable"><![CDATA[
+        <b>Stable</b> — biggest safety margin, most delay.<br /><br />
+        About <b>83 ms total</b> on DirectAudio (3000 frames). Sound lags visibly behind the picture in
+        fast games, which is the trade you are making.<br /><br />
+        For weak devices, very demanding games, or anything that crackles on every other setting.
+    ]]></string>
+    <string name="help_audio_preset_custom"><![CDATA[
+        <b>Custom</b> — unlocks the fine-tune rows below.<br /><br />
+        Every other preset fills those rows in for you and greys them out; they still <i>show</i> what the
+        preset applies, so you can read them before switching.<br /><br />
+        Only choose this if you want to set the buffer yourself. The "?" on each row explains what it does.
+    ]]></string>
+    <string name="help_audio_perf_mode"><![CDATA[
+        <b>Output mode</b> — which Android audio path is requested.<br /><br />
+        <b>Low latency</b> asks for the fast path with a high-priority audio thread. On this emulator that
+        is the tested choice: under box64/FEX a normal-priority thread gets preempted by the game and the
+        sound turns choppy.<br /><br />
+        <b>None</b> is the ordinary path — steadier on paper, choppier here for that reason.<br /><br />
+        <b>Power saving</b> favours battery over delay.<br /><br />
+        DirectAudio forces <b>Low latency</b> for every named preset regardless of this row; it only takes
+        effect on Custom.
+    ]]></string>
+    <string name="help_audio_adaptive"><![CDATA[
+        <b>Adaptive buffer</b> — grow only when something actually goes wrong.<br /><br />
+        The buffer starts small. Each time the audio underruns, a little is added, so it settles at the
+        lowest delay <i>this</i> game can hold on <i>your</i> device rather than a number someone guessed.<br /><br />
+        Turning it off pins the buffer. If the game then cannot keep up, <b>it crackles until you relaunch</b>
+        — nothing recovers on its own.<br /><br />
+        Every preset now leaves this on, so switching it off is a deliberate choice you make here, on Custom.
+        Do that only when you are testing a fixed size and want no interference.
+    ]]></string>
+    <string name="help_audio_direct_buffer"><![CDATA[
+        <b>Audio buffer</b> — how much sound DirectAudio keeps ready, in milliseconds.<br /><br />
+        Smaller is tighter but more fragile; larger rides out stutters at the cost of delay.<br /><br />
+        The row shows the <b>total</b>, because Android adds a fixed <b>21 ms</b> of its own that no
+        application can avoid. A 12 ms buffer is 33 ms total. The lowest possible is one hardware burst —
+        4 ms of buffer, <b>25 ms total</b>, the floor for any app on this device.<br /><br />
+        With adaptive on, this is a starting point <i>and</i> the level the buffer returns to once things
+        are calm again — it never drops below what you set here.
+    ]]></string>
+    <string name="help_audio_guest_buffer"><![CDATA[
+        <b>Guest buffer</b> — how much sound Windows hands to PulseAudio at a time.<br /><br />
+        This is the guest side of the delay, separate from the sink buffer below. It is fixed when the game
+        connects, so a change takes effect on the <b>next launch</b>.<br /><br />
+        Lower means tighter sync and more work per second; higher is steadier.
+    ]]></string>
+    <string name="help_audio_buffer_frames"><![CDATA[
+        <b>Initial buffer</b> — the starting size, in audio frames rather than milliseconds.<br /><br />
+        48 frames is 1 ms, so 576 frames is a 12 ms buffer (33 ms total). <b>auto</b> lets the engine
+        choose.<br /><br />
+        This is the advanced form of the millisecond row above. If you set both, <b>frames win</b> — clear
+        it back to auto to go by milliseconds again.
+    ]]></string>
+    <string name="help_audio_max_buffer_frames"><![CDATA[
+        <b>Max buffer</b> — how far adaptive growth is allowed to go.<br /><br />
+        A ceiling, not a target: the buffer only reaches it if the game repeatedly underruns. It stops a bad
+        patch from inflating the delay without limit.<br /><br />
+        <b>device max</b> uses the driver default (100 ms). Setting it too low means a struggling game runs
+        out of room and keeps crackling.
+    ]]></string>
+    <string name="help_audio_latency_unused"><![CDATA[
+        <b>Not used by ALSA.</b><br /><br />
+        This row sets the guest-side buffer, which only PulseAudio has. ALSA reaches Android through the
+        app\'s own sound server, and that takes its sizing from the <b>Initial buffer</b> and <b>Max
+        buffer</b> rows below instead.<br /><br />
+        Change those to adjust ALSA\'s delay. This slider is greyed out here because nothing reads it.
+    ]]></string>
 </resources>

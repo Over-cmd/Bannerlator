@@ -25,6 +25,7 @@ public class XServer {
     public final SparseArray<Extension> extensions = new SparseArray<>();
     public final ScreenInfo screenInfo;
     public final PixmapManager pixmapManager;
+    public final ColormapManager colormapManager = new ColormapManager();
     public final ResourceIDs resourceIDs = new ResourceIDs(128);
     public final GraphicsContextManager graphicsContextManager = new GraphicsContextManager();
     public final SelectionManager selectionManager;

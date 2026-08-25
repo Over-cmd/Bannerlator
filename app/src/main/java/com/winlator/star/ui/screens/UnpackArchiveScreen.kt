@@ -781,14 +781,4 @@ private fun WarnCard(content: @Composable androidx.compose.foundation.layout.Col
     }
 }
 
-private fun humanDuration(ms: Long): String {
-    val totalSec = ms / 1000
-    val h = totalSec / 3600
-    val m = (totalSec % 3600) / 60
-    val s = totalSec % 60
-    return when {
-        h > 0 -> "${h}h ${m}m"
-        m > 0 -> "${m}m ${s}s"
-        else -> "${s}s"
-    }
-}
+private fun humanDuration(ms: Long): String = StringUtils.humanDuration(ms)

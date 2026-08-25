@@ -86,10 +86,11 @@ object CustomSaveVault {
     )
 
     /**
-     * Enumerate every CUSTOM (non-Steam) shortcut across all containers and build its local-vault
-     * status. Custom = NOT a genuine Steam game (mirrors ShortcutsScreen's isCustomShortcut):
-     * `storeSource != "steam"` AND the exec path is not under `steam_games`. Sorted no-backup-first,
-     * then by name. BLOCKING (loads containers + scans desktop dirs) — call off the main thread.
+     * Enumerate every CUSTOM (non-store) shortcut across all containers and build its local-vault
+     * status. Custom = neither a Steam, an Epic, nor a GOG game (each has its own tab): `storeSource`
+     * is not "steam"/"epic"/"gog" AND the exec path is not under `steam_games`/`epic_games`/`gog_games`.
+     * Sorted no-backup-first, then by name. BLOCKING (loads containers + scans desktop dirs) — call
+     * off the main thread.
      */
     fun listStatuses(context: Context): List<CustomGameStatus> {
         val shortcuts = try {
@@ -112,11 +113,22 @@ object CustomSaveVault {
             .sortedWith(compareBy({ it.hasBackup }, { it.name.lowercase() }))
     }
 
-    /** Mirror of ShortcutsScreen's Steam-origin gate, inverted: true for custom (non-Steam) games. */
+    /**
+     * Mirror of ShortcutsScreen's store-origin gate, inverted: true only for genuinely custom games.
+     * Excludes ALL storefronts — Steam, Epic, and GOG each own a dedicated Save Manager tab, so a
+     * store-tagged shortcut (or one whose exec lives under `steam_games`/`epic_games`/`gog_games`)
+     * must not also leak into the Custom tab. NB: GOG shortcuts are written UNTAGGED (StarLaunchBridge's
+     * legacy overload stamps no `storeSource`), so the load-bearing GOG exclusion is the `gog_games`
+     * path segment; the `"gog"` storeSource branch is defensive / forward-compat.
+     */
     private fun isCustom(shortcut: Shortcut): Boolean {
-        if (shortcut.getExtra("storeSource") == "steam") return false
-        val p = shortcut.path
-        return p == null || !p.contains("steam_games", ignoreCase = true)
+        when (shortcut.getExtra("storeSource")) {
+            "steam", "epic", "gog" -> return false
+        }
+        val p = shortcut.path ?: return true
+        return !p.contains("steam_games", ignoreCase = true) &&
+            !p.contains("epic_games", ignoreCase = true) &&
+            !p.contains("gog_games", ignoreCase = true)
     }
 
     /**

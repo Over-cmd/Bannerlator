@@ -54,17 +54,25 @@ public abstract class ImageFsInstaller {
         }
     }
 
-    // Stages the bundled bionic-fg Vulkan layer (.so + implicit-layer manifest) into imagefs so
-    // frame generation / the FPS limiter work without manually copying the .so after every
-    // (re)install. Idempotent via the version stamp above. The manifest's library_path is
-    // ../../../lib/libbionic_fg.so, so it must sit in usr/share/vulkan/implicit_layer.d/ with the
-    // .so in usr/lib/.
-    public static void installBionicFgLayer(Context context, ImageFs imageFs) {
+    // Stages the bundled win-fg Vulkan layer (.so + implicit-layer manifest) into imagefs so frame
+    // generation works without manually copying the .so after every (re)install. Idempotent via the
+    // version stamp above. The manifest's library_path is ../../../lib/libwin_fg.so, so it must sit
+    // in usr/share/vulkan/implicit_layer.d/ with the .so in usr/lib/.
+    //
+    // win-fg is the clean-room replacement for the previous bionic-fg layer, which was removed
+    // because it embedded proprietary Lossless-Scaling-derived weights. This method also deletes any
+    // previously-staged bionic-fg layer so devices upgrading from an older build stop carrying it.
+    public static void installWinFgLayer(Context context, ImageFs imageFs) {
         try {
-            File soDst = new File(imageFs.getLibDir(), "libbionic_fg.so");
-            long assetSize = FileUtils.getSize(context, "bionic-fg/libbionic_fg.so");
-            File stamp = new File(imageFs.getLibDir(), ".bionic-fg-stamp");
-            String want = assetStamp(context, "bionic-fg/libbionic_fg.so");
+            // Purge the superseded proprietary-derived bionic-fg layer from the prefix.
+            new File(imageFs.getLibDir(), "libbionic_fg.so").delete();
+            new File(imageFs.getLibDir(), ".bionic-fg-stamp").delete();
+            new File(imageFs.getRootDir(), "usr/share/vulkan/implicit_layer.d/VkLayer_BIONIC_framegen.json").delete();
+
+            File soDst = new File(imageFs.getLibDir(), "libwin_fg.so");
+            long assetSize = FileUtils.getSize(context, "win-fg/libwin_fg.so");
+            File stamp = new File(imageFs.getLibDir(), ".win-fg-stamp");
+            String want = assetStamp(context, "win-fg/libwin_fg.so");
             // Both checks, because they catch different failures: the stamp catches a new build
             // that happens to be the same size as the installed one, the size catches the staged
             // file drifting on disk (replaced, truncated) while the stamp still reads current.
@@ -73,25 +81,25 @@ public abstract class ImageFsInstaller {
                 // Copy via a temp file and rename into place: staging runs off the main thread,
                 // so a game launched during it would otherwise be able to dlopen a half-written
                 // layer. rename() within the same directory is atomic.
-                File soTmp = new File(soDst.getParentFile(), "libbionic_fg.so.staging");
-                FileUtils.copy(context, "bionic-fg/libbionic_fg.so", soTmp);
+                File soTmp = new File(soDst.getParentFile(), "libwin_fg.so.staging");
+                FileUtils.copy(context, "win-fg/libwin_fg.so", soTmp);
                 if (!soTmp.renameTo(soDst)) {
                     soTmp.delete();
-                    Log.e("ImageFsInstaller", "Failed to swap in the staged bionic-fg layer");
+                    Log.e("ImageFsInstaller", "Failed to swap in the staged win-fg layer");
                     return;
                 }
-                Log.i("ImageFsInstaller", "Staged bundled bionic-fg layer (" + assetSize + " bytes)");
+                Log.i("ImageFsInstaller", "Staged bundled win-fg layer (" + assetSize + " bytes)");
             }
             File manifestDir = new File(imageFs.getRootDir(), "usr/share/vulkan/implicit_layer.d");
             manifestDir.mkdirs();
-            File manifestDst = new File(manifestDir, "VkLayer_BIONIC_framegen.json");
+            File manifestDst = new File(manifestDir, "VkLayer_win_framegen.json");
             // Always refresh the manifest, like the lsfg-vk one below. It was previously written
             // only when absent, so any change to it (layer name, api version, env gating) could
             // never reach a device that already had the old copy.
-            FileUtils.copy(context, "bionic-fg/VkLayer_BIONIC_framegen.json", manifestDst);
+            FileUtils.copy(context, "win-fg/VkLayer_win_framegen.json", manifestDst);
             FileUtils.writeString(stamp, want);
         } catch (Exception e) {
-            Log.e("ImageFsInstaller", "Failed to stage bionic-fg layer", e);
+            Log.e("ImageFsInstaller", "Failed to stage win-fg layer", e);
         }
     }
 
@@ -102,7 +110,7 @@ public abstract class ImageFsInstaller {
     // version stamp), so the steady-state cost is a few stats. Call off the main thread.
     public static void stageBundledComponents(Context context, ImageFs imageFs) {
         disableLibjpegShadowOnXiaomi(imageFs);
-        installBionicFgLayer(context, imageFs);
+        installWinFgLayer(context, imageFs);
         installLsfgVkLayer(context, imageFs);
         installFFmpeg8(context, imageFs);
     }
@@ -258,7 +266,7 @@ public abstract class ImageFsInstaller {
                 imageFs.createImgVersionFile(LATEST_VERSION);
                 FileUtils.symlink("libSDL2-2.0.so", new File(imageFs.getLibDir(), "libSDL2-2.0.so.0").getAbsolutePath());
                 resetContainerImgVersions(activity);
-                installBionicFgLayer(activity, imageFs);
+                installWinFgLayer(activity, imageFs);
                 installLsfgVkLayer(activity, imageFs);
                 installFFmpeg8(activity, imageFs);
                 // Progress is derived from an estimated content length and the post-extraction
@@ -278,7 +286,7 @@ public abstract class ImageFsInstaller {
         // imagefs already current -> just make sure the bundled bionic-fg layer is present
         // (e.g. upgrading from a build that didn't bundle it, without an imagefs re-extract).
         else {
-            installBionicFgLayer(activity, imageFs);
+            installWinFgLayer(activity, imageFs);
             installLsfgVkLayer(activity, imageFs);
             installFFmpeg8(activity, imageFs);
         }
@@ -318,7 +326,7 @@ public abstract class ImageFsInstaller {
                 imageFs.createImgVersionFile(LATEST_VERSION);
                 FileUtils.symlink("libSDL2-2.0.so", new File(imageFs.getLibDir(), "libSDL2-2.0.so.0").getAbsolutePath());
                 resetContainerImgVersions(activity);
-                installBionicFgLayer(activity, imageFs);
+                installWinFgLayer(activity, imageFs);
                 installLsfgVkLayer(activity, imageFs);
                 installFFmpeg8(activity, imageFs);
             } else {

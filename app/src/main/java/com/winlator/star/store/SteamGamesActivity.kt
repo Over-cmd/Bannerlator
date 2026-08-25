@@ -269,7 +269,9 @@ class SteamGamesActivity : ComponentActivity(), SteamRepository.SteamEventListen
         }
         val rows = repo.getCachedGameRows()
         games = rows
-            .filter { it.type == "game" }
+            // Only true "game" apps are shown, plus specific allowlisted appIds
+            // (e.g. Lossless Scaling) that are non-"game" but worth surfacing.
+            .filter { it.type == "game" || SteamRepository.LIBRARY_ALLOWLIST.contains(it.appId) }
             .map { SteamGame.fromGameRow(it) }
             .sortedBy { it.name.lowercase() }
         isLoading = false

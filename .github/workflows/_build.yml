@@ -26,6 +26,12 @@ on:
         description: 'Label for APK file names'
         required: true
         type: string
+    secrets:
+      # Samsung Galaxy Performance SDK jar (base64), optional. Supplied only by callers that
+      # opt in (test builds). When absent the build proceeds without it and the Galaxy
+      # Performance feature stays dormant. The proprietary jar is NEVER committed to the repo.
+      GALAXY_PERF_SDK_JAR_B64:
+        required: false
 
 permissions:
   contents: read
@@ -222,6 +228,21 @@ jobs:
     - name: Build LSFG native library (only if not cached)
       if: steps.cache-lsfg.outputs.cache-hit != 'true'
       run: ./build-lsfg-android.sh
+
+    - name: Restore Galaxy Performance SDK jar (optional, from secret)
+      # Decodes the proprietary Samsung jar from the encrypted secret into the git-ignored
+      # drop-point so app/build.gradle bundles it. No secret => no jar => feature dormant.
+      # The secret value is piped, never echoed, so it cannot leak into the log.
+      env:
+        GALAXY_JAR_B64: ${{ secrets.GALAXY_PERF_SDK_JAR_B64 }}
+      run: |
+        if [ -n "$GALAXY_JAR_B64" ]; then
+          mkdir -p app/libs/GalaxyPerf
+          printf '%s' "$GALAXY_JAR_B64" | base64 -d > app/libs/GalaxyPerf/perfsdk-v1.0.0.jar
+          echo "Galaxy Performance SDK restored: $(wc -c < app/libs/GalaxyPerf/perfsdk-v1.0.0.jar) bytes"
+        else
+          echo "No Galaxy SDK secret set — building without it (Galaxy feature dormant)."
+        fi
 
     - name: Build with Gradle
       # ONE flavor per job → only one ~588MB APK packages here, so the old

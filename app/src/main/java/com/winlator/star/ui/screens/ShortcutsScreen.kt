@@ -5,6 +5,7 @@ package com.winlator.star.ui.screens
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.content.res.Configuration
 import android.content.SharedPreferences
 import android.content.pm.ShortcutInfo
 import android.content.pm.ShortcutManager
@@ -85,8 +86,13 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Extension
+import androidx.compose.material.icons.filled.SportsEsports
+import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.Widgets
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Help
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Info
@@ -96,7 +102,9 @@ import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.DriveFileMove
 import androidx.compose.material.icons.filled.FileUpload
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.InsertDriveFile
@@ -117,6 +125,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.RadioButton
 import com.winlator.star.communityconfigs.AccountManager
 import com.winlator.star.communityconfigs.CanonicalDevice
@@ -173,6 +182,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -215,6 +225,7 @@ import com.winlator.star.ui.findActivity
 import com.winlator.star.ui.screens.adrenodownload.AdrenoDriverDownloadSheet
 import com.winlator.star.ui.screens.adrenodownload.RemoteDriverEntry
 import com.winlator.star.ui.screens.adrenodownload.RemoteDriverRepository
+import com.winlator.star.core.CopyGameToDriveC
 import com.winlator.star.core.DefaultVersion
 import com.winlator.star.core.FileUtils
 import com.winlator.star.core.GameFolderScanner
@@ -249,6 +260,16 @@ import com.winlator.star.ui.theme.SurfaceVariant
 import com.winlator.star.ui.theme.SurfaceVariant as SurfaceVariantColor
 import com.winlator.star.widget.CPUListView
 import com.winlator.star.ui.components.EnvVarsEditor
+import com.winlator.star.ui.components.AudioSettingsDialog
+import com.winlator.star.ui.components.audioConfigFromEnv
+import com.winlator.star.ui.components.audioConfigToEnv
+import com.winlator.star.ui.components.PlayerSlotsEditor
+import com.winlator.star.ui.components.CollapsibleRail
+import com.winlator.star.ui.components.RailItem
+import com.winlator.star.ui.components.RailLink
+import com.winlator.star.ui.components.RailSection
+import com.winlator.star.ui.components.RailTopTabs
+import com.winlator.star.ui.components.rememberRailState
 import com.winlator.star.winhandler.WinHandler
 import android.net.Uri
 import android.os.Build
@@ -288,6 +309,14 @@ fun ShortcutsScreen(vm: ShortcutsViewModel = viewModel()) {
     // The shortcut whose "Back up saves" layout-choice dialog is open (Winlator vs GameHub).
     var backupFormatShortcut by remember { mutableStateOf<Shortcut?>(null) }
     var settingsShortcut by remember { mutableStateOf<Shortcut?>(null) }
+    // "Copy to Drive C…" target — the game whose folder is being copied onto the container's C:
+    // drive (and then repointed). Both entry points (the ⋮ menu item and the editor's Storage row)
+    // set this; the shared CopyToDriveCCoordinator below owns the whole confirm→copy→repoint flow.
+    var copyToDriveCTarget by remember { mutableStateOf<Shortcut?>(null) }
+    // "Change executable…" target — the game being repointed at a different .exe/.lnk (launcher →
+    // real exe, dx11 ↔ dx9, a config tool). Both entry points set it; ChangeExecutableCoordinator
+    // owns the pick → args-choice → rewrite flow via the shared CopyGameToDriveC.setShortcutExe.
+    var changeExeTarget by remember { mutableStateOf<Shortcut?>(null) }
     var gameDetailsShortcut by remember { mutableStateOf<Shortcut?>(null) }
     var propertiesShortcut by remember { mutableStateOf<Shortcut?>(null) }
     var logsShortcut by remember { mutableStateOf<Shortcut?>(null) }
@@ -831,6 +860,8 @@ fun ShortcutsScreen(vm: ShortcutsViewModel = viewModel()) {
                                     onSettings = { settingsShortcut = shortcut },
                                     onRemove = { confirmRemove = shortcut },
                                     onClone = { cloneTarget = shortcut },
+                                    onCopyToDriveC = { copyToDriveCTarget = shortcut },
+                                    onChangeExe = { changeExeTarget = shortcut },
                                     onAddToHome = { addToHomeScreen(context, shortcut) },
                                     onExport = { exportShortcut(context, shortcut) },
                                     onProperties = { propertiesShortcut = shortcut },
@@ -857,6 +888,8 @@ fun ShortcutsScreen(vm: ShortcutsViewModel = viewModel()) {
                                 val itemSettings = { settingsShortcut = shortcut }
                                 val itemRemove = { confirmRemove = shortcut }
                                 val itemClone = { cloneTarget = shortcut }
+                                val itemCopyToDriveC = { copyToDriveCTarget = shortcut }
+                                val itemChangeExe = { changeExeTarget = shortcut }
                                 val itemAddToHome = { addToHomeScreen(context, shortcut) }
                                 val itemExport = { exportShortcut(context, shortcut) }
                                 val itemProperties = { propertiesShortcut = shortcut }
@@ -868,6 +901,8 @@ fun ShortcutsScreen(vm: ShortcutsViewModel = viewModel()) {
                                     onSettings = itemSettings,
                                     onRemove = itemRemove,
                                     onClone = itemClone,
+                                    onCopyToDriveC = itemCopyToDriveC,
+                                    onChangeExe = itemChangeExe,
                                     onAddToHome = itemAddToHome,
                                     onExport = itemExport,
                                     onProperties = itemProperties,
@@ -1043,9 +1078,17 @@ fun ShortcutsScreen(vm: ShortcutsViewModel = viewModel()) {
                         icon = Icons.Default.InsertDriveFile,
                     ) {
                         showImportMethodPicker = false
+                        // A container is already chosen here — hand the in-app picker its C: drive so
+                        // the user can pick a game living on C: (games picked under drive_c import as
+                        // C:\… via WinePath, running FROM the container's C:). Null-safe: only when the
+                        // C: drive actually exists on disk. The system picker (SAF) has no C: notion.
+                        val driveC = pendingImportContainerIndex.takeIf { it >= 0 }
+                            ?.let { vm.containers().getOrNull(it) }
+                            ?.let { File(it.rootDir, ".wine/drive_c") }
+                            ?.takeIf { it.isDirectory }
                         if (importUseSystemPicker) importFileLauncher.launch("*/*")
                         else importFileInAppLauncher.launch(
-                            InAppFilePicker.buildIntent(context, InAppFilePicker.SHORTCUT, "Select .exe / .desktop / .lnk")
+                            InAppFilePicker.buildIntent(context, InAppFilePicker.SHORTCUT, "Select .exe / .desktop / .lnk", driveCPath = driveC?.absolutePath)
                         )
                     }
                     MenuOptionCard(
@@ -1054,8 +1097,14 @@ fun ShortcutsScreen(vm: ShortcutsViewModel = viewModel()) {
                         icon = Icons.Default.Folder,
                     ) {
                         showImportMethodPicker = false
+                        // Same C: hand-off as the single-exe path: let the folder picker browse the
+                        // chosen container's C: drive (scanned games under drive_c import as C:\…).
+                        val driveC = pendingImportContainerIndex.takeIf { it >= 0 }
+                            ?.let { vm.containers().getOrNull(it) }
+                            ?.let { File(it.rootDir, ".wine/drive_c") }
+                            ?.takeIf { it.isDirectory }
                         importFolderLauncher.launch(
-                            InAppFilePicker.buildDirIntent(context, "Select your games folder")
+                            InAppFilePicker.buildDirIntent(context, "Select your games folder", driveCPath = driveC?.absolutePath)
                         )
                     }
                 }
@@ -1481,6 +1530,20 @@ fun ShortcutsScreen(vm: ShortcutsViewModel = viewModel()) {
             dismissButton = { TextButton(onClick = { cloneTarget = null }) { Text("Cancel") } },
         )
     }
+
+    // "Copy to Drive C…" — the shared confirm→copy→repoint flow, fed by the ⋮ menu item and the
+    // editor's Storage row. Owns its own dialogs/progress; clears the target and refreshes on finish.
+    CopyToDriveCCoordinator(
+        target = copyToDriveCTarget,
+        onFinished = { copyToDriveCTarget = null; vm.refresh() },
+    )
+
+    // "Change executable…" — pick a different .exe/.lnk in the game's folder and repoint the shortcut
+    // at it (shared Exec-rewrite with copy-to-C). Fed by the ⋮ item and the editor's Executable row.
+    ChangeExecutableCoordinator(
+        target = changeExeTarget,
+        onFinished = { changeExeTarget = null; vm.refresh() },
+    )
 
     // Save Restore: a backup .zip has been picked — choose the TARGET container to restore it into,
     // then hand off to GameSaveBackup.restore (which unzips into that container and remaps the user).
@@ -2555,7 +2618,12 @@ fun ShortcutsScreen(vm: ShortcutsViewModel = viewModel()) {
     settingsShortcut?.let { s ->
         ShortcutSettingsDialogScreen(
             shortcut = s,
-            onDismiss = { settingsShortcut = null; vm.refresh() }
+            onDismiss = { settingsShortcut = null; vm.refresh() },
+            // "Move to Drive C" (Storage row, General tab): close the editor and hand this game to
+            // the shared coordinator. Same destination as the ⋮ "Copy to Drive C…" item.
+            onMoveToDriveC = { settingsShortcut = null; copyToDriveCTarget = s },
+            // "Change executable…" (Executable row): close the editor and hand off to the coordinator.
+            onChangeExe = { settingsShortcut = null; changeExeTarget = s },
         )
     }
 
@@ -4470,6 +4538,8 @@ private fun ShortcutItemLayoutL(
     onSettings: () -> Unit,
     onRemove: () -> Unit,
     onClone: () -> Unit,
+    onCopyToDriveC: () -> Unit,
+    onChangeExe: () -> Unit,
     onAddToHome: () -> Unit,
     onExport: () -> Unit,
     onProperties: () -> Unit,
@@ -4552,13 +4622,24 @@ private fun ShortcutItemLayoutL(
         }
         Spacer(modifier = Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = shortcut.name,
-                style = MaterialTheme.typography.bodyLarge,
-                color = OnSurface,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
+            // Store badges beside the name (thumbnail too small to overlay): EPIC (storeSource==epic)
+            // then EOS, then GOG (storeSource==gog or gog_games exec path).
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = shortcut.name,
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = OnSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                ShortcutBadgeOverlay(
+                    showEpic = remember(shortcut) { shortcut.getExtra("storeSource") == "epic" },
+                    showEos = rememberEosBadge(shortcut),
+                    showGog = remember(shortcut) { isGogShortcut(shortcut) },
+                    modifier = Modifier.padding(start = 6.dp),
+                )
+            }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 if (subtitle.isNotEmpty()) {
                     Text(
@@ -4590,6 +4671,8 @@ private fun ShortcutItemLayoutL(
             onSettings = onSettings,
             onRemove = onRemove,
             onClone = onClone,
+            onCopyToDriveC = onCopyToDriveC,
+            onChangeExe = onChangeExe,
             onAddToHome = onAddToHome,
             onExport = onExport,
             onProperties = onProperties,
@@ -4611,6 +4694,8 @@ private fun ShortcutOverflowButton(
     onSettings: () -> Unit,
     onRemove: () -> Unit,
     onClone: () -> Unit,
+    onCopyToDriveC: () -> Unit,
+    onChangeExe: () -> Unit,
     onAddToHome: () -> Unit,
     onExport: () -> Unit,
     onProperties: () -> Unit,
@@ -4648,6 +4733,18 @@ private fun ShortcutOverflowButton(
                 text = { Text("Clone to container") },
                 leadingIcon = { Icon(Icons.Filled.ContentCopy, null) },
                 onClick = { menuExpanded = false; onClone() },
+            )
+            MenuItemDivider()
+            DropdownMenuItem(
+                text = { Text("Copy to Drive C…") },
+                leadingIcon = { Icon(Icons.Filled.DriveFileMove, null, tint = MaterialTheme.colorScheme.primary) },
+                onClick = { menuExpanded = false; onCopyToDriveC() },
+            )
+            MenuItemDivider()
+            DropdownMenuItem(
+                text = { Text("Change executable…") },
+                leadingIcon = { Icon(Icons.Filled.SwapHoriz, null, tint = MaterialTheme.colorScheme.primary) },
+                onClick = { menuExpanded = false; onChangeExe() },
             )
             MenuItemDivider()
             DropdownMenuItem(
@@ -4731,6 +4828,8 @@ private fun ShortcutGridItem(
     onSettings: () -> Unit,
     onRemove: () -> Unit,
     onClone: () -> Unit,
+    onCopyToDriveC: () -> Unit,
+    onChangeExe: () -> Unit,
     onAddToHome: () -> Unit,
     onExport: () -> Unit,
     onProperties: () -> Unit,
@@ -4788,6 +4887,17 @@ private fun ShortcutGridItem(
                     .padding(6.dp),
             )
         }
+
+        // Store badges overlaid top-left on the cover: EPIC (storeSource==epic) then EOS, then GOG
+        // (storeSource==gog or gog_games exec path).
+        ShortcutBadgeOverlay(
+            showEpic = remember(shortcut) { shortcut.getExtra("storeSource") == "epic" },
+            showEos = rememberEosBadge(shortcut),
+            showGog = remember(shortcut) { isGogShortcut(shortcut) },
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .padding(6.dp),
+        )
 
         // Gradient scrim + name/container at the bottom
         Box(
@@ -4859,6 +4969,10 @@ private fun ShortcutGridItem(
             DropdownMenuItem(text = { Text("Remove") }, leadingIcon = { Icon(Icons.Filled.Delete, null) }, onClick = { menuExpanded = false; onRemove() })
             MenuItemDivider()
             DropdownMenuItem(text = { Text("Clone to container") }, leadingIcon = { Icon(Icons.Filled.ContentCopy, null) }, onClick = { menuExpanded = false; onClone() })
+            MenuItemDivider()
+            DropdownMenuItem(text = { Text("Copy to Drive C…") }, leadingIcon = { Icon(Icons.Filled.DriveFileMove, null, tint = MaterialTheme.colorScheme.primary) }, onClick = { menuExpanded = false; onCopyToDriveC() })
+            MenuItemDivider()
+            DropdownMenuItem(text = { Text("Change executable…") }, leadingIcon = { Icon(Icons.Filled.SwapHoriz, null, tint = MaterialTheme.colorScheme.primary) }, onClick = { menuExpanded = false; onChangeExe() })
             MenuItemDivider()
             DropdownMenuItem(text = { Text("Add to home screen") }, leadingIcon = { Icon(Icons.Filled.AddToHomeScreen, null) }, onClick = { menuExpanded = false; onAddToHome() })
             MenuItemDivider()
@@ -5358,22 +5472,22 @@ private fun perfExtraOrNull(value: Boolean, global: Boolean): String? =
 @Composable
 private fun PerfEditRow(dp: SettingsDpad, id: String, label: String, checked: Boolean, global: Boolean, onChange: (Boolean) -> Unit) {
     val overridden = checked != global
-    Column(modifier = Modifier.fillMaxWidth()) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            DpSwitch(dp, id, checked = checked, onCheckedChange = onChange)
-            Spacer(Modifier.width(8.dp))
-            Text(label, modifier = Modifier.weight(1f))
-        }
-        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(start = 44.dp, bottom = 2.dp)) {
-            Text(
-                if (overridden) "● Per-game override" else "○ Using global default",
-                fontSize = 10.sp,
-                color = if (overridden) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.weight(1f)
-            )
-            if (overridden) Text("Reset", fontSize = 10.sp, color = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.clickable { onChange(global) })
-        }
+    // Compact single-line row: switch + label, with a trailing state hint. Overridden → an accent
+    // "Reset" tap; otherwise a faint "default" marker. (Full explanation lives in the section "?" help.)
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp)
+    ) {
+        DpSwitch(dp, id, checked = checked, onCheckedChange = onChange)
+        Spacer(Modifier.width(8.dp))
+        Text(label, fontSize = 13.sp, modifier = Modifier.weight(1f))
+        if (overridden) Text(
+            "● Reset", fontSize = 11.sp, color = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.clickable { onChange(global) }.padding(start = 8.dp)
+        ) else Text(
+            "default", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(start = 8.dp)
+        )
     }
 }
 
@@ -5420,11 +5534,32 @@ private fun DpTabs(dp: SettingsDpad, id: String, selected: Int, count: Int, onSe
 }
 
 @Composable
-internal fun ShortcutSettingsDialogScreen(shortcut: Shortcut, onDismiss: () -> Unit) {
+internal fun ShortcutSettingsDialogScreen(
+    shortcut: Shortcut,
+    onDismiss: () -> Unit,
+    // Non-null when the host can run the "Copy to Drive C" flow (the Games list). The Storage row's
+    // "Move to Drive C" button calls this; it stays hidden for a game already on C:.
+    onMoveToDriveC: (() -> Unit)? = null,
+    // Non-null when the host can run the "Change executable" flow (the Games list). The Executable
+    // row's "Change…" button calls this.
+    onChangeExe: (() -> Unit)? = null,
+) {
     val context = LocalContext.current
     val res = context.resources
     // Controller / D-pad state for this editor (see the SettingsDpad model above).
     val dp = remember { SettingsDpad() }
+
+    // Epic Online Services (EOS) auth — only relevant for Epic-origin shortcuts. Default ON.
+    val isEpicShortcut = remember { shortcut.getExtra("storeSource") == "epic" }
+    var epicEosEnabled by remember { mutableStateOf(shortcut.getExtra("epicEos", "1") != "0") }
+    // Manual override: force the -epicovt ownership-token path even when the auto
+    // DenuvoDetector misses an obfuscated Denuvo exe. Default OFF.
+    var epicOvtForce by remember { mutableStateOf(shortcut.getExtra("epicOvtForce", "0") == "1") }
+    // Launch offline — skip EOS online auth for this game (keeps its Epic identity args). Default OFF.
+    var epicOffline by remember { mutableStateOf(shortcut.getExtra("epicOffline", "0") == "1") }
+    // Epic Friends Overlay (Phase 3) — provision Epic's real EOS overlay into the prefix so the game's
+    // own EOS SDK renders friends/notifications on Shift+F3. Default OFF (opt-in per game).
+    var epicOverlayEnabled by remember { mutableStateOf(shortcut.getExtra("epicOverlay", "0") == "1") }
 
     // Async-loaded state
     var isArm64EC by remember { mutableStateOf(false) }
@@ -5551,6 +5686,18 @@ internal fun ShortcutSettingsDialogScreen(shortcut: Shortcut, onDismiss: () -> U
     var vkPresentMode by remember {
         mutableStateOf(shortcut.getExtra("presentMode", shortcut.container.getRendererPresentMode()))
     }
+    // Native backend (Auto / SurfaceFlinger / Vulkan direct-scanout) — per-game override, defaults to
+    // the container's value. Stored via the "nativeBackend" extra the launch resolver reads; only
+    // relevant when Native Rendering is on.
+    var vkNativeBackend by remember {
+        mutableStateOf(shortcut.getExtra("nativeBackend", shortcut.container.getRendererNativeBackend()))
+    }
+    // Compositor (present-layer) Vulkan driver — per-game override, defaults to the container's value.
+    // This is the driver the present layer runs on (System or an installed Turnip), NOT the guest
+    // graphics driver above. Launch already resolves shortcut.getExtra("rendererDriverId", ...).
+    var vkRendererDriverId by remember {
+        mutableStateOf(shortcut.getExtra("rendererDriverId", shortcut.container.getRendererDriverId()))
+    }
 
     // Render scale (supersampling) — per-game override, defaults to the container's "renderScale"
     // extra. Stored via the shortcut "renderScale" extra. "1.0" = Off.
@@ -5606,11 +5753,23 @@ internal fun ShortcutSettingsDialogScreen(shortcut: Shortcut, onDismiss: () -> U
                 put(k, shortcut.getExtra(k, if (com.winlator.star.perf.PerformanceSettings.rootDefaultValue(k)) "1" else "0") == "1")
         }
     }
+    // The 9 power-user perf toggles live in a collapsed "Performance" section to keep this dialog short.
+    var perfExpanded by rememberSaveable { mutableStateOf(false) }
 
-    // Audio driver
+    // Audio driver. DirectAudio only loads on the four supported arm64ec Proton builds; a shortcut
+    // can't override the Wine version (container-only), so support is fixed by the container's layer.
+    // Grey the option out off those layers and coerce a stale saved pick back to the default so the
+    // dropdown never shows an unselectable value as selected.
     val audioDriverEntries = remember { res.getStringArray(R.array.audio_driver_entries).toList() }
+    val directAudioSupported = remember {
+        com.winlator.star.core.DirectAudioSupport.isSupported(shortcut.container.wineVersion)
+    }
+    val directAudioEntry = remember {
+        audioDriverEntries.firstOrNull { StringUtils.parseIdentifier(it) == "directaudio" }
+    }
     var selectedAudioDriver by remember {
-        val id = shortcut.getExtra("audioDriver", shortcut.container.audioDriver)
+        var id = shortcut.getExtra("audioDriver", shortcut.container.audioDriver)
+        if (id == "directaudio" && !directAudioSupported) id = Container.DEFAULT_AUDIO_DRIVER
         mutableStateOf(audioDriverEntries.firstOrNull { StringUtils.parseIdentifier(it) == id }
             ?: audioDriverEntries.firstOrNull() ?: id)
     }
@@ -5664,6 +5823,16 @@ internal fun ShortcutSettingsDialogScreen(shortcut: Shortcut, onDismiss: () -> U
     var enableDInput by remember { mutableStateOf((initialInputType and WinHandler.FLAG_INPUT_TYPE_DINPUT.toInt()) != 0) }
     var disabledXInput by remember { mutableStateOf(shortcut.getExtra("disableXinput", "0") == "1") }
     var simTouchScreen by remember { mutableStateOf(shortcut.getExtra("simTouchScreen", "0") == "1") }
+
+    // Per-game controller->player-slot pins. EMPTY string = no shortcut override (inherit the container's
+    // Player Slots); any non-empty value means this shortcut OWNS the pins. Same JSON schema (and editor)
+    // as the container editor and the in-game Players tab — mutated only via WinHandler.parse/build. The
+    // launch resolver reads this extra first, else the container's (resolvedControllerSlotOverridesJson).
+    var controllerSlotOverridesJson by remember { mutableStateOf(shortcut.getExtra("controllerSlotOverrides", "")) }
+
+    // #333 per-game auto-hide override. "" = inherit the container; "1"/"0" = explicit on/off for this
+    // game. The launch resolver (resolvedAutoHideControlsOnPad) reads this extra first, else the container.
+    var autoHideControlsOnPad by remember { mutableStateOf(shortcut.getExtra("autoHideControlsOnPad", "")) }
 
     // Num controllers
     val numControllersEntries = remember { res.getStringArray(R.array.num_controllers_entries).toList() }
@@ -5747,6 +5916,7 @@ internal fun ShortcutSettingsDialogScreen(shortcut: Shortcut, onDismiss: () -> U
     // Env vars live in dialog-level state (not in the tab) so switching tabs can't drop
     // in-progress edits; written back to the shortcut's extras in save() below.
     var envVarsStr by remember { mutableStateOf(shortcut.getExtra("envVars")) }
+    var showScAudioSettings by remember { mutableStateOf(false) }
     // The game's folder on the Android side, derived from the shortcut's Exec= path, so the
     // editor can look for DLLs the game ships. Null when the drive letter isn't mapped.
     val gameDir = remember(shortcut) {
@@ -5782,7 +5952,9 @@ internal fun ShortcutSettingsDialogScreen(shortcut: Shortcut, onDismiss: () -> U
 
     // Tab
     var selectedTab by remember { mutableIntStateOf(0) }
-    val tabTitles = listOf("Win Components", "Env Vars", "Advanced")
+    // Tab positions: General(0), Win Components(1), Env Vars(2), Advanced(3), Controller(4). The old
+    // top "general" scrolling block became the General tab; its controller half became Controller.
+    val tabTitles = listOf("General", "Win Components", "Env Vars", "Advanced", "Controller")
 
     // Icon picker
     fun applyIconFromUri(uri: Uri) {
@@ -5901,6 +6073,10 @@ internal fun ShortcutSettingsDialogScreen(shortcut: Shortcut, onDismiss: () -> U
 
         with(shortcut) {
             putExtra("execArgs", execArgs.ifEmpty { null })
+            if (isEpicShortcut) putExtra("epicEos", if (epicEosEnabled) "1" else "0")
+            if (isEpicShortcut) putExtra("epicOvtForce", if (epicOvtForce) "1" else "0")
+            if (isEpicShortcut) putExtra("epicOffline", if (epicOffline) "1" else "0")
+            if (isEpicShortcut) putExtra("epicOverlay", if (epicOverlayEnabled) "1" else "0")
             putExtra("screenSize", screenSize)
             putExtra("graphicsDriver", StringUtils.parseIdentifier(selectedGfxDriver))
             putExtra("graphicsDriverConfig", graphicsDriverConfig)
@@ -5919,6 +6095,8 @@ internal fun ShortcutSettingsDialogScreen(shortcut: Shortcut, onDismiss: () -> U
             putExtra("native", if (vkNative) "true" else "false")
             putExtra("swapRB", if (vkSwapRB) "true" else "false")
             putExtra("presentMode", vkPresentMode)
+            putExtra("nativeBackend", vkNativeBackend)
+            putExtra("rendererDriverId", vkRendererDriverId)
             putExtra("renderScale", if (renderScale == "1.0") null else renderScale)
             // "In-game refresh rate" per-game override: both extras written together, "" = inherit the
             // container (store null so the extra is cleared, not left empty → keeps the shortcut default).
@@ -5935,7 +6113,11 @@ internal fun ShortcutSettingsDialogScreen(shortcut: Shortcut, onDismiss: () -> U
                 putExtra(rk, perfExtraOrNull(rootOverrides[rk] ?: false, com.winlator.star.perf.PerformanceSettings.rootDefaultValue(rk)))
             putExtra("dxwrapper", StringUtils.parseIdentifier(selectedDxWrapper))
             putExtra("dxwrapperConfig", dxWrapperConfig)
-            putExtra("audioDriver", StringUtils.parseIdentifier(selectedAudioDriver))
+            // Belt-and-suspenders: never persist Audio=directaudio for a layer that can't load it (the
+            // grey-out blocks a fresh pick; this catches an already-set one edited without touching it).
+            putExtra("audioDriver", StringUtils.parseIdentifier(selectedAudioDriver).let {
+                if (it == "directaudio" && !directAudioSupported) Container.DEFAULT_AUDIO_DRIVER else it
+            })
             putExtra("emulator", StringUtils.parseIdentifier(selectedEmulator))
             putExtra("midiSoundFont", midiVal.ifEmpty { null })
             putExtra("lc_all", lcAll)
@@ -5948,6 +6130,10 @@ internal fun ShortcutSettingsDialogScreen(shortcut: Shortcut, onDismiss: () -> U
             putExtra("exclusiveXInput", if (exclusiveXInput) "1" else "0")
             putExtra("disableXinput", if (disabledXInput) "1" else null)
             putExtra("simTouchScreen", if (simTouchScreen) "1" else "0")
+            // Empty = clear the extra so the game re-inherits the container's Player Slots.
+            putExtra("controllerSlotOverrides", controllerSlotOverridesJson.ifEmpty { null })
+            // #333: empty = re-inherit the container's auto-hide setting.
+            putExtra("autoHideControlsOnPad", autoHideControlsOnPad.ifEmpty { null })
             putExtra("numControllers", numCtrl.toString())
             putExtra("box64Version", selectedBox64Version)
             putExtra("box64Preset", b64PresetId)
@@ -5983,63 +6169,93 @@ internal fun ShortcutSettingsDialogScreen(shortcut: Shortcut, onDismiss: () -> U
 
     // The ORDERED, currently-visible focusable ids (mirrors the render conditionals below). Rebuilt each
     // recomposition so conditional rows (custom W/H, SF/Vulkan blocks, refresh, MIDI, gyro block) drop in
-    // and out of the D-pad order automatically. Tab content is touch-navigable (see report) — the tab ROW
-    // itself is here so Left/Right switches tabs and the whole top form + OK/Cancel are controller-driven.
+    // and out of the D-pad order automatically. Now that each tab is its own screen, only the SELECTED
+    // tab's controls are in the order — the tab selector ("tabs", Left/Right switches tabs) plus the
+    // title-close and OK/Cancel are always present. Tab content on Win/Env/Advanced is touch-navigable.
     val dpadIds = buildList {
-        add("titleX"); add("name"); add("execArgs"); add("screenSize")
-        if (selectedScreenSize == "Custom") { add("customW"); add("customH") }
-        add("selectIcon"); add("gfxDriver"); add("gfxWrapper"); add("gfxConfig")
-        add("dxWrapper"); add("dxConfig"); add("renderer")
-        if (selectedRenderer == "SurfaceFlinger") add("sfCompat")
-        if (selectedRenderer == "Vulkan") { add("vkNative"); add("vkColors"); add("vkPresent") }
-        add("renderScale")
-        if (panelRates.isNotEmpty()) add("refresh")
-        add("frameGen"); add("fpsLimiter"); add("audio"); add("emulator")
-        if (midiList.isNotEmpty()) add("midi")
-        add("lcAll"); add("fullscreen"); add("autoClose")
-        add("enableXInput"); add("enableDInput"); add("exclusiveXInput"); add("disableXInput"); add("simTouch"); add("numControllers")
-        add("gyroEnabled")
-        if (gyroEnabled) {
-            add("gyroMode"); add("gyroTarget"); add("gyroActivator")
-            if (gyroActivator != Container.GYRO_ACTIVATOR_ALWAYS) add("gyroActivationMode")
-            add("gyroSensitivity"); add("gyroInvertX"); add("gyroInvertY")
+        add("titleX")
+        when (selectedTab) {
+            0 -> { // General
+                add("name"); add("execArgs"); add("screenSize")
+                if (selectedScreenSize == "Custom") { add("customW"); add("customH") }
+                add("selectIcon"); add("gfxDriver"); add("gfxWrapper"); add("gfxConfig")
+                add("dxWrapper"); add("dxConfig"); add("renderer")
+                if (selectedRenderer == "SurfaceFlinger") add("sfCompat")
+                if (selectedRenderer == "Vulkan") { add("vkNative"); add("vkColors"); add("vkPresent"); if (vkNative) add("vkBackend"); add("vkDriver") }
+                add("renderScale")
+                if (panelRates.isNotEmpty()) add("refresh")
+                add("frameGen"); add("fpsLimiter"); add("audio"); add("emulator")
+                if (midiList.isNotEmpty()) add("midi")
+                add("lcAll"); add("fullscreen"); add("autoClose")
+            }
+            4 -> { // Controller
+                add("enableXInput"); add("enableDInput"); add("exclusiveXInput"); add("disableXInput"); add("simTouch"); add("numControllers")
+                add("gyroEnabled")
+                if (gyroEnabled) {
+                    add("gyroMode"); add("gyroTarget"); add("gyroActivator")
+                    if (gyroActivator != Container.GYRO_ACTIVATOR_ALWAYS) add("gyroActivationMode")
+                    add("gyroSensitivity"); add("gyroInvertX"); add("gyroInvertY")
+                }
+            }
         }
         add("tabs"); add("cancel"); add("ok")
     }
     // Seed the root focus so the editor receives D-pad from the first frame (it's its own Dialog window).
     LaunchedEffect(Unit) { runCatching { dp.rootFocus.requestFocus() } }
 
+    val isPortrait = LocalConfiguration.current.orientation == Configuration.ORIENTATION_PORTRAIT
+
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false)
     ) {
         Surface(
-            modifier = Modifier.fillMaxWidth(0.95f).fillMaxHeight(0.92f)
+            // A DEFINITE height (not fillMaxHeight fraction): inside a Dialog the window height is
+            // effectively unbounded, so fillMaxHeight(fraction) silently no-ops and the Surface
+            // wrapped its content — which left a dead band under the footer and kept the weighted
+            // content from expanding. A concrete dp height propagates bounded constraints, so the
+            // inner Column fills it and the footer pins flush to the bottom, mirroring the top bar.
+            modifier = Modifier.fillMaxWidth(0.95f)
+                .height((LocalConfiguration.current.screenHeightDp * 0.92f).dp)
                 .settingsDpad(dp, { dpadIds }, onDismiss),
             shape = MaterialTheme.shapes.large,
             color = MaterialTheme.colorScheme.surface,
             tonalElevation = 6.dp
         ) {
-            Column {
-                // Title bar
+            // Fill the fixed-height Surface so the weighted content region actually expands and the
+            // footer pins to the real bottom edge. Without this the Column wrapped its content and
+            // floated near the top, leaving a large dead band under the OK/Cancel bar.
+            Column(modifier = Modifier.fillMaxSize()) {
+                // Title bar — compact: minimal vertical padding + a shrunk close button so the
+                // header (and its footer twin below) don't eat vertical space, most noticeable in
+                // landscape where height is scarce.
                 Row(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 3.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(shortcut.name, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
                     DpButton(dp, "titleX", onActivate = onDismiss) {
-                        IconButton(onClick = onDismiss) {
+                        IconButton(onClick = onDismiss, modifier = Modifier.size(28.dp)) {
                             Icon(Icons.Default.Close, contentDescription = "Close")
                         }
                     }
                 }
                 Divider(color = DividerColor)
 
-                // Scrollable content
-                Column(
-                    modifier = Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
+                // Scrollable tab content — ONE region shared by both orientations (portrait pins the
+                // tab strip above it; landscape puts the rail beside it). Scrolls internally so the
+                // Cancel/OK footer stays pinned. Branch labels are tab indices: General(0),
+                // Win Components(1), Env Vars(2), Advanced(3), Controller(4). General and Controller are
+                // authored next to each other because both came from the old single top form; the
+                // Controller TAB sits last (index 4).
+                val contentScroll = rememberScrollState()
+                val mainContent: @Composable () -> Unit = {
+                    Column(
+                        modifier = Modifier.fillMaxSize().verticalScroll(contentScroll).padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        when (selectedTab) {
+                            0 -> Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     // Name
                     DpField(
                         dp, "name",
@@ -6058,6 +6274,152 @@ internal fun ShortcutSettingsDialogScreen(shortcut: Shortcut, onDismiss: () -> U
                         label = stringResource(R.string.exec_arguments),
                         modifier = Modifier.fillMaxWidth()
                     )
+
+                    // Storage — where this game's files currently live, and (unless it's already on
+                    // C:) a one-tap "Move to Drive C" that copies the folder onto native app storage.
+                    // Games that stream assets over FUSE-backed shared storage stall; from C: they run.
+                    val storageLabel = remember(shortcut) { CopyGameToDriveC.storageLabel(shortcut) }
+                    val alreadyOnC = remember(shortcut) { CopyGameToDriveC.parse(shortcut).onDriveC }
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Storage", fontSize = 14.sp)
+                            Text(
+                                storageLabel,
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        if (onMoveToDriveC != null && !alreadyOnC) {
+                            Spacer(Modifier.width(8.dp))
+                            OutlinedButton(onClick = onMoveToDriveC) {
+                                Icon(
+                                    Icons.Filled.DriveFileMove,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp),
+                                )
+                                Spacer(Modifier.width(6.dp))
+                                Text("Move to Drive C")
+                            }
+                        }
+                    }
+
+                    // Executable — the .exe this shortcut launches, with a one-tap repoint to a
+                    // different exe in the same game (launcher → real exe, dx11 ↔ dx9, a config tool).
+                    if (onChangeExe != null) {
+                        val currentExeName = remember(shortcut) {
+                            CopyGameToDriveC.parse(shortcut).exeWin.substringAfterLast('\\').substringAfterLast('/')
+                        }
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("Executable", fontSize = 14.sp)
+                                Text(
+                                    currentExeName.ifEmpty { "Unknown" },
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                            Spacer(Modifier.width(8.dp))
+                            OutlinedButton(onClick = onChangeExe) {
+                                Icon(
+                                    Icons.Filled.SwapHoriz,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp),
+                                )
+                                Spacer(Modifier.width(6.dp))
+                                Text("Change…")
+                            }
+                        }
+                    }
+
+                    // Epic Online Services (EOS) auth toggle — only for Epic-origin shortcuts.
+                    // When ON, the launcher injects real-Epic auth args (-EpicPortal + a fresh
+                    // exchange code) so EOS-requiring titles authenticate against the user's
+                    // logged-in Epic account. Harmless for non-EOS Epic games.
+                    if (isEpicShortcut) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("Epic Online Services (EOS) auth", fontSize = 14.sp)
+                                Text(
+                                    "Sign EOS games in with your Epic account",
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Spacer(Modifier.width(8.dp))
+                            Switch(checked = epicEosEnabled, onCheckedChange = { epicEosEnabled = it })
+                        }
+                        // Force the ownership-token (-epicovt) path for Denuvo EOS games
+                        // the auto-detector misses (obfuscated exes). Default OFF.
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("Force Denuvo ownership token", fontSize = 14.sp)
+                                Text(
+                                    "Force the ownership token for Denuvo games we don't auto-detect",
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Spacer(Modifier.width(8.dp))
+                            // Sub-option of EOS auth: only meaningful when EOS auth is on.
+                            Switch(checked = epicOvtForce, onCheckedChange = { epicOvtForce = it },
+                                   enabled = epicEosEnabled)
+                        }
+                        // Launch offline: skip the online EOS auth exchange (drops the -AUTH_* args)
+                        // but keep the game's Epic identity/portal args. Default OFF.
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("Launch offline", fontSize = 14.sp)
+                                Text(
+                                    "Skip Epic sign-in for this game (no online features)",
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Spacer(Modifier.width(8.dp))
+                            // Sub-option of EOS auth: offline has nothing to skip when EOS auth is off.
+                            Switch(checked = epicOffline, onCheckedChange = { epicOffline = it },
+                                   enabled = epicEosEnabled)
+                        }
+                        // Epic Friends Overlay (Phase 3): provision Epic's real EOS overlay into the
+                        // prefix; the game's own EOS SDK renders it on Shift+F3. Default OFF.
+                        // Dark-launched: hidden behind FeatureFlags.EPIC_OVERLAY_ENABLED so no shortcut
+                        // can be set to epicOverlay=1 through the UI until the DXVK wrapper lands.
+                        if (com.winlator.star.FeatureFlags.EPIC_OVERLAY_ENABLED) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text("Epic Friends Overlay", fontSize = 14.sp)
+                                    Text(
+                                        "Experimental — in-game Epic overlay on Shift+F3 (a draggable pill " +
+                                                "can summon it too). Needs the container to allow full services.",
+                                        fontSize = 11.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                Spacer(Modifier.width(8.dp))
+                                Switch(checked = epicOverlayEnabled, onCheckedChange = { epicOverlayEnabled = it })
+                            }
+                        }
+                    }
 
                     // Screen size
                     DpDrop(
@@ -6277,6 +6639,51 @@ internal fun ShortcutSettingsDialogScreen(shortcut: Shortcut, onDismiss: () -> U
                                 Icon(Icons.Default.Help, contentDescription = "What is this?", modifier = Modifier.size(18.dp))
                             }
                         }
+                        // Native backend — which native path Native Rendering uses. Only meaningful when
+                        // Native Rendering is on (matches the container Vulkan cog), so gate on vkNative.
+                        if (vkNative) {
+                            val vkBackendValues = listOf("auto", "asr", "flip")
+                            val vkBackendLabels = listOf(
+                                stringResource(R.string.renderer_native_backend_auto),
+                                stringResource(R.string.renderer_native_backend_asr),
+                                stringResource(R.string.renderer_native_backend_flip)
+                            )
+                            val vkBackendIdx = vkBackendValues.indexOf(vkNativeBackend).coerceAtLeast(0)
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                DpDrop(
+                                    dp, "vkBackend",
+                                    label = stringResource(R.string.renderer_native_backend),
+                                    options = vkBackendLabels,
+                                    selected = vkBackendLabels[vkBackendIdx],
+                                    onSelect = { vkNativeBackend = vkBackendValues[vkBackendLabels.indexOf(it)] },
+                                    modifier = Modifier.weight(1f)
+                                )
+                                IconButton(onClick = { helpRes = R.string.help_renderer_native_backend }) {
+                                    Icon(Icons.Default.Help, contentDescription = "What is this?", modifier = Modifier.size(18.dp))
+                                }
+                            }
+                        }
+                        // Compositor (present-layer) Vulkan driver: System or an installed Turnip. Applies
+                        // regardless of native mode, so not gated on vkNative. Matches the container cog.
+                        val vkDriverOptions = remember {
+                            val installed = try {
+                                com.winlator.star.contents.AdrenotoolsManager(context).enumarateInstalledDrivers()
+                            } catch (e: Exception) { arrayListOf<String>() }
+                            (listOf("system") + installed).distinct()
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            DpDrop(
+                                dp, "vkDriver",
+                                label = stringResource(R.string.renderer_driver_id),
+                                options = vkDriverOptions,
+                                selected = if (vkDriverOptions.contains(vkRendererDriverId)) vkRendererDriverId else "system",
+                                onSelect = { vkRendererDriverId = it },
+                                modifier = Modifier.weight(1f)
+                            )
+                            IconButton(onClick = { helpRes = R.string.help_renderer_driver }) {
+                                Icon(Icons.Default.Help, contentDescription = "What is this?", modifier = Modifier.size(18.dp))
+                            }
+                        }
                         // FG temporarily forces Mailbox; caption the field so FIFO-while-FG-selected isn't confusing.
                         if (frameGenEngine != "off") {
                             Text(
@@ -6395,35 +6802,63 @@ internal fun ShortcutSettingsDialogScreen(shortcut: Shortcut, onDismiss: () -> U
                         }
                     }
 
-                    // Power-user performance toggles — per-game overrides. A row shows "override" vs
-                    // "using global default" and offers a per-toggle Reset; a per-game toggle is only
-                    // saved when it differs from the App Settings global default.
-                    PerfEditRow(dp, "sustainedPerf", "Sustained Performance Mode", sustainedPerfMode,
-                        com.winlator.star.perf.PerformanceSettings.sustainedPerfMode.value) { sustainedPerfMode = it }
-                    PerfEditRow(dp, "perfPriority", "Thread Priority Boost", perfPriorityBoost,
-                        com.winlator.star.perf.PerformanceSettings.perfPriorityBoost.value) { perfPriorityBoost = it }
-                    PerfEditRow(dp, "preferBigCores", "Prefer Big Cores", preferBigCores,
-                        com.winlator.star.perf.PerformanceSettings.preferBigCores.value) { preferBigCores = it }
-                    // Root six (per-game overrides; only take effect with root, honored at launch).
-                    for (rk in com.winlator.star.perf.PerfRootApplier.ROOT_KEYS) {
-                        PerfEditRow(dp, rk, ROOT_PERF_LABELS[rk] ?: rk, rootOverrides[rk] ?: false,
-                            com.winlator.star.perf.PerformanceSettings.rootDefaultValue(rk)) { rootOverrides[rk] = it }
-                    }
-                    // Reset ALL 9 perf keys to the global defaults (visible when this game overrides any).
+                    // Power-user performance toggles — collapsed into an expandable "Performance" section
+                    // (closed by default) so the shortcut dialog stays short. Each toggle is a compact row;
+                    // a per-game toggle is only saved when it differs from the App Settings global default.
                     val anyPerfOverride = sustainedPerfMode != com.winlator.star.perf.PerformanceSettings.sustainedPerfMode.value ||
                         perfPriorityBoost != com.winlator.star.perf.PerformanceSettings.perfPriorityBoost.value ||
                         preferBigCores != com.winlator.star.perf.PerformanceSettings.preferBigCores.value ||
                         com.winlator.star.perf.PerfRootApplier.ROOT_KEYS.any { (rootOverrides[it] ?: false) != com.winlator.star.perf.PerformanceSettings.rootDefaultValue(it) }
-                    if (anyPerfOverride) {
-                        Text("↺ Reset all performance toggles to global",
-                            fontSize = 12.sp, color = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.fillMaxWidth().clickable {
+                    val perfOverrideCount = (if (sustainedPerfMode != com.winlator.star.perf.PerformanceSettings.sustainedPerfMode.value) 1 else 0) +
+                        (if (perfPriorityBoost != com.winlator.star.perf.PerformanceSettings.perfPriorityBoost.value) 1 else 0) +
+                        (if (preferBigCores != com.winlator.star.perf.PerformanceSettings.preferBigCores.value) 1 else 0) +
+                        com.winlator.star.perf.PerfRootApplier.ROOT_KEYS.count { (rootOverrides[it] ?: false) != com.winlator.star.perf.PerformanceSettings.rootDefaultValue(it) }
+
+                    // Performance — one row opens the full dashboard menu (same as in-game), bound to
+                    // this shortcut's saved-per-game toggles. Replaces the old inline toggle list; the
+                    // save block below still persists whatever the dialog set (override-when-different).
+                    var showPerfDialog by remember { mutableStateOf(false) }
+                    // Styled to match the other outlined menu fields (notched "Performance" label +
+                    // border + trailing chevron). The read-only field shows the override status; a
+                    // transparent overlay Box catches taps so the whole field opens the dashboard
+                    // dialog instead of focusing the text field.
+                    Box(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+                        OutlinedTextField(
+                            value = if (perfOverrideCount > 0) "$perfOverrideCount overridden" else "Global defaults",
+                            onValueChange = {},
+                            readOnly = true,
+                            label = { Text("Performance") },
+                            trailingIcon = { Icon(Icons.Default.KeyboardArrowRight, contentDescription = "Open") },
+                            // Accent-colored outline so this opener stands out from the grey menu fields.
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = MaterialTheme.colorScheme.primary,
+                                unfocusedBorderColor = MaterialTheme.colorScheme.primary,
+                                focusedLabelColor = MaterialTheme.colorScheme.primary,
+                                unfocusedLabelColor = MaterialTheme.colorScheme.primary,
+                                focusedTrailingIconColor = MaterialTheme.colorScheme.primary,
+                                unfocusedTrailingIconColor = MaterialTheme.colorScheme.primary,
+                            ),
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        Box(Modifier.matchParentSize().clickable { showPerfDialog = true })
+                    }
+
+                    if (showPerfDialog) {
+                        com.winlator.star.ui.PerformanceDashboardDialogPerGame(
+                            sustained = sustainedPerfMode, onSustained = { sustainedPerfMode = it },
+                            priority = perfPriorityBoost, onPriority = { perfPriorityBoost = it },
+                            bigCores = preferBigCores, onBigCores = { preferBigCores = it },
+                            rootValue = { rootOverrides[it] ?: false },
+                            onRoot = { k, v -> rootOverrides[k] = v },
+                            onResetAll = {
                                 sustainedPerfMode = com.winlator.star.perf.PerformanceSettings.sustainedPerfMode.value
                                 perfPriorityBoost = com.winlator.star.perf.PerformanceSettings.perfPriorityBoost.value
                                 preferBigCores = com.winlator.star.perf.PerformanceSettings.preferBigCores.value
                                 for (rk in com.winlator.star.perf.PerfRootApplier.ROOT_KEYS)
                                     rootOverrides[rk] = com.winlator.star.perf.PerformanceSettings.rootDefaultValue(rk)
-                            }.padding(vertical = 6.dp))
+                            },
+                            onDismiss = { showPerfDialog = false },
+                        )
                     }
 
                     // Audio driver
@@ -6433,12 +6868,48 @@ internal fun ShortcutSettingsDialogScreen(shortcut: Shortcut, onDismiss: () -> U
                             label = stringResource(R.string.audio_driver),
                             options = audioDriverEntries,
                             selected = selectedAudioDriver,
-                            onSelect = { selectedAudioDriver = it },
+                            disabledOptions = if (!directAudioSupported && directAudioEntry != null) setOf(directAudioEntry) else emptySet(),
+                            onSelect = {
+                                selectedAudioDriver = it
+                                // DirectAudio is experimental — warn on select (reuses the HelpDialog surface).
+                                if (StringUtils.parseIdentifier(it) == "directaudio") helpRes = R.string.directaudio_experimental_warning
+                            },
                             modifier = Modifier.weight(1f)
                         )
+                        val scAudioId = StringUtils.parseIdentifier(selectedAudioDriver)
+                        if (scAudioId == "pulseaudio" || scAudioId == "alsa" || scAudioId == "directaudio") {
+                            IconButton(onClick = { showScAudioSettings = true }) {
+                                Icon(Icons.Default.Settings, contentDescription = "Audio settings", modifier = Modifier.size(18.dp))
+                            }
+                        }
                         IconButton(onClick = { helpRes = R.string.help_audio_driver }) {
                             Icon(Icons.Default.Help, contentDescription = "What is this?", modifier = Modifier.size(18.dp))
                         }
+                    }
+                    if (!directAudioSupported && directAudioEntry != null) {
+                        Text(
+                            "DirectAudio requires Proton ${com.winlator.star.core.DirectAudioSupport.SUPPORTED_LABEL}",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontSize = 11.5.sp,
+                            modifier = Modifier.padding(start = 4.dp, top = 2.dp)
+                        )
+                    }
+                    if (showScAudioSettings) {
+                        AudioSettingsDialog(
+                            initial = audioConfigFromEnv(envVarsStr, StringUtils.parseIdentifier(selectedAudioDriver)),
+                            scopeLabel = "this game",
+                            latencyLive = true,
+                            driverLabel = when (StringUtils.parseIdentifier(selectedAudioDriver)) {
+                                "alsa" -> "ALSA"; "pulseaudio" -> "PulseAudio"; "directaudio" -> "DirectAudio"
+                                else -> StringUtils.parseIdentifier(selectedAudioDriver)
+                            },
+                            driverId = StringUtils.parseIdentifier(selectedAudioDriver),
+                            onDismiss = { showScAudioSettings = false },
+                            onSave = { cfg ->
+                                envVarsStr = audioConfigToEnv(envVarsStr, cfg, StringUtils.parseIdentifier(selectedAudioDriver))
+                                showScAudioSettings = false
+                            }
+                        )
                     }
 
                     // Emulator
@@ -6501,7 +6972,8 @@ internal fun ShortcutSettingsDialogScreen(shortcut: Shortcut, onDismiss: () -> U
                         DpCheck(dp, "autoClose", checked = autoCloseOnExit, onCheckedChange = { autoCloseOnExit = it })
                         Text("Close when game exits")
                     }
-
+                            }
+                            4 -> Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     // Input section
                     SectionBox(title = "Input") {
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -6560,6 +7032,49 @@ internal fun ShortcutSettingsDialogScreen(shortcut: Shortcut, onDismiss: () -> U
                             options = numControllersEntries,
                             selected = selectedNumControllers,
                             onSelect = { selectedNumControllers = it }
+                        )
+
+                        // #333 per-game auto-hide override (tri-state): inherit container / On / Off.
+                        Spacer(Modifier.height(12.dp))
+                        run {
+                            val autoHideLabels = listOf("Use container default", "On", "Off")
+                            val autoHideIdx = when (autoHideControlsOnPad) { "1" -> 1; "0" -> 2; else -> 0 }
+                            LabeledDropdown(
+                                label = "Hide on-screen controls when a controller connects",
+                                options = autoHideLabels,
+                                selectedOption = autoHideLabels[autoHideIdx],
+                                onSelect = {
+                                    autoHideControlsOnPad = when (autoHideLabels.indexOf(it)) { 1 -> "1"; 2 -> "0"; else -> "" }
+                                },
+                            )
+                        }
+
+                        // Player Slots (per-game override). Empty override = inherit the container's
+                        // Player Slots; touching any slot makes this shortcut own the pins. The "Use
+                        // container default" button clears the override so it re-inherits. Editing an
+                        // empty override starts from an all-auto ("{}") view.
+                        Spacer(Modifier.height(12.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("Player Slots", modifier = Modifier.weight(1f), fontWeight = FontWeight.Medium)
+                            IconButton(onClick = { helpRes = R.string.help_player_slots }) {
+                                Icon(Icons.Default.Help, contentDescription = "What is this?", modifier = Modifier.size(18.dp))
+                            }
+                            if (controllerSlotOverridesJson.isNotEmpty()) {
+                                TextButton(onClick = { controllerSlotOverridesJson = "" }) {
+                                    Text("Use container default")
+                                }
+                            }
+                        }
+                        if (controllerSlotOverridesJson.isEmpty()) {
+                            Text(
+                                "Inheriting the container's Player Slots. Pin a controller below to set a per-game override.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        PlayerSlotsEditor(
+                            savedOverridesJson = controllerSlotOverridesJson.ifEmpty { "{}" },
+                            onOverridesChange = { controllerSlotOverridesJson = it },
                         )
 
                         // Gyro (motion aim) per-game override. Deadzone/smoothing are deliberately
@@ -6697,24 +7212,8 @@ internal fun ShortcutSettingsDialogScreen(shortcut: Shortcut, onDismiss: () -> U
                         }
                     }
 
-                    // Tabs — the tab ROW is one focusable node; Left/Right (while it's focused) switches
-                    // tabs. Tab CONTENT below is touch-navigable (deferred — see report).
-                    DpTabs(dp, "tabs", selected = selectedTab, count = tabTitles.size, onSelect = { selectedTab = it }) {
-                        TabRow(selectedTabIndex = selectedTab) {
-                            tabTitles.forEachIndexed { index, title ->
-                                Tab(
-                                    selected = selectedTab == index,
-                                    onClick = { selectedTab = index },
-                                    text = { Text(title) }
-                                )
                             }
-                        }
-                    }
-                    Spacer(Modifier.height(4.dp))
-
-                    // Tab content
-                    when (selectedTab) {
-                        0 -> Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            1 -> Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             RecommendedComponentsSection(
                                 container = shortcut.container,
                                 exeFile = gameExe,
@@ -6723,8 +7222,8 @@ internal fun ShortcutSettingsDialogScreen(shortcut: Shortcut, onDismiss: () -> U
                             )
                             ScWinComponentsTab(winComponents)
                         }
-                        1 -> ScEnvVarsTab(envVarsStr, { envVarsStr = it }, gameDir)
-         2 -> ScAdvancedTab(
+                            2 -> ScEnvVarsTab(envVarsStr, { envVarsStr = it }, gameDir)
+                            3 -> ScAdvancedTab(
             isArm64EC = isArm64EC,
             box64Versions = box64Versions,
             selectedBox64Version = selectedBox64Version,
@@ -6769,20 +7268,72 @@ internal fun ShortcutSettingsDialogScreen(shortcut: Shortcut, onDismiss: () -> U
             onShowBox64DownloadSheet = { showBox64DownloadSheet = true },
             onShowFexCoreDownloadSheet = { showFexCoreDownloadSheet = true }
         )
+                        }
+                    }
+                }
+
+                // ── Responsive tab layout ────────────────────────────────────────────────────────
+                // Portrait: the tab strip is pinned across the TOP (mirrors the container editor's
+                // top tab bar via the shared RailTopTabs). Landscape: the shared collapsible left rail
+                // beside the content. Left/Right on the focused "tabs" node still switches tabs for
+                // D-pad/controller users in both orientations.
+                val railState = rememberRailState("shortcut")
+                val railItems = tabTitles.mapIndexed { index, tab ->
+                    RailItem(tab, shortcutTabIcon(tab), index == selectedTab) { selectedTab = index }
+                }
+                // Same "What is all this?" glossary link the container editor surfaces on its rail.
+                val railLinks = listOf(RailLink("What is all this?", Icons.Filled.Help) { glossaryQuery = "" })
+                if (isPortrait) {
+                    Column(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                        DpTabs(dp, "tabs", selected = selectedTab, count = tabTitles.size, onSelect = { selectedTab = it }) {
+                            RailTopTabs(items = railItems, links = railLinks)
+                        }
+                        // Weighted so the internally-scrolling content takes exactly the space left
+                        // between the pinned tab strip and the pinned footer (never overflows it).
+                        Box(modifier = Modifier.weight(1f).fillMaxWidth()) { mainContent() }
+                    }
+                } else {
+                    Row(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                        DpTabs(dp, "tabs", selected = selectedTab, count = tabTitles.size, onSelect = { selectedTab = it }) {
+                            CollapsibleRail(
+                                state = railState,
+                                title = shortcut.name,
+                                links = railLinks,
+                                sections = listOf(RailSection(header = null, items = railItems)),
+                            )
+                        }
+                        Column(modifier = Modifier.weight(1f).fillMaxHeight()) { mainContent() }
                     }
                 }
 
                 Divider(color = DividerColor)
+                // Compact footer — reduced padding + shrunk button height so the OK/Cancel bar
+                // matches the slimmed title bar above and frees vertical room for content.
                 Row(
-                    modifier = Modifier.fillMaxWidth().padding(8.dp),
-                    horizontalArrangement = Arrangement.End
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
                     DpButton(dp, "cancel", onActivate = onDismiss, onRightId = "ok") {
-                        TextButton(onClick = onDismiss) { Text(stringResource(android.R.string.cancel)) }
+                        TextButton(
+                            onClick = onDismiss,
+                            // Definite height overrides TextButton's internal 40dp defaultMinSize
+                            // floor (which heightIn(min=…) can't lower), so the footer bar is genuinely
+                            // short — roughly matching the slim title bar at the top.
+                            modifier = Modifier.height(30.dp),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp)
+                        ) { Text(stringResource(android.R.string.cancel)) }
                     }
                     Spacer(Modifier.width(8.dp))
                     DpButton(dp, "ok", onActivate = { save(); onDismiss() }, onLeftId = "cancel") {
-                        TextButton(onClick = { save(); onDismiss() }) { Text(stringResource(android.R.string.ok)) }
+                        TextButton(
+                            onClick = { save(); onDismiss() },
+                            // Definite height overrides TextButton's internal 40dp defaultMinSize
+                            // floor (which heightIn(min=…) can't lower), so the footer bar is genuinely
+                            // short — roughly matching the slim title bar at the top.
+                            modifier = Modifier.height(30.dp),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp)
+                        ) { Text(stringResource(android.R.string.ok)) }
                     }
                 }
             }
@@ -6830,8 +7381,14 @@ internal fun ShortcutSettingsDialogScreen(shortcut: Shortcut, onDismiss: () -> U
     glossaryQuery?.let { ContainerGlossarySheet(initialQuery = it, onDismiss = { glossaryQuery = null }) }
 
     if (showBox64DownloadSheet) {
+        // Arch-match the download sheet to the selector above it: arm64ec containers use WOWBox64,
+        // everything else Box64 (mirrors ContainerDetailScreen). Was hardcoded to Box64, so the
+        // "download more" button on an arm64ec shortcut opened the wrong content type.
         ContentDownloadSheet(
-            contentType = com.winlator.star.contents.ContentProfile.ContentType.CONTENT_TYPE_BOX64,
+            contentType = if (isArm64EC)
+                com.winlator.star.contents.ContentProfile.ContentType.CONTENT_TYPE_WOWBOX64
+            else
+                com.winlator.star.contents.ContentProfile.ContentType.CONTENT_TYPE_BOX64,
             onDismiss = { showBox64DownloadSheet = false },
             onContentChanged = {}
         )
@@ -6871,6 +7428,17 @@ internal fun ShortcutSettingsDialogScreen(shortcut: Shortcut, onDismiss: () -> U
         )
     }
     } // settings Dialog
+}
+
+/** The Material icon for each shortcut-settings tab (mirrors the container editor's tabIcon glyphs;
+ *  Controller gets a gamepad). Used by both the portrait top bar and the landscape rail. */
+private fun shortcutTabIcon(title: String): ImageVector = when (title) {
+    "General" -> Icons.Filled.Settings
+    "Win Components" -> Icons.Filled.Widgets
+    "Env Vars" -> Icons.Filled.Extension
+    "Advanced" -> Icons.Filled.Tune
+    "Controller" -> Icons.Filled.SportsEsports
+    else -> Icons.Filled.Settings
 }
 
 @Composable
@@ -7006,7 +7574,7 @@ private fun ScAdvancedTab(
                     contentPadding = PaddingValues(0.dp),
                     shape = RoundedCornerShape(8.dp)
                 ) {
-                    Icon(Icons.Default.Settings, contentDescription = "Download Box64", tint = MaterialTheme.colorScheme.primary)
+                    Icon(Icons.Default.Settings, contentDescription = "Download $emulatorLabel", tint = MaterialTheme.colorScheme.primary)
                 }
             }
             Spacer(Modifier.height(8.dp))
@@ -7338,6 +7906,520 @@ private fun exportShortcut(context: Context, shortcut: Shortcut) {
  * Worth surfacing because it explains behaviour the user would otherwise have to guess at: a game
  * on a card is slower to load, and it disappears entirely if the card is removed.
  */
+@Composable
+private fun EosBadge(modifier: Modifier = Modifier) {
+    Row(
+        modifier = modifier
+            .clip(RoundedCornerShape(4.dp))
+            .background(Color(0xFF1A73E8))
+            .padding(horizontal = 5.dp, vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            "EOS",
+            color = Color.White,
+            style = MaterialTheme.typography.labelSmall,
+        )
+    }
+}
+
+/**
+ * Marks a shortcut whose store source is the Epic Games Store (storeSource=epic). Deliberately a
+ * neutral dark-grey pill so it reads as distinct from the blue EOS badge when both appear together.
+ */
+@Composable
+private fun EpicBadge(modifier: Modifier = Modifier) {
+    Row(
+        modifier = modifier
+            .clip(RoundedCornerShape(4.dp))
+            .background(Color(0xFF2A2A2A))
+            .padding(horizontal = 5.dp, vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            "EPIC",
+            color = Color.White,
+            style = MaterialTheme.typography.labelSmall,
+        )
+    }
+}
+
+/**
+ * Marks a shortcut whose store source is GOG (storeSource=gog, or — for untagged legacy GOG installs
+ * — an exec path under `gog_games`). GOG-brand purple pill, sized like the EPIC/EOS pills.
+ */
+@Composable
+private fun GogBadge(modifier: Modifier = Modifier) {
+    Row(
+        modifier = modifier
+            .clip(RoundedCornerShape(4.dp))
+            .background(Color(0xFF7A2FBB))
+            .padding(horizontal = 5.dp, vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            "GOG",
+            color = Color.White,
+            style = MaterialTheme.typography.labelSmall,
+        )
+    }
+}
+
+/**
+ * True when a shortcut is a GOG game. GOG shortcuts are UNTAGGED (StarLaunchBridge stamps no
+ * `storeSource` for the legacy GOG overload), so the load-bearing signal is the exec path living
+ * under `gog_games` (installs at `imagefs/gog_games/…` → `Z:\gog_games\…`); the `storeSource==gog`
+ * branch is defensive / forward-compat. Mirrors CustomSaveVault.isCustom's GOG exclusion.
+ */
+private fun isGogShortcut(shortcut: Shortcut): Boolean =
+    shortcut.getExtra("storeSource") == "gog" ||
+        (shortcut.path?.contains("gog_games", ignoreCase = true) == true)
+
+/**
+ * EPIC + EOS + GOG pills clustered for the top-left corner of a shortcut's cover art. Caller aligns
+ * and insets this (Alignment.TopStart, ~6dp); each pill keeps its own opaque background for contrast.
+ */
+// The stages of the "Copy to Drive C" flow, in order: confirm the source root, resolve a
+// destination collision, run the background copy, then offer to delete the original.
+private enum class CopyToCPhase { CONFIRM, OVERWRITE, COPYING, DELETE_ORIGINAL }
+
+/**
+ * Shared coordinator for "Copy to Drive C…". Fed a [target] shortcut by either entry point (the ⋮
+ * menu item or the editor's Storage-row button); [onFinished] clears that target and refreshes the
+ * list. Owns the whole flow and all its dialogs:
+ *   1. Locate the exe on disk. Already on C: (or unmappable) → toast + finish, no dialogs.
+ *   2. Confirm-source: propose the plausible game root, show its size, let the user Change folder…
+ *      Validates the chosen folder is an ancestor of the exe so the repoint is correct.
+ *   3. Free-space check against the data partition (drive_c lives under filesDir).
+ *   4. Background copy (cancelable progress) into drive_c/Games/<name>, with an overwrite prompt.
+ *   5. Repoint the shortcut to C:\Games\<name>\… — ONLY after a fully successful copy.
+ *   6. Offer to delete the original folder (Move) vs keep it (Copy).
+ * On cancel or any failure the partial destination is deleted and the shortcut is left untouched.
+ */
+@Composable
+private fun CopyToDriveCCoordinator(
+    target: Shortcut?,
+    onFinished: () -> Unit,
+) {
+    if (target == null) return
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+
+    // Parsed once per opened game. exeAndroid == null => the drive letter isn't mapped, so the
+    // files can't be located; onDriveC => it's already where we'd copy it to.
+    val info = remember(target) { CopyGameToDriveC.parse(target) }
+    val actionable = info.exeAndroid != null && !info.onDriveC
+
+    // Step 1 short-circuits — fire a toast and bail before any dialog shows.
+    LaunchedEffect(target) {
+        if (info.onDriveC) {
+            Toast.makeText(context, "\"${target.name}\" already runs from Drive C.", Toast.LENGTH_SHORT).show()
+            onFinished()
+        } else if (info.exeAndroid == null) {
+            Toast.makeText(context, "Couldn't locate this game's files on disk.", Toast.LENGTH_LONG).show()
+            onFinished()
+        }
+    }
+    if (!actionable) return
+    val exeAndroid = info.exeAndroid!!
+
+    var phase by remember(target) { mutableStateOf(CopyToCPhase.CONFIRM) }
+    // Chosen/confirmed source root — defaults to the plausible game root, user can Change folder….
+    var sourceRoot by remember(target) { mutableStateOf(CopyGameToDriveC.defaultSourceRoot(exeAndroid)) }
+    var sourceSize by remember(target) { mutableStateOf<Long?>(null) } // null = still computing
+    var validationError by remember(target) { mutableStateOf<String?>(null) }
+    // Copy progress + cooperative cancel handle (read by copyTree on the IO thread).
+    val cancelFlag = remember(target) { java.util.concurrent.atomic.AtomicBoolean(false) }
+    var progress by remember(target) { mutableStateOf<CopyGameToDriveC.Progress?>(null) }
+
+    fun fmt(bytes: Long) = android.text.format.Formatter.formatShortFileSize(context, bytes)
+
+    // Size the source folder (background) and re-validate ancestry whenever the root changes.
+    LaunchedEffect(sourceRoot) {
+        validationError = if (!CopyGameToDriveC.isAncestor(sourceRoot, exeAndroid)) {
+            "That folder doesn't contain this game's .exe. Pick the folder the game runs from."
+        } else null
+        sourceSize = null
+        val size = withContext(Dispatchers.IO) { CopyGameToDriveC.folderSize(sourceRoot) }
+        sourceSize = size
+    }
+
+    // Folder picker (real absolute path via buildDirIntent) so the user can navigate to the true root.
+    val folderPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            InAppFilePicker.pickedPath(result.data)?.let { sourceRoot = File(it) }
+        }
+    }
+
+    // Kick the background copy of [sourceRoot] into [dest]; [cleanFirst] wipes an existing dest
+    // (overwrite). Drives phase COPYING → DELETE_ORIGINAL on success, or finishes on cancel/failure.
+    fun startCopy(dest: File, cleanFirst: Boolean) {
+        cancelFlag.set(false)
+        val total = sourceSize ?: 0L
+        val src = sourceRoot
+        progress = CopyGameToDriveC.Progress(0, total, "")
+        phase = CopyToCPhase.COPYING
+        scope.launch {
+            val outcome = withContext(Dispatchers.IO) {
+                runCatching {
+                    if (cleanFirst) dest.deleteRecursively()
+                    CopyGameToDriveC.copyTree(src, dest, total, { cancelFlag.get() }) { p -> progress = p }
+                    CopyGameToDriveC.repoint(target, src, dest)
+                        ?: throw java.io.IOException("Couldn't repoint the shortcut to the copied files.")
+                }
+            }
+            outcome.fold(
+                onSuccess = { phase = CopyToCPhase.DELETE_ORIGINAL },
+                onFailure = { e ->
+                    if (e is CopyGameToDriveC.CancelledException) {
+                        Toast.makeText(context, "Copy cancelled — nothing was changed.", Toast.LENGTH_SHORT).show()
+                    } else {
+                        android.util.Log.e("CopyToDriveC", "copy/repoint failed for ${target.name}", e)
+                        Toast.makeText(
+                            context,
+                            "Copy failed: ${e.message ?: "unknown error"}. Nothing was changed.",
+                            Toast.LENGTH_LONG,
+                        ).show()
+                    }
+                    onFinished()
+                },
+            )
+        }
+    }
+
+    // Validate ancestry + free space, resolve a destination collision, then start.
+    fun confirmAndCopy() {
+        if (!CopyGameToDriveC.isAncestor(sourceRoot, exeAndroid)) {
+            validationError = "That folder doesn't contain this game's .exe. Pick the folder the game runs from."
+            return
+        }
+        val size = sourceSize ?: return // still sizing — Copy is disabled, but guard anyway
+        if (!CopyGameToDriveC.hasRoomFor(context, size)) {
+            validationError = "Not enough space on Drive C. Needs ${fmt(size)} plus headroom, but only " +
+                "${fmt(CopyGameToDriveC.freeBytes(context))} is free."
+            return
+        }
+        val dest = CopyGameToDriveC.destRootFor(target.container, sourceRoot.name)
+        if (dest.exists()) phase = CopyToCPhase.OVERWRITE else startCopy(dest, cleanFirst = false)
+    }
+
+    when (phase) {
+        CopyToCPhase.CONFIRM -> OutlinedAlertDialog(
+            onDismissRequest = onFinished,
+            title = { Text("Copy \"${target.name}\" to Drive C") },
+            text = {
+                Column(
+                    modifier = Modifier.heightIn(max = 460.dp).verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text(
+                        "Copies the game onto this container's C: drive (native app storage) and points " +
+                            "the shortcut there. Fixes games that stall streaming from shared storage.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = OnSurfaceVariant,
+                    )
+                    Text("Folder to copy", style = MaterialTheme.typography.labelMedium, color = OnSurface)
+                    Text(
+                        sourceRoot.absolutePath,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = OnSurfaceVariant,
+                    )
+                    Text(
+                        text = when {
+                            validationError != null -> "Size —"
+                            sourceSize == null -> "Calculating size…"
+                            else -> "Size: ${fmt(sourceSize!!)}"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = OnSurfaceVariant,
+                    )
+                    Text(
+                        "Pick the folder that holds everything the game needs, not just the .exe.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = OnSurfaceVariant,
+                    )
+                    validationError?.let {
+                        Text(it, style = MaterialTheme.typography.bodySmall, color = DangerRed)
+                    }
+                    OutlinedButton(onClick = {
+                        val driveC = File(target.container.rootDir, ".wine/drive_c").takeIf { it.isDirectory }
+                        folderPicker.launch(
+                            InAppFilePicker.buildDirIntent(
+                                context, "Select the game's folder", initialDir = sourceRoot.absolutePath,
+                                driveCPath = driveC?.absolutePath,
+                            )
+                        )
+                    }) {
+                        Icon(Icons.Filled.Folder, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Change folder…")
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = { confirmAndCopy() },
+                    enabled = validationError == null && sourceSize != null,
+                ) { Text("Copy") }
+            },
+            dismissButton = { TextButton(onClick = onFinished) { Text("Cancel") } },
+        )
+
+        CopyToCPhase.OVERWRITE -> OutlinedAlertDialog(
+            onDismissRequest = onFinished,
+            title = { Text("Already on Drive C") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(
+                        "A folder named \"${sourceRoot.name}\" already exists under C:\\${CopyGameToDriveC.GAMES_SUBDIR}. " +
+                            "Overwrite it, or keep both by copying to a new folder?",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = OnSurfaceVariant,
+                    )
+                    OutlinedButton(onClick = {
+                        val dest = CopyGameToDriveC.autoRenamedDest(
+                            CopyGameToDriveC.destRootFor(target.container, sourceRoot.name)
+                        )
+                        startCopy(dest, cleanFirst = false)
+                    }) { Text("Keep both (new folder)") }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    startCopy(CopyGameToDriveC.destRootFor(target.container, sourceRoot.name), cleanFirst = true)
+                }) { Text("Overwrite") }
+            },
+            dismissButton = { TextButton(onClick = onFinished) { Text("Cancel") } },
+        )
+
+        CopyToCPhase.COPYING -> {
+            val p = progress
+            val total = p?.totalBytes ?: 0L
+            val done = p?.copiedBytes ?: 0L
+            OutlinedAlertDialog(
+                onDismissRequest = {}, // no accidental dismiss mid-copy; use Cancel
+                title = { Text("Copying to Drive C…") },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (total > 0L) {
+                            LinearProgressIndicator(
+                                progress = (done.toFloat() / total.toFloat()).coerceIn(0f, 1f),
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                            Text(
+                                "${fmt(done)} / ${fmt(total)}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = OnSurfaceVariant,
+                            )
+                        } else {
+                            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                        }
+                        p?.currentFile?.takeIf { it.isNotEmpty() }?.let {
+                            Text(
+                                it,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = OnSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { cancelFlag.set(true) }) { Text("Cancel") }
+                },
+            )
+        }
+
+        CopyToCPhase.DELETE_ORIGINAL -> OutlinedAlertDialog(
+            onDismissRequest = {
+                Toast.makeText(context, "\"${target.name}\" now runs from Drive C.", Toast.LENGTH_SHORT).show()
+                onFinished()
+            },
+            title = { Text("Copied to Drive C") },
+            text = {
+                Text(
+                    "\"${target.name}\" now runs from Drive C. Delete the original folder to free " +
+                        "${sourceSize?.let { fmt(it) } ?: "space"}, or keep it as a backup?",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = OnSurfaceVariant,
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val src = sourceRoot
+                    scope.launch {
+                        withContext(Dispatchers.IO) { runCatching { src.deleteRecursively() } }
+                        Toast.makeText(context, "Moved to Drive C — original deleted.", Toast.LENGTH_SHORT).show()
+                        onFinished()
+                    }
+                }) { Text("Delete original", color = DangerRed) }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    Toast.makeText(context, "Copied to Drive C — original kept.", Toast.LENGTH_SHORT).show()
+                    onFinished()
+                }) { Text("Keep original") }
+            },
+        )
+    }
+}
+
+/**
+ * "Change executable" coordinator. Given a [target] shortcut, opens the in-app file picker at the
+ * current exe's folder (filtered to .exe/.lnk/.desktop, with the container's Drive-C rail available),
+ * then repoints the shortcut at the picked file through the shared [CopyGameToDriveC.setShortcutExe]
+ * — asking first whether to keep or clear the existing launch arguments. [onFinished] clears the
+ * target and refreshes the list (Shortcut.path is final — same reload pattern as copy-to-C). The
+ * shortcut is touched ONLY on a valid, mappable pick; anything else warns and aborts unchanged.
+ */
+@Composable
+private fun ChangeExecutableCoordinator(
+    target: Shortcut?,
+    onFinished: () -> Unit,
+) {
+    if (target == null) return
+    val context = LocalContext.current
+
+    val info = remember(target) { CopyGameToDriveC.parse(target) }
+    // A picked exe awaiting the keep/clear-args choice (null until then).
+    var pendingExe by remember(target) { mutableStateOf<File?>(null) }
+
+    // Extensions accepted as a launch target (matches the InAppFilePicker.SHORTCUT filter).
+    fun isSupported(name: String) =
+        name.substringAfterLast('.', "").lowercase() in setOf("exe", "lnk", "desktop")
+
+    // Write the new exe via the shared helper, toast the outcome, and finish. argsSuffix "" clears
+    // the launch args; a leading-space suffix keeps them.
+    fun applyExe(exe: File, argsSuffix: String) {
+        val win = CopyGameToDriveC.setShortcutExe(target, exe, argsSuffix)
+        if (win == null) {
+            Toast.makeText(
+                context,
+                "That file isn't on a drive this container can reach. Keep the game on storage the " +
+                    "container maps (internal/SD, or its C: drive).",
+                Toast.LENGTH_LONG,
+            ).show()
+        } else {
+            Toast.makeText(context, "\"${target.name}\" now launches $win", Toast.LENGTH_LONG).show()
+        }
+        onFinished()
+    }
+
+    val picker = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode != Activity.RESULT_OK) {
+            onFinished(); return@rememberLauncherForActivityResult
+        }
+        val file = InAppFilePicker.pickedPath(result.data)?.let { File(it) }
+        if (file == null || !file.isFile || !isSupported(file.name)) {
+            Toast.makeText(context, "Pick a .exe, .lnk, or .desktop file.", Toast.LENGTH_LONG).show()
+            onFinished(); return@rememberLauncherForActivityResult
+        }
+        // Ask about launch args only when there are some to keep; otherwise apply straight away.
+        if (info.argsSuffix.isBlank()) applyExe(file, "") else pendingExe = file
+    }
+
+    // Launch the picker once when this target opens, seeded at the current exe's folder.
+    LaunchedEffect(target) {
+        val driveC = File(target.container.rootDir, ".wine/drive_c").takeIf { it.isDirectory }
+        picker.launch(
+            InAppFilePicker.buildIntent(
+                context,
+                InAppFilePicker.SHORTCUT,
+                "Select the game's .exe",
+                initialDir = info.exeAndroid?.parentFile?.absolutePath,
+                driveCPath = driveC?.absolutePath,
+            )
+        )
+    }
+
+    // Keep-or-clear the launch arguments (default keep). Mirrors the backup-format chooser idiom.
+    pendingExe?.let { exe ->
+        OutlinedAlertDialog(
+            onDismissRequest = onFinished,
+            title = { Text("Launch arguments") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(
+                        "This shortcut launches with arguments:",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = OnSurfaceVariant,
+                    )
+                    Text(
+                        info.argsSuffix.trim(),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                    Column(
+                        modifier = Modifier.fillMaxWidth()
+                            .clickable { applyExe(exe, info.argsSuffix) }
+                            .padding(vertical = 8.dp),
+                    ) {
+                        Text("Keep arguments", color = MaterialTheme.colorScheme.primary)
+                        Text(
+                            "Launch the new .exe with the same arguments",
+                            color = OnSurfaceVariant,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                    Column(
+                        modifier = Modifier.fillMaxWidth()
+                            .clickable { applyExe(exe, "") }
+                            .padding(vertical = 8.dp),
+                    ) {
+                        Text("Clear arguments", color = MaterialTheme.colorScheme.primary)
+                        Text(
+                            "Launch the new .exe with no arguments",
+                            color = OnSurfaceVariant,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = { TextButton(onClick = onFinished) { Text("Cancel") } },
+        )
+    }
+}
+
+@Composable
+private fun ShortcutBadgeOverlay(
+    showEpic: Boolean,
+    showEos: Boolean,
+    showGog: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    if (!showEpic && !showEos && !showGog) return
+    Row(modifier = modifier, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        if (showEpic) EpicBadge()
+        if (showEos) EosBadge()
+        if (showGog) GogBadge()
+    }
+}
+
+/**
+ * Reads the cached {@code eos} identification extra for a shortcut and, if it has never
+ * been computed, kicks a bounded background filesystem scan (off the render path) that
+ * caches the result on the shortcut. Returns the current badge state, which flips to
+ * true once a scan finds EOS markers. Source-agnostic: works for any store origin.
+ */
+@Composable
+private fun rememberEosBadge(shortcut: Shortcut): Boolean {
+    var eos by remember(shortcut.path) { mutableStateOf(shortcut.getExtra("eos") == "1") }
+    LaunchedEffect(shortcut.path) {
+        if (!shortcut.hasExtra("eos")) {
+            com.winlator.star.store.EpicEosDetector.scanShortcutIfNeeded(shortcut) {
+                eos = shortcut.getExtra("eos") == "1"
+            }
+        }
+    }
+    return eos
+}
+
 @Composable
 private fun SdCardBadge(modifier: Modifier = Modifier) {
     Row(

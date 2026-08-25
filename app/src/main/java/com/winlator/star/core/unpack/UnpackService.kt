@@ -248,13 +248,49 @@ class UnpackService : Service() {
                     if (r.exitCode == 0) files = runCatching { destDir.walkTopDown().count { it.isFile } }.getOrDefault(files)
                     SevenZip.Result(if (r.exitCode == 0) 0 else 2, r.stderrTail)
                 } else if (isInno) {
+                    // innoextract's --progress percent is unreliable for GOG multi-part installers: it
+                    // sawtooths ~0-9 (per-chunk, not overall) instead of climbing 0-100, which made the
+                    // bar look deceiving. Drive progress the same way as the FreeArc path — POLL the
+                    // destination size against the payload total. innoextract still does the extraction;
+                    // we just ignore its percent for the bar.
+                    val innoTotal = dataSize.coerceAtLeast(1L)
+                    val polling = java.util.concurrent.atomic.AtomicBoolean(true)
+                    val poller = Thread {
+                        var pLastB = 0L; var pLastT = SystemClock.elapsedRealtime(); var pEma = 0L
+                        while (polling.get()) {
+                            runCatching { Thread.sleep(2500) }
+                            val (count, bytes) = runCatching {
+                                var c = 0; var b = 0L
+                                destDir.walkTopDown().forEach { if (it.isFile) { c++; b += it.length() } }
+                                c to b
+                            }.getOrDefault(0 to 0L)
+                            val now = SystemClock.elapsedRealtime()
+                            val dt = (now - pLastT).coerceAtLeast(1)
+                            val inst = ((bytes - pLastB) * 1000 / dt).coerceAtLeast(0)
+                            pEma = if (pEma == 0L) inst else (pEma * 2 + inst) / 3
+                            pLastB = bytes; pLastT = now
+                            val pct = (bytes * 100 / innoTotal).toInt().coerceIn(0, 100)
+                            val eta = if (pEma > 0) (innoTotal - bytes) / pEma else -1L
+                            files = count
+                            UnpackManager.update {
+                                it.copy(
+                                    phase = UnpackPhase.EXTRACTING, percent = pct,
+                                    bytesProcessed = bytes, speedBps = pEma, etaSeconds = eta,
+                                    elapsedMs = now - startMs, filesExtracted = count,
+                                )
+                            }
+                            refresh()
+                        }
+                    }.also { it.name = "inno-poller"; it.start() }
                     val r = Innoextract.extract(
                         ctx, archive, destDir,
-                        listener = { percent -> pushProgress(percent, null) },
+                        listener = { /* innoextract percent ignored — poller above drives the bar */ },
                         onProcess = { proc = it },
                     )
+                    polling.set(false)
+                    runCatching { poller.join(3000) }
                     // innoextract has no per-file callback; count the extracted files for the summary.
-                    if (r.exitCode == 0) files = runCatching { destDir.walk().count { it.isFile } }.getOrDefault(0)
+                    if (r.exitCode == 0) files = runCatching { destDir.walk().count { it.isFile } }.getOrDefault(files)
                     // innoextract uses 0=ok; map any non-zero to an error code (2) for the terminal logic.
                     SevenZip.Result(if (r.exitCode == 0) 0 else 2, r.stderrTail)
                 } else {

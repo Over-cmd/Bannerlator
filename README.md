@@ -58,13 +58,28 @@
 
 ---
 
+## 🤖 AI Disclaimer
+
+All coding, features, and changes in this project are developed with the assistance of **[Claude AI](https://www.anthropic.com/claude)** by Anthropic. Claude is used to help with the heavy lifting — writing, reviewing, and modifying the emulator's code and the features added here: the Kotlin/Compose app shell and the native emulation glue (Wine/Proton, box64/FEX, DXVK/VKD3D → Vulkan), the storefront and cloud-save integrations, and the per-game/container features — as well as porting and re-deriving community changes into this build.
+
+Before any **stable release** is published, all changes are **manually debugged and tested by me across multiple devices — both rooted and unrooted**. Debugging is done using `logcat`/`getlog` output and in-app debug log files to diagnose and verify behaviour, and no stable release is cut until the change is verified end-to-end on real hardware. Test devices:
+
+- **Samsung Galaxy Fold 8 Ultra** — Snapdragon 8 Elite Gen 5 — *not rooted*
+- **AYANEO Konkr Pocket Fit** — Snapdragon G3 Gen 3 — *rooted*
+- **Odin 2 Portal** (base) — Snapdragon 8 Gen 2 — *rooted*
+- **Retroid Pocket 5** — Snapdragon 865 — *rooted*
+
+> **A note on root:** using any root-only features is entirely **your own choice and at your own risk**. I don't encourage rooting your device in general — especially without the proper knowledge and tools to do it correctly. Bannerlator runs fine unrooted; root only unlocks a few optional performance extras.
+
+---
+
 ## ℹ️ Information
 
 | | |
 |---|---|
 | **App label** | `Bannerlator Bionic` (standard) · `Bannerlator Bionic PuBG` (pubg) · `Bannerlator Bionic Ludashi` (ludashi) |
 | **Packages** | `com.winlator.banner` (standard) · `com.tencent.ig` (pubg) · `com.ludashi.benchmark` (ludashi) |
-| **Version** | Bannerlator **V 2.9.6** — built from Star **marcescence** (`versionName 2.9.6`, `versionCode 68`) |
+| **Version** | Bannerlator **V 3.0.0** — built from Star **marcescence** (`versionName 3.0.0`, `versionCode 74`) |
 | **Android SDK** | `compileSdk 34` · `targetSdk 28` · `minSdk 26` (Android 8.0+) |
 | **Lineage** | Winlator → cmod → Bionic Nightly → Star Bionic → **marcescence** → **Bannerlator** |
 
@@ -93,15 +108,10 @@ Every report gets its own **public discussion thread**. You can reply as the ori
 ## 📖 Contents
 
 - [📌 Project Notice](#-project-notice)
+- [🤖 AI Disclaimer](#-ai-disclaimer)
 - [ℹ️ Information](#ℹ️-information)
 - [🐛 Report a Mali GPU Issue](#-report-a-mali-gpu-game-issue)
-- [🆕 What's New in 2.9.6](#-whats-new-in-296)
-- [🆕 What's New in 2.9.5](#-whats-new-in-295)
-- [🆕 What's New in 2.9.4](#-whats-new-in-294)
-- [🆕 What's New in 2.9.3](#-whats-new-in-293)
-- [🆕 What's New in 2.9.2](#-whats-new-in-292)
-- [🆕 What's New in 2.9.1](#-whats-new-in-291)
-- [🆕 What's New in 2.9](#-whats-new-in-29)
+- [🆕 What's New in 3.0.0](#-whats-new-in-300)
 - [🎞️ Frame Generation & Present Modes](#-frame-generation--present-modes)
 - [✨ Full Features](#-full-features)
 - [🎨 Adding your own ReShade effects](#-adding-your-own-reshade-effects)
@@ -114,309 +124,21 @@ Every report gets its own **public discussion thread**. You can reply as the ori
 
 ---
 
-## 🆕 What's New in 2.9.6
-
-2.9.6 is a **feature-and-fixes release over 2.9.5**, headlined by a rebuilt **in-game Task Manager** and a new **D7VK** wrapper that runs old DirectX 7 / DirectDraw games on Vulkan. Everything from 2.9.5 is included. Like the releases before it it's **entirely app-side** — **no ImageFS reinstall** — just install over 2.9.5; your containers, themes, accent and per-game settings carry over untouched.
-
-**🧰 In-game Task Manager — now a real control panel.** The process list grew into a proper control panel. A Windows-style **"Set affinity"** on any running process's ⋮ menu lets you pin it to specific CPU cores **live, mid-game** — no relaunch — applied through the guest's real affinity path, with core toggles that match the container/game core-picker. Above it sits a **live telemetry header**: CPU & GPU usage **and temperatures**, GPU clock, **FPS (+ minimum)**, RAM, swap, battery (level / watts / temperature / charging) and a **per-core clock strip** — all from the same cross-vendor sensors as the performance HUD. Plus a collapsible **container info panel** summarizing the running Wine/Proton, DX wrapper, renderer, driver, resolution and device. *Which telemetry readings are available varies from device to device — some sensors (GPU load/clock, temperatures, battery watts) depend on what the manufacturer exposes, so a few values may read **"—"** on certain hardware.*
-
-**🎮 D7VK — DirectX 7 / DirectDraw games on Vulkan.** Old **DirectDraw / Direct3D 3–7** titles historically took a slow OpenGL path. **D7VK** ([WinterSnowfall](https://github.com/WinterSnowfall/d7vk)'s Vulkan implementation, a DXVK cousin) runs them straight through **Vulkan** instead — a new **D7VK** option in the **DDraw Wrapper** picker, **per-container and per-game**. It ships **bundled** and offline-ready as the **default**, and is **catalog-backed**: pick D7VK and a **"D7VK Version"** dropdown + download button appears, so you can pull **bleeding-edge nightly d7vk builds** from the catalog and switch between them. Entirely app-side — the wrapper drops into the container at launch, **no ImageFS reinstall**.
-
-**🧭 Container editor — tabs back on top in portrait.** In portrait the editor tabs (General / Environment / Drives / Win Components / Advanced) now sit in a single **icon bar across the top**, spread evenly across the full width, with **?** help (and **Reset** on the defaults screen) at the end of the row — reclaiming the wasted band. **Landscape is unchanged** (the collapsible left rail), and it applies to all three container screens — **New Container**, **Edit Container** and **New Container Defaults**.
-
-**🛡️ Backgrounded games stay alive.** Switching to another app (or taking a call) mid-game used to let Android quietly kill the container. 2.9.6 runs the game session as a **real foreground service** with a persistent notification, so a backgrounded game or container **keeps running** instead of being evicted.
-
-**🎛️ Deeper graphics tuning (Turnip).** **GMEM control (Auto / On / Off)** for Adreno (710 / 720 / 722) — force tiled rendering on or off, per-container **and** per-game — plus **advanced `TU_DEBUG` tokens** (concurrent-binning force/off, deck-emu, and more) for tricky titles. Each option carries a **"?"** explanation and a glossary entry.
-
-**📟 Performance HUD — wider device support + honest API labels.** The HUD now reads GPU load / clock and charging state on **MediaTek (GED)** and other non-Adreno devices, and apps that report their **active graphics API** (e.g. the bundled AIO Graphics Test's per-backend tests) now show the **correct** API instead of a best guess.
-
-**❓ "?" help everywhere + glossary.** Per-option **"?" help buttons** now cover **every technical setting** across the container editor, the per-game shortcut editor and the Turnip / Wrapper driver config, each backed by a plain-language **glossary**.
-
-**📦 Bundled in every container** (picked up automatically, no reinstall): **[AIO Graphics Test 2.0.1](https://github.com/The412Banner/AIO-Graphics-Test/releases/tag/2.0.1)** ([repo](https://github.com/The412Banner/AIO-Graphics-Test)) — single-window multi-API benchmark with an automatic OpenGL fallback for Mali / broken-DXVK; **[Banner File Manager 1.2.0](https://github.com/The412Banner/banner-file-manager/releases/tag/v1.2.0)** ([repo](https://github.com/The412Banner/banner-file-manager)) — faster on large folders; and **[Pale Moon](https://www.palemoon.org/)**, a lightweight browser launchable from the **Start Menu**.
-
-**🌐 Fixes.** Containers now get a **usable IPv4 DNS resolver**, fixing games and launchers that couldn't resolve hostnames. **New containers show up immediately** in the Games "add a game" container picker — no relaunch needed. **Pale Moon** no longer clutters the container desktop or Games tab (Start Menu only). Plus assorted stability and UI polish.
-
-## 🆕 What's New in 2.9.5
-
-2.9.5 is a **feature release over 2.9.4**, headlined by a brand-new **Unpack Archive** tool and a full **landscape UI overhaul**. Everything from 2.9.4 is included. Like the releases before it it's **entirely app-side** — **no ImageFS reinstall** — just install over 2.9.4; your containers, themes, accent and per-game settings carry over untouched.
-
-**📦 Unpack Archive — install games right in the File Manager.** A new extractor built into the File Manager (⋮ → Unpack, or one-tap **Fast Extract**): **ISO/UDF, ZIP, RAR, 7z and the TAR family** via a bundled 7-Zip engine; **GOG installers** pulled straight out of `setup_*.exe` via a bundled innoextract; and — the headline — **native FreeArc repack install with no PC**: FitGirl/DODI-style **FreeArc** repacks (LZMA / tornado / rep) now decompress **on-device** via a bundled NDK `unarc` (srep-based repacks still need a Windows PC — the app tells you and offers the container route). Fast Extract unpacks to a new folder straight into a **minimizable progress pill** with a foreground notification, so multi-hour extracts survive backgrounding. Content-aware ⋮ menu (offers unpack on any real archive regardless of extension) plus **power/thread** and **read-buffer** controls.
-
-**🖥️ Landscape UI overhaul.** Landscape stopped wasting the top and bottom of the screen. Tabs moved to a **collapsible left rail** on the Container editors, File Manager and Save Manager — it collapses to icons (with tiny labels in portrait), **remembers per-screen**, and **reflows on rotation** without losing your tab, edits or scroll. **File Manager** gains a left **Locations rail** (Internal / SD / Downloads / Games / favourites), **grid** by default in landscape (the grid/list toggle now works in portrait too), a **New Folder** button in the toolbar, and outlined selectors. **Save Manager** gets a left Steam/Custom/Settings rail, **multi-column** game cards, and a sync-count **badge + banner**. Container editors get the rail, reclaimed bottom space, and the **Wine-glass** container glyph. A **slim top header** on every screen, plus a new **App Orientation** setting (Auto / Portrait / Landscape) that locks the app UI — **games are unaffected**.
-
-**🎞️ Frame Generation & Present Modes.** Frame-gen was being strangled by FIFO backpressure — it now **forces mailbox while FG multiplies**, and **bionic-fg is re-enabled** (device-verified). A live in-game **Present Mode selector** lands on the Graphics tab (FG gated to the **Vulkan** renderer), with **"?" help + a glossary** across the container/game editors and the shortcut editor. **⚠️ Frame generation is still experimental and a work in progress** — please don't expect magic results; outcomes still vary from game to game, device to device, and with the components used. Both **bionic-fg** and **lsfg-vk** are offered — treat them as experimental and use whichever works best for your game.
-
-**🐛 Fixes.** The **GL/Zink perf-HUD now reads real FPS** (was stuck at 0.0) — it counts on the child render surface the game actually presents to. Plus the File Manager grid/list toggle now works in portrait, and assorted landscape UI polish.
-
-## 🆕 What's New in 2.9.4
-
-2.9.4 is a **feature release over 2.9.3**, headlined by a **HUD overhaul** and a batch of **container-setup quality-of-life**. Everything from 2.9.3 is included. Like the releases before it it's **entirely app-side** — **no ImageFS reinstall** — just install over 2.9.3; your containers, themes, accent and per-game settings carry over untouched.
-
-**🎚️ HUD overhaul — Fusion by default, with an on/off switch.** The Fusion overlay is now the default HUD at its compact **Pill** size, and it gained a system-wide **RAM%** readout. The in-game FPS tab is reorganized: a master **Show HUD** toggle turns the whole overlay on/off **live** (no relaunch), your frame-rate & refresh controls stay put, and the appearance settings collapse into tidy tap-to-open sections — Style & Size, Metrics, Appearance, Alerts, Tools — with a thin accent line separating the tab buttons from their content.
-
-**🗂️ Log storage moved to Documents — fixes games closing mid-play.** Logs defaulted to the app's private `Android/data` folder on restricted storage; under heavy logging, log rotation could crash the phone's media service and Android would kill the running game — the "**the game just closes**" bug (worst on the pubg build / AYANEO Pocket FIT). Logs now default to **Documents/bannerlator**; existing installs are migrated automatically, and the crash-prone "App data" location is removed.
-
-**🧰 Easier container setup.** New Container Defaults are now **user-configurable and per-architecture** (x86-64 / arm64ec). A **"What is all this?"** newcomer glossary (34 terms) plus per-field **?** help explains every container setting in plain English. The **environment-variable editor** no longer silently drops custom variables on save, adds separate **Name** and **Value** fields, and recognizes ~75 variables (was ~34). **Save Manager**'s custom-game **Restore** is now always available via the in-app file picker.
-
-**🧩 Mali: BCn→ASTC transcode on the default driver.** Set **BCn Emulation Type = Compute**, then enable **BCn → ASTC** in the graphics driver settings — the transcode is done by a bundled Vulkan layer, so it works on **any** wrapper (including "Original", which has no built-in BCn). No effect on Adreno, which decodes BCn natively.
-
-**🔤 Polish & fixes.** The **"+" add button** no longer lands off-screen in right-to-left languages (#200) — thanks **@aszba258-cyber** and **@alroe2435-cell** for reporting, and **iManiii** for verifying on device. Landscape dialog **scroll/clipping** fixes across the growable pickers and Select-container dialogs.
-
-**⚠️ Frame generation.** **bionic-fg** is temporarily disabled (repeated false-positive "it's working" reports on a work-in-progress feature) — use **lsfg-vk** for now. lsfg-vk is **experimental**: it's the recommended option, but don't expect it to run fluidly on every game and every device. bionic-fg returns as selectable once it's proven to work as intended.
-
----
-
-## 🆕 What's New in 2.9.3
-
-2.9.3 is a **feature release over 2.9.2** — headlined by a full **Save Manager**. Everything from 2.9.2 is included. Like the releases before it it's **entirely app-side** — **no ImageFS reinstall** — just install over 2.9.2; your containers, themes, accent and per-game settings carry over untouched.
-
-**💾 Save Manager — never lose a save again.** A whole screen for your game saves — open it from the **side menu** (under Library), the **Steam store**, or any game's **⋮ menu** or detail page. It manages three tiers — **Steam Cloud**, your local **Library**, and the **container** — and keeps them honest: for games whose Steam Cloud doesn't actually retain saves (looking at you, FlatOut 2) it detects that and **backs them up locally instead**, telling you exactly what happened. **Auto-Collect** grabs your saves automatically **when you exit a game** and **before you uninstall** one, so an uninstall never takes your progress with it. And it isn't Steam-only — **any custom game** (an imported EXE or folder) gets the same treatment through a **universal save vault**: auto-snapshot on exit, per-game folders under `Downloads/Bannerlator/game saves/`, and restore back into whichever container you choose. Rounded out with a live **Steam connection badge + auto-connect** and a **"played but never synced"** flag so nothing slips through the cracks. **📖 Full guide: [Save Manager — Complete Guide](https://github.com/The412Banner/Bannerlator/blob/main/docs/save-manager-guide.md).**
-
-**🎞️ Frame generation — smoother by default (lsfg-vk).** The **lsfg-vk** frame-gen defaults are retuned to match the settings that get the best real-world results: **Performance mode is now on by default** (a lighter interpolation model that's cheaper on Adreno), **flow scale defaults higher (0.80)** for cleaner motion, and a new per-container **"Auto-enable at launch"** (on by default) starts frame generation **live at your saved multiplier from the first frame** instead of waiting for you to switch it on in the drawer. Every one of these is still a toggle — flip auto-enable off to restore the old start-off behavior, per container. *(Defaults ported from **[GameNative](https://github.com/utkarshdalal/GameNative)** — see [Credits](#-credits).)*
-
-**📊 Perf HUD.** On dual-API builds the in-game overlay now reads the **active DirectX API straight from the engine log** and pins it to the running game, so the DX version it shows is the one actually in use.
-
----
-
-## 🆕 What's New in 2.9.2
-
-2.9.2 is a **hotfix over 2.9.1**. It fixes one thing, and it affected everyone. Like the releases before it it's **entirely app-side** — **no ImageFS reinstall** — just install over 2.9.1.
-
-**🔇 Turning logging off now actually turns logging off.** In 2.9.1, switching every toggle in the Log Manager off did **not** stop Bannerlator writing a log, and setting `WINEDEBUG=-all` yourself didn't either. The switches chose *how chatty* Wine was; nothing told the app to stop **writing the file**, so it kept filling from everything else running underneath — the x86 translator, the Wine server, the loader, DXVK. That had a cost beyond the annoyance: when nothing is listening, Bannerlator normally discards that output without reading it, and because it was always listening, **every 2.9.1 install was writing to disk line by line on every launch**, whether you wanted logs or not. Now, with the recording switches off, no file is opened, nothing is written, no empty per-game folders are left behind, and the output is thrown away untouched. **Viewing is unaffected** — the Log Manager, viewer, per-game **View logs**, File Manager, sharing and **Report a problem** all still work on whatever is already on disk. ⚠️ With everything off a crash now leaves **no Wine log**, which is the point: to report a bug, turn **Wine debug** on, reproduce once, then use **Report a problem**. Found, reported and device-confirmed by **D4V1Z0N**.
-
----
-
-## 🆕 What's New in 2.9.1
-
-2.9.1 is a **point release over 2.9**, headlined by a full **Log Manager** — so when something breaks you can capture exactly what happened and file a report with the logs already attached — plus a set of drawer and library controls and a **non-root** GPU max-clock. Like the releases before it it's **entirely app-side** — **no ImageFS reinstall** — your containers, themes, custom accent and per-game settings carry over untouched; just install over 2.9.
-
-**🗂️ Log Manager.** One screen for everything logging, at **App Settings → Logs → Open Log Manager**. A **folder per game** with **keep-last-N rotation** and a choice of location (app data, Download, Documents, or a folder you pick). Choose exactly **what gets recorded** — Wine debug, Box64/FEXCore, DXVK & VKD3D, Android logcat, crash reports — with a **"?"** on every toggle whose copy **leads with the performance cost**, because two of them genuinely slow games down. **Browse all 521 Wine debug channels**, grouped by family (graphics, sound, input, networking…) with a **"What's this?"** switch that explains each in plain English, while the 18 everyday channels stay one tap away. A built-in **log viewer** with file tabs, a live **following** tail, severity colouring, find, wrap, copy and share — it reads only the tail of a file, so a multi-gigabyte Wine log opens instantly. **View logs on any game** straight from the library: long-press in grid view, or the ⋮ menu in list view. And **Report a problem** builds a **redacted** zip of the run and opens a GitHub issue pre-filled with device, app version, GPU, driver and DXVK/VKD3D versions. **Redaction runs before anything is written** — usernames, e-mail addresses and tokens are stripped from logs, crash reports and stack traces alike — and logcat capture is **Bannerlator's own output only**, never system-wide, even with root. Delete and **Clear all** remove **only** files Bannerlator wrote; anything else in your log folder is left alone by construction.
-
-**⚡ Lock GPU to max clock — without root.** On **Adreno** devices this control no longer needs root: on a Snapdragon handheld it took the GPU from 231 MHz to **1000 MHz** with root never granted. With root, the original path is still used; turning it off restores the clock either way.
-
-**🎨 Drawer & library controls.** **Appearance → Side Menu** gains switches to hide the **game stores** section, **internal storage** and **SD card storage**, each independently. The drawer's storage bar is now labelled **Internal Storage**, and a card in the device gets **its own card** beneath it. The **+ button** on Games and Containers can be **long-pressed and slid along the bottom**, so it stops covering a card's play or ⋮ button, and it stays where you put it. Games also gains **multi-select removal** (list *and* grid) and a third view mode — a **four-across compact grid**.
-
-**🔧 Graphics & runtime.** **Vulkan 1.4 by default**, with the exported version **clamped to the minor your driver actually reports** (picking 1.4 on a 1.3 driver used to produce a version string no driver would accept). New containers on **non-Adreno GPUs** default to **wrapper-gamenative**. And FEXCore's SMC-checks variable was being set under the wrong name — it is `FEX_SMCCHECKS`, so that setting now actually applies.
-
-**📦 Smaller install.** The APK is **~103 MB smaller**: the bundled Proton 9 is gone, because that bundled copy never launched. Wine installs from the in-app catalog on first run instead. ⚠️ **A fresh install ships with no Wine at all** — open **Containers → the download icon** and install a Proton before creating a container. Updating from 2.9 changes nothing. If you want Proton 9, the working **arm64ec `.wcp`** is a direct download: **[proton-9.0-arm64ec.wcp](https://github.com/The412Banner/Nightlies/releases/download/Proton/wine/proton-9.0-arm64ec.wcp)** (66.7 MB, compiled as a wcp by **Xnick417x**) — install it via **Containers → download icon**.
-
----
-
-## 🆕 What's New in 2.9
-
-2.9 is a **big feature release** headlined by two major additions — **power-user Performance controls** (with an opt-in **root tier**) and **Virtual Controller Pro**, a ground-up rebuild of the on-screen touch controls — and it rolls up everything that landed since 2.8. Like the last several releases it's **entirely app-side** — **no ImageFS reinstall** — your containers, themes, custom accent and per-game settings carry over untouched; just install over your current build.
-
-**⚡ Performance controls — with an opt-in root tier.** A new **App Settings → Performance** menu, mirrored live in the in-game **Debug** tab and kept in **two-way sync**, with **global defaults** and optional **per-game overrides** (honored only when they differ from the global, with a one-tap **reset-to-global**). **No root needed, for everyone:** **Sustained Performance Mode** (steadies clocks so long sessions stay smooth instead of spiking and dropping), **Thread Priority Boost** (raises the guest CPU-worker threads for more CPU time), and **Prefer Big Cores** (pins the running game to your fastest cores instead of the efficiency ones). **Opt-in root tier** — **Magisk / KernelSU / APatch**, behind a **Grant Root** gate and a scroll-to-accept ***"USE AT YOUR OWN RISK"*** disclaimer: **CPU governor → performance**, **lock CPU frequency to max**, **keep all cores online**, **lock GPU to max clock**, **disable thermal throttling**, **fan to maximum**, and a **"Free memory now"** action. Safety is built in and always on: an **exact snapshot-revert** restores every value it touched to precisely what it was — automatically on game-exit, app-background or crash, and even after a hard kill (the snapshot is persisted to disk) — backed by a device-anchored **Temperature Watchdog** that reads your device's **own thermal trip points** (presets **Conservative / Balanced / Aggressive / Manual**) and rolls everything back *before* the device overheats. Every toggle has a **"?"** explainer, there's an **"Explain toggles"** overview and a watchdog **"What's this?"**, and live **CPU / GPU temps** plus your device's own thermal limits are shown inline. **Device-verified on an AYANEO Pocket FIT (Adreno).** The root tier is **entirely opt-in** and gated behind the risk disclaimer — nothing writes to your system files unless you grant root and accept the warning.
-
-**🎮 Virtual Controller Pro.** A ground-up overhaul of the on-screen touch controls. *(PR [#156](https://github.com/The412Banner/Bannerlator/pull/156) by [arro000](https://github.com/arro000) — thank you.)* New control types join the classic Button / D-Pad / Range / Stick / Trackpad: a **Dynamic Stick** (a floating stick that appears wherever your thumb lands inside a set area), a **Mouse Area** (a touch region that drives the cursor), a **Button Grid** (a rows × columns block of independently-bound keys, with optional **multitouch** and QWERTY / F-row / NumPad quick-fill), and **Expandable Buttons** (radial or list fly-outs). The editor is **rebuilt in Jetpack Compose** — a sliding per-element settings pane and a floating toolbar, with the selected control highlighted and refreshed control visuals — and you can now **edit your controls live in-game**, tapping a control to tune it against the running game and saving without leaving. Plus **control groups** (assign controls to a group, then show/hide the whole group at once), **key combos** (bind several keys to one control), **per-element dead zones**, a **Hold key** for stick / trackpad / mouse-area controls, **custom control icons** (import your own, tint them with your accent or use one as the whole button, with safe shared deletion), a **binding picker with category filters** (Keyboard / Mouse / Gamepad) and direct character entry, an editor **background/reference image** for tracing your layout, and a higher **control-scale limit — up to 300%**. Profiles gain a new **ICpx** format (with best-effort **legacy ICP** export), and external-controller binding moves to its own dedicated screen.
-
-**➕ Also rolled up since 2.8:**
-- **🎛️ Fusion HUD — a fourth in-game overlay.** A MangoHud-style overlay alongside Classic, GameHub and the GameNative-style HUD: **size modes** (Full / Tiles / Pill / Minimal / Mega), **VRAM**, **GPU model**, **1% / 0.1% lows** and a live **frametime graph** — plus **long-press to lock any HUD in place**.
-- **⬇️ In-app updater.** **Settings → Updates** checks GitHub for a new release and installs the correct **flavor APK** for you, with **notify-on-update** and an opt-in **include-prereleases** (beta channel) toggle.
-- **🎨 Driver-source management.** Add, toggle and remove your own **adrenotools GPU-driver feeds** (a custom JSON URL or a GitHub `owner/repo`), on top of the built-in sources. *([#160](https://github.com/The412Banner/Bannerlator/issues/160).)*
-- **📂 Games-folder bulk import + smart import.** Point at a whole library folder and every game subfolder is scanned for its real executable, named and cover-arted for one-tap batch add; individual `.exe` imports now **auto-resolve the authoritative game name + cover from Steam** and fix launcher-exe misnames.
-- **📁 File Manager — archive extraction & tools.** The built-in (in-app) file manager can now **extract** zip / 7z / tar / tar.gz / xz / bz2 / zst (Zip-Slip-guarded, with progress and cancel), plus **search**, **sort**, a **hidden-file toggle**, **multi-select bulk operations** and **free-space** display.
-- **🖥️ In-game refresh-rate unlock**, a **Custom** per-service **startup mode** (*[#168](https://github.com/The412Banner/Bannerlator/issues/168)*), and **recommended-component** install chips for the redistributables a game bundles.
-
-<details>
-<summary><b>Previously in 2.8</b> — gyroscope motion aim, rebuilt Big Picture, PC-accurate vibration</summary>
-
-2.8 is a **feature release** built around three big additions — **gyroscope motion aim**, a **completely rebuilt Big Picture mode**, and **PC-accurate controller vibration** — plus a reorganised in-game Controls drawer and an updated file manager. Like the last several releases it's **entirely app-side** — **no ImageFS reinstall** — your containers, themes, custom accent and per-game settings carry over untouched; just install over 2.7.1.
-
-**🎯 Gyroscope — motion aim.** Aim by tilting your device. Gyro input can drive either the **right stick** or the **mouse**, with a **Tilt-to-Aim (orientation) mode** that maps how you hold the device straight to where you're aiming. Activation is yours to choose — **Hold** a button while you tilt, or **Toggle** it on and leave it on — and there's **device-level calibration** in Input Controls (plus a live bias correction) so a phone that drifts on a table doesn't drift in-game. Every setting is **saved per container and per game**, like the rest of the presets. *(Implementation modeled on [WinNative](https://github.com/WinNative-Emu/WinNative)'s — thank you.)*
-
-> 📖 **New to motion aim? [Read the complete gyro guide →](docs/gyro-controls-guide.md)** — every mode and setting explained in plain English: **Rate vs Tilt to Aim**, the three targets (**right stick / left stick / mouse**), **Hold vs Toggle** activation, sensitivity / deadzone / smoothing tuning, drift calibration, and troubleshooting.
-
-**📺 Big Picture — rebuilt from scratch.** Big Picture mode is now a **full Compose rebuild**: a fluid couch launcher you can actually drive from the sofa, with **direct access to settings, features and your games**, real **per-game spec chips** showing what each title is actually set to, and **no background music**. D-pad navigation is fixed throughout — no more phantom focus rings, clipped Play buttons or hero buttons overflowing on long titles.
-
-**🎮 PC-accurate controller vibration.** Rumble now behaves like it does on a PC: **dual-motor** output (strong/weak driven independently rather than collapsed into one buzz), with a **per-container vibration mode and intensity**. Underneath, a **winebus duration patch** stops SDL rumble from auto-expiring mid-effect, so sustained rumble actually sustains — applied across **Proton 10 and 11**, on both **arm64ec and x86-64**, with a build-agnostic fallback so it keeps working on future layers. *(Duration patch from [TideGear](https://github.com/TideGear/GameHub-Vibration-Fix)'s PR #91, adopted with permission; the vibration feature itself originates from [GameNative](https://github.com/utkarshdalal/GameNative) #1214.)*
-
-**🕹️ In-game Controls drawer.** The Controls tab is split into **Touch / Mouse / Vibration / Gyro** sub-tabs instead of one long scroll, and the toggle chips are now a uniform 3-across grid with shorter labels.
-
-**📁 Banner File Manager 1.1.0.** New containers ship the updated build, replacing 1.0.0.
-
-</details>
-
-<details>
-<summary><b>Previously in 2.7.1</b> — wrapper catalog updates, frame-gen Performance mode, Banner File Manager</summary>
-
-2.7.1 builds on 2.7's **Wrapper Version Manager** with a big round of **catalog + update improvements**, plus a frame-gen **Performance mode**, a **controller-vibration master switch**, our own **Banner File Manager** (replacing WFM), and consistent menu styling across the app. Like the last several releases it's **entirely app-side** — **no ImageFS reinstall** — your containers, themes, custom accent and per-game settings carry over untouched; just install over 2.7.
-
-**🧩 Wrapper Version Manager — catalog + bundled updates.** The wrapper catalog now **remembers what you've installed** across restarts and flags **"Update available"** when a newer build exists — for **imported *and* bundled** wrappers — with **one-tap Update** and a **"From catalog"** chip marking catalog-installed entries. The **GameNative wrapper** is refreshed to its latest July build (adds 32-bit game support), and the bundled **leegao BCn + DX12 compat layers** carry leegao's **layer-composition fix** so the two stack correctly. Plus a batch of fixes: the **BCn layer (leegao)** entry now detects correctly (was "Vulkan ICD" / 0 settings → **BCn layer / 13 knobs**), the shared **"Extra libraries"** payload is hidden from the manager (it isn't a wrapper), card text no longer truncates, and the catalog's Installed mark now clears properly on **Reset**.
-
-**🎞️ Frame generation — Performance mode.** A new **"Performance mode"** toggle for **lsfg-vk** frame generation — per-container in settings **and** live in the in-game drawer — switches to a lighter frame-gen model for a real FPS gain on weaker GPUs, **with no root or read-only file hacks**. Defaults off. *(Thanks [@Tony57319](https://github.com/Tony57319) — [#152](https://github.com/The412Banner/Bannerlator/issues/152).)*
-
-**🎮 Controllers.** A new **"Controller vibration" master switch** in the in-game Vibration section silences **all** rumble regardless of slot, saved globally — and the per-slot vibration toggles that used to snap back now reflect your changes.
-
-**📁 Banner File Manager.** New containers now ship **[Banner File Manager](https://github.com/The412Banner/banner-file-manager)** — our own native Win32 file manager, forked from [BrunoSX's Winlator File Manager](https://github.com/brunodev85/wfm): **dual-pane split view**, **Open as administrator / Open with**, and a **native Win32 copy** that sidesteps the Proton 10.0-4 shell32 copy-paste crash. *(Applies to new containers.)*
-
-**🎨 Interface.** Every dropdown / overflow menu now shares one clean **outlined-card style** (dividers + accent icons), matching the File Manager.
-
-</details>
-
-<details>
-<summary><b>Previously in 2.6.2</b> — fixes &amp; hardening</summary>
-
-2.6.2 is a **fixes-and-hardening** update on top of 2.6.1 — no new subsystem, just sharpening what's already here. The **in-game performance HUD** got a ground-up pass, **component downloads** now keep going when you leave the app, and a batch of reported bugs are fixed. Like the last several releases it's **entirely app-side** — **no ImageFS reinstall** — your containers, themes, custom accent and per-game settings carry over untouched; just install over 2.6.
-
-**🎛️ In-game HUD — hardened + a new overlay style.** Every overlay now reads **one shared FPS source** (they could drift before), and the metric readers (GPU load, CPU / GPU temp, RAM, battery / power) were rewritten with proper vendor discovery — so values that used to read **0% on many non-Adreno GPUs** now populate correctly. There's a new third overlay — a **GameNative-style HUD** with live graphs — alongside Classic and GameHub, switchable **live in-game**. Plus compact chip UI in an aligned grid, a **slider-controlled accent outline**, FPS-limiter presets (**30 / 60 / 90 / 120**), and a clean GPU-model name (e.g. `Adreno 750`).
-
-**⬇️ Background component downloads.** Downloading a large layer (Proton / DXVK / box64 / FEXCore / rootfs) no longer stops when you **minimize or lock** the phone — it continues via a foreground service with a **shade notification**, and **resumes** if interrupted. *(Thanks [@kylinzang](https://github.com/kylinzang) — [#122](https://github.com/The412Banner/Bannerlator/issues/122).)*
-
-**🔧 Fixes.** DXVK 1.x can no longer be paired with **VKD3D** (they're binary-incompatible — DXVK 1.x can't back VKD3D-Proton — so the DX12 path failed silently) *([@GmoLargey](https://github.com/GmoLargey), [#113](https://github.com/The412Banner/Bannerlator/issues/113))*; the per-game editor now labels the x86 backend **WOWBox64** on arm64ec instead of "Box64" *([@railexcatapangdiaz-ux](https://github.com/railexcatapangdiaz-ux), [#111](https://github.com/The412Banner/Bannerlator/issues/111))*; the Classic HUD no longer double-shows or resizes on a metric toggle; **power draw** reads correctly on inverted-battery-current devices (Xiaomi / Poco) *(HUD reports via Discord user **devaspe**)*; and a failed component install no longer reports success.
-
-**🔐 Run games as administrator.** New per-container **"Run as administrator"** toggle (on by default) for installers and games that need elevation.
-
-**🌐 Community — thank you.** Contributed straight to Bannerlator's own config repo: **166 games**, **184 configs**, from **252 accounts** — and because the in-app browser also merges the **BannerHub** catalog, the total you can browse and apply *inside the app* is **2,257 games / 1,548 configs**. All growing. This project grows *only* because of the community's support and participation. 🙏 Browse: [Bannerlator repo](https://github.com/The412Banner/bannerlator-game-configs) · [BannerHub catalog](https://github.com/The412Banner/bannerhub-game-configs) · [online](https://the412banner.github.io/bannerlator-game-configs/).
-
-</details>
-
-<details>
-<summary><b>Previously in 2.6.1</b> — Adreno BCn fix</summary>
-
-2.6.1 was a small hotfix on top of 2.6. The headline was an **Adreno graphics fix**: since 2.5, the integrated-wrapper BCn emulation (`WRAPPER_EMULATE_BCN`) was emitted for **every** GPU, but the BCn-aware wrapper builds act on it — so on **Adreno 7xx** it forced a pointless per-texture transcode: global slowdown and BC-heavy DX11 games (e.g. *Skyrim AE*) failing to launch. It's now gated **off on Qualcomm (0x5143)**; **Mali / Xclipse / PowerVR behaviour is untouched**. Rounded out by an **Add to Shortcuts** action on any `.exe` in the File Manager, and a **community-config XInput** round-trip fix (the setting is a bitmask, was being written back as `1/0`).
-
-</details>
-
-<details>
-<summary><b>Previously in 2.6</b> — Community Config <i>Sharing</i> + optional accounts</summary>
-
-2.6 completed **Community Configs**: 2.5.2 gave you the browse-and-apply half, and 2.6 added the other half — **share your own working setups**, locally or online, straight from the same Community Configs menu. Sharing captures your **entire per-game setup** (38 of 39 shortcut settings — the full DXVK/VKD3D config, graphics, emulator, wrapper incl. **VEGAS**, Turnip driver and input), and a brand-new **optional account system** (username + password, one-time recovery key, **no email**) lets your uploads follow you across devices and carry your name — everything still works anonymously without one. Also app-side, **no ImageFS reinstall**. *(Includes a community VEGAS-dialog improvement from [isygold](https://github.com/isygold) — [#84](https://github.com/The412Banner/Bannerlator/pull/84).)*
-
-</details>
-
-<details>
-<summary><b>Previously in 2.5.2</b> — Community Configs (browse &amp; apply) + two Proton 11 layers</summary>
-
-2.5.2 adds **Community Configs** — a way to browse **community-shared, per-game/per-device tuning configs** right inside the app and apply a known-good setup to your game in one tap, without hunting through Discord screenshots. It also ships **two new Proton 11 x86-64 compatibility layers** in the downloadable catalog. Like the last few releases it's an **app-side** update — **no ImageFS reinstall** — your containers, themes, custom accent and per-game settings carry over untouched; just install over 2.5.1.
-
-**🌐 Community Configs — new.** A new **globe** button in the **Games** header opens a browsable catalog of community game-configs. Bannerlator matches your installed games to the catalog, and a **"Matches my device"** filter narrows it to configs shared from hardware like yours. Each shared config is its own card showing its **★ upvotes** and **↓ downloads** (best-rated first), the device it came from, and its date.
-
-- **One-tap Apply.** Tap a config → **Apply to game** and Bannerlator **surgically merges** just that config's settings — DXVK / VKD3D / Turnip driver / FEX preset / renderer / resolution / launch args / environment variables — into your shortcut, **preserving everything else you've set** (BCn options, HUD, colour toggles, and the rest are untouched). It'll even apply a config to a *different* game, warning you first.
-- **Smart install of what's missing.** If a config needs a **DXVK / VKD3D / FEXCore** build or a **Turnip GPU driver** you don't have, install it inline right there — an exact match installs with one confirm, or you pick from the closest versions (or browse all) — and the config **auto-applies** once it lands, with a ✓. FEX date-stamped builds are matched by their **YYMM** build tag so a dated config resolves to the right monthly build, and a component you already have is recognised instead of erroring.
-- **Config detail page.** Tap **View details** for a config's provenance (source device / SoC / app / date), exactly **what it sets** in Bannerlator's own component terms, and a **preview of what would change** on your shortcut before you apply. The detail page also shows the config's **description, upvotes, downloads and comments** live — and you can **upvote** and **leave a comment** yourself.
-
-> ℹ️ Community Configs is **read-only for your setup** — it only ever changes a shortcut when *you* tap Apply, and it never touches your containers, imagefs or existing settings.
-
-**🍷 Two new Proton 11 x86-64 compatibility layers — new.** Two **Proton 11.0-1 (x86_64)** compatibility layers are now downloadable in-app from the **Compatibility Layers** menu (Wine/Proton tab): **`proton-11.0-1-x86_64-sdk28`** for Android 9-era devices and **`proton-11.0-1-x86_64-sdk35`** for Android 15 — pick the one matching your Android version.
-
-<details>
-<summary><b>Previously in 2.5.1</b> — the compatibility & tooling release</summary>
-
-2.5.1 is a **compatibility-and-tooling** follow-up to 2.5: it fixes crashes and swapped colours on the **SurfaceFlinger** renderer, adds a live **FEX runtime indicator** so you can see exactly what's translating your game, makes **FEXCore unixlib (`.so`)** handling correct when you swap FEXCore versions per game, and expands the **Environment Variable presets**.
-
-**🎨 SurfaceFlinger renderer: colour & crash fix — new.** The **SurfaceFlinger** host renderer (ASurfaceRenderer) gets a crash-and-colour-accuracy fix: the red/blue channel swap is corrected, a GPU-side format converter and proper fencing are added, and the OpenGL / Vulkan / DRI3 paths are left untouched. A new **"Correct SurfaceFlinger colours"** toggle is available **per container and per game** (shown inline under the **Renderer** picker when SurfaceFlinger is selected, on by default). Device-verified on **Adreno 750**: *DiRT 3* on **DXVK + SurfaceFlinger** renders with correct colours, no R/B swap, and no Vulkan / OpenGL regression. *(Ported from [GameNative](https://github.com/utkarshdalal/GameNative) #1620 / #1644.)*
-
-**🔎 FEX runtime indicator — new.** The **Graphics** tab now shows a live badge, read straight from the running game: **arm64ec** vs **x86-64**, the translator (**FEXCore / wowbox64 / Box64**), and — for FEXCore — whether the native **unixlib (`.so`)** or the classic **DLL** path is active. No more guessing what's under the hood.
-
-**🧩 FEXCore unixlib (`.so`) auto-match — new.** Users run different FEXCore versions per game or container — some DLL-only, some with the native `.so` unixlib. 2.5.1 keeps the shared `.so` **in sync with your selection on every launch**: a unixlib build gets its **matching** `.so` placed, a DLL-only build gets it **cleared**. No stale `.so` silently overriding a DLL-only choice, no mismatched `.dll` / `.so` pair — and uninstalling a unixlib FEXCore removes its `.so` too.
-
-**🧰 18 new Environment Variable presets — new.** The **Add Environment Variable** picker gained **18 presets** across **DXVK / VKD3D / Wine / Mesa** — including `DXVK_DISABLE_TIMELINE_SEMAPHORES`, `VKD3D_SHADER_MODEL`, `DXVK_FRAME_RATE`, `VKD3D_CONFIG`, `WINEFSYNC`, `WINE_FULLSCREEN_FSR` and `MESA_VK_WSI_PRESENT_MODE` — so common tuning vars are one tap away instead of typed by hand. *(Requested by Angel.)*
-
-<details>
-<summary><b>Previously in 2.5</b> — the Mali hardening release</summary>
-
-2.5 is the **Mali hardening** release. If you're on a **Mali** or **Xclipse** GPU, this is the big one: **BC-texture (BCn) games that used to crash or render as black / garbled textures now work**, backed by a full sign-off on real **Mali-G57** hardware — plus an **in-game logging overhaul** so reporting a problem no longer means digging through `Android/data`. It's an **app-side** update — **no ImageFS reinstall** — your containers, themes, custom accent and per-game settings carry over untouched; the new Mali driver assets are pulled into your existing containers automatically on next launch.
-
-**🟢 Mali & Xclipse: BC-texture games now work — new.** Mali / Xclipse GPUs don't decode BC (BCn) textures in hardware, so many games crashed, ran out of VRAM, or showed black / missing textures. A new **"Wrapper + bcn_layer"** graphics driver (pick it per container under **Graphics driver**) transcodes those textures on the GPU at runtime so the games just run — **device-proven on Mali-G57 (Helio G99)**, where *MiSide* went from crashing to rendering correctly at **~34 fps** with **zero** buffer errors. It's backed by **[leegao](https://github.com/leegao)**'s **bcn_layer shader-v3** (up to ~3.5× faster BCn / ASTC transcoding), with a **BCn Layer Settings** panel to tune force-decode, ETC2 / ASTC transcode, image-view mode and debug logging. A second **"Wrapper-gamenative"** driver ships **labelled experimental** (BCn baked into the wrapper; Adreno-only in practice). *(Driven end-to-end by @kylinzang on Mali-G57 — [#70](https://github.com/The412Banner/Bannerlator/issues/70).)*
-
-**🧾 In-game logging overhaul — new.** Reporting a bug from inside a game is finally painless: a **Copy button** in the in-game Debug Logs panel copies the whole log (including BCn transfer stats) to the clipboard; a **selectable log location** (**Settings → Logs**: App data, Download, Documents or a custom folder) lets you grab every log straight from a file manager with **no shizuku / adb**; **DXVK, DXGI and VKD3D logs are co-located** with the Wine log in one folder (they no longer hide in the game directory); and the **Wine Debug Channels** dialog now **scrolls**. *(All three ideas from @kylinzang — [#70](https://github.com/The412Banner/Bannerlator/issues/70).)*
-
-**🔧 Fixes.** The `wrapper_DestroyBuffer: null buffer` **log spam is eliminated** (bundled Vulkan wrapper bumped to **ETC2-Milestone-2**); the in-game **Copy-logs action row is pinned on-screen** (it was pushed off the bottom in landscape); and the **release-notes pipeline is hardened** against backticks / shell metacharacters.
-
-</details>
-</details>
-
-<details>
-<summary><b>Previously in 2.4</b> — the fit & finish release</summary>
-
-2.4 is the **fit & finish** release. Take control of **how your game fills the screen**, import files **without fighting Android's system picker**, and make your **in-game choices stick per game**. Nearly every headline feature here came straight from a GitHub report or request. It's an **app-side** update — **no ImageFS reinstall** — your containers, themes, custom accent and per-game settings carry over untouched.
-
-**🖥️ Fullscreen aspect-ratio modes — new.** No more forced stretching on wide games. Choose exactly how the picture fits the screen, **per container *and* per game**: **Off** (windowed, letterboxed), **Fit** (fullscreen, aspect preserved), **Stretch** (fills, ignores aspect), **Fill** (fills with aspect kept, cropping the overflow — no bars, no distortion) and **Integer** (largest whole-number scale, pixel-perfect and centered). Switch live from the in-game drawer with a new **five-button selector** that applies instantly and keeps the drawer open so you can compare. Works on the OpenGL, Vulkan and SurfaceFlinger renderers. *(GitHub #71.)*
-
-**📁 Import files with the built-in File Manager — new.** Android's system file picker (SAF) silently fails or crawls on a lot of OEM skins. Every local import now opens **Bannerlator's own File Manager** in a pick mode instead — covering **content packs (`.wcp`), control profiles (`.icp`), wallpapers, custom icons, saves, shortcuts, drivers and the big Proton / Wine / DXVK / box64 / FEXCore assets**. It starts in **Download**, **remembers your last folder**, filters to the file types you need, and now shows a **real thumbnail** for image files (jpg/png/webp…) instead of a generic icon — so picking a wallpaper is no longer done blind. Large imports show a **progress bar with percentage and ETA**. The system picker is still available as a **"Pick via system…"** option for cloud / document providers. *(GitHub #73.)*
-
-**🎚️ In-game choices that stick — per game — new.** Three settings you tune in-game are now remembered per game and restored on relaunch: the **Scaling mode** (SGSR / FSR / FSR-Fit / Sharpen / NIS used to reset to a plain filter every launch), the **Fullscreen mode**, and your dragged **FPS overlay position** (classic *and* GameHub HUD).
-
-**🧩 Choose your DLC + smarter Steam installs — new.** A **"Choose DLC"** sheet lets you opt out of owned DLC before downloading, with the download size updating **live** as you check and uncheck; an **"Includes DLC"** line on the detail page; and a **true-size install fix** — Steam's catalog over-reported some games' sizes, so a fully-downloaded game could be wrongly flagged "incomplete" and refuse to launch, which is now resolved by fetching the real depot-manifest sizes. The detail page also gains a **size breakdown** (on-disk footprint, download size, catalog size, free space) and **download ETA + speed** across the detail page, Download Manager and notification. *(Install-blocker reported by @Devaspe.)*
-
-**🖼️ Container wallpaper picker — new.** Pick an image as your container's desktop wallpaper — the picker now actually appears in the container editor — and choose whether a wallpaper applies to **just this container** or **globally** to all of them. *(GitHub #66.)*
-
-**💾 Back up & restore game saves — new.** Export and import your saves as **GameHub-compatible zips**, with per-game save discovery, a confirm checklist before anything is overwritten, and a caution prompt so you verify before replacing originals.
-
-**🔧 Fixes.** The **magnifier follows the cursor on Vulkan** now (parity with OpenGL, fullscreen and windowed) *(GitHub #44)* and **no longer dims the whole screen** while zoomed; the Settings **"Enable File Provider" help button no longer crashes**; and **Scrape cover** is available from the list-view overflow menu, not just the grid.
-
-<details>
-<summary><b>Previously in 2.3</b> — the storefronts release</summary>
-
-2.3 is the **storefronts** release. Bannerlator gains a full **built-in Steam store** — sign in with **username/password or QR code**, browse your owned library, and **download + install** your games through a native depot engine — plus new **Epic Games** and **Amazon Games** stores, with the existing **GOG** store folded into a new **cross-store Download Manager**. One ⬇ manager shows every active download and your whole installed library across **all four stores**, with **background downloads** that survive leaving the app and appear in your **notification shade**. For offline / emulated play there's an optional **Goldberg auto-patch** for Steam games, a **4-tier download-speed** picker, and this release **hardens store logs** so credentials and tokens are scrubbed from anything you might share. It's an **app-side** update — **no ImageFS reinstall** — your containers, themes and settings carry over untouched.
-
-**🎮 Built-in Steam store — new.** Sign in to Steam (**username + password** *or* **QR code**), browse your owned library, and **download + install** games through a built-in **depot engine** (built on **[JavaSteam](https://github.com/Longi94/JavaSteam)**) straight into a container. Includes a **GameNative-style 4-tier download speed** (Slow / Medium / Fast / Blazing, cores × ratio), **session hardening** that recovers from Steam's ~1-hour connection-manager logoff so long installs survive, an in-header **connection / login status pill**, a **depot-download OOM fix**, and an optional per-download **"Log debug session"** toggle.
-
-**🕹️ Goldberg auto-patch — new.** On a Steam game's detail page, apply a **[Goldberg](https://mr_goldberg.gitlab.io/goldberg_emulator/) / gbe_fork** patch for **offline / emulated** play in three tiers — **Regular**, **Experimental**, **ColdClient** — installed automatically and cleanly reverted on switch-back. *(Modifies a game's shipped files to run offline/emulated — **use at your own risk**, for games you own.)*
-
-**⬇️ Cross-store Download Manager — new.** One unified **⬇ manager** across Steam, Epic, GOG and Amazon: see active downloads *and* your installed library in one place, with **live two-bar** download/install progress, **background downloads + shade notifications** (a foreground service keeps them running after you leave the app), **launch / verified uninstall**, a single **source-of-truth install state** across detail / card / list, and a new **"Default screen on launch"** setting.
-
-**🛍️ Epic, GOG & Amazon stores.** **Amazon Games** and **Epic Games** stores added — sign in, browse your library, and **download / install / launch** (including Epic **free games**) — and **GOG** wired into the Download Manager. All non-Steam store pages are **restyled to Material 3** to match the app theme and the Steam layout, with live download **%** on detail pages, cover art, launch fixes, a **themed container picker**, and **themed toasts** (fixing an unreadable black-box toast on some ROMs).
-
-**🔒 Security & your accounts.** The Steam / Epic / GOG / Amazon sign-ins are a **third-party login system, exactly like any other emulator or launcher** that logs into these stores — Bannerlator is **not affiliated with or endorsed by** Valve/Steam, Epic, GOG or Amazon, and you use them **at your own risk**. This release **redacts** credentials and identifiers from logs — signed download / manifest URLs, OAuth authorization codes, GOG `client_secret` + `refresh_token`, and account identity IDs are stripped from **logcat *and* the shareable diagnostic files** via a new `StoreLog.redactUrl` helper (Steam was already redacted). Even so, **be cautious about sharing any log or debug file publicly** — they can still contain other diagnostic detail. See the [Security Hardening](#-security-hardening--your-store-accounts) section below.
-
-**🔓 Steam QR sign-in re-enabled.** With the new logoff-recovery path in place, **QR login is back on** — a QR session stores the same credentials as a password login and recovers the same way. If downloads or the session keep dropping after a QR sign-in, sign out and use **username + password** (the more durable path).
-
-<details>
-<summary><b>Previously in 2.2.2</b> — the in-game ReShade release</summary>
-
-2.2.2 brought the big one: **in-game ReShade effects** — real ReShade `.fx` post-processing you configure **per game**, toggle and tune **live**, and **stack**. It also landed a batch of fixes from GitHub and Discord reports: the **FPS limiter no longer resets** between sessions, on-screen controls honour a **white** colour, **container creation** can no longer get stuck, and very light / dark custom accents stay readable. That was an **app-side** update with **no ImageFS reinstall** — existing containers **refreshed their ReShade layer automatically** on next launch.
-
-**🎬 In-game ReShade effects.** Run real ReShade `.fx` effects (colour grading, sharpen, film grain, CRT, tonemap, LUTs…) on **DXVK / VKD3D** games, compiled **on-device** via the bundled **[vkBasalt](https://github.com/DadSchoorse/vkBasalt)** layer:
-- **Per-game setup** — pick effects when editing a **container** or a **game shortcut**; your choices are saved with that game.
-- **On-demand catalog** of ~100 curated MIT / CC0 effects (search, browse, download only what you want) — or **drop your own** into the `ReShade/` folder (see [Adding your own ReShade effects](#-adding-your-own-reshade-effects)).
-- **Dedicated in-game ReShade tab** that auto-generates properly **typed controls** — sliders, toggles, dropdowns and colour pickers — read straight from each shader, with a **Reset-to-defaults** button. Toggle and tune effects **live**, no restart, and your changes **persist per game** across quit → relaunch.
-- **Solo or stack** — run a single effect or layer several at once.
-- > ⚠️ **Stacking multiple effects? Add them a few at a time.** Each ReShade effect compiles on-device and costs GPU, so **selecting too many at once can stop a game from starting** — you'll get a **flat / blank screen** instead of the game. If that happens, go back into the per-game **ReShade effect** settings and **uncheck the effects one at a time** (or the specific heavy one) until the game boots correctly, then add more gradually. *(Colour effects today; depth effects like SSAO / DOF aren't supported yet.)*
-
-**♻️ Existing containers auto-update the ReShade layer** on next launch — no need to recreate a container or reinstall the ImageFS for ReShade to work.
-
-**🛟 In-game drawer rail now scrolls** so every control — including **Exit** — is always reachable on short screens.
-
-**🎛️ FPS limiter now sticks between sessions** for a game launched from a shortcut. *(GitHub #46.)*
-
-**🎨 Fixes** — **white on-screen controls** stay white *(GitHub #46)*; very **light / dark custom accents** stay readable (glyphs pick a contrasting colour, AMOLED and presets unchanged); and **container creation** can no longer get stuck on a leftover shortcut *(GitHub #45)*.
-
-<details>
-<summary><b>Previously in 2.2</b> — the themeable-interface overhaul</summary>
-
-2.2 is a **big visual overhaul**: the whole interface — and the **in-game side drawer** — now follow your chosen theme, with a redesigned drawer, **nine new colour presets**, and **per-game control colours**. It also adds **Favorites** to the File Manager and **rebuilds the controller-binding screen**, alongside a batch of readability and consistency fixes.
-
-**🎨 A themeable interface — redesigned.** The app drawer and the in-game side drawer were rebuilt with new icons and accent-driven buttons, and — the big change — **your selected theme now recolours the entire app *and* the in-game drawer**. Previously large parts of the UI stayed blue regardless of theme; now presets and your custom accent reach the screens, dialogs, drawer, chips, sliders and overlays.
-- **9 new theme presets** bring the total to **16**, plus the custom HSV accent picker: **Midnight Cobalt**, **Phosphor**, **Carbon & Ember**, **Amethyst**, **Crimson**, **Synthwave**, **Royal Gold**, **Frost** and **Monochrome** — alongside Classic Dark, **AMOLED** (still the default), Ocean, Forest, Sunset, Rose and Steel.
-- **AMOLED stays the default and is unchanged**, so updating doesn't alter your look unless you choose a new theme. Your previously selected theme and custom accent are preserved.
-
-**🕹️ Per-game on-screen control colours — new.** The on-screen touch controls follow your app theme by default, and you can now **override their colour per game**. Turn off **"Follow app theme"** in the Controls editor (in-game drawer or the out-of-game Input Controls page), pick a colour, and it's **saved with that game's profile** — so each game can keep its own control colour.
-
-**⭐ File Manager — Favorites / bookmarked folders — new.** Pin the folders you open most and jump straight to them. A **★ button** opens a dedicated **Favorites** list, and each entry shows **exactly where it lives** — a colour-coded badge for the storage source (**Internal**, **SD card**, **Drive C:**, **Drive Z:**), the **container name** for a container drive, and the **full path** — so two games' `C:\Program Files` are never confused. Pin from a folder's **⋮ menu** or with **"Pin current folder"**, unpin with the filled ★. Favorites persist across launches; entries for a deleted container quietly drop off.
-
-**🎮 Controller-binding screen rebuilt.** The external controller-binding screen was rebuilt in the modern UI: **labels are clearly readable under any theme**, each binding is a card matching the rest of the app, and **buttons you press while binding appear instantly**. (Builds on the 2.1.1 readability fix; bindings still persist and Ludashi-format profile import still works.)
-
-**🧰 In-game Task Manager.** **"New Task" now works on the Vulkan / Native renderers** — the dialog used to be invisible over those surfaces — and running processes are shown as **cards**.
-
-**🧹 Consistency & readability.** The Games and Containers lists now share one card style with consistent depth on every theme, and legacy dropdowns, spinners, dialogs and section headers follow the accent too — with a luminance floor so text never goes dark-on-dark on a dark custom accent.
-
-</details>
-
-</details>
-
-</details>
-
-</details>
-
-</details>
+## 🆕 What's New in 3.0.0
+
+**The big 3.0 stable** — rolls up everything since 2.9.9, including the `3.0.0-pre1` / `pre2` opt-in betas. Entirely app-side — **no ImageFS reinstall**; install over 2.9.9 and your containers, Wine installs, themes, accent colour and per-game settings all carry over. Full notes on the [**3.0.0 release page**](https://github.com/The412Banner/Bannerlator/releases/tag/3.0.0).
+
+- **🔊 New three-engine audio stack (the headline).** The ground-up audio rebuild that was "coming soon" in 2.9.9 has landed: a new **adaptive PulseAudio engine** (grows its buffer on crackle/underruns, re-opens cleanly when your output changes), a second **adaptive ALSA** engine, and an experimental third **DirectAudio** driver — each with an Audio cog in the container editor, per-game shortcut settings and the in-game side-menu, presets + fine-tune rows, a per-row **"?"** explanation, and a latency slider that really drives the buffer. Strict per-engine / per-scope settings mean changing one never rewrites another.
+- **🛒 Storefronts + automatic cloud saves across GOG, Epic & Steam.** GOG gets a major overhaul — automatic cloud saves (auto-path, upload-on-exit / download-on-launch, content-hash skip), MD5 verify + repair, redistributable auto-install, per-DLC installs, faster parallel downloads, and a Save Manager tab with cover art. Epic / EOS adds cloud saves, real launch-time sign-in + EOS game IDs, EPIC/EOS badges, Denuvo & offline support, and a robust cancelable downloader. Steam adds one-tap **Lossless Scaling "Detect from store"**, beta-branch selection, and non-game apps in your library.
+- **🎮 Games & shortcuts.** The internal-storage intro-movie hang fix — **add a game from Drive C** and **Copy game to Drive C** (moves a game onto the container's fast C: drive and re-points the shortcut), plus **Change executable**, a file picker that opens at your storage root with a working Back button, responsive shortcut settings, per-DLL toggles, per-game graphics persistence, and an opt-in **Big Picture games wall**.
+- **🖥️ Graphics & performance.** Hardened Native Rendering with a per-container / per-game **backend picker**, clean-room **win-fg** frame generation (replaces bionic-fg, adapts AMD FidelityFX FSR3), Samsung Galaxy **no-root power control**, a live **Performance dashboard**, an upgraded **Fusion HUD** (battery temp, accurate DXVK/VKD3D label), and a new **Contents hub** for browsing/installing/removing GPU drivers & components. Plus a **wrapper + Adreno Vulkan fix ([#403](https://github.com/The412Banner/Bannerlator/issues/403))** — DXVK/games start again on wrapper drivers and low-tier Adreno (e.g. 610).
+- **🐛 Stability.** Rootless native crash-capture with real backtraces, a background-pause fix for games with very long executable names, malformed-environment-variable resilience, and assorted X-server leak/crash fixes.
 
 ---
 
 ## 🎞️ Frame Generation & Present Modes
 
-**Frame generation** (lsfg-vk and bionic-fg) inserts AI-generated in-between frames to make motion look smoother — it helps most when a game runs *below* your screen's refresh rate. It runs on the **Vulkan renderer**.
+**Frame generation** (lsfg-vk and win-fg) inserts AI-generated in-between frames to make motion look smoother — it helps most when a game runs *below* your screen's refresh rate. It runs on the **Vulkan renderer**.
 
 **Present mode** decides how finished frames are handed to your screen:
 
@@ -496,12 +218,13 @@ Everything Bannerlator offers, at a glance. No PC and no root required — it ru
 <details>
 <summary><b>🎞️ Frame generation & pacing</b></summary>
 
-- **Two selectable frame-generation engines** — pick **Off / bionic-fg / lsfg-vk** per container; the running engine is shown as a badge in the in-game drawer.
-  - **bionic-fg** — powered by the **[bionic-fg](https://github.com/xXJSONDeruloXx/bionic-fg)** Vulkan layer (Lossless-Scaling lineage), bundled and ready to use out of the box.
+- **Two selectable frame-generation engines** — pick **Off / win-fg / lsfg-vk** per container; the running engine is shown as a badge in the in-game drawer.
+  - **win-fg** — Bannerlator's own **clean-room** Vulkan frame-generation layer (FSR3 optical flow + from-scratch synthesis, no proprietary weights), bundled and ready to use out of the box.
   - **lsfg-vk** — powered by the **[lsfg-vk](https://github.com/PancakeTAS/lsfg-vk)** Vulkan layer (Android port by [FrankBarretta](https://github.com/FrankBarretta/lsfg-vk-android)).
-- > ⚠️ **lsfg-vk requires you to supply your own `Lossless.dll`.** Bannerlator bundles **no** proprietary Lossless Scaling files. You must own **[Lossless Scaling](https://store.steampowered.com/app/993090/Lossless_Scaling/)** (THS, on Steam) and import its `Lossless.dll` via **Settings → Frame Generation (lsfg-vk) → pick DLL**. The DLL is copied into app storage and serves all containers. Until you import a valid `Lossless.dll`, the **lsfg-vk** option stays greyed out; **bionic-fg** needs no DLL and works without it.
+- > ℹ️ **Why win-fg exists, and what it is.** Bannerlator previously bundled a different frame-generation layer that was later found to embed compute shaders whose model weights were **essentially identical to the proprietary Lossless Scaling frame-generation model** — which cannot be redistributed. That layer was **removed**, and **win-fg** is its **clean-room replacement**: a frame-gen engine we built from the ground up. Its motion estimation is our MIT adaptation of **AMD FidelityFX FSR3 optical flow** (an algorithm — no learned weights), and its frame synthesis is written from first principles using published, permissively-licensed math. It bundles **no proprietary code or weights**. That's also why the two engines sit side by side: **lsfg-vk** relies on *your own* legally-owned `Lossless.dll`, while **win-fg** is entirely Bannerlator's own and needs nothing to run.
+- > ⚠️ **lsfg-vk requires you to supply your own `Lossless.dll`.** Bannerlator bundles **no** proprietary Lossless Scaling files. You must own **[Lossless Scaling](https://store.steampowered.com/app/993090/Lossless_Scaling/)** (THS, on Steam) and import its `Lossless.dll` via **Settings → Frame Generation (lsfg-vk) → pick DLL**. The DLL is copied into app storage and serves all containers. Until you import a valid `Lossless.dll`, the **lsfg-vk** option stays greyed out; **win-fg** needs no DLL and works without it.
 - **Live in-game controls** for whichever engine the container runs: switch between **Off / 2× / 3× / 4×** and adjust the **flow-scale** slider right from the in-game Graphics drawer, hot-reloaded with no restart.
-- **FPS Limiter** — a **standalone, engine-independent** live frame cap. It paces the X11 Present extension by delaying the `IdleNotify` that frees the guest's buffer, so the game itself throttles (the in-game HUD reflects the cap and GPU/power draw drops). Works the same with frame gen **Off**, **bionic-fg**, or **lsfg-vk**, on both host renderers, all guest APIs. When **lsfg-vk** is multiplying (2×+) the limiter automatically steps aside so lsfg's own pacing governs — no double-cap. This guest-side present-pacing mechanism was ported from **[GameNative](https://github.com/utkarshdalal/GameNative)** (see [Credits](#-credits)).
+- **FPS Limiter** — a **standalone, engine-independent** live frame cap. It paces the X11 Present extension by delaying the `IdleNotify` that frees the guest's buffer, so the game itself throttles (the in-game HUD reflects the cap and GPU/power draw drops). Works the same with frame gen **Off**, **win-fg**, or **lsfg-vk**, on both host renderers, all guest APIs. When **lsfg-vk** is multiplying (2×+) the limiter automatically steps aside so lsfg's own pacing governs — no double-cap. This guest-side present-pacing mechanism was ported from **[GameNative](https://github.com/utkarshdalal/GameNative)** (see [Credits](#-credits)).
 - **lsfg Performance mode** — a lighter frame-gen model for weaker GPUs, selectable **per container** and live in the **in-game drawer**, with no root or read-only file hacks; defaults off. *(Requested by [@Tony57319](https://github.com/Tony57319) — [#152](https://github.com/The412Banner/Bannerlator/issues/152).)*
 - Confirmed on **both** the OpenGL and Vulkan host renderers.
 
@@ -797,10 +520,10 @@ This build stands on a long chain of prior work — its direct lineage, plus the
 | **vivsi** | Controller support contributions. |
 | **arro000** | **Virtual Controller Pro** ([#156](https://github.com/The412Banner/Bannerlator/pull/156)) — a ground-up on-screen touch-controls overhaul: new control types (Dynamic Stick, Mouse Area, Button Grid, Expandable Buttons), a Jetpack Compose-rebuilt controls editor with an **in-game live editor**, control groups, key combos, per-element dead zones, custom control icons, and a control scale limit raised to 300%. |
 | **StevenMXZ** | [Winlator-Ludashi](https://github.com/StevenMXZ/Winlator-Ludashi) and extensive cherry-picked work implemented in this build. This includes the **new user interface** and the **Vulkan rendering** path — both of which were **still unreleased and unfinished at the time these builds and this repo were created** — along with various other cherry-picked commits. This work is set to be released properly in his upcoming **3.1**. |
-| **GameNative** | [GameNative](https://github.com/utkarshdalal/GameNative) by **utkarshdalal** — Proton bionic translation layers and cherry-picked commits adapted into this build. Its rendering pipeline was also the **reference used to fix and rewire Bannerlator's render options** — the `AHardwareBuffer` present path that makes Vulkan / DXVK / VKD3D content render correctly on both the OpenGL and Vulkan host renderers (GPUImage socket-buffer locking + EGLImage sampling, DRI3 direct-scanout, the Present extension's FLIP / COPY branches, and the Native Rendering+ direct-scanout path) was ported from and cross-examined against GameNative's implementation. The **standalone FPS limiter** is GameNative's too — its guest-side present-pacing mechanism (delaying the X11 Present `IdleNotify` to throttle the game itself, plus the rule that lsfg-vk's own pacing governs when its multiplier is ≥ 2) was ported from GameNative. For the **Steam store** (2.3), the **session-hardening patterns** (derived-`loggedIn` state, off-pump PICS sync, single reconnect funnel, dead-token clearing, keep-alive / watchdog) and the **`DownloadSpeedConfig` cores × ratio 4-tier download-speed model** were also ported / adapted from GameNative. The **PC-accurate controller vibration** feature (dual-motor rumble with per-container mode + intensity) originates from GameNative **#1214**, reaching this build via **TideGear**'s port (see below). |
+| **GameNative** | [GameNative](https://github.com/utkarshdalal/GameNative) by **utkarshdalal** — Proton bionic translation layers and cherry-picked commits adapted into this build. Its rendering pipeline was also the **reference used to fix and rewire Bannerlator's render options** — the `AHardwareBuffer` present path that makes Vulkan / DXVK / VKD3D content render correctly on both the OpenGL and Vulkan host renderers (GPUImage socket-buffer locking + EGLImage sampling, DRI3 direct-scanout, the Present extension's FLIP / COPY branches, and the Native Rendering+ direct-scanout path) was ported from and cross-examined against GameNative's implementation. The **standalone FPS limiter** is GameNative's too — its guest-side present-pacing mechanism (delaying the X11 Present `IdleNotify` to throttle the game itself, plus the rule that lsfg-vk's own pacing governs when its multiplier is ≥ 2) was ported from GameNative. For the **Steam store** (2.3), the **session-hardening patterns** (derived-`loggedIn` state, off-pump PICS sync, single reconnect funnel, dead-token clearing, keep-alive / watchdog) and the **`DownloadSpeedConfig` cores × ratio 4-tier download-speed model** were also ported / adapted from GameNative. The **PC-accurate controller vibration** feature (dual-motor rumble with per-container mode + intensity) originates from GameNative **#1214**, reaching this build via **TideGear**'s port (see below). **In 2.9.8**, the **external-display ("game on TV") concept** and the **suspend-sink audio-recovery approach** (re-establishing the guest's audio output after backgrounding or a mid-game output-route change) were referenced from GameNative and reimplemented clean-room — the TV Options suite and Bannerlator's native `pasink` libpulse audio client are original work, and the **wireless casting** feature is entirely Bannerlator's own with no upstream equivalent. |
 | **TideGear** | [GameHub-Vibration-Fix](https://github.com/TideGear/GameHub-Vibration-Fix) — the **PC-accurate controller vibration** work this build's rumble is built on. TideGear authored both halves: the original vibration feature PR (carrying [GameNative](https://github.com/utkarshdalal/GameNative) **#1214** forward) and the **preload-free `winebus.so` rumble-duration patch** (PR **#91**) that drops the `libevshim` `LD_PRELOAD` hook and instead byte-patches SDL's rumble duration to never auto-expire — which is what makes sustained rumble actually *hold* instead of dying after ~1s. Adopted with the author's permission. Bannerlator re-derived the patch patterns per Proton build (9.0 / 10 / 11 aarch64 + Wine 10.0 x86-64) and added a build-agnostic structural fallback. |
 | **WinNative** | [WinNative](https://github.com/WinNative-Emu/WinNative) — the reference for Bannerlator's **gyroscope (motion aim)** support. Its rate-mode gyro implementation is what ours is derived from: the sensor→stick pipeline (deadzone → sensitivity → exponential low-pass → clamp), the axis and sign conventions, and the fractional-remainder accumulator that keeps slow tilts from rounding away to nothing. Bannerlator adapted it to our evdev gamepad-injection path and extended the **gyro-mouse** mode to also drive the X pointer directly, so motion control works on a Wine container desktop and not only in captured mouse-look games. GPL-3.0, same as this project. |
-| **xXJSONDeruloXx** | [bionic-fg](https://github.com/xXJSONDeruloXx/bionic-fg) — the Android/bionic Vulkan **frame-generation** layer powering Bannerlator's Frame Generation feature. Included in-tree as a git submodule with the author's permission. |
+| **win-fg** (Bannerlator) | Frame generation is powered by **win-fg**, Bannerlator's own **clean-room** Vulkan layer — FSR3 optical flow (MIT, AMD FidelityFX) plus a from-scratch synthesis. No third-party frame-generation code or weights are bundled. |
 | **PancakeTAS** | [lsfg-vk](https://github.com/PancakeTAS/lsfg-vk) — the open-source Vulkan frame-generation layer (a Vulkan-layer reimplementation of Lossless Scaling's frame generation) that Bannerlator's **second, user-selectable FG engine** is built on. |
 | **FrankBarretta** | [lsfg-vk-android](https://github.com/FrankBarretta/lsfg-vk-android) — the Android/bionic port of lsfg-vk (AHardwareBuffer path + `vkCmdPipelineBarrier2` shim) that runs as Bannerlator's lsfg-vk engine on the Turnip stack. The in-game live multiplier/flow-scale reload uses the `conf.toml` mtime-watch mechanism from **GameNative's** [lsfg-vk-android fork](https://github.com/GameNative). No proprietary shaders are bundled — users supply their own `Lossless.dll` ([Lossless Scaling](https://store.steampowered.com/app/993090/Lossless_Scaling/) by THS) via the in-app picker. |
 | **DadSchoorse** | [vkBasalt](https://github.com/DadSchoorse/vkBasalt) (zlib) — the Vulkan post-processing layer that embeds the ReShade FX compiler. Bannerlator's **ReShade** feature is a continuation of this work: the bundled layer is built from DadSchoorse's source, patched for live on-device toggle and slider control. The bundled / catalog `.fx` effects are MIT / CC0 shaders by the **ReShade ([crosire](https://github.com/crosire/reshade-shaders))**, **prod80 ([prod80-reshade-repository](https://github.com/prod80/prod80-reshade-repository))**, **luluco250 ([FXShaders](https://github.com/luluco250/FXShaders))** and **fubax** authors, each under their own MIT / CC0 license. |
@@ -809,7 +532,7 @@ This build stands on a long chain of prior work — its direct lineage, plus the
 | **WinlatorMali** (GunaCharanTeja / Charan) | [WinlatorMali](https://github.com/GunaCharanTeja/WinlatorMali) — the **Wrapper Version Manager** (new in 2.7) is modeled on WinlatorMali's graphics-driver manager, introduced in [Winlator Mali Bionic 1.1](https://github.com/GunaCharanTeja/WinlatorMali/releases/tag/bionic-mali-1.1); a number of the downloadable catalog wrappers come from WinlatorMali too (each credited in-app). The feature was requested in [#132](https://github.com/The412Banner/Bannerlator/issues/132) by [@6ui99uhkllj](https://github.com/6ui99uhkllj). |
 | **BrunoSX** | The bundled Windows file manager is **[Banner File Manager](https://github.com/The412Banner/banner-file-manager)** (new in 2.7.1), Bannerlator's fork of BrunoSX's [Winlator File Manager](https://github.com/brunodev85/wfm) (**MIT**) — rebuilt with **native Win32 file operations** (sidestepping the Proton 10.0-4 shell32 copy-paste crash), a **dual-pane split view**, and **Open-as-administrator / Open-with**. |
 | **[@Tony57319](https://github.com/Tony57319)** | Reported / requested the **lsfg Performance mode** frame-gen toggle new in 2.7.1 ([#152](https://github.com/The412Banner/Bannerlator/issues/152)). |
-| **[@clintOnSky](https://github.com/clintOnSky)** 🌱 *(first-time contributor)* | Downstream fixes surfaced in [#96](https://github.com/The412Banner/Bannerlator/pull/96), applied to `main` individually: the **bionic-fg present-path bounded fence wait** (replacing the full `vkQueueWaitIdle` after the frame-gen dispatch, restoring FPS in heavy DXVK titles on single-queue Adreno/Turnip) plus the **FIFO-pacing acquire guard** — matched by the fixes upstreamed as [xXJSONDeruloXx/bionic-fg#6](https://github.com/xXJSONDeruloXx/bionic-fg) and now baked into the submodule source; the **Xiaomi/HyperOS `libjpeg.so` symlink-shadow removal** that lets the frame-gen Vulkan layer load; the **sign-agnostic battery-wattage fix** for Xiaomi/MTK devices that report discharge current as positive; and the **`WOWBOX64` content-type fix** for arm64ec Box64 downloads with live refresh of the component version lists after a download sheet closes. |
+| **[@clintOnSky](https://github.com/clintOnSky)** 🌱 *(first-time contributor)* | Downstream fixes surfaced in [#96](https://github.com/The412Banner/Bannerlator/pull/96), applied to `main` individually: the **Xiaomi/HyperOS `libjpeg.so` symlink-shadow removal** that lets the frame-gen Vulkan layer load; the **sign-agnostic battery-wattage fix** for Xiaomi/MTK devices that report discharge current as positive; and the **`WOWBOX64` content-type fix** for arm64ec Box64 downloads with live refresh of the component version lists after a download sheet closes. |
 | **JavaSteam** | [JavaSteam](https://github.com/Longi94/JavaSteam) (`in.dragonbra:javasteam`) by **Longi94** — the Steam **connection-manager client** the built-in Steam store logs in and talks to Steam with, and — via the **`javasteam-depotdownloader`** fork by **joshuatam** — the **entire depot-download engine** Bannerlator's Steam store is built on. |
 | **Goldberg Steam Emu / gbe_fork** | [Goldberg Steam Emu](https://mr_goldberg.gitlab.io/goldberg_emulator/) by **Mr_Goldberg**, and **gbe_fork** by **[Detanup01](https://github.com/Detanup01/gbe_fork)** — the Steam emulator Bannerlator's **Goldberg auto-patch** installs (Regular / Experimental / ColdClient tiers) for offline / emulated play of games you own. |
 | **Pluvia** | [Pluvia](https://github.com/oxters168/Pluvia) — an Android Steam client whose patterns were **referenced alongside GameNative** while building the Steam store's login / session handling. |
@@ -836,7 +559,7 @@ The Wine/translation stack this app bundles or downloads:
 | **Steam emulator (Goldberg auto-patch)** | [Goldberg Steam Emu](https://mr_goldberg.gitlab.io/goldberg_emulator/) (Mr_Goldberg) · [gbe_fork](https://github.com/Detanup01/gbe_fork) (Detanup01) |
 | **Controller vibration (PC-accurate rumble)** | Feature [GameNative](https://github.com/utkarshdalal/GameNative) #1214 · port + preload-free `winebus` duration patch [TideGear](https://github.com/TideGear/GameHub-Vibration-Fix) (#91) |
 | **Gyroscope (motion aim)** | Rate-mode pipeline + axis conventions from [WinNative](https://github.com/WinNative-Emu/WinNative) |
-| **Frame Generation (bionic-fg)** | [xXJSONDeruloXx](https://github.com/xXJSONDeruloXx/bionic-fg) |
+| **Frame Generation (win-fg)** | Bannerlator (clean-room) |
 | **Frame Generation (lsfg-vk)** | [PancakeTAS](https://github.com/PancakeTAS/lsfg-vk) · Android port [FrankBarretta](https://github.com/FrankBarretta/lsfg-vk-android) · live-reload fork [GameNative](https://github.com/utkarshdalal/GameNative) · DLL [Lossless Scaling](https://store.steampowered.com/app/993090/Lossless_Scaling/) (user-supplied) |
 | **Post-processing (ReShade / vkBasalt)** | [vkBasalt](https://github.com/DadSchoorse/vkBasalt) by [DadSchoorse](https://github.com/DadSchoorse) (zlib) · Winlator packaging [Pipetto-crypto](https://github.com/Pipetto-crypto/winlator) · effects by [crosire](https://github.com/crosire/reshade-shaders) · [prod80](https://github.com/prod80/prod80-reshade-repository) · [luluco250](https://github.com/luluco250/FXShaders) · fubax (MIT / CC0) |
 
@@ -874,6 +597,6 @@ Winlator and its forks are unofficial community projects. They are **not** affil
 
 **Bannerlator is licensed under [GPL-3.0](LICENSE) as a whole**, because it incorporates GPL-3.0-licensed components (notably **GameNative** and **lsfg-vk**), whose copyleft governs the combined distribution.
 
-The upstream **Winlator → cmod → Bionic → Star → Ludashi** lineage it builds on is **MIT © 2023 BrunoSX** (permissive, and GPL-3.0-compatible). That MIT notice — and the license and copyright of *every* incorporated component (GameNative, lsfg-vk, gbe_fork/Goldberg, vkBasalt, bcn_layer, JavaSteam, bionic-fg, Wine/Box64/Mesa/DXVK, FSR/NIS/SGSR, ReShade shaders, …) — is preserved in **[`THIRD-PARTY-LICENSES.md`](THIRD-PARTY-LICENSES.md)**.
+The upstream **Winlator → cmod → Bionic → Star → Ludashi** lineage it builds on is **MIT © 2023 BrunoSX** (permissive, and GPL-3.0-compatible). That MIT notice — and the license and copyright of *every* incorporated component (GameNative, lsfg-vk, gbe_fork/Goldberg, vkBasalt, bcn_layer, JavaSteam, Wine/Box64/Mesa/DXVK, FSR/NIS/SGSR, ReShade shaders, …) — is preserved in **[`THIRD-PARTY-LICENSES.md`](THIRD-PARTY-LICENSES.md)**.
 
 See [`LICENSE`](LICENSE) for the full GPL-3.0 text and [`THIRD-PARTY-LICENSES.md`](THIRD-PARTY-LICENSES.md) for all third-party attributions.

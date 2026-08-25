@@ -30,6 +30,7 @@ import com.winlator.star.core.WinebusRumblePatcher;
 import com.winlator.star.fexcore.FEXCoreManager;
 import com.winlator.star.fexcore.FEXCorePreset;
 import com.winlator.star.fexcore.FEXCorePresetManager;
+import com.winlator.star.inputcontrols.FakeInputWriter;
 import com.winlator.star.xconnector.UnixSocketConfig;
 import com.winlator.star.xenvironment.EnvironmentComponent;
 import com.winlator.star.xenvironment.ImageFs;
@@ -457,9 +458,12 @@ public class GuestProgramLauncherComponent extends EnvironmentComponent {
 
         try {
             if (fakeinputSrc.exists()) {
+                // Refresh every launch so the guest reader can never skew from the
+                // app-side ring writer (a same-size rebuild defeats length checks).
+                // Do NOT reintroduce a `!fakeinputDest.exists()` guard here.
                 FileUtils.copy(fakeinputSrc, fakeinputDest);
                 Log.d("GuestLauncher", "Copied libfakeinput.so to imagefs");
-            } else {
+            } else if (!fakeinputDest.exists()) {
                 Log.e("GuestLauncher", "libfakeinput.so NOT FOUND in APK: " + fakeinputSrc.getAbsolutePath());
             }
         } catch (Exception e) {
@@ -483,6 +487,15 @@ public class GuestProgramLauncherComponent extends EnvironmentComponent {
         envVars.put("FAKE_EVDEV_DIR", devInputDir.getAbsolutePath());
         envVars.put("FAKE_EVDEV_VIBRATION", "1");
 
+        // Fake-input transport is a fixed-size mmap ring per slot (see FakeInputWriter).
+        // Prepare all 4 slot rings and hand the native reader their canonical paths so
+        // an open() of /dev/input/eventN maps the matching ring. The static rings are
+        // shared with the WinHandler writers created later in this same process.
+        String ringPaths = FakeInputWriter.getRingEnv(devInputDir);
+        if (ringPaths != null && !ringPaths.isEmpty()) {
+            envVars.put("FAKE_EVDEV_MEMFD_PATHS", ringPaths);
+        }
+
         Log.d("GuestLauncher", "Final LD_PRELOAD: " + ld_preload);
         envVars.put("LD_PRELOAD", ld_preload);
 
@@ -493,6 +506,15 @@ public class GuestProgramLauncherComponent extends EnvironmentComponent {
         if (this.envVars.has("MANGOHUD_CONFIG")) {
             this.envVars.remove("MANGOHUD_CONFIG");
         }
+
+        // WINEVMEMMAXSIZE (MB) caps the guest Wine VA reservation — the fix for heavy AAA titles
+        // (e.g. Deus Ex: MD on EOS) that reserve hundreds of GB of address space up-front and OOM the
+        // X server (observed ~489 GB: err:virtual:allocate_virtual_memory ... size 71f6ea0000). It is
+        // OPT-IN / default-off: set it per shortcut/container envVars only when a game needs it (it
+        // then propagates to the guest verbatim via the external-env merge below, covering both the
+        // arm64ec/WOWBox64+FEX and box64 paths). Recognized in the env-var picker (KnownEnvVars).
+        // Only effective on a Wine/Proton build patched to READ WINEVMEMMAXSIZE (coffincolors ntdll
+        // patch, not in stock Wine); inert otherwise.
 
         // Merge any additional environment variables from external sources
         if (this.envVars != null) {

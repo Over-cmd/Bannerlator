@@ -118,6 +118,11 @@ public abstract class GPUInformation {
     public native static int getVendorID(String driverName, Context context);
     public native static String getRenderer(String driverName, Context context);
     public native static String[] enumerateExtensions(String driverName, Context context);
+    // True when the most recent native probe (getRenderer/enumerateExtensions/getVendorID)
+    // selected a real installed Adrenotools custom driver that couldn't load on this GPU and
+    // silently fell back to the system Vulkan ICD instead of crashing. Read right after a
+    // probe to tell the user their chosen driver didn't actually engage.
+    public native static boolean driverLoadedFellBack();
 
     static {
         System.loadLibrary("winlator");

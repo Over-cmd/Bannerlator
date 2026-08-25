@@ -70,7 +70,12 @@ import java.net.URL
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.function.Consumer
 
-class GogGameDetailActivity : ComponentActivity() {
+class GogGameDetailActivity : ComponentActivity(), GogRedistInstaller.Host {
+
+    /** Redist install feedback → the shared themed bar (system Toasts are an unreadable black box
+     *  on this ROM). Posted on the main thread; GogRedistInstaller already calls on main. */
+    override fun onRedistMessage(msg: String) { runOnUiThread { resultBarMsg = msg } }
+
 
     companion object {
         const val RESULT_REFRESH = 100
@@ -127,6 +132,9 @@ class GogGameDetailActivity : ComponentActivity() {
     private var setExeVisible by mutableStateOf(false)
     private var uninstallVisible by mutableStateOf(false)
     private var copyVisible by mutableStateOf(false)
+    // gap#3: this gen2 game declared GOG redistributable dependencies (gog_deps_<gameId>), so the
+    // detail page shows a manual "Install prerequisites" action.
+    private var prereqsVisible by mutableStateOf(false)
     private var progressVisible by mutableStateOf(false)
     private var progressValue by mutableIntStateOf(0)
     private var progressLabel by mutableStateOf("")
@@ -139,6 +147,11 @@ class GogGameDetailActivity : ComponentActivity() {
     private var updateBtnVisible by mutableStateOf(false)
 
     private var dlcJson by mutableStateOf<String?>(null)
+    // gap#5 DLC install: per-DLC row state (id → Install / Installing…% / Installed), observable so
+    // the DLC section re-renders as each install progresses. Base-installed gate (DLC interleaves
+    // into the base install dir, so it needs the base game present first).
+    private val dlcStates = androidx.compose.runtime.mutableStateMapOf<String, DlcRowUi>()
+    private var dlcBaseInstalled by mutableStateOf(false)
 
     private var cloudSaveDir by mutableStateOf<String?>(null)
     private var cloudSaveDirText by mutableStateOf("No save folder set")
@@ -191,6 +204,7 @@ class GogGameDetailActivity : ComponentActivity() {
         generation = i.getIntExtra("generation", 0)
 
         dlcJson = prefs.getString("gog_dlcs_$gameId", null)
+        initDlcStates()
         updateStatusText = prefs.getString("gog_build_$gameId", null)?.let {
             "Installed build: ${it.substring(0, minOf(12, it.length))}\u2026"
         } ?: "Build ID not recorded \u2014 tap Check to verify"
@@ -199,9 +213,19 @@ class GogGameDetailActivity : ComponentActivity() {
         checkUpdateEnabled = updatesInstalled
 
         cloudSaveDir = prefs.getString("gog_save_dir_$gameId", null)
-        cloudSaveDirText = cloudSaveDir?.let { shortenPath(it) } ?: "No save folder set"
-        cloudSaveDirColor = if (cloudSaveDir != null) 0xFFCCCCCC.toInt() else 0xFF555577.toInt()
-        cloudBtnsEnabled = cloudSaveDir != null
+        if (cloudSaveDir != null) {
+            // Explicit manual pick (Browse) — show it as the override.
+            cloudSaveDirText = shortenPath(cloudSaveDir!!)
+            cloudSaveDirColor = 0xFFCCCCCC.toInt()
+        } else {
+            // No manual pick — show the auto-resolved folder (GogCloudSavePaths), agreeing with the
+            // Save Manager GOG tab. Resolved off-main; label updates when ready.
+            cloudSaveDirText = "No save folder set"
+            cloudSaveDirColor = 0xFF555577.toInt()
+            refreshResolvedSaveDirLabel()
+        }
+        // Buttons stay enabled: the folder is resolved (manual or auto) at click time.
+        cloudBtnsEnabled = true
 
         refreshActionState()
         observeRegistry()
@@ -234,6 +258,9 @@ class GogGameDetailActivity : ComponentActivity() {
                     checkUpdateEnabled = checkUpdateEnabled,
                     updateBtnVisible = updateBtnVisible,
                     dlcJson = dlcJson,
+                    dlcStates = dlcStates,
+                    dlcBaseInstalled = dlcBaseInstalled,
+                    onInstallDlc = { id, dlcTitle -> installDlc(id, dlcTitle) },
                     cloudSaveDirText = cloudSaveDirText,
                     cloudSaveDirColor = cloudSaveDirColor,
                     cloudSaveStatusText = cloudSaveStatusText,
@@ -242,7 +269,14 @@ class GogGameDetailActivity : ComponentActivity() {
                     onBack = { finish() },
                     onLaunch = {
                         val exe = prefs.getString("gog_exe_$gameId", null)
-                        if (exe != null) GogLaunchHelper.addToLauncher(this@GogGameDetailActivity, title, exe, imageUrl)
+                        // Add to the chosen container; the prereqs-aware path then offers to install the
+                        // game's required GOG redistributables (gap#3) into that same prefix.
+                        if (exe != null) GogLaunchHelper.addToLauncherWithPrereqs(
+                            this@GogGameDetailActivity, title, exe, imageUrl, gameId)
+                    },
+                    prereqsVisible = prereqsVisible,
+                    onInstallPrereqs = {
+                        GogRedistInstaller.promptContainerAndInstall(this@GogGameDetailActivity, gameId)
                     },
                     onInstall = { onInstallClicked() },
                     onSetExe = {
@@ -280,6 +314,7 @@ class GogGameDetailActivity : ComponentActivity() {
                         }
                     },
                     onCheckUpdate = { doCheckUpdate() },
+                    onVerifyRepair = { doVerifyRepair() },
                     onUpdateNow = {
                         updateBtnVisible = false
                         updateStatusText = "Updating\u2026"
@@ -289,36 +324,8 @@ class GogGameDetailActivity : ComponentActivity() {
                         val intent = Intent(this@GogGameDetailActivity, FolderPickerActivity::class.java)
                         folderPickerLauncher.launch(intent)
                     },
-                    onUploadSaves = {
-                        val dir = prefs.getString("gog_save_dir_$gameId", null)
-                        if (dir == null) {
-                            resultBarMsg = "Set a save folder first"
-                            return@GogGameDetailScreen
-                        }
-                        cloudBtnsEnabled = false
-                        showCloudStatus("Preparing upload\u2026")
-                        GogCloudSaveManager.uploadSaves(this@GogGameDetailActivity, gameId, File(dir),
-                            object : GogCloudSaveManager.Callback {
-                                override fun onStatus(msg: String) { runOnUiThread { showCloudStatus(msg) } }
-                                override fun onDone(msg: String) { runOnUiThread { showCloudStatus(msg); cloudBtnsEnabled = true } }
-                                override fun onError(msg: String) { runOnUiThread { showCloudStatus("Error: $msg"); cloudBtnsEnabled = true } }
-                            })
-                    },
-                    onDownloadSaves = {
-                        val dir = prefs.getString("gog_save_dir_$gameId", null)
-                        if (dir == null) {
-                            resultBarMsg = "Set a save folder first"
-                            return@GogGameDetailScreen
-                        }
-                        cloudBtnsEnabled = false
-                        showCloudStatus("Preparing download\u2026")
-                        GogCloudSaveManager.downloadSaves(this@GogGameDetailActivity, gameId, File(dir),
-                            object : GogCloudSaveManager.Callback {
-                                override fun onStatus(msg: String) { runOnUiThread { showCloudStatus(msg) } }
-                                override fun onDone(msg: String) { runOnUiThread { showCloudStatus(msg); cloudBtnsEnabled = true } }
-                                override fun onError(msg: String) { runOnUiThread { showCloudStatus("Error: $msg"); cloudBtnsEnabled = true } }
-                            })
-                    },
+                    onUploadSaves = { cloudSync(up = true) },
+                    onDownloadSaves = { cloudSync(up = false) },
                 )
 
                 showExePicker?.let { state ->
@@ -393,7 +400,7 @@ class GogGameDetailActivity : ComponentActivity() {
         startInstall()
     }
 
-    private fun startInstall() {
+    private fun startInstall(verify: Boolean = false) {
         installBtnText = "Cancel"
         installBtnColor = 0xFFCC3333.toInt()
         progressVisible = true
@@ -420,7 +427,7 @@ class GogGameDetailActivity : ComponentActivity() {
         // being destroyed / the app backgrounded without leaking the Activity. Registry hooks below
         // run on the engine's callback thread and are Activity-independent; only the mutableState UI
         // writes are guarded with !isDestroyed && !isFinishing.
-        cancelDownload = GogDownloadManager.startDownload(applicationContext, makeGogGame(), object : GogDownloadManager.Callback {
+        val cb: GogDownloadManager.Callback = object : GogDownloadManager.Callback {
             override fun onProgress(msg: String, pct: Int) {
                 StoreDownloadHooks.tick(Store.GOG, gameId, pct)
                 if (!isDestroyed && !isFinishing) runOnUiThread {
@@ -492,7 +499,20 @@ class GogGameDetailActivity : ComponentActivity() {
                 // the exe choice is available later via "Set .exe…". Mirrors the Amazon fix.
                 if (onSelected != null) onSelected.accept(candidates?.firstOrNull() ?: "")
             }
-        })
+        }
+        cancelDownload = if (verify)
+            GogDownloadManager.verifyRepair(applicationContext, makeGogGame(), cb)
+        else
+            GogDownloadManager.startDownload(applicationContext, makeGogGame(), cb)
+    }
+
+    /**
+     * Verify installed files and re-download only those missing or failing MD5 (gen2). Reuses the
+     * whole install flow + progress UI; the engine's size+MD5 skip-logic makes the re-run a repair.
+     */
+    private fun doVerifyRepair() {
+        updateStatusText = "Verifying files…"
+        startInstall(verify = true)
     }
 
     private fun confirmUninstall() {
@@ -584,6 +604,56 @@ class GogGameDetailActivity : ComponentActivity() {
         setExeVisible = installed
         uninstallVisible = installed
         copyVisible = installed
+        // gap#5: DLC needs the base install dir present. Gate the DLC Install buttons on it.
+        dlcBaseInstalled = installed
+        // Offer the manual prereq install once the game is installed AND it declared GOG deps.
+        prereqsVisible = installed && GogRedistInstaller.hasPrereqs(this, gameId)
+    }
+
+    /** Seed each owned DLC's row state from its per-DLC installed marker (Installed on return). */
+    private fun initDlcStates() {
+        dlcStates.clear()
+        val json = dlcJson ?: return
+        val arr = runCatching { org.json.JSONArray(json) }.getOrNull() ?: return
+        for (i in 0 until arr.length()) {
+            val id = arr.optJSONObject(i)?.optString("id") ?: continue
+            if (id.isEmpty()) continue
+            val installed = GogDownloadManager.isDlcInstalled(this, gameId, id)
+            dlcStates[id] = DlcRowUi(installing = false, installed = installed, pct = 0)
+        }
+    }
+
+    /**
+     * gap#5 — drive one owned DLC's install. Records progress into [dlcStates] so its row shows
+     * Installing…pct% then Installed; a 403/failure surfaces on the themed result bar and reverts
+     * the row to Install. Fail-soft: never touches the base game.
+     */
+    private fun installDlc(dlcId: String, dlcTitle: String) {
+        dlcStates[dlcId] = DlcRowUi(installing = true, installed = false, pct = 0)
+        val cb = object : GogDownloadManager.Callback {
+            override fun onProgress(msg: String, pct: Int) {
+                if (!isDestroyed && !isFinishing) runOnUiThread {
+                    if (isDestroyed || isFinishing) return@runOnUiThread
+                    dlcStates[dlcId] = DlcRowUi(installing = true, installed = false, pct = pct)
+                }
+            }
+            override fun onComplete(exePath: String) {
+                if (!isDestroyed && !isFinishing) runOnUiThread {
+                    if (isDestroyed || isFinishing) return@runOnUiThread
+                    dlcStates[dlcId] = DlcRowUi(installing = false, installed = true, pct = 100)
+                    resultBarMsg = "$dlcTitle installed"
+                }
+            }
+            override fun onError(msg: String) {
+                if (!isDestroyed && !isFinishing) runOnUiThread {
+                    if (isDestroyed || isFinishing) return@runOnUiThread
+                    dlcStates[dlcId] = DlcRowUi(installing = false, installed = false, pct = 0)
+                    resultBarMsg = if (msg.contains("own", ignoreCase = true))
+                        "You may not own this DLC" else "DLC install failed: $msg"
+                }
+            }
+        }
+        GogDownloadManager.installDlc(applicationContext, makeGogGame(), dlcId, dlcTitle, cb)
     }
 
     private fun doCheckUpdate() {
@@ -669,6 +739,56 @@ class GogGameDetailActivity : ComponentActivity() {
         cloudSaveStatusVisible = true
     }
 
+    /**
+     * Resolve this game's GOG save folder: a manual pick (Browse) wins as a user override; otherwise
+     * auto-resolve via [GogCloudSavePaths] (container match + cloud-storage location token-expand,
+     * same as the Save Manager GOG tab). Does file I/O + a possible remote-config fetch — MUST be
+     * called off the main thread.
+     */
+    private fun resolveGogSaveDir(): File? {
+        // Explicit manual pick (Browse) wins as a user override.
+        prefs.getString("gog_save_dir_$gameId", null)?.takeIf { it.isNotEmpty() }?.let { return File(it) }
+        val (_, dir) = GogCloudSavePaths.resolve(this, gameId)
+        return dir
+    }
+
+    /** Populate the Cloud Saves label from the auto-resolver (off-main) when no manual folder is set. */
+    private fun refreshResolvedSaveDirLabel() {
+        Thread {
+            val dir = resolveGogSaveDir()
+            runOnUiThread {
+                if (dir != null && cloudSaveDir == null) {
+                    cloudSaveDirText = "Auto: " + shortenPath(dir.absolutePath)
+                    cloudSaveDirColor = 0xFFCCCCCC.toInt()
+                }
+            }
+        }.start()
+    }
+
+    /** Resolve the save folder off-main (manual override or auto), then drive the transport. */
+    private fun cloudSync(up: Boolean) {
+        cloudBtnsEnabled = false
+        showCloudStatus("Resolving save folder…")
+        Thread {
+            val dir = resolveGogSaveDir()
+            if (dir == null) {
+                runOnUiThread {
+                    showCloudStatus("No save folder found for this game — add it to a container, or set one with Browse")
+                    cloudBtnsEnabled = true
+                }
+                return@Thread
+            }
+            runOnUiThread { showCloudStatus(if (up) "Preparing upload…" else "Preparing download…") }
+            val cb = object : GogCloudSaveManager.Callback {
+                override fun onStatus(msg: String) { runOnUiThread { showCloudStatus(msg) } }
+                override fun onDone(msg: String) { runOnUiThread { showCloudStatus(msg); cloudBtnsEnabled = true } }
+                override fun onError(msg: String) { runOnUiThread { showCloudStatus("Error: $msg"); cloudBtnsEnabled = true } }
+            }
+            if (up) GogCloudSaveManager.uploadSaves(this, gameId, dir, cb)
+            else GogCloudSaveManager.downloadSaves(this, gameId, dir, cb)
+        }.start()
+    }
+
     private fun deleteDir(dir: File) {
         if (dir == null || !dir.exists()) return
         val files = dir.listFiles()
@@ -683,6 +803,13 @@ class GogGameDetailActivity : ComponentActivity() {
 private data class ExePickerStateGame(
     val candidates: List<String>,
     val onSelected: (String) -> Unit,
+)
+
+/** gap#5 — one DLC row's install state: Install (idle) → Installing…pct% → Installed. */
+private data class DlcRowUi(
+    val installing: Boolean,
+    val installed: Boolean,
+    val pct: Int,
 )
 
 // ── Composable Screen ──────────────────────────────────────────────────────
@@ -704,6 +831,7 @@ private fun GogGameDetailScreen(
     setExeVisible: Boolean,
     uninstallVisible: Boolean,
     copyVisible: Boolean,
+    prereqsVisible: Boolean,
     progressVisible: Boolean,
     progressValue: Int,
     progressLabel: String,
@@ -714,6 +842,9 @@ private fun GogGameDetailScreen(
     checkUpdateEnabled: Boolean,
     updateBtnVisible: Boolean,
     dlcJson: String?,
+    dlcStates: Map<String, DlcRowUi>,
+    dlcBaseInstalled: Boolean,
+    onInstallDlc: (String, String) -> Unit,
     cloudSaveDirText: String,
     cloudSaveDirColor: Int,
     cloudSaveStatusText: String,
@@ -725,7 +856,9 @@ private fun GogGameDetailScreen(
     onSetExe: () -> Unit,
     onUninstall: () -> Unit,
     onCopy: () -> Unit,
+    onInstallPrereqs: () -> Unit,
     onCheckUpdate: () -> Unit,
+    onVerifyRepair: () -> Unit,
     onUpdateNow: () -> Unit,
     onBrowseCloud: () -> Unit,
     onUploadSaves: () -> Unit,
@@ -850,13 +983,35 @@ private fun GogGameDetailScreen(
                 checkUpdateEnabled = checkUpdateEnabled,
                 updateBtnVisible = updateBtnVisible,
                 onCheckUpdate = onCheckUpdate,
+                onVerifyRepair = onVerifyRepair,
                 onUpdateNow = onUpdateNow,
             )
         }
 
+        // Prerequisites (gap#3) — only when this gen2 game declared GOG redist dependencies.
+        if (prereqsVisible) {
+            StoreSection(title = "Prerequisites") {
+                StoreStatusText(
+                    "This game needs Microsoft runtimes (Visual C++, .NET, …). Install them into a " +
+                        "container's Wine prefix so the game can start. A brief setup window appears for each."
+                )
+                Spacer(Modifier.height(8.dp))
+                StoreActionButton(
+                    text = "Install prerequisites",
+                    onClick = onInstallPrereqs,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        }
+
         // DLC
         StoreSection(title = "DLC") {
-            GogDlcContent(dlcJson = dlcJson)
+            GogDlcContent(
+                dlcJson = dlcJson,
+                baseInstalled = dlcBaseInstalled,
+                states = dlcStates,
+                onInstall = onInstallDlc,
+            )
         }
 
         // Cloud Saves
@@ -886,6 +1041,7 @@ private fun GogUpdatesContent(
     checkUpdateEnabled: Boolean,
     updateBtnVisible: Boolean,
     onCheckUpdate: () -> Unit,
+    onVerifyRepair: () -> Unit,
     onUpdateNow: () -> Unit,
 ) {
     // Not installed yet — just the muted hint, no buttons.
@@ -910,10 +1066,24 @@ private fun GogUpdatesContent(
         modifier = Modifier.fillMaxWidth(),
         enabled = checkUpdateEnabled,
     )
+    Spacer(Modifier.height(8.dp))
+    // Re-verify installed files against the manifest (size + MD5); re-downloads only the
+    // missing/corrupt ones. Gated on the same installed+idle signal as Check for Updates.
+    StoreActionButton(
+        text = "Verify / Repair Files",
+        onClick = onVerifyRepair,
+        modifier = Modifier.fillMaxWidth(),
+        enabled = checkUpdateEnabled,
+    )
 }
 
 @Composable
-private fun GogDlcContent(dlcJson: String?) {
+private fun GogDlcContent(
+    dlcJson: String?,
+    baseInstalled: Boolean,
+    states: Map<String, DlcRowUi>,
+    onInstall: (String, String) -> Unit,
+) {
     val arr = remember(dlcJson) {
         if (dlcJson.isNullOrEmpty() || dlcJson == "[]") null
         else runCatching { org.json.JSONArray(dlcJson) }.getOrNull()
@@ -930,14 +1100,17 @@ private fun GogDlcContent(dlcJson: String?) {
         fontWeight = FontWeight.Bold,
     )
     Text(
-        text = "DLC content is included in gen2 game installs.",
+        text = if (baseInstalled) "Install a DLC to add its files to your game."
+        else "Install the game first, then you can add its DLC.",
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = Modifier.padding(top = 3.dp, bottom = 6.dp),
     )
     for (i in 0 until arr.length()) {
         val dlc = arr.optJSONObject(i) ?: continue
+        val dlcId = dlc.optString("id", "")
         val dlcTitle = dlc.optString("title", "Unknown DLC")
+        val state = states[dlcId]
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -951,12 +1124,30 @@ private fun GogDlcContent(dlcJson: String?) {
                 color = MaterialTheme.colorScheme.onSurface,
                 modifier = Modifier.weight(1f),
             )
-            Text(
-                text = "Owned",
-                style = MaterialTheme.typography.labelSmall,
-                color = INSTALLED_GREEN,
-                fontWeight = FontWeight.Bold,
-            )
+            when {
+                state?.installed == true -> Text(
+                    text = "Installed",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = INSTALLED_GREEN,
+                    fontWeight = FontWeight.Bold,
+                )
+                state?.installing == true -> Text(
+                    text = "Installing… ${state.pct}%",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontWeight = FontWeight.Bold,
+                )
+                !baseInstalled -> Text(
+                    text = "Install the game first",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                else -> StoreActionButton(
+                    text = "Install",
+                    onClick = { if (dlcId.isNotEmpty()) onInstall(dlcId, dlcTitle) },
+                    enabled = dlcId.isNotEmpty(),
+                )
+            }
         }
         Spacer(Modifier.height(4.dp))
     }

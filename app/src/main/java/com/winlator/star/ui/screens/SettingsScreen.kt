@@ -320,10 +320,18 @@ fun SettingsScreen(onSaved: () -> Unit = {}) {
     // can be revoked, so the local copy is the source of truth. The launch wiring points
     // LSFG_DLL_PATH at this exact file.
     val lsfgDllFile = remember { File(context.filesDir, "lsfg-vk/Lossless.dll") }
-    fun lsfgDllStatusText(): String =
-        if (lsfgDllFile.isFile && lsfgDllFile.length() > 0)
-            "Imported (" + (lsfgDllFile.length() / (1024 * 1024)) + " MB)"
-        else "Not set — lsfg-vk will stay off"
+    // Where the current copy came from ("store" | "manual"), so the status line can label it and the
+    // badge survives an app restart. The DLL file itself is still the single runtime source of truth;
+    // this pref is purely cosmetic provenance. Cleared when the DLL is removed.
+    fun lsfgDllStatusText(): String {
+        if (!(lsfgDllFile.isFile && lsfgDllFile.length() > 0)) return "Not set — lsfg-vk will stay off"
+        val mb = lsfgDllFile.length() / (1024 * 1024)
+        return when (prefs.getString("lsfg_dll_source", null)) {
+            "store"  -> "Imported from Steam store (Lossless Scaling) — $mb MB"
+            "manual" -> "Imported manually — $mb MB"
+            else     -> "Imported ($mb MB)"
+        }
+    }
     var lsfgDllStatus by remember { mutableStateOf(lsfgDllStatusText()) }
     fun importLosslessDllFromUri(uri: Uri) {
         try {
@@ -331,9 +339,40 @@ fun SettingsScreen(onSaved: () -> Unit = {}) {
             context.contentResolver.openInputStream(uri)?.use { input ->
                 lsfgDllFile.outputStream().use { output -> input.copyTo(output) }
             }
+            prefs.edit().putString("lsfg_dll_source", "manual").apply()
             lsfgDllStatus = lsfgDllStatusText()
         } catch (e: Exception) {
             lsfgDllStatus = "Import failed: " + e.message
+        }
+    }
+    // Locate a Lossless.dll from a Steam-store install (appId 993090 lands under
+    // filesDir/imagefs/steam_games/<name>/…). Lossless Scaling ships the DLL at its install root, but
+    // we walk a bounded tree in case a future layout nests it. Prefer the newest by lastModified so a
+    // re-download of an updated Lossless Scaling wins.
+    fun findStoreLosslessDll(): File? {
+        val root = File(context.filesDir, "imagefs/steam_games")
+        if (!root.isDirectory) return null
+        return root.walkTopDown().maxDepth(6)
+            .filter { it.isFile && it.name.equals("Lossless.dll", ignoreCase = true) && it.length() > 0 }
+            .maxByOrNull { it.lastModified() }
+    }
+    fun detectLosslessDllFromStore() {
+        val src = findStoreLosslessDll()
+        if (src == null) {
+            Toast.makeText(context,
+                "No Steam-store Lossless Scaling found — download it from the store or import manually.",
+                Toast.LENGTH_LONG).show()
+            return
+        }
+        try {
+            lsfgDllFile.parentFile?.mkdirs()
+            src.inputStream().use { input -> lsfgDllFile.outputStream().use { output -> input.copyTo(output) } }
+            prefs.edit().putString("lsfg_dll_source", "store").apply()
+            lsfgDllStatus = lsfgDllStatusText()
+            Toast.makeText(context, "Lossless.dll set from Steam store install.", Toast.LENGTH_SHORT).show()
+        } catch (e: Exception) {
+            lsfgDllStatus = "Detect failed: " + e.message
+            Toast.makeText(context, "Detect failed: " + e.message, Toast.LENGTH_LONG).show()
         }
     }
     val importLosslessDllLauncher = rememberLauncherForActivityResult(
@@ -902,14 +941,25 @@ fun SettingsScreen(onSaved: () -> Unit = {}) {
         FieldSetLabel("Frame Generation — lsfg-vk")
         FieldSet {
             Text(
-                "lsfg-vk needs your own Lossless Scaling \"Lossless.dll\". Pick it once — it is copied " +
-                "into the app and reused by any container whose Frame Generation engine is set to lsfg-vk.",
+                "lsfg-vk needs a Lossless Scaling \"Lossless.dll\". Download Lossless Scaling from the in-app " +
+                "Steam store and tap Detect below — or import your own copy. Either way it is copied into the " +
+                "app and reused by any container whose Frame Generation engine is set to lsfg-vk.",
                 color = MaterialTheme.colorScheme.onSurface, fontSize = 12.sp,
                 modifier = Modifier.padding(bottom = 6.dp)
             )
             Text(
                 "Status: " + lsfgDllStatus, color = MaterialTheme.colorScheme.onSurface, fontSize = 13.sp,
                 modifier = Modifier.padding(bottom = 6.dp)
+            )
+            Button(
+                onClick = { detectLosslessDllFromStore() },
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4CAF50)), // intentional: green = success/safe action, distinct from accent
+                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
+            ) { Text("Detect from Steam store", color = Color.White) } // intentional: high-contrast label on green fill
+            Text(
+                "Manual override — pick a Lossless.dll yourself:",
+                color = MaterialTheme.colorScheme.onSurface, fontSize = 12.sp,
+                modifier = Modifier.padding(top = 4.dp, bottom = 2.dp)
             )
             Button(
                 onClick = { importLosslessDllInAppLauncher.launch(InAppFilePicker.buildIntent(context, InAppFilePicker.DLL, "Select Lossless.dll")) },
@@ -922,7 +972,7 @@ fun SettingsScreen(onSaved: () -> Unit = {}) {
             ) { Text("Pick via system…", color = MaterialTheme.colorScheme.primary) }
             if (lsfgDllFile.isFile) {
                 Button(
-                    onClick = { lsfgDllFile.delete(); lsfgDllStatus = lsfgDllStatusText() },
+                    onClick = { lsfgDllFile.delete(); prefs.edit().remove("lsfg_dll_source").apply(); lsfgDllStatus = lsfgDllStatusText() },
                     colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
                     modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
                 ) { Text("Remove", color = Color.White) } // intentional: high-contrast label on error/destructive fill

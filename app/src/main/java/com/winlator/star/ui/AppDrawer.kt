@@ -64,6 +64,7 @@ import kotlinx.coroutines.withContext
 private fun iconFor(screen: Screen): Int = when (screen) {
     Screen.Containers    -> R.drawable.icon_menu_container
     Screen.Games         -> R.drawable.icon_games
+    Screen.Contents      -> R.drawable.icon_menu_contents
     Screen.InputControls -> R.drawable.icon_gamepad
     Screen.AdrenoTools   -> R.drawable.icon_menu_gpu
     Screen.Saves         -> R.drawable.icon_save
@@ -118,7 +119,7 @@ fun AppDrawerContent(
         DrawerItem(Screen.Settings,      currentRoute, onNavigate)
         DrawerItem(Screen.Appearance,    currentRoute, onNavigate)
         DrawerItem(Screen.InputControls, currentRoute, onNavigate)
-        DrawerItem(Screen.AdrenoTools,   currentRoute, onNavigate)
+        DrawerItem(Screen.Contents,      currentRoute, onNavigate)
 
         // Hideable from Appearance — the whole section, header included, so turning it off
         // leaves no orphaned divider behind.

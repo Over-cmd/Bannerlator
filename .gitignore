@@ -14,3 +14,7 @@
 
 # local agent worktrees (never commit)
 .claude/worktrees/
+
+# Samsung Galaxy Performance SDK — proprietary, not GPL, supplied per-build (see
+# app/libs/GalaxyPerf/README.md). Never commit the jar; keep the drop-point + docs.
+/app/libs/GalaxyPerf/*.jar

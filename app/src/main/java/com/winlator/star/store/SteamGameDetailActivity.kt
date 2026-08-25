@@ -41,6 +41,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -105,6 +106,24 @@ private data class SizeBreakdown(
     val fits: Boolean = true,         // false → render freeLabel in the error color
 )
 
+/** One beta branch as shown in the branch picker (a UI projection of SteamDatabase.BranchRow). */
+private data class BranchDisplay(
+    val name: String,
+    val description: String,   // Steam-authored blurb, may be empty
+    val timeUpdated: Long,     // epoch seconds of the last build (0 = unknown)
+    val pwdRequired: Boolean,  // password-protected beta
+    val unlocked: Boolean,     // selectable now (public, or a verified password on file)
+)
+
+/** Format a branch's build timestamp (epoch seconds) as a readable date; "" when unknown. */
+private fun formatBranchUpdated(epochSeconds: Long): String {
+    if (epochSeconds <= 0L) return ""
+    return try {
+        java.text.SimpleDateFormat("MMM d, yyyy", java.util.Locale.getDefault())
+            .format(java.util.Date(epochSeconds * 1000L))
+    } catch (_: Throwable) { "" }
+}
+
 class SteamGameDetailActivity : ComponentActivity(), SteamRepository.SteamEventListener {
 
     companion object {
@@ -132,6 +151,14 @@ class SteamGameDetailActivity : ComponentActivity(), SteamRepository.SteamEventL
     private var dlcEntries by mutableStateOf<Map<Int, String>>(emptyMap())
     private var excludedDlc by mutableStateOf<Set<Int>>(emptySet())
     private var showDlcSheet by mutableStateOf(false)
+    // Beta-branch selector: known branches (public + betas), the currently selected branch, and the
+    // picker-sheet state. Only surfaced when the app actually exposes a non-public branch. branchCheck*
+    // drive the "enter access code" flow for locked betas.
+    private var branches by mutableStateOf<List<BranchDisplay>>(emptyList())
+    private var selectedBranch by mutableStateOf("public")
+    private var showBranchSheet by mutableStateOf(false)
+    private var branchCheckBusy by mutableStateOf(false)
+    private var branchCheckMessage by mutableStateOf<String?>(null)
     // One-shot guard so the manifest-true size resolve fires at most once per detail view.
     private var sizeResolveStarted = false
     private var statusText by mutableStateOf("Not installed")
@@ -221,6 +248,15 @@ class SteamGameDetailActivity : ComponentActivity(), SteamRepository.SteamEventL
                     onDlcLineClick = { if (dlcEntries.isNotEmpty()) showDlcSheet = true },
                     onToggleDlc = { toggleDlc(it) },
                     onDismissDlcSheet = { showDlcSheet = false },
+                    branches = branches,
+                    selectedBranch = selectedBranch,
+                    showBranchSheet = showBranchSheet,
+                    branchCheckBusy = branchCheckBusy,
+                    branchCheckMessage = branchCheckMessage,
+                    onBranchLineClick = { showBranchSheet = true },
+                    onSelectBranch = { selectBranch(it) },
+                    onCheckBranchPassword = { submitBranchPassword(it) },
+                    onDismissBranchSheet = { showBranchSheet = false; branchCheckMessage = null },
                     statusText = statusText,
                     gameStatus = gameStatus,
                     installBtnText = installBtnText,
@@ -591,6 +627,60 @@ class SteamGameDetailActivity : ComponentActivity(), SteamRepository.SteamEventL
         recomputeSizeDisplay(g)   // drop the unticked DLC from the shown download/on-disk/PICS sizes
     }
 
+    // ── Beta-branch selector ─────────────────────────────────────────────────
+
+    /** Load the app's branches (+ unlock state) from the DB and normalise the selected branch. */
+    private fun refreshBranchState(g: SteamGame) {
+        val repo = SteamRepository.getInstance()
+        branches = try {
+            val unlocked = repo.database.getUnlockedBranchNames(g.appId).toSet()
+            repo.getBranches(g.appId).map {
+                BranchDisplay(
+                    name = it.branchName,
+                    description = it.description,
+                    timeUpdated = it.timeUpdated,
+                    pwdRequired = it.pwdRequired,
+                    unlocked = !it.pwdRequired || it.branchName in unlocked,
+                )
+            }
+        } catch (_: Throwable) { emptyList() }
+        selectedBranch = try { SteamPrefs.getSelectedBranch(g.appId) } catch (_: Throwable) { "public" }
+        // If the stored branch is no longer selectable (lost unlock / removed branch), fall back to
+        // public so we never try to install a branch the user can't currently access.
+        if (selectedBranch != "public" && branches.none { it.name == selectedBranch && it.unlocked }) {
+            selectedBranch = "public"
+            try { SteamPrefs.setSelectedBranch(g.appId, "public") } catch (_: Throwable) {}
+        }
+    }
+
+    /** Persist + reflect the chosen branch. */
+    private fun selectBranch(name: String) {
+        try { SteamPrefs.setSelectedBranch(appId, name) } catch (_: Throwable) {}
+        selectedBranch = name
+    }
+
+    /** Verify a beta access code off the main thread; on success re-derive the unlock state. */
+    private fun submitBranchPassword(password: String) {
+        if (password.isBlank() || branchCheckBusy) return
+        branchCheckBusy = true
+        branchCheckMessage = null
+        // Serialize onto the library worker so this CM round-trip stays off the pump (same pattern
+        // as DepotSizeResolver's manifest fetches).
+        SteamRepository.getInstance().submitLibraryWork {
+            val ok = try { SteamRepository.getInstance().checkBranchPassword(appId, password) }
+                     catch (_: Throwable) { false }
+            runOnUiThread {
+                branchCheckBusy = false
+                if (ok) {
+                    branchCheckMessage = "Access code accepted"
+                    game?.let { refreshBranchState(it) }
+                } else {
+                    branchCheckMessage = "Invalid access code (or not connected to Steam)"
+                }
+            }
+        }
+    }
+
     /** Available bytes on the partition the games install to. */
     private fun freeInstallBytes(): Long {
         val base = File(filesDir, "imagefs/steam_games")
@@ -679,6 +769,7 @@ class SteamGameDetailActivity : ComponentActivity(), SteamRepository.SteamEventL
         dlcEntries = try { SteamRepository.getInstance().database.getIncludedDlcEntries(g.appId) } catch (_: Throwable) { emptyMap() }
         excludedDlc = try { SteamPrefs.getExcludedDlc(g.appId) } catch (_: Throwable) { emptySet() }
         includedDlcText = buildIncludedDlcText()
+        refreshBranchState(g)
         maybeResolveRealSize()
 
         if (g.isInstalled) {
@@ -1045,6 +1136,15 @@ private fun SteamGameDetailScreen(
     onDlcLineClick: () -> Unit,
     onToggleDlc: (Int) -> Unit,
     onDismissDlcSheet: () -> Unit,
+    branches: List<BranchDisplay>,
+    selectedBranch: String,
+    showBranchSheet: Boolean,
+    branchCheckBusy: Boolean,
+    branchCheckMessage: String?,
+    onBranchLineClick: () -> Unit,
+    onSelectBranch: (String) -> Unit,
+    onCheckBranchPassword: (String) -> Unit,
+    onDismissBranchSheet: () -> Unit,
     statusText: String,
     gameStatus: GameStatus,
     installBtnText: String,
@@ -1201,6 +1301,22 @@ private fun SteamGameDetailScreen(
                     modifier = Modifier.padding(top = 6.dp),
                 ) {
                     Text("Choose DLC")
+                }
+            }
+            // Beta-branch selector — only when the app actually exposes a non-public branch. Switching
+            // branches downloads/installs that branch's build on the next install or update.
+            if (branches.any { it.name != "public" }) {
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    text = "Branch: " + if (selectedBranch == "public") "public (default)" else selectedBranch,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+                OutlinedButton(
+                    onClick = onBranchLineClick,
+                    modifier = Modifier.padding(top = 6.dp),
+                ) {
+                    Text("Change branch")
                 }
             }
             Spacer(Modifier.height(8.dp))
@@ -1374,6 +1490,122 @@ private fun SteamGameDetailScreen(
                 Spacer(Modifier.height(12.dp))
                 Button(
                     onClick = onDismissDlcSheet,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp),
+                ) { Text("Done") }
+            }
+        }
+    }
+
+    // Beta-branch picker sheet — pick which branch to download/install. Selectable branches (public +
+    // any unlocked beta) get a radio; a locked beta needs a verified access code first.
+    // Ported from GameNative (GPL-3.0): SteamAppScreen branch picker + password field.
+    if (showBranchSheet) {
+        val sheetState = rememberModalBottomSheetState()
+        ModalBottomSheet(onDismissRequest = onDismissBranchSheet, sheetState = sheetState) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+                    .navigationBarsPadding()
+                    .padding(start = 20.dp, end = 20.dp, bottom = 24.dp),
+            ) {
+                Text(
+                    text = "Choose a branch",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                Text(
+                    text = "Switching branches downloads and installs that branch's build the next " +
+                        "time you install or update this game.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 2.dp, bottom = 12.dp),
+                )
+                branches.forEach { b ->
+                    Row(
+                        verticalAlignment = Alignment.Top,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable(enabled = b.unlocked) { onSelectBranch(b.name) }
+                            .padding(vertical = 6.dp),
+                    ) {
+                        RadioButton(
+                            selected = selectedBranch == b.name,
+                            enabled = b.unlocked,
+                            onClick = { onSelectBranch(b.name) },
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = (if (b.name == "public") "public (default)" else b.name) +
+                                    (if (b.pwdRequired && !b.unlocked) "  🔒" else ""),
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurface,
+                            )
+                            if (b.description.isNotEmpty()) Text(
+                                text = b.description,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            val updated = formatBranchUpdated(b.timeUpdated)
+                            if (updated.isNotEmpty()) Text(
+                                text = "Updated $updated",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+                // Access-code entry for locked betas. Steam returns every valid beta password for the
+                // app in one response, so a single correct code can unlock more than one branch.
+                if (branches.any { it.pwdRequired && !it.unlocked }) {
+                    Spacer(Modifier.height(12.dp))
+                    Text(
+                        text = "Unlock a password-protected beta",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    var code by remember { mutableStateOf("") }
+                    OutlinedTextField(
+                        value = code,
+                        onValueChange = { code = it },
+                        singleLine = true,
+                        enabled = !branchCheckBusy,
+                        label = { Text("Beta access code") },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 6.dp),
+                    )
+                    branchCheckMessage?.let { msg ->
+                        Text(
+                            text = msg,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (msg.startsWith("Access code accepted"))
+                                Color(0xFF4CAF50) else MaterialTheme.colorScheme.error,
+                            modifier = Modifier.padding(top = 4.dp),
+                        )
+                    }
+                    Button(
+                        onClick = { onCheckBranchPassword(code) },
+                        enabled = !branchCheckBusy && code.isNotBlank(),
+                        modifier = Modifier.padding(top = 8.dp),
+                        shape = RoundedCornerShape(10.dp),
+                    ) {
+                        if (branchCheckBusy) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(18.dp),
+                                color = MaterialTheme.colorScheme.onPrimary,
+                                strokeWidth = 2.dp,
+                            )
+                        } else {
+                            Text("Unlock branch")
+                        }
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
+                Button(
+                    onClick = onDismissBranchSheet,
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(10.dp),
                 ) { Text("Done") }

@@ -67,6 +67,7 @@ import androidx.compose.ui.unit.sp
 import androidx.preference.PreferenceManager
 import com.winlator.star.core.FileUtils
 import com.winlator.star.util.InAppFilePicker
+import com.winlator.star.core.ExitReasonReporter
 import com.winlator.star.core.LogInventory
 import com.winlator.star.core.LogLocation
 import com.winlator.star.core.LogcatCapture
@@ -98,6 +99,7 @@ fun LogManagerScreen(onClose: () -> Unit) {
     var dxvkLogs by remember { mutableStateOf(prefs.getBoolean("enable_dxvk_logs", true)) }
     var logcat by remember { mutableStateOf(prefs.getBoolean("enable_logcat", true)) }
     var crashReports by remember { mutableStateOf(prefs.getBoolean("enable_crash_reports", true)) }
+    var exitAutosave by remember { mutableStateOf(prefs.getBoolean(ExitReasonReporter.PREF_AUTOSAVE, false)) }
 
     // Location + channels moved here from the old Settings › Logs section, which this screen
     // replaces. They used to be saved by the Settings "Save" FAB; here every change is written
@@ -146,6 +148,7 @@ fun LogManagerScreen(onClose: () -> Unit) {
     }
 
     var info by remember { mutableStateOf<Pair<String, String>?>(null) }
+    var exitReport by remember { mutableStateOf<String?>(null) }
     var showExplainAll by remember { mutableStateOf(false) }
     var showKeepMenu by remember { mutableStateOf(false) }
     // Folder the embedded File Manager is showing, or null when it is closed.
@@ -256,6 +259,19 @@ fun LogManagerScreen(onClose: () -> Unit) {
                     onInfo = { info = "Crash reports" to LogCopy.CRASH }) {
                     crashReports = it; putBool("enable_crash_reports", it)
                 }
+                // Exit reasons: reads Android's own record of why the process last died — the only way
+                // to see a NATIVE crash (which dies in another process and never reaches logcat or the
+                // Java crash reporter) on an unrooted device. Toggle only auto-saves on launch; the
+                // system keeps the record either way, so the manual button below works even when off.
+                LogToggle(
+                    if (ExitReasonReporter.isSupported()) "Exit reasons (auto-save on launch)"
+                    else "Exit reasons (needs Android 11+)",
+                    exitAutosave,
+                    hint = "Records native crashes without root",
+                    enabled = ExitReasonReporter.isSupported(),
+                    onInfo = { info = "Exit reasons" to LogCopy.EXIT_REASONS }) {
+                    exitAutosave = it; putBool(ExitReasonReporter.PREF_AUTOSAVE, it)
+                }
 
                 // Outlined rather than a filled button: the design keeps solid accent for switches
                 // only, and this is an occasional action, not the point of the screen.
@@ -266,7 +282,7 @@ fun LogManagerScreen(onClose: () -> Unit) {
                         modifier = Modifier.weight(1f).alpha(if (logcat) 1f else 0.4f)
                     ) {
                         if (!logcat) return@CardAction
-                        // Runtime.exec + 1000 lines + a redaction pass + a file write: far too
+                        // Runtime.exec + up to 10000 lines + a redaction pass + a file write: far too
                         // much for the UI thread (its own docs say so). Off to IO, refresh after.
                         scope.launch {
                             kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
@@ -276,6 +292,26 @@ fun LogManagerScreen(onClose: () -> Unit) {
                         }
                     }
                     InfoDot { info = "Capture logcat now" to LogCopy.CAPTURE_NOW }
+                }
+                Spacer(Modifier.height(4.dp))
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                    CardAction(
+                        "Read last crash",
+                        modifier = Modifier.weight(1f).alpha(if (ExitReasonReporter.isSupported()) 1f else 0.4f)
+                    ) {
+                        if (!ExitReasonReporter.isSupported()) return@CardAction
+                        // Reads a system stream + writes a file — off the main thread. We show the text
+                        // AND save it to the exit-reasons folder so it can be shared like any other log.
+                        scope.launch {
+                            val text = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                ExitReasonReporter.captureToFile(context)
+                                ExitReasonReporter.capture(context)
+                            }
+                            exitReport = text
+                            refreshTick++
+                        }
+                    }
+                    InfoDot { info = "Exit reasons" to LogCopy.EXIT_REASONS }
                 }
             }
 
@@ -398,6 +434,31 @@ fun LogManagerScreen(onClose: () -> Unit) {
                 LogViewerScreen(entry = entry, onClose = { viewing = null })
             }
         }
+    }
+
+    exitReport?.let { report ->
+        OutlinedAlertDialog(
+            onDismissRequest = { exitReport = null },
+            title = { Text("Last crash / exit reasons") },
+            text = {
+                Column(modifier = Modifier.heightIn(max = 440.dp).verticalScroll(rememberScrollState())) {
+                    Text(
+                        "Saved with your logs under the \"" + ExitReasonReporter.FOLDER +
+                            "\" folder. Exit #0 is the most recent; a NATIVE_CRASH entry includes the " +
+                            "signal and the top backtrace frames.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp,
+                        modifier = Modifier.padding(bottom = 8.dp)
+                    )
+                    Text(
+                        report,
+                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                        fontSize = 10.sp,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                }
+            },
+            confirmButton = { TextButton(onClick = { exitReport = null }) { Text("Close") } }
+        )
     }
 
     confirmDelete?.let { entry ->
@@ -1106,6 +1167,16 @@ private object LogCopy {
         "logs.\n\n" +
         "Useful when something went wrong but the app didn't crash — capture it while the problem is " +
         "fresh, then share it."
+
+    const val EXIT_REASONS =
+        "Reads Android's own record of why Bannerlator last shut down or crashed — no root needed.\n\n" +
+        "This is the ONLY way to see a NATIVE crash on an unrooted device: those die in a separate " +
+        "system process, so they never show up in the logcat capture or the Java crash report, and " +
+        "the app just restarts looking fine. For a native crash this shows the signal (e.g. SIGSEGV) " +
+        "and the top backtrace frames — the actual cause, not a hint.\n\n" +
+        "The system keeps this record across the crash, so \"Read last crash\" works even if you only " +
+        "turn this on afterwards. The toggle just controls whether a report is also saved " +
+        "automatically each time the app starts. Needs Android 11 or newer."
 
     const val KEEP_LAST =
         "How many past runs to keep for each game.\n\n" +

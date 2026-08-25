@@ -38,7 +38,10 @@ public final class SteamDatabase extends SQLiteOpenHelper {
     //     equalled real_size); zero it so the fixed block-rounding recomputes on next resolve.
     // v7: additive included_dlc (CSV of owned DLC appIds whose depots download with the game) on
     //     steam_games — surfaced as an "Includes DLC:" line on the detail page.
-    private static final int    DB_VERSION = 7;
+    // v8: additive steam_branches (beta-branch metadata parsed from depots/branches/*) +
+    //     steam_unlocked_branches (per-app beta access passwords the user has verified). Both are
+    //     new tables — NO existing library table is touched, so no re-sync required.
+    private static final int    DB_VERSION = 8;
 
     // -------------------------------------------------------------------------
     // DDL
@@ -109,6 +112,29 @@ public final class SteamDatabase extends SQLiteOpenHelper {
             "  PRIMARY KEY (app_id, depot_id)" +
             ")";
 
+    // Beta-branch metadata (depots/branches/* from PICS). One row per branch per app. Re-parsed on
+    // every library sync (SteamRepository clears the app's rows first, then upserts each branch).
+    private static final String SQL_BRANCHES =
+            "CREATE TABLE IF NOT EXISTS steam_branches (" +
+            "  app_id       INTEGER NOT NULL," +
+            "  branch_name  TEXT    NOT NULL," +
+            "  pwd_required INTEGER NOT NULL DEFAULT 0," +   // 1 = password-protected beta
+            "  build_id     INTEGER NOT NULL DEFAULT 0," +
+            "  time_updated INTEGER NOT NULL DEFAULT 0," +   // epoch seconds of last build
+            "  description  TEXT    NOT NULL DEFAULT ''," +
+            "  PRIMARY KEY (app_id, branch_name)" +
+            ")";
+
+    // Beta access passwords the user has successfully verified (SteamApps.checkAppBetaPassword).
+    // Persisted so an unlocked branch stays selectable — and downloadable — across sessions.
+    private static final String SQL_UNLOCKED_BRANCHES =
+            "CREATE TABLE IF NOT EXISTS steam_unlocked_branches (" +
+            "  app_id      INTEGER NOT NULL," +
+            "  branch_name TEXT    NOT NULL," +
+            "  password    TEXT    NOT NULL DEFAULT ''," +
+            "  PRIMARY KEY (app_id, branch_name)" +
+            ")";
+
     // -------------------------------------------------------------------------
     // Singleton
     // -------------------------------------------------------------------------
@@ -147,6 +173,8 @@ public final class SteamDatabase extends SQLiteOpenHelper {
         db.execSQL(SQL_LICENSE_APPS);
         db.execSQL(SQL_DOWNLOADS);
         db.execSQL(SQL_DEPOT_MANIFESTS);
+        db.execSQL(SQL_BRANCHES);
+        db.execSQL(SQL_UNLOCKED_BRANCHES);
         Log.i(TAG, "steam.db created (v" + DB_VERSION + ")");
     }
 
@@ -190,6 +218,12 @@ public final class SteamDatabase extends SQLiteOpenHelper {
         if (oldVersion < 7) {
             addColumnIfMissing(db, "steam_games", "included_dlc", "TEXT NOT NULL DEFAULT ''");
         }
+        // v7 → v8: ADDITIVE — two NEW tables for beta branches + unlocked passwords. CREATE IF NOT
+        // EXISTS, and crucially NO drop of the library tables (steam_games etc. stay intact).
+        if (oldVersion < 8) {
+            db.execSQL(SQL_BRANCHES);
+            db.execSQL(SQL_UNLOCKED_BRANCHES);
+        }
     }
 
     /**
@@ -208,6 +242,8 @@ public final class SteamDatabase extends SQLiteOpenHelper {
         db.execSQL("DROP TABLE IF EXISTS steam_license_apps");
         db.execSQL("DROP TABLE IF EXISTS steam_licenses");
         db.execSQL("DROP TABLE IF EXISTS steam_games");
+        db.execSQL("DROP TABLE IF EXISTS steam_branches");
+        db.execSQL("DROP TABLE IF EXISTS steam_unlocked_branches");
         onCreate(db);
     }
 
@@ -270,6 +306,26 @@ public final class SteamDatabase extends SQLiteOpenHelper {
             this.bytesTotal      = bytesTotal;
             this.installDir      = installDir;
             this.errorMsg        = errorMsg;
+        }
+    }
+
+    /** One beta branch's metadata (from depots/branches/*). */
+    public static final class BranchRow {
+        public final int     appId;
+        public final String  branchName;
+        public final boolean pwdRequired;   // true = password-protected beta
+        public final long    buildId;
+        public final long    timeUpdated;    // epoch seconds of the branch's last build (0 = unknown)
+        public final String  description;    // Steam-authored branch blurb (may be empty)
+
+        BranchRow(int appId, String branchName, boolean pwdRequired,
+                  long buildId, long timeUpdated, String description) {
+            this.appId       = appId;
+            this.branchName  = branchName;
+            this.pwdRequired = pwdRequired;
+            this.buildId     = buildId;
+            this.timeUpdated = timeUpdated;
+            this.description = description;
         }
     }
 
@@ -617,6 +673,77 @@ public final class SteamDatabase extends SQLiteOpenHelper {
         cv.put("real_disk_bytes", realDiskBytes);
         getWritableDatabase().update("steam_games", cv,
                 "app_id = ?", new String[]{String.valueOf(appId)});
+    }
+
+    // =========================================================================
+    // steam_branches / steam_unlocked_branches (beta-branch selector)
+    // =========================================================================
+
+    /** Insert or replace one branch's metadata for an app. */
+    public void upsertBranch(int appId, String branchName, boolean pwdRequired,
+                             long buildId, long timeUpdated, String description) {
+        ContentValues cv = new ContentValues();
+        cv.put("app_id",       appId);
+        cv.put("branch_name",  branchName != null ? branchName : "");
+        cv.put("pwd_required", pwdRequired ? 1 : 0);
+        cv.put("build_id",     buildId);
+        cv.put("time_updated", timeUpdated);
+        cv.put("description",  description != null ? description : "");
+        getWritableDatabase().insertWithOnConflict(
+                "steam_branches", null, cv, SQLiteDatabase.CONFLICT_REPLACE);
+    }
+
+    /** All known branches for an app, ordered public-first then by name. Empty = no branch data. */
+    public List<BranchRow> getBranches(int appId) {
+        List<BranchRow> rows = new ArrayList<>();
+        try (Cursor c = getReadableDatabase().rawQuery(
+                "SELECT app_id,branch_name,pwd_required,build_id,time_updated,description" +
+                " FROM steam_branches WHERE app_id = ?" +
+                " ORDER BY (branch_name = 'public') DESC, branch_name COLLATE NOCASE",
+                new String[]{String.valueOf(appId)})) {
+            while (c.moveToNext()) {
+                rows.add(new BranchRow(
+                        c.getInt(0), c.getString(1), c.getInt(2) != 0,
+                        c.getLong(3), c.getLong(4), c.getString(5)));
+            }
+        } catch (Exception ignored) {}
+        return rows;
+    }
+
+    /** Drop all branch rows for an app (call before re-parsing a sync's branch list). */
+    public void clearBranches(int appId) {
+        getWritableDatabase().delete("steam_branches", "app_id = ?", new String[]{String.valueOf(appId)});
+    }
+
+    /** Persist a verified beta access password for a branch (unlocks it for selection + download). */
+    public void insertUnlockedBranch(int appId, String branchName, String password) {
+        ContentValues cv = new ContentValues();
+        cv.put("app_id",      appId);
+        cv.put("branch_name", branchName != null ? branchName : "");
+        cv.put("password",    password != null ? password : "");
+        getWritableDatabase().insertWithOnConflict(
+                "steam_unlocked_branches", null, cv, SQLiteDatabase.CONFLICT_REPLACE);
+    }
+
+    /** Branch names the user has unlocked (verified a password for) for this app. */
+    public List<String> getUnlockedBranchNames(int appId) {
+        List<String> names = new ArrayList<>();
+        try (Cursor c = getReadableDatabase().rawQuery(
+                "SELECT branch_name FROM steam_unlocked_branches WHERE app_id = ?",
+                new String[]{String.valueOf(appId)})) {
+            while (c.moveToNext()) names.add(c.getString(0));
+        } catch (Exception ignored) {}
+        return names;
+    }
+
+    /** The stored beta password for an unlocked branch, or null if the branch isn't unlocked. */
+    public String getUnlockedBranchPassword(int appId, String branch) {
+        try (Cursor c = getReadableDatabase().rawQuery(
+                "SELECT password FROM steam_unlocked_branches WHERE app_id = ? AND branch_name = ?",
+                new String[]{String.valueOf(appId), branch != null ? branch : ""})) {
+            if (c.moveToNext()) return c.getString(0);
+        } catch (Exception ignored) {}
+        return null;
     }
 
     // =========================================================================

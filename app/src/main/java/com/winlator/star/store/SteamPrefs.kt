@@ -111,6 +111,24 @@ object SteamPrefs {
         prefs.edit().putString(K_EXCLUDED_DLC_PREFIX + appId, csv).apply()
     }
 
+    // ── Beta-branch selector: per-game SELECTED branch ───────────────────────
+    // The branch the user chose on the detail page to download/install. Default
+    // "public" = the normal stable build; anything else is a beta branch (which
+    // may require a verified access code, stored in SteamDatabase). Per-game user
+    // preference (not synced library data), so it lives here like the DLC opt-out.
+
+    private const val K_SELECTED_BRANCH_PREFIX = "selected_branch_"
+
+    /** The branch chosen for [appId], or "public" (the stable default) if none set. */
+    fun getSelectedBranch(appId: Int): String =
+        prefs.getString(K_SELECTED_BRANCH_PREFIX + appId, "public") ?: "public"
+
+    /** Persist the branch chosen for [appId]. Empty/blank falls back to "public". */
+    fun setSelectedBranch(appId: Int, branch: String) {
+        val value = branch.ifBlank { "public" }
+        prefs.edit().putString(K_SELECTED_BRANCH_PREFIX + appId, value).apply()
+    }
+
     /** Wipe all Steam credentials and session state. */
     fun clear() {
         prefs.edit()

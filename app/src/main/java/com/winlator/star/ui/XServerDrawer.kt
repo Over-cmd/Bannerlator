@@ -151,6 +151,8 @@ fun XServerDrawer() {
     val state = XServerDrawerState
     val selectedTab by state.selectedTab.collectAsState()
     val isPaused by state.isPaused.collectAsState()
+    val tvConnected by state.tvConnected.collectAsState()
+    val castSupported by state.castSupported.collectAsState()
     val pauseIcon = if (isPaused) R.drawable.icon_play else R.drawable.icon_pause
     val accent = MaterialTheme.colorScheme.primary
     val surface = MaterialTheme.colorScheme.surface
@@ -208,8 +210,23 @@ fun XServerDrawer() {
                             handleTabClick(TabType.CONTROLS, state)
                         }
                         Spacer(Modifier.height(6.dp))
+                        TabIconButton(R.drawable.icon_audio, selectedTab == TabType.AUDIO) {
+                            handleTabClick(TabType.AUDIO, state)
+                        }
+                        Spacer(Modifier.height(6.dp))
                         TabIconButton(R.drawable.icon_debug, selectedTab == TabType.ADVANCED) {
                             handleTabClick(TabType.ADVANCED, state)
+                        }
+                        // TV / Cast tab: shown while a TV is wired-connected OR wireless casting is
+                        // available (so the "Cast to a TV" button is always reachable). Gated behind
+                        // FeatureFlags.TV_OUTPUT_ENABLED so the whole tab disappears while the feature
+                        // is disabled (issue #339) — belt-and-braces on top of the controller/caster
+                        // never being constructed (which already leaves tvConnected/castSupported false).
+                        if (com.winlator.star.FeatureFlags.TV_OUTPUT_ENABLED && (tvConnected || castSupported)) {
+                            Spacer(Modifier.height(6.dp))
+                            TvTabButton(selectedTab == TabType.TV) {
+                                handleTabClick(TabType.TV, state)
+                            }
                         }
                     }
 
@@ -264,6 +281,8 @@ fun XServerDrawer() {
                 TabType.CONTROLS -> ControlsContent(state)
                 TabType.ADVANCED -> AdvancedContent(state)
                 TabType.TASK_MANAGER -> TmContent()
+                TabType.TV -> TvContent(state)
+                TabType.AUDIO -> AudioContent(state)
             }
         }
     }
@@ -271,6 +290,305 @@ fun XServerDrawer() {
 
 private fun handleTabClick(tab: TabType, state: XServerDrawerState) {
     state.selectTab(tab)
+}
+
+// ───── TV / External Display tab ─────
+// Version A: game on the TV, handheld as the controller. This minimal panel exposes the display
+// controls; picture/latency controls (aspect, overscan, latency mode, audio) land in a later pass.
+// In-game Audio tab: adaptive presets + fine-tuning, applied LIVE via onReapplyAudio (sink recreate).
+// Guest-buffer latency is fixed at connect, so that one knob is flagged "next launch" in the dialog.
+@Composable
+private fun AudioContent(state: XServerDrawerState) {
+    val ctx = LocalContext.current
+    var show by remember { mutableStateOf(false) }
+    val driverId = state.audioDriverId
+    var cfg by remember { mutableStateOf(com.winlator.star.ui.components.loadAudioConfig(ctx, driverId)) }
+    Text(
+        "Audio",
+        fontSize = 18.sp,
+        fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
+        color = MaterialTheme.colorScheme.onSurface
+    )
+    Spacer(Modifier.height(2.dp))
+    val engine = state.audioDriverLabel
+    Text(
+        if (engine.isNotBlank()) "Engine: $engine  ·  preset: ${cfg.preset}" else "Current preset: ${cfg.preset}",
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        fontSize = 12.sp
+    )
+    Spacer(Modifier.height(12.dp))
+    AccentButton("Presets & fine-tuning", Modifier.fillMaxWidth()) { show = true }
+    Text(
+        "Balance crackle vs delay. Applies live; guest buffer needs a relaunch.",
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        fontSize = 11.sp,
+        modifier = Modifier.padding(top = 4.dp)
+    )
+    Spacer(Modifier.height(12.dp))
+    AccentButton("Reset audio", Modifier.fillMaxWidth()) { state.onResetAudio?.run() }
+    Text(
+        "Fixes lost sound after switching apps.",
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        fontSize = 11.sp,
+        modifier = Modifier.padding(top = 4.dp)
+    )
+    if (show) {
+        com.winlator.star.ui.components.AudioSettingsDialog(
+            initial = cfg,
+            scopeLabel = "live · this session",
+            latencyLive = false,
+            driverLabel = engine,
+            driverId = driverId,
+            onDismiss = { show = false },
+            onSave = { newCfg ->
+                com.winlator.star.ui.components.saveAudioConfig(ctx, driverId, newCfg)
+                cfg = newCfg
+                state.onReapplyAudio?.run()
+                show = false
+            }
+        )
+    }
+}
+
+@Composable
+private fun TvContent(state: XServerDrawerState) {
+    val tvConnected by state.tvConnected.collectAsState()
+    val displayName by state.tvDisplayName.collectAsState()
+    val playOnTv by state.tvPlayOnTv.collectAsState()
+    val autoSwap by state.tvAutoSwap.collectAsState()
+    val onExternal by state.tvGameOnExternal.collectAsState()
+    val modes by state.tvModes.collectAsState()
+    val currentModeId by state.tvCurrentModeId.collectAsState()
+    val hdr by state.tvHdr.collectAsState()
+
+    // ───────────── Wireless cast (screen mirroring — no app on the TV) ─────────────
+    SectionHeader("Cast to a TV (wireless)")
+    Text(
+        text = "⚠ EXPERIMENTAL · VIDEO ONLY — wireless streaming is new: the picture runs a few seconds " +
+            "behind, there's no TV sound yet (game audio stays on this device), and it may take a moment " +
+            "to start or need a second try.",
+        color = MaterialTheme.colorScheme.error,
+        fontSize = 11.sp,
+        fontWeight = FontWeight.SemiBold,
+        modifier = Modifier.padding(bottom = 6.dp)
+    )
+    Text(
+        text = "Stream the game's picture to a Google TV / Chromecast on your Wi-Fi — pick one in the app, " +
+            "nothing to install on the TV. Tap the “?” inside for how it works and the trade-offs.",
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        fontSize = 11.sp,
+        modifier = Modifier.padding(bottom = 8.dp)
+    )
+    AccentButton("Cast to a TV", Modifier.fillMaxWidth()) {
+        state.onOpenCastPicker?.run()
+    }
+    Text(
+        text = "For the lowest lag, a wired USB-C→HDMI cable is still best.",
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        fontSize = 11.sp,
+        modifier = Modifier.padding(top = 4.dp)
+    )
+
+    // ───────────── Wired / external display (only when one is actually connected) ─────────────
+    if (tvConnected) {
+        HorizontalDivider(color = MaterialTheme.colorScheme.outline, modifier = Modifier.padding(vertical = 12.dp))
+        SectionHeader("TV / External Display")
+
+        Text(
+            text = if (displayName.isNotBlank()) "Connected: $displayName" else "External display connected",
+            color = MaterialTheme.colorScheme.onSurface,
+            fontSize = 13.sp,
+            modifier = Modifier.padding(bottom = 8.dp)
+        )
+
+        // Output resolution + refresh rate of the TV (e.g. switch 4K@30 → 1080p@60 for smoother play).
+        if (modes.isNotEmpty()) {
+            val labels = modes.map { it.label }
+            val selectedIdx = modes.indexOfFirst { it.id == currentModeId }.let { if (it >= 0) it else 0 }
+            ReshadeDropdown("Display mode (resolution & refresh)", labels, selectedIdx) { i ->
+                val id = modes[i].id
+                state.setTvCurrentModeId(id)
+                state.onTvModeChange?.accept(id)
+            }
+            Spacer(Modifier.height(6.dp))
+        }
+
+        if (hdr.isNotBlank()) {
+            Text(
+                text = "HDR supported by display: $hdr",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontSize = 11.sp,
+                modifier = Modifier.padding(bottom = 8.dp)
+            )
+        }
+
+        ToggleRow("Play on TV", playOnTv) {
+            state.setTvPlayOnTv(it)
+            state.onTvPlayOnTvChange?.accept(it)
+        }
+        ToggleRow("Auto-switch on connect", autoSwap, enabled = playOnTv) {
+            state.setTvAutoSwap(it)
+            state.onTvAutoSwapChange?.accept(it)
+        }
+
+        Spacer(Modifier.height(12.dp))
+
+        if (onExternal) {
+            AccentButton("Bring game back to handheld", Modifier.fillMaxWidth()) {
+                state.onBringBackFromTv?.run()
+            }
+        } else {
+            AccentButton("Move game to TV", Modifier.fillMaxWidth()) {
+                state.onMoveToTv?.run()
+            }
+        }
+    }
+
+    Spacer(Modifier.height(12.dp))
+
+    // Rebuild the audio route — sound can drop after backgrounding or an HDMI route change.
+    AccentButton("Reset audio", Modifier.fillMaxWidth()) {
+        state.onResetAudio?.run()
+    }
+    Text(
+        text = "Fixes lost sound after switching apps.",
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        fontSize = 11.sp,
+        modifier = Modifier.padding(top = 4.dp)
+    )
+
+
+    val rendererIsVulkan by state.rendererIsVulkan.collectAsState()
+
+    // ───────────── Picture ─────────────
+    HorizontalDivider(color = MaterialTheme.colorScheme.outline, modifier = Modifier.padding(vertical = 12.dp))
+    SectionHeader("Picture")
+
+    // Aspect on TV — reuses the same fullscreen-mode cycle as the handheld (OFF / FIT / STRETCH).
+    val fullscreenMode by state.fullscreenMode.collectAsState()
+    Text("Aspect", color = MaterialTheme.colorScheme.onSurface, fontSize = 13.sp,
+        fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(bottom = 6.dp))
+    FullscreenModeButtons(fullscreenMode) { mode ->
+        state.setFullscreenMode(mode)
+        state.onSetFullscreenMode?.accept(mode)
+    }
+
+    // Overscan / safe area (v2) — pads the game inward on TVs that crop the edges.
+    Spacer(Modifier.height(8.dp))
+    val overscan by state.tvOverscan.collectAsState()
+    var overscanVal by remember(overscan) { mutableIntStateOf(overscan) }
+    IntSlider("Overscan / safe area", overscanVal, 0..8,
+        onValueChange = { overscanVal = it },
+        onValueChangeFinished = {
+            state.setTvOverscan(overscanVal)
+            state.onTvOverscanChange?.accept(overscanVal)
+        },
+        steps = 7, enabled = true)
+    Text("Shrinks the picture inward if your TV cuts off the edges.",
+        color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp,
+        modifier = Modifier.padding(top = 2.dp, bottom = 6.dp))
+
+    // Scaling filter (v1) — GL EffectComposer only; grayed on the Vulkan renderer.
+    if (rendererIsVulkan) {
+        Text("Scaling filter is available on the OpenGL renderer.",
+            color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp,
+            modifier = Modifier.padding(top = 4.dp))
+    } else {
+        Text("Scaling filter", color = MaterialTheme.colorScheme.onSurface, fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 4.dp, bottom = 6.dp))
+        val initGlUpscalerMode by XServerDialogState.glUpscalerMode.collectAsState()
+        var glUpscalerMode by remember(initGlUpscalerMode) { mutableIntStateOf(initGlUpscalerMode) }
+        UpscalerModeButtons(glUpscalerMode, true) {
+            glUpscalerMode = it
+            XServerDialogState.onGlUpscalerApply?.invoke(it)
+        }
+    }
+
+    // ───────────── Latency & pacing ─────────────
+    HorizontalDivider(color = MaterialTheme.colorScheme.outline, modifier = Modifier.padding(vertical = 12.dp))
+
+    // Latency mode (present mode). PresentModeSection self-gates to the Vulkan renderer.
+    if (rendererIsVulkan) {
+        PresentModeSection(state)
+    } else {
+        SectionHeader("Latency")
+        Text("Latency mode (V-Sync / Low latency) is available on the Vulkan renderer.",
+            color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp,
+            modifier = Modifier.padding(bottom = 6.dp))
+    }
+
+    // Frame cap — drives the standalone host FPS limiter (shared with the HUD tab).
+    Spacer(Modifier.height(6.dp))
+    val fpsLimiterEnabled by state.fpsLimiterEnabled.collectAsState()
+    val fpsLimit by state.fpsLimit.collectAsState()
+    val capOptions = listOf("Off", "30 FPS", "60 FPS", "90 FPS", "120 FPS")
+    val capValues = listOf(0, 30, 60, 90, 120)
+    val capIdx = if (!fpsLimiterEnabled) 0 else capValues.indexOf(fpsLimit).let { if (it >= 0) it else 0 }
+    ReshadeDropdown("Frame cap", capOptions, capIdx) { i ->
+        val v = capValues[i]
+        state.setFpsLimiterEnabled(v > 0)
+        if (v > 0) state.setFpsLimit(v)
+        state.onFpsLimitChange?.run()
+    }
+
+    // Frame generation — the full reused section (engine picker + multiplier + models).
+    Spacer(Modifier.height(6.dp))
+    FrameGenSection(state)
+
+    // TV Game Mode tip (biggest wired-latency win is TV-side; we can only advise).
+    Text("Tip: enable Game Mode on your TV for the lowest input lag.",
+        color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp,
+        modifier = Modifier.padding(top = 8.dp))
+
+    // ───────────── Audio & power ─────────────
+    HorizontalDivider(color = MaterialTheme.colorScheme.outline, modifier = Modifier.padding(vertical = 12.dp))
+    SectionHeader("Audio & power")
+
+    val audioOut by state.tvAudioOut.collectAsState()
+    ReshadeDropdown("Audio output", listOf("Follow system", "TV / HDMI", "Handheld"), audioOut) { i ->
+        state.setTvAudioOut(i)
+        state.onTvAudioOutChange?.accept(i)
+    }
+    Text("Experimental — the guest audio route may not always follow.",
+        color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp,
+        modifier = Modifier.padding(top = 2.dp, bottom = 6.dp))
+
+    val dimHandheld by state.tvDimHandheld.collectAsState()
+    ToggleRow("Dim handheld while on TV", dimHandheld) {
+        state.setTvDimHandheld(it)
+        state.onTvDimHandheldChange?.accept(it)
+    }
+    Text("Saves battery and heat by dimming the phone screen.",
+        color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp,
+        modifier = Modifier.padding(top = 2.dp))
+
+    // ───────────── Advanced ─────────────
+    HorizontalDivider(color = MaterialTheme.colorScheme.outline, modifier = Modifier.padding(vertical = 12.dp))
+    SectionHeader("Advanced")
+
+    val renderRes by state.tvRenderRes.collectAsState()
+    ReshadeDropdown("TV render resolution", listOf("Match TV", "Match handheld", "1080p", "1440p"), renderRes) { i ->
+        state.setTvRenderRes(i)
+        state.onTvRenderResChange?.accept(i)
+    }
+    Text("Applies on the next game launch (the render resolution is fixed at startup).",
+        color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp,
+        modifier = Modifier.padding(top = 2.dp))
+
+    // ───────────── Streaming (v3 — WiFi caster, not yet available) ─────────────
+    HorizontalDivider(color = MaterialTheme.colorScheme.outline, modifier = Modifier.padding(vertical = 12.dp))
+    val disabledColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+    Text("Streaming", style = MaterialTheme.typography.titleSmall.copy(
+        fontSize = 15.sp, fontWeight = FontWeight.Bold), color = disabledColor)
+    Text("Wireless streaming to a TV without a cable (bitrate, codec, transport) is coming in a " +
+        "future update. Wired HDMI / DeX casting works today via the controls above.",
+        color = disabledColor, fontSize = 11.sp, modifier = Modifier.padding(top = 4.dp))
+    listOf("Bitrate", "Codec (H.264 / HEVC)", "Transport (WebRTC / DLNA)", "Stream resolution & FPS").forEach {
+        Text("• $it — requires WiFi streaming", color = disabledColor, fontSize = 11.sp,
+            modifier = Modifier.padding(top = 4.dp))
+    }
+
+    Spacer(Modifier.height(12.dp))
 }
 
 // ───── Modern Tab Button ─────
@@ -352,6 +670,48 @@ private fun FpsTabButton(isSelected: Boolean, onClick: () -> Unit) {
         }
         Text(
             text = "FPS",
+            color = textColor,
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.Bold,
+        )
+    }
+}
+
+// TV tab: a text "TV" pill (mirrors the FPS tab) instead of an icon.
+@Composable
+private fun TvTabButton(isSelected: Boolean, onClick: () -> Unit) {
+    val accent = MaterialTheme.colorScheme.primary
+    val accentDim = LocalAccentDim.current
+    val bgBrush = if (isSelected)
+        Brush.verticalGradient(listOf(accent, accentDim))
+    else
+        Brush.verticalGradient(listOf(Color.Transparent, Color.Transparent))
+
+    val borderColor = if (isSelected) accent.copy(alpha = 0.6f) else Color(0xFF333333)
+    val textColor = if (isSelected) Color.White else accent
+
+    Box(
+        modifier = Modifier
+            .size(44.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(bgBrush, RoundedCornerShape(12.dp))
+            .border(1.5.dp, borderColor, RoundedCornerShape(12.dp))
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (isSelected) {
+            Canvas(Modifier.size(44.dp)) {
+                drawCircle(
+                    brush = Brush.radialGradient(
+                        colors = listOf(accent.copy(alpha = 0.25f), Color.Transparent),
+                        radius = size.minDimension / 2f
+                    ),
+                    radius = size.minDimension / 2f
+                )
+            }
+        }
+        Text(
+            text = "TV",
             color = textColor,
             style = MaterialTheme.typography.labelSmall,
             fontWeight = FontWeight.Bold,
@@ -821,7 +1181,7 @@ private fun FrameGenSection(state: XServerDrawerState) {
     // labeled twice. Badge shows bionic-fg / lsfg-vk depending on the container's selection.
     val engineLabel = when (engine) {
         "lsfg"   -> "lsfg-vk"
-        "bionic" -> "bionic-fg"
+        "bionic" -> "win-fg"
         else     -> "Off"
     }
     // Green dot = engine actually multiplying frames right now. Frame gen starts at multiplier 0
@@ -869,9 +1229,14 @@ private fun FrameGenSection(state: XServerDrawerState) {
             state.onBionicFgConfigChange?.run()
         }
 
-        FgMultiplierButtons(fgMult) { fgMult = it; applyFg() }
+        FgMultiplierButtons(fgMult, engine) { newMult ->
+            val wasOff = fgMult == 0
+            fgMult = newMult; applyFg()
+            // Turning FG on: pulse a bg/fg reset so win-fg starts clean, not artifacty.
+            if (wasOff && newMult >= 2) state.onFgResetPulse?.run()
+        }
 
-        // Interpolation model, bionic-fg only. The layer rebuilds its framegen context when the
+        // Interpolation model, win-fg only. The layer rebuilds its framegen context when the
         // model changes (same path as a multiplier change), so this switches live. Hidden while
         // frame gen is Off, where it would have nothing to act on.
         AnimatedVisibility(
@@ -887,7 +1252,11 @@ private fun FrameGenSection(state: XServerDrawerState) {
                     fontSize = 12.sp,
                     modifier = Modifier.padding(start = 4.dp, bottom = 6.dp)
                 )
-                FgModelButtons(fgModel) { fgModel = it; applyFg() }
+                FgModelButtons(fgModel) { newModel ->
+                    fgModel = newModel; applyFg()
+                    // Model switch while FG is on -> same bg/fg reset pulse.
+                    if (fgMult >= 2) state.onFgResetPulse?.run()
+                }
             }
         }
 
@@ -946,17 +1315,17 @@ private fun FrameGenSection(state: XServerDrawerState) {
 private fun FgModelButtons(selected: Int, onSelect: (Int) -> Unit) {
     val accent = MaterialTheme.colorScheme.primary
     val accentDim = LocalAccentDim.current
-    // 0 is the long-standing default chain; 1-4 are newer engines, not yet device-proven.
-    // 4 ("FSR3+") is 3's optical flow reworked — per-block search, sub-pixel refinement
-    // and a true bidirectional solve that gates the flow at occlusion edges. 3 is kept
-    // alongside it so the two can be compared live in the same scene.
-    val options = listOf(0 to "Default", 1 to "Traced", 2 to "V2", 3 to "FSR3", 4 to "FSR3+")
+    // win-fg's two optical-flow models: 3 = single-direction flow, 4 = block-grid
+    // bidirectional flow with occlusion gating (softer at occlusion edges). Legacy
+    // stored values 0-2 map to the standard flow (model 3), matching the layer's clamp.
+    val options = listOf(3 to "Optical flow", 4 to "Bidirectional")
+    val sel = if (selected < 3) 3 else selected
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(6.dp)
     ) {
         options.forEach { (model, label) ->
-            val isSel = selected == model
+            val isSel = sel == model
             Box(
                 contentAlignment = Alignment.Center,
                 modifier = Modifier
@@ -983,10 +1352,15 @@ private fun FgModelButtons(selected: Int, onSelect: (Int) -> Unit) {
 }
 
 @Composable
-private fun FgMultiplierButtons(selected: Int, onSelect: (Int) -> Unit) {
+private fun FgMultiplierButtons(selected: Int, engine: String, onSelect: (Int) -> Unit) {
     val accent = MaterialTheme.colorScheme.primary
     val accentDim = LocalAccentDim.current
-    val options = listOf(0 to "Off", 2 to "2×", 3 to "3×", 4 to "4×")
+    // win-fg is a simple Off / On toggle for now (On = 2×); selecting On reveals the
+    // model + flow-scale controls (gated on multiplier > 0). lsfg-vk keeps 2×/3×/4×.
+    val options = if (engine == "bionic")
+        listOf(0 to "Off", 2 to "On")
+    else
+        listOf(0 to "Off", 2 to "2×", 3 to "3×", 4 to "4×")
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -2426,8 +2800,9 @@ private fun ControlsContent(state: XServerDrawerState) {
             Triple("Mouse", subTab == 1) { state.setControlsSubTab(1) },
             Triple("Vibration", subTab == 2) { state.setControlsSubTab(2) },
             Triple("Gyro", subTab == 3) { state.setControlsSubTab(3) },
+            Triple("Players", subTab == 4) { state.setControlsSubTab(4) },
         ),
-        perRow = 4
+        perRow = 3
     )
     Spacer(Modifier.height(8.dp))
 
@@ -2643,6 +3018,138 @@ private fun ControlsContent(state: XServerDrawerState) {
         // ── Gyro ── its own branch, deliberately OUTSIDE the vibration block above: the gyro section
         // is unrelated to rumble and must render whether or not vibration is switched on.
         3 -> GyroSection()
+
+        // ── Players ── manual per-device slot assignment (override when auto-assignment guesses wrong).
+        4 -> PlayersSection()
+    }
+}
+
+// ───── Controls > Players — manual per-device XInput slot assignment ─────
+// One row per detected input device (plus the on-screen pad), each with a Player 1-4 / Ignore / Auto
+// selector. Applied live (WinHandler.setDeviceSlotAssignment) and persisted per-container. Fixes the
+// case where auto-assignment hands Player 1 to the wrong device (e.g. an aux media-button board that
+// sorts first). The list is re-read from WinHandler each time the sub-tab opens, since devices
+// hot-plug. Reuses SectionHeader + the drawer's ExposedDropdownMenu pattern for visual consistency.
+@Composable
+private fun PlayersSection() {
+    val accent = MaterialTheme.colorScheme.primary
+    val rows by XServerDialogState.playerSlots.collectAsState()
+
+    // Devices hot-plug, so pull a fresh snapshot whenever this sub-tab is shown.
+    LaunchedEffect(Unit) { XServerDialogState.onPlayerSlotsRefresh?.run() }
+
+    Text("Player Slots", color = accent, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+    Spacer(Modifier.height(4.dp))
+    Text(
+        "Assign each device to a player, or ignore it. Applied immediately and saved for this container.",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant
+    )
+    Spacer(Modifier.height(8.dp))
+
+    if (rows.isEmpty()) {
+        Text(
+            "No input devices detected.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    } else {
+        rows.forEachIndexed { i, row ->
+            if (i > 0) HorizontalDivider(
+                color = MaterialTheme.colorScheme.outline,
+                modifier = Modifier.padding(vertical = 8.dp)
+            )
+            PlayerSlotRowItem(row)
+        }
+    }
+
+    // Manual recovery: rebuild the fake-input transport in place (no relaunch). Belt-and-suspenders
+    // for any input-loss — re-handshakes physical pads AND the on-screen controls. Refreshes the list
+    // afterwards so the rebuilt slot assignments show.
+    Spacer(Modifier.height(4.dp))
+    OutlinedButton(
+        onClick = {
+            XServerDialogState.onResetInput?.run()
+            XServerDialogState.onPlayerSlotsRefresh?.run()
+        },
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(10.dp),
+    ) { Text("Reset Input") }
+    Text(
+        "Re-handshake controllers & on-screen if input stops responding.",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant
+    )
+}
+
+// One device row: name + "currently Player N / unassigned" subtitle + a slot selector dropdown.
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun PlayerSlotRowItem(row: XServerDialogState.PlayerSlotRow) {
+    val accent = MaterialTheme.colorScheme.primary
+
+    // Selector option order: Auto, Player 1-4, Ignore. Value encodes the override the callback wants:
+    // SLOT_AUTO / 0..3 / SLOT_IGNORE — the exact contract of onPlayerSlotChanged.
+    val options = remember {
+        buildList {
+            add("Auto" to XServerDialogState.SLOT_AUTO)
+            for (i in 0 until 4) add("Player ${i + 1}" to i)
+            add("Ignore" to XServerDialogState.SLOT_IGNORE)
+        }
+    }
+    val selectedLabel = options.firstOrNull { it.second == row.override }?.first ?: "Auto"
+
+    val subtitle = when {
+        row.currentSlot >= 0 -> "Currently Player ${row.currentSlot + 1}"
+        row.override == XServerDialogState.SLOT_IGNORE -> "Ignored"
+        else -> "Unassigned"
+    }
+
+    var expanded by remember(row.descriptor, row.override) { mutableStateOf(false) }
+
+    Column(Modifier.fillMaxWidth()) {
+        Text(
+            row.displayName,
+            color = MaterialTheme.colorScheme.onSurface,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Medium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+        Text(
+            subtitle + if (row.isOnScreen) " · on-screen controls" else "",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(Modifier.height(4.dp))
+        ExposedDropdownMenuBox(expanded = expanded, onExpandedChange = { expanded = it }) {
+            OutlinedTextField(
+                value = selectedLabel,
+                onValueChange = {}, readOnly = true,
+                label = { Text("Slot", color = MaterialTheme.colorScheme.onSurfaceVariant) },
+                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+                modifier = Modifier.fillMaxWidth().menuAnchor(),
+                singleLine = true,
+            )
+            ExposedDropdownMenu(
+                expanded = expanded,
+                onDismissRequest = { expanded = false },
+                // #333 polish: match the shared outlined-menu-card look (outline + thin divider between
+                // options), same as the out-of-game Player Slots pickers.
+                modifier = Modifier.outlinedMenuCard()
+            ) {
+                options.forEachIndexed { index, option ->
+                    if (index > 0) MenuItemDivider()
+                    val (label, value) = option
+                    DropdownMenuItem(text = { Text(label) }, onClick = {
+                        expanded = false
+                        if (value != row.override) {
+                            XServerDialogState.onPlayerSlotChanged?.invoke(row.descriptor, value)
+                        }
+                    })
+                }
+            }
+        }
     }
 }
 
@@ -2951,51 +3458,19 @@ private fun AdvancedContent(state: XServerDrawerState) {
 
     Spacer(Modifier.height(14.dp))
 
-    // ── Performance ── non-root power-user toggles; always enabled, applied + persisted live.
-    // Each row shows whether it's a per-game override or inheriting the App Settings global default,
-    // with a "Reset to global" affordance (a per-game toggle is only saved when it differs).
+    // ── Performance ── one entry that opens the full dashboard dialog (Form C). This REPLACES the
+    // old inline toggle stack; every control still binds to the SAME XServerDrawerState flows and
+    // perf/* objects — now inside PerformanceDashboardDialog — so it is a pure drop-in swap.
     SectionHeader("Performance")
+    var showPerfDialog by remember { mutableStateOf(false) }
+    AdvancedActionRow(
+        "Performance",
+        R.drawable.ic_sidebar_performance,
+        subtitle = "CPU / GPU clocks, thermal, memory — live gauges, root-aware.",
+    ) { showPerfDialog = true }
 
-    val overridden by state.overriddenKeys.collectAsState()
-
-    val sustainedPerf by state.sustainedPerfMode.collectAsState()
-    ToggleRow("Sustained Performance Mode", sustainedPerf) {
-        state.setSustainedPerfMode(it); state.onSustainedPerfModeChange?.run()
-    }
-    PerfOverrideLine("sustainedPerfMode" in overridden) { state.onResetPerfKey?.accept("sustainedPerfMode") }
-
-    val priorityBoost by state.perfPriorityBoost.collectAsState()
-    ToggleRow("Thread Priority Boost", priorityBoost) {
-        state.setPerfPriorityBoost(it); state.onPerfPriorityBoostChange?.run()
-    }
-    PerfOverrideLine("perfPriorityBoost" in overridden) { state.onResetPerfKey?.accept("perfPriorityBoost") }
-
-    val bigCores by state.preferBigCores.collectAsState()
-    ToggleRow("Prefer Big Cores", bigCores) {
-        state.setPreferBigCores(it); state.onPreferBigCoresChange?.run()
-    }
-    PerfOverrideLine("preferBigCores" in overridden) { state.onResetPerfKey?.accept("preferBigCores") }
-
-    // GPU max-clock pin — sits with the no-root toggles because on Adreno it works without root
-    // (KGSL turbo); it upgrades to the sysfs pin automatically when root is granted.
-    GpuClockLockRow(state, overridden)
-
-    Spacer(Modifier.height(14.dp))
-    RootPerformanceSection(state)
-
-    // One-tap "reset every per-game override" — shown only when this game overrides something.
-    if (overridden.isNotEmpty()) {
-        Spacer(Modifier.height(8.dp))
-        Text(
-            "↺ Reset all game overrides to global",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.primary,
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(10.dp))
-                .clickable { state.onResetAllPerf?.run() }
-                .padding(horizontal = 12.dp, vertical = 8.dp)
-        )
+    if (showPerfDialog) {
+        PerformanceDashboardDialog(state) { showPerfDialog = false }
     }
 }
 
@@ -3114,7 +3589,16 @@ private fun RootPerformanceSection(state: XServerDrawerState) {
 
     if (granted) {
         Spacer(Modifier.height(6.dp))
-        AdvancedActionRow("Free memory now", R.drawable.icon_task_manager) { state.onFreeMemory?.run() }
+        // TIER 1 — light, honest label. Drops file caches; the system reclaims cache automatically.
+        AdvancedActionRow(
+            "Drop file caches", R.drawable.icon_task_manager,
+            subtitle = "Frees cached files. Little visible RAM; the system reclaims cache automatically.",
+        ) { state.onFreeMemory?.run() }
+        // TIER 2 — the real RAM free (root-only). `am kill-all` never touches the running game/system.
+        AdvancedActionRow(
+            "Deep clean (free app memory)", R.drawable.icon_task_manager,
+            subtitle = "Force-closes background apps to free real memory. Won't touch your game or system.",
+        ) { state.onDeepClean?.run() }
     }
 
     // Temperature watchdog (device-wide; shared control block, identical + synced with App Settings).
@@ -3142,7 +3626,12 @@ private fun RootToggleRow(
 }
 
 @Composable
-private fun AdvancedActionRow(label: String, iconRes: Int, onClick: () -> Unit) {
+private fun AdvancedActionRow(
+    label: String,
+    iconRes: Int,
+    subtitle: String? = null,
+    onClick: () -> Unit,
+) {
     val accent = MaterialTheme.colorScheme.primary
     Row(
         verticalAlignment = Alignment.CenterVertically,
@@ -3160,7 +3649,16 @@ private fun AdvancedActionRow(label: String, iconRes: Int, onClick: () -> Unit) 
             modifier = Modifier.size(20.dp),
         )
         Spacer(Modifier.width(10.dp))
-        Text(label, color = MaterialTheme.colorScheme.onSurface, modifier = Modifier.weight(1f))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(label, color = MaterialTheme.colorScheme.onSurface)
+            if (subtitle != null) {
+                Text(
+                    subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
     }
 }
 
@@ -3376,9 +3874,12 @@ private fun ProcessorAffinityDialog(
 ) {
     val coreCount = remember { Runtime.getRuntime().availableProcessors().coerceIn(1, 32) }
     val allMask = remember(coreCount) { if (coreCount >= 32) -1 else (1 shl coreCount) - 1 }
-    // Open pre-ticked to the process's live cores; if the guest reported nothing, default to all.
+    // Open pre-ticked to the cores the user actually chose. Prefer the live override cache (what the
+    // user last applied) over the guest's GetProcessAffinityMask readback, which is unreliable under
+    // wow64/FEX. Fall back to the guest value, then to all.
     var mask by remember(proc.pid) {
-        val m = proc.affinityMask and allMask
+        val stored = XServerDialogState.onTmQueryAffinity?.invoke(proc.pid) ?: -1
+        val m = (if (stored > 0) stored else proc.affinityMask) and allMask
         mutableStateOf(if (m == 0) allMask else m)
     }
     val allChecked = (mask and allMask) == allMask

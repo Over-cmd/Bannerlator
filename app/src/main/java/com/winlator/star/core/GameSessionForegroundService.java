@@ -9,7 +9,11 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
 import android.os.Build;
+import android.os.Handler;
 import android.os.IBinder;
+import android.os.Looper;
+import android.os.Process;
+import android.util.Log;
 
 import androidx.annotation.Nullable;
 import androidx.core.app.NotificationCompat;
@@ -31,6 +35,7 @@ import com.winlator.star.XServerDisplayActivity;
  * <p>See {@code docs/session-foreground-service-plan.md}.
  */
 public class GameSessionForegroundService extends Service {
+    private static final String TAG = "GameSessionFgService";
     private static final String EXTRA_LABEL = "session_label";
 
     /** Intent that starts the session-keepalive service. {@code label} = the game/shortcut name (nullable). */
@@ -45,9 +50,10 @@ public class GameSessionForegroundService extends Service {
         String label = intent != null ? intent.getStringExtra(EXTRA_LABEL) : null;
         createChannel();
         Notification notification = buildNotification(label);
-        // startForeground(id, notification, type) requires API 34 for the typed overload; mirror the
-        // gating used by the store/unpack foreground services (targetSdk 28 => classic FGS semantics).
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+        // The typed startForeground overload (with the declared foregroundServiceType) exists since
+        // API 29 — same gating as the store/download and unpack foreground services
+        // (DownloadForegroundService, UnpackService). targetSdk 28 => classic FGS semantics.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(XServerDisplayActivity.NOTIFICATION_ID, notification,
                     ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
         } else {
@@ -60,10 +66,15 @@ public class GameSessionForegroundService extends Service {
     private void createChannel() {
         NotificationManager nm = getSystemService(NotificationManager.class);
         if (nm == null) return;
-        if (nm.getNotificationChannel(XServerDisplayActivity.NOTIFICATION_CHANNEL_ID) == null) {
+        NotificationChannel existing = nm.getNotificationChannel(XServerDisplayActivity.NOTIFICATION_CHANNEL_ID);
+        if (existing != null && existing.getImportance() > NotificationManager.IMPORTANCE_LOW) {
+            nm.deleteNotificationChannel(XServerDisplayActivity.NOTIFICATION_CHANNEL_ID);
+            existing = null;
+        }
+        if (existing == null) {
             NotificationChannel channel = new NotificationChannel(
                     XServerDisplayActivity.NOTIFICATION_CHANNEL_ID, "Winlator",
-                    NotificationManager.IMPORTANCE_HIGH);
+                    NotificationManager.IMPORTANCE_LOW);
             channel.setDescription("Winlator XServer Messages");
             nm.createNotificationChannel(channel);
         }
@@ -81,11 +92,42 @@ public class GameSessionForegroundService extends Service {
                 .setSmallIcon(R.drawable.ic_stat_ab_gear_0011)
                 .setContentTitle("Winlator")
                 .setContentText(text)
-                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setPriority(NotificationCompat.PRIORITY_LOW)
                 .setContentIntent(pendingIntent)
                 .setOngoing(true)
                 .setAutoCancel(false)
                 .build();
+    }
+
+    @Override
+    public void onTaskRemoved(Intent rootIntent) {
+        super.onTaskRemoved(rootIntent);
+        Log.i(TAG, "Task removed (user swipe). Tearing down session and exiting process.");
+        // Recents-swipe destroys the activity WITHOUT running XServerDisplayActivity.exit(), so the
+        // wine session would otherwise survive as an orphan (its stale wineserver/process tree then
+        // fouls the next launch). Defensively tear it down here — the activity's own teardown, if it
+        // happens to be racing, is idempotent — then drop the notification, stop the service and
+        // exit the process, so swipe behaves like the pre-existing "close everything" flow. Mirrors
+        // WinNative's SessionKeepAliveService.onTaskRemoved().
+        new Handler(Looper.getMainLooper()).postDelayed(() -> {
+            try {
+                ProcessHelper.terminateAllWineProcessesAndWait(1500, true);
+            } catch (Throwable t) {
+                Log.w(TAG, "Defensive wine cleanup on task removal failed", t);
+            }
+            stopForeground(STOP_FOREGROUND_REMOVE);
+            stopSelf();
+            Process.killProcess(Process.myPid());
+        }, 1500L);
+    }
+
+    @Override
+    public void onDestroy() {
+        // Nothing to release here: the foreground notification is auto-removed when the service
+        // stops, and wine teardown is owned by XServerDisplayActivity.exit() (in-app exit) and
+        // onTaskRemoved() (recents-swipe). An extra sweep here would be unsafe — the system may
+        // destroy the service while a session is legitimately running in the background.
+        super.onDestroy();
     }
 
     @Nullable

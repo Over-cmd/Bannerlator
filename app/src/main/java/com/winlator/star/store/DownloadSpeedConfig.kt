@@ -21,9 +21,8 @@ package com.winlator.star.store
  * `maxDownloads = (cores * download).coerceAtLeast(1)`
  * `maxDecompress = (cores * decompress).coerceAtLeast(1)`
  *
- * [maxFileWrites] is NOT user-exposed (GameNative omits it and relies on the engine default).
- * Our positional 9-arg constructor requires the argument, so we tie it to [maxDecompress] to keep
- * the peak count of simultaneously-live large buffers bounded (~maxDecompress + maxFileWrites).
+ * The joshuatam fork engine disk-spools chunks and has no separate file-write stage, so
+ * `maxFileWrites` is gone — these two caps are now purely throughput knobs, not heap bounds.
  */
 class DownloadSpeedConfig(private val tier: Int) {
 
@@ -58,11 +57,4 @@ class DownloadSpeedConfig(private val tier: Int) {
 
     val maxDecompress: Int
         get() = (cpuCores * ratios.decompress).toInt().coerceAtLeast(1)
-
-    /**
-     * File-write stage concurrency. Tied to [maxDecompress] so peak live large buffers stay
-     * bounded. GameNative doesn't expose this; our positional ctor requires it, so we derive it.
-     */
-    val maxFileWrites: Int
-        get() = maxDecompress
 }

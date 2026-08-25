@@ -35,11 +35,42 @@ class BannerlatorApp : Application() {
             Log.w("BannerlatorApp", "crash reporter not installed", t)
         }
 
+        // Exit-reason auto-save (opt-in, off by default): if the previous process died — including a
+        // NATIVE crash that never reached logcat or the Java crash reporter — file a report now while
+        // the system still has the record. Off the main thread; a failure here must never block start.
+        try {
+            if (com.winlator.star.core.ExitReasonReporter.isSupported() &&
+                androidx.preference.PreferenceManager.getDefaultSharedPreferences(this)
+                    .getBoolean(com.winlator.star.core.ExitReasonReporter.PREF_AUTOSAVE, false)) {
+                Thread {
+                    try { com.winlator.star.core.ExitReasonReporter.captureToFile(this) }
+                    catch (t: Throwable) { Log.w("BannerlatorApp", "exit-reason autosave failed", t) }
+                }.start()
+            }
+        } catch (t: Throwable) {
+            Log.w("BannerlatorApp", "exit-reason autosave not scheduled", t)
+        }
+
+        // Reclaim stale update installers from the external cache. On a fresh cold start there is
+        // never a legitimate in-flight download, so clearing here is safe; it also recovers space
+        // left by pre-prune builds (their update never cleaned up) and sweeps OS-killed partials.
+        // Off the main thread; a failure here must never block start.
+        try {
+            Thread {
+                try { com.winlator.star.core.UpdateManager.pruneUpdateCacheAtStartup(this) }
+                catch (t: Throwable) { Log.w("BannerlatorApp", "update-cache prune failed", t) }
+            }.start()
+        } catch (t: Throwable) {
+            Log.w("BannerlatorApp", "update-cache prune not scheduled", t)
+        }
+
         try {
             // Restore-if-dirty + root probe + crash/shutdown safety nets, BEFORE anything touches a node.
             RootManager.onAppStartup(this)
             TempWatchdog.init(this)
             PerformanceSettings.init(this) // global defaults both perf surfaces bind to
+            // No-root Samsung Galaxy Performance SDK path (dormant off Samsung / without the SDK jar).
+            com.winlator.star.perf.galaxy.GalaxyPerfManager.initialize(this)
 
             // App-level background => revert privileged writes (a single game Activity stopping is
             // handled in XServerDisplayActivity; this catches process-wide backgrounding).

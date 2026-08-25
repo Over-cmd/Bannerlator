@@ -21,9 +21,12 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
@@ -32,7 +35,6 @@ import androidx.compose.ui.platform.LocalContext
 import com.winlator.star.core.AppOrientation
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -55,6 +57,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.graphics.ColorUtils
+import kotlin.math.roundToInt
 import com.winlator.star.ui.components.ColorPicker
 import com.winlator.star.ui.theme.AppThemeState
 import com.winlator.star.ui.theme.CUSTOM_PRESET_INDEX
@@ -181,9 +184,92 @@ fun AppearanceScreen() {
             modifier = Modifier.padding(top = 4.dp),
         )
 
+        Spacer(Modifier.height(4.dp))
+        Box(Modifier.fillMaxWidth().height(1.dp).background(Divider))
+
+        // ── Interface scale ──────────────────────────────────────────────
+        SectionLabel("Interface Scale")
+        Text(
+            text = "Scales the app's own UI — games keep their own size.",
+            color = OnSurfaceVariant,
+            fontSize = 12.sp,
+        )
+        Spacer(Modifier.height(6.dp))
+        val uiScale by AppThemeState.uiScale.collectAsState()
+        val fontScale by AppThemeState.fontScale.collectAsState()
+        ScaleSlider(
+            label = "UI Scale",
+            value = uiScale,
+            onValueChange = { AppThemeState.setUiScale(it) },
+        )
+        ScaleSlider(
+            label = "Font Size",
+            value = fontScale,
+            onValueChange = { AppThemeState.setFontScale(it) },
+        )
+
         Spacer(Modifier.height(16.dp))
     }
 }
+
+/** Percentage slider (0.5×–1.5×) for the interface-scale prefs, flanked by −/+ steppers
+ *  that nudge one 5% tick at a time. Kept local since AppearanceScreen has no shared slider. */
+@Composable
+private fun ScaleSlider(
+    label: String,
+    value: Float,
+    onValueChange: (Float) -> Unit,
+) {
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = label,
+                modifier = Modifier.weight(1f),
+                color = OnSurfaceVariant,
+                fontSize = 14.sp,
+            )
+            Text(
+                text = "${(value * 100).roundToInt()}%",
+                color = OnSurface,
+                fontWeight = FontWeight.Medium,
+                fontSize = 14.sp,
+            )
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            IconButton(
+                onClick = { onValueChange((value - SCALE_STEP).coerceIn(SCALE_MIN, SCALE_MAX)) },
+                enabled = value > SCALE_MIN,
+            ) {
+                Icon(Icons.Filled.Remove, contentDescription = "Decrease $label", tint = OnSurface)
+            }
+            Slider(
+                value = value,
+                onValueChange = onValueChange,
+                valueRange = SCALE_MIN..SCALE_MAX,
+                modifier = Modifier.weight(1f),
+            )
+            IconButton(
+                onClick = { onValueChange((value + SCALE_STEP).coerceIn(SCALE_MIN, SCALE_MAX)) },
+                enabled = value < SCALE_MAX,
+            ) {
+                Icon(Icons.Filled.Add, contentDescription = "Increase $label", tint = OnSurface)
+            }
+        }
+    }
+}
+
+private const val SCALE_MIN = 0.5f
+private const val SCALE_MAX = 1.5f
+private const val SCALE_STEP = 0.05f
 
 /** One labelled switch. Three of these now, so they share a shape rather than drift apart. */
 @Composable

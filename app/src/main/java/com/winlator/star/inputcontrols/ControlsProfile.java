@@ -124,9 +124,38 @@ public class ControlsProfile implements Comparable<ControlsProfile> {
         return gamepadState;
     }
 
+    // #333: reserved id for the "Default / Any Controller" binding template — a bindings-only entry
+    // (not tied to a real device) whose mappings newly-added controllers inherit, so a fresh controller
+    // is never blank (the reporter's issue: a new pad came up with 0 bindings).
+    public static final String DEFAULT_CONTROLLER_ID = "__default__";
+
+    /** #333: the Default/Any-Controller template entry, created on demand. Editable via the bindings
+     *  editor (controller_id = DEFAULT_CONTROLLER_ID) like any other controller. */
+    public ExternalController getOrCreateDefaultController() {
+        ExternalController c = getController(DEFAULT_CONTROLLER_ID);
+        if (c == null) {
+            c = new ExternalController();
+            c.setId(DEFAULT_CONTROLLER_ID);
+            c.setName("Default / Any Controller");
+            controllers.add(c);
+            controllersLoaded = true;
+        }
+        return c;
+    }
+
     public ExternalController addController(String id) {
         ExternalController controller = getController(id);
-        if (controller == null) controllers.add(controller = ExternalController.getController(id));
+        if (controller != null) { controllersLoaded = true; return controller; }
+        // The Default/Any-Controller template is a bindings-only entry, not a real device lookup.
+        if (DEFAULT_CONTROLLER_ID.equals(id)) return getOrCreateDefaultController();
+        controller = ExternalController.getController(id);
+        if (controller != null) {
+            // #333: seed a brand-new controller from the Default/Any-Controller template so it inherits
+            // the shared mappings instead of coming up empty.
+            ExternalController template = getController(DEFAULT_CONTROLLER_ID);
+            if (template != null && template.getControllerBindingCount() > 0) controller.copyBindingsFrom(template);
+            controllers.add(controller);
+        }
         controllersLoaded = true;
         return controller;
     }
@@ -157,6 +186,22 @@ public class ControlsProfile implements Comparable<ControlsProfile> {
             for (ExternalController controller : controllers) {
                 if (controller.getId().equals(descriptor)) {
                     return controller;
+                }
+            }
+            // #333 runtime auto-inherit: an unconfigured real controller inherits the Default/Any-
+            // Controller template so it isn't blank in-game (the reporter's issue). Only when a
+            // non-empty template exists, and only for real game controllers (isGameController rejects
+            // uinput-fpc etc.). Created once — subsequent lookups match above. Not persisted here (the
+            // seed re-applies each session; an explicit edit in the bindings editor saves it).
+            if (descriptor != null && ExternalController.isGameController(device)) {
+                ExternalController template = getController(DEFAULT_CONTROLLER_ID);
+                if (template != null && template.getControllerBindingCount() > 0) {
+                    ExternalController seeded = new ExternalController();
+                    seeded.setId(descriptor);
+                    seeded.setName(device.getName());
+                    seeded.copyBindingsFrom(template);
+                    controllers.add(seeded);
+                    return seeded;
                 }
             }
         }

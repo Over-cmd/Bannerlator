@@ -51,6 +51,24 @@ object SteamDepotDownloader {
      *  (as a resume) before the failure is surfaced to the user. Covers the ~1h CM-logoff case. */
     private const val MAX_SESSION_RETRIES = 2
 
+    /**
+     * Overlapping-depot fix. A few Steam apps ship two+ content depots that carry the SAME file
+     * PATHS but DIFFERENT content — one maintained, one a stale leftover. JavaSteam's DepotDownloader
+     * de-dupes files by path across an app's depots; the first-processed depot wins, so a stale twin
+     * can pre-empt the maintained file and land an OUTDATED copy on disk (the engine then reports
+     * "downloaded 0 files" for the maintained depot, hiding it).
+     *
+     * Map of appId → depotIds to DROP from the download, so only the maintained depot is pulled
+     * (mirrors what GameNative fetches). Verified case:
+     *   993090 Lossless Scaling → drop 993092: its Lossless.dll lags depot 993091 by a build
+     *   (993091 got the +1.99 MiB update in build 19476814 → 7.17 MiB; 993092 still ships the older
+     *   5.18 MiB DLL). Keeping 993092 makes lsfg-vk run an outdated frame-gen DLL. 993091 alone is a
+     *   complete install (315 MB), so dropping the twin loses nothing.
+     */
+    private val STALE_DUPLICATE_DEPOTS: Map<Int, Set<Int>> = mapOf(
+        993090 to setOf(993092),
+    )
+
     // -------------------------------------------------------------------------
     // Active download tracking — used by UI to detect stale DL_DOWNLOADING rows
     // -------------------------------------------------------------------------
@@ -207,7 +225,7 @@ object SteamDepotDownloader {
     /**
      * Start a fresh install. Returns a DownloadControl with cancel + pause Runnables.
      * @param speedTier download-speed tier key (8=Slow / 16=Medium / 24=Fast / 32=Blazing);
-     *   fed to [DownloadSpeedConfig] to derive maxDownloads/maxDecompress/maxFileWrites.
+     *   fed to [DownloadSpeedConfig] to derive maxDownloads/maxDecompress.
      * @param debugLog when true (or in a debug build) writes the verbose steam_debug.txt firehose +
      *   JavaSteam-internal bridge for this download. Off = logcat-only; failures still leave a trace.
      */
@@ -441,30 +459,31 @@ object SteamDepotDownloader {
             repo.emit("DownloadProgress:$appId:$iDone:$iTotal:$dDone:$dTotal:$etaSeconds:$speedBps")
         }
 
-        // Derive the three pipeline-stage caps from CPU cores × the selected tier's ratios
-        // (see DownloadSpeedConfig, a faithful port of GameNative on this same engine). The 7th
-        // ctor arg is maxFileWrites (NOT progressUpdateInterval — that's a hardcoded 500L inside
-        // the engine); passing a large value there let up to ~100 chunks hold multi-MB decompressed
-        // buffers at once and OOM'd the 256 MB heap. maxDownloads stays high (network parallelism is
-        // cheap on heap); decompress + file-write are the heap drivers and are kept bounded.
+        // Derive the two pipeline-stage caps from CPU cores × the selected tier's ratios
+        // (see DownloadSpeedConfig). On the joshuatam fork engine, chunk buffers are disk-spooled
+        // (temp files) rather than held in memory, so heap peak no longer scales with game size and
+        // these are purely throughput knobs — the old maxFileWrites stage was removed upstream.
         val speedConfig   = DownloadSpeedConfig(speedTier)
         val cores         = speedConfig.cpuCores
         val maxDownloads  = speedConfig.maxDownloads
         val maxDecompress = speedConfig.maxDecompress
-        val maxFileWrites = speedConfig.maxFileWrites
         dlog("Constructing DepotDownloader(tier=$speedTier, cores=$cores, maxDownloads=$maxDownloads, " +
-                "maxDecompress=$maxDecompress, maxFileWrites=$maxFileWrites, androidEmulation=true, debug=$verbose)")
+                "maxDecompress=$maxDecompress, androidEmulation=true, skipLargeFileAllocation=true, debug=$verbose)")
         val downloader = try {
+            // Named args: the fork removed the maxFileWrites ctor arg (it no longer has a separate
+            // file-write stage — decompress+write are combined), so the positional slots shifted.
             DepotDownloader(
-                steamClient,
-                licenses,
-                verbose,       // debug (gated: BuildConfig.DEBUG || user "Log debug session")
-                false,         // useLanCache
-                maxDownloads,  // maxDownloads (cores × tier download ratio)
-                maxDecompress, // maxDecompress (cores × tier decompress ratio — bounds the big buffers)
-                maxFileWrites, // maxFileWrites (tied to maxDecompress; was 100, mislabeled "progressUpdateInterval")
-                true,          // androidEmulation
-                null,          // parentJob
+                steamClient = steamClient,
+                licenses = licenses,
+                debug = verbose,                 // gated: BuildConfig.DEBUG || user "Log debug session"
+                useLanCache = false,
+                maxDownloads = maxDownloads,      // cores × tier download ratio
+                maxDecompress = maxDecompress,    // cores × tier decompress ratio
+                androidEmulation = true,
+                parentJob = null,
+                // #408: the fork disk-spools chunks so heap no longer scales with game size; this
+                // flag also skips the multi-GB per-file pre-allocation that HITMAN's large files tripped.
+                skipLargeFileAllocation = true,
             )
         } catch (e: Exception) {
             dlog("FAIL: DepotDownloader constructor threw")
@@ -649,12 +668,38 @@ object SteamDepotDownloader {
                     // True size known → authoritative 90% check. 313830 → 130/130 passes; a real skip
                     // (HL2 405 MB of 10.66 GB) still fails.
                     if (finalInstall < (realExpected * 90L / 100L)) {
-                        dlog("INCOMPLETE: only ${fmtSize(finalInstall)} of ${fmtSize(realExpected)} " +
-                                "(manifest-true) on disk (<90%) — refusing to mark installed")
-                        emitFailed(appId, "Download incomplete (${fmtSize(finalInstall)}/${fmtSize(realExpected)}) — please retry")
-                        return
+                        // Shortfall vs the SUMMED manifest-true size. Two very different causes:
+                        //   (a) genuine truncation — a dominant depot was skipped (stale .DepotDownloader
+                        //       state), its files never landing on disk (HL2: 405 MB of an 8.4 GB depot).
+                        //   (b) OVERLAPPING DEPOTS — the app ships two+ depots with identical files, so
+                        //       the engine de-dupes and downloads each unique file ONCE (Lossless Scaling
+                        //       993090: depots 993091 ≈ 993092, so 993091 downloads 0 files / fires no
+                        //       onFileCompleted). sum(realSize) then DOUBLE-COUNTS the shared content and
+                        //       a fully complete install can never reach 90% of that inflated total (also
+                        //       why its progress bar caps ~87%).
+                        // Size totals alone can't tell (a) from (b). Decide on the ACTUAL on-disk
+                        // footprint: overlapping depots collapse to ~one copy on disk, so the install
+                        // still reaches ~the LARGEST single kept depot; a dominant-depot skip leaves it
+                        // far below even that. Require no zero-byte files too — a pre-allocated-but-
+                        // unfilled file is the fingerprint of a real skip, never of clean de-duplication.
+                        val onDisk = dirSizeBytes(installDir)
+                        val largestKept = keptRows.maxOfOrNull { it.realSizeBytes } ?: 0L
+                        val hasEmpty = hasZeroByteFile(installDir)
+                        val overlapComplete = !hasEmpty && largestKept > 0L &&
+                                onDisk >= (largestKept * 90L / 100L)
+                        if (!overlapComplete) {
+                            dlog("INCOMPLETE: ${fmtSize(finalInstall)} of ${fmtSize(realExpected)} manifest-true " +
+                                    "(<90%); on-disk ${fmtSize(onDisk)} vs largest depot ${fmtSize(largestKept)}, " +
+                                    "emptyFiles=$hasEmpty — depot content missing, refusing to mark installed")
+                            emitFailed(appId, "Download incomplete (${fmtSize(finalInstall)}/${fmtSize(realExpected)}) — please retry")
+                            return
+                        }
+                        dlog("Complete: ${fmtSize(finalInstall)} < 90% of summed manifest-true ${fmtSize(realExpected)}, " +
+                                "but on-disk ${fmtSize(onDisk)} ≥ 90% of largest depot ${fmtSize(largestKept)} with no empty " +
+                                "files — overlapping/de-duplicated depots, trusting completion")
+                    } else {
+                        dlog("Complete: ${fmtSize(finalInstall)} of ${fmtSize(realExpected)} manifest-true (≥90%)")
                     }
-                    dlog("Complete: ${fmtSize(finalInstall)} of ${fmtSize(realExpected)} manifest-true (≥90%)")
                 } else {
                     // Real size unresolved → PICS guard, RELAXED (never stricter): a genuine truncation
                     // skips a whole depot, showing up as a KEPT depot with zero bytes delivered. If every
@@ -709,19 +754,42 @@ object SteamDepotDownloader {
             }
         })
 
+        // Beta-branch selector: the branch the user chose on the detail page (default "public") plus
+        // the verified access code for a password-protected branch (null for public / unlocked-none).
+        // Ported from GameNative (GPL-3.0): SteamService AppItem(branch, branchPassword) wiring.
+        val selectedBranch = try { SteamPrefs.getSelectedBranch(appId) } catch (_: Throwable) { "public" }
+        val branchPassword: String? = if (selectedBranch != "public") {
+            try { db.getUnlockedBranchPassword(appId, selectedBranch) } catch (_: Throwable) { null }
+        } else null
+
         // DLC picker: DLC the user opted out of (appId == depot id). When non-empty we hand the
         // engine an EXPLICIT depot list (our filtered selection minus the excluded DLC) instead of
         // letting it auto-resolve — so the unchecked DLC simply isn't downloaded. Default (nothing
         // excluded) → empty lists → engine auto-resolves exactly as before.
         val excludedDlc = try { SteamPrefs.getExcludedDlc(appId) } catch (_: Throwable) { emptySet() }
+        // Also drop this app's known stale-duplicate depots (see STALE_DUPLICATE_DEPOTS) so the engine
+        // can't de-dupe a maintained file down to its outdated twin (e.g. Lossless Scaling's 993092).
+        val staleDupeDepots = STALE_DUPLICATE_DEPOTS[appId].orEmpty()
+        val dropDepots = excludedDlc + staleDupeDepots
         val explicitDepots: List<Int>
         val explicitManifests: List<Long>
-        if (excludedDlc.isNotEmpty()) {
-            val kept = try { db.getDepotManifests(appId).filter { it.depotId !in excludedDlc && it.manifestId != 0L } }
+        // The explicit manifest gids come from our PUBLIC-branch DB rows, so they only apply to the
+        // public branch. For any other branch, hand the engine EMPTY lists so it resolves that
+        // branch's own manifests (given AppItem.branch/branchPassword). The DLC opt-out and the
+        // stale-duplicate drop therefore only take effect on the public branch — matching where this
+        // manifest data is valid (and the branch these overlapping depots occur on).
+        if (dropDepots.isNotEmpty() && selectedBranch == "public") {
+            val kept = try { db.getDepotManifests(appId).filter { it.depotId !in dropDepots && it.manifestId != 0L } }
                        catch (_: Throwable) { emptyList() }
             explicitDepots   = kept.map { it.depotId }
             explicitManifests = kept.map { it.manifestId }
-            dlog("DLC opt-out: excluding ${excludedDlc.joinToString(",")} → downloading ${explicitDepots.size} depot(s) explicitly")
+            if (staleDupeDepots.isNotEmpty()) {
+                dlog("Stale-duplicate depot drop for app $appId: excluding ${staleDupeDepots.joinToString(",")}" +
+                     (if (excludedDlc.isNotEmpty()) " + DLC ${excludedDlc.joinToString(",")}" else "") +
+                     " → downloading ${explicitDepots.size} depot(s) explicitly")
+            } else {
+                dlog("DLC opt-out: excluding ${excludedDlc.joinToString(",")} → downloading ${explicitDepots.size} depot(s) explicitly")
+            }
         } else {
             explicitDepots = emptyList()
             explicitManifests = emptyList()
@@ -730,7 +798,8 @@ object SteamDepotDownloader {
         val item = AppItem(
             appId = appId,
             installDirectory = installDir.absolutePath,
-            branch = "public",
+            branch = selectedBranch,
+            branchPassword = branchPassword,
             // Explicitly request Windows depots — don't let Util.getSteamOS() guess,
             // since androidEmulation only works if IS_OS_ANDROID is true at runtime.
             os = "windows",
@@ -741,7 +810,9 @@ object SteamDepotDownloader {
             depot = explicitDepots,
             manifest = explicitManifests,
         )
-        dlog("Adding AppItem: appId=${item.appId} branch=${item.branch} dir=${item.installDirectory}" +
+        dlog("Adding AppItem: appId=${item.appId} branch=${item.branch}" +
+             (if (branchPassword != null) " (pwd-protected)" else "") +
+             " dir=${item.installDirectory}" +
              if (explicitDepots.isNotEmpty()) " depots=${explicitDepots.size}(explicit)" else "")
         downloader.add(item)
         downloader.finishAdding()
@@ -881,4 +952,19 @@ object SteamDepotDownloader {
         bytes >= 1_048_576L     -> "%.1f MB".format(bytes / 1_048_576.0)
         else                    -> "%.0f KB".format(bytes / 1024.0)
     }
+
+    /** Recursive on-disk byte total for a completed install (real footprint, dedup already applied
+     *  by the filesystem — used by the false-complete guard's overlapping-depot branch). */
+    private fun dirSizeBytes(f: File): Long =
+        when {
+            !f.exists() -> 0L
+            f.isFile    -> f.length()
+            else        -> f.listFiles()?.sumOf { dirSizeBytes(it) } ?: 0L
+        }
+
+    /** True if any regular file under [root] is zero-length — the signature of a pre-allocated but
+     *  unfilled file left by a genuinely-skipped/truncated depot (distinguishes a real skip from a
+     *  legitimately de-duplicated overlapping depot, whose files are all present and non-empty). */
+    private fun hasZeroByteFile(root: File): Boolean =
+        root.walkTopDown().any { it.isFile && it.length() == 0L }
 }

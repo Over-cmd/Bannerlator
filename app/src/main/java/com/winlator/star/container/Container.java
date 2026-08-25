@@ -36,12 +36,12 @@ public class Container {
      * instead of {@link #DEFAULT_GRAPHICS_DRIVER}, which targets Adreno/Turnip.
      */
     public static final String GRAPHICS_DRIVER_GAMENATIVE = "wrapper-gamenative";
-    public static final String DEFAULT_AUDIO_DRIVER = "alsa";
+    public static final String DEFAULT_AUDIO_DRIVER = "pulseaudio";
     public static final String DEFAULT_EMULATOR = "FEXCore";
     public static final String DEFAULT_DXWRAPPER = "dxvk+vkd3d";
     public static final String DEFAULT_DXWRAPPERCONFIG = "version=" + DefaultVersion.getVegasDefault() + ",framerate=0,async=0,asyncCache=0" + ",vkd3dVersion=2.8" + ",vkd3dLevel=12_1" + ",ddrawrapper=" + Container.DEFAULT_DDRAWRAPPER + ",csmt=3" + ",gpuName=NVIDIA GeForce GTX 480" + ",videoMemorySize=2048" + ",strict_shader_math=1" + ",OffscreenRenderingMode=fbo" + ",renderer=gl";
     public static final String DEFAULT_GRAPHICSDRIVERCONFIG =
-            "vulkanVersion=1.4" + ";version=" + ";blacklistedExtensions=" + ";maxDeviceMemory=0" + ";presentMode=mailbox" + ";syncFrame=0" + ";disablePresentWait=0" + ";resourceType=auto" + ";bcnEmulation=auto" + ";bcnEmulationType=compute" + ";bcnEmulationCache=0" + ";gpuName=Device" + ";fdDevFeatures=0";
+            "vulkanVersion=1.3" + ";version=" + ";blacklistedExtensions=" + ";maxDeviceMemory=0" + ";presentMode=mailbox" + ";syncFrame=0" + ";disablePresentWait=0" + ";resourceType=auto" + ";bcnEmulation=auto" + ";bcnEmulationType=compute" + ";bcnEmulationCache=0" + ";gpuName=Device" + ";fdDevFeatures=0";
     public static final String DEFAULT_DDRAWRAPPER = "none";
     /**
      * Canonical default HUD scale (percent). Referenced by every overlay view and both HUD config
@@ -76,6 +76,10 @@ public class Container {
     private String wineVersion = WineInfo.MAIN_WINE_VERSION.identifier();
     private boolean showFPS;
     private boolean rendererNative = false;
+    // Which native backend a Native-Rendering Vulkan container routes to: "auto"/"asr" -> hardened
+    // SurfaceFlinger (ASR) renderer when eligible (default reroute); "flip" -> force the leaner inline
+    // Vulkan FLIP direct-scanout (skip the reroute). Default "auto" preserves existing behaviour.
+    private String rendererNativeBackend = "auto";
     private String rendererPresentMode = "fifo";
     private String rendererDriverId = "system";
     private int rendererFilterMode = 0;
@@ -567,6 +571,63 @@ public class Container {
         putExtra("vibrationIntensity", String.valueOf(intensity));
     }
 
+    // Manual controller slot overrides (in-game "Players" sub-tab), per-container. Stored as a raw
+    // JSON object string mapping a stable device descriptor -> desired slot: 0..3 pins the device to
+    // that XInput player slot, WinHandler.SLOT_IGNORE (-2) means "never take a slot", and a missing
+    // key = auto (FCFS). The on-screen pad uses the WinHandler.OSC_DESCRIPTOR sentinel as its key.
+    // Kept as an opaque string here (same discipline as getFPSCounterConfig): XServerDisplayActivity
+    // parses it into a Map for WinHandler.setManualSlotOverrides and writes edits back through here.
+    public String getControllerSlotOverrides() {
+        return getExtra("controllerSlotOverrides", "{}");
+    }
+
+    public void setControllerSlotOverrides(String json) {
+        putExtra("controllerSlotOverrides", json == null || json.isEmpty() ? "{}" : json);
+    }
+
+    // On-screen-controls vs physical-pad priority, per-container. Mirrors the WinHandler.ON_SCREEN_MODE_*
+    // constants (duplicated here for the same reason VIBRATION_MODE_* is — the editor VM shouldn't import
+    // winhandler). KEEP (default) = the historical behavior: the on-screen pad keeps whatever slot it
+    // holds, so a pad hot-plugged mid-game lands on the next free player. YIELD = a pad connecting while
+    // the on-screen pad holds Player 1 promotes to Player 1 (on-screen steps up to the next free slot).
+    // SHARE = that pad co-occupies the on-screen pad's slot (both drive that player, merged). Default is
+    // KEEP so existing containers behave exactly as before. Resolved (shortcut-override-else-container)
+    // and pushed to WinHandler at launch (XServerDisplayActivity.setupUI).
+    public static final int ON_SCREEN_MODE_KEEP = 0;
+    public static final int ON_SCREEN_MODE_YIELD = 1;
+    public static final int ON_SCREEN_MODE_SHARE = 2;
+    public static final int ON_SCREEN_MODE_DEFAULT = ON_SCREEN_MODE_KEEP;
+
+    public int getOnScreenControllerMode() {
+        try {
+            int m = Integer.parseInt(getExtra("onScreenControllerMode", String.valueOf(ON_SCREEN_MODE_DEFAULT)));
+            return (m < ON_SCREEN_MODE_KEEP || m > ON_SCREEN_MODE_SHARE) ? ON_SCREEN_MODE_DEFAULT : m;
+        }
+        catch (NumberFormatException e) {
+            return ON_SCREEN_MODE_DEFAULT;
+        }
+    }
+
+    public void setOnScreenControllerMode(int mode) {
+        putExtra("onScreenControllerMode", String.valueOf(mode));
+    }
+
+    // Auto-hide the on-screen touch controls when a physical controller takes over the on-screen pad's
+    // player slot (issue #333). Per-container, resolved shortcut-override-else-container and applied live
+    // at launch + on hot-plug. The container-level fallback is FALSE so existing containers are unchanged;
+    // a NEW container is seeded from the app-drawer global (GlobalControllerPrefs, default ON) at creation,
+    // exactly like onScreenControllerMode above. Stored as "1"/"0" in extraData (matches the shortcut
+    // "exclusiveXInput"/"inputType" extra convention that XServerDisplayActivity reads with equals("1")).
+    public static final boolean AUTO_HIDE_CONTROLS_ON_PAD_DEFAULT = false;
+
+    public boolean isAutoHideControlsOnPad() {
+        return getExtra("autoHideControlsOnPad", AUTO_HIDE_CONTROLS_ON_PAD_DEFAULT ? "1" : "0").equals("1");
+    }
+
+    public void setAutoHideControlsOnPad(boolean enabled) {
+        putExtra("autoHideControlsOnPad", enabled ? "1" : "0");
+    }
+
     // Gyro (motion aim), per-container. Mirrors the WinHandler.GYRO_* constants so the editor VM and
     // the shortcut screen can talk about targets/activators without importing winhandler (same reason
     // the VIBRATION_MODE_* values are duplicated above). Enabled/target/sensitivity/activator/invert
@@ -923,6 +984,8 @@ public class Container {
 
     public boolean isRendererNative() { return rendererNative; }
     public void setRendererNative(boolean v) { this.rendererNative = v; }
+    public String getRendererNativeBackend() { return (rendererNativeBackend == null || rendererNativeBackend.isEmpty()) ? "auto" : rendererNativeBackend; }
+    public void setRendererNativeBackend(String v) { this.rendererNativeBackend = (v == null || v.isEmpty()) ? "auto" : v; }
     public String getRendererPresentMode() { return rendererPresentMode; }
     public void setRendererPresentMode(String v) { this.rendererPresentMode = v != null ? v : "fifo"; }
     public String getRendererDriverId() { return rendererDriverId; }
@@ -1009,6 +1072,7 @@ public class Container {
             data.put("exclusiveXInput", exclusiveXInput);
             data.put("renderer", renderer);
             data.put("rendererNative", rendererNative);
+            data.put("rendererNativeBackend", rendererNativeBackend);
             data.put("rendererPresentMode", rendererPresentMode);
             if (!rendererDriverId.isEmpty()) data.put("rendererDriverId", rendererDriverId);
             if (rendererFilterMode != 0) data.put("rendererFilterMode", rendererFilterMode);
@@ -1137,6 +1201,9 @@ public class Container {
                     break;
                 case "rendererNative" :
                     rendererNative = data.getBoolean(key);
+                    break;
+                case "rendererNativeBackend" :
+                    rendererNativeBackend = data.getString(key);
                     break;
                 case "rendererPresentMode" :
                     rendererPresentMode = data.getString(key);

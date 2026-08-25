@@ -90,6 +90,7 @@ class EpicGameDetailActivity : ComponentActivity() {
     private var installBtnVisible by mutableStateOf(true)
     private var setExeBtnVisible by mutableStateOf(false)
     private var uninstallBtnVisible by mutableStateOf(false)
+    private var usesEos by mutableStateOf(false)
     private var progressVisible by mutableStateOf(false)
     private var progressValue by mutableIntStateOf(0)
     private var progressLabelText by mutableStateOf("")
@@ -100,6 +101,9 @@ class EpicGameDetailActivity : ComponentActivity() {
     private var updateStatusText by mutableStateOf("")
     private var checkUpdatesEnabled by mutableStateOf(true)
     private var updateBtnVisible by mutableStateOf(false)
+
+    private var verifyStatusText by mutableStateOf("")
+    private var verifyEnabled by mutableStateOf(true)
 
     private var dlcJson by mutableStateOf<String?>(null)
 
@@ -137,6 +141,10 @@ class EpicGameDetailActivity : ComponentActivity() {
         if (savedDir != null) {
             cloudSaveDirText = shortenPath(savedDir)
             cloudSaveDirColor = 0xFFCCCCCC.toInt()
+        } else {
+            // No manual pick — show the auto-resolved folder so this surface agrees
+            // with the Save Manager Epic tab (both use EpicCloudSavePaths).
+            refreshResolvedSaveDirLabel()
         }
 
         dlcJson = catalogItemId?.let { prefs!!.getString("epic_dlcs_$it", null) }
@@ -157,6 +165,7 @@ class EpicGameDetailActivity : ComponentActivity() {
                     installBtnVisible = installBtnVisible,
                     setExeBtnVisible = setExeBtnVisible,
                     uninstallBtnVisible = uninstallBtnVisible,
+                    usesEos = usesEos,
                     progressVisible = progressVisible,
                     progressValue = progressValue,
                     progressLabelText = progressLabelText,
@@ -165,6 +174,8 @@ class EpicGameDetailActivity : ComponentActivity() {
                     updateStatusText = updateStatusText,
                     checkUpdatesEnabled = checkUpdatesEnabled,
                     updateBtnVisible = updateBtnVisible,
+                    verifyStatusText = verifyStatusText,
+                    verifyEnabled = verifyEnabled,
                     dlcJson = dlcJson,
                     cloudSaveDirText = cloudSaveDirText,
                     cloudSaveStatusText = cloudSaveStatusText,
@@ -181,6 +192,7 @@ class EpicGameDetailActivity : ComponentActivity() {
                         updateStatusText = "Updating\u2026"
                         startInstallInternal()
                     },
+                    onVerifyRepair = { doVerifyRepair() },
                     onDlcInstall = { dlcApp, dlcNs, dlcCat, dlcTitle ->
                         dlcInstall(dlcApp, dlcNs, dlcCat, dlcTitle)
                     },
@@ -275,11 +287,39 @@ class EpicGameDetailActivity : ComponentActivity() {
         uninstallBtnVisible = dir != null
 
         if (!installed) installBtnText = "Install"
+
+        // EOS badge: reflect cached flag now; lazily scan (upgraders / pre-feature installs) and
+        // refresh the state when the background walk finishes. Never scans on the render path.
+        val an = appName
+        if (an != null && installed) {
+            val ctx = applicationContext
+            usesEos = EpicEosDetector.isEosCached(ctx, an)
+            val scanRoot = dir?.let { File(it) }
+            EpicEosDetector.scanIfNeeded(ctx, an, scanRoot) {
+                runOnUiThread { usesEos = EpicEosDetector.isEosCached(ctx, an) }
+            }
+        } else {
+            usesEos = false
+        }
     }
 
     private fun onInstallClicked() {
         if (installBtnText == "Cancel") {
-            cancelDownload?.run(); cancelDownload = null
+            // Ask what to do with the partial download before cancelling.
+            AlertDialog.Builder(this)
+                .setTitle("Cancel download?")
+                .setMessage("Keep the partial download so you can resume later, or delete all " +
+                        "downloaded files for this game?")
+                .setPositiveButton("Keep files") { _, _ ->
+                    appName?.let { EpicCancelPolicy.setDeleteOnCancel(it, false) }
+                    cancelDownload?.run(); cancelDownload = null
+                }
+                .setNegativeButton("Delete files") { _, _ ->
+                    appName?.let { EpicCancelPolicy.setDeleteOnCancel(it, true) }
+                    cancelDownload?.run(); cancelDownload = null
+                }
+                .setNeutralButton("Keep downloading", null)
+                .show()
             return
         }
         startInstallInternal()
@@ -287,6 +327,7 @@ class EpicGameDetailActivity : ComponentActivity() {
 
     private fun startInstallInternal() {
         val an = appName ?: return
+        EpicCancelPolicy.clear(an)   // fresh download → default to keep-on-cancel until the dialog says otherwise
         installBtnText = "Cancel"
             installBtnColor = 0xFFCC3333.toInt()
         progressVisible = true
@@ -295,9 +336,9 @@ class EpicGameDetailActivity : ComponentActivity() {
         setExeBtnVisible = false
         progressLabelText = ""
 
-        // WEAK CANCEL (Epic-only): install() takes no cancel checker, so flipping this flag can't
-        // abort mid-download \u2014 it's only read AFTER install() returns, at which point the finished
-        // download is discarded. The registry row/notification clear then. Honest, best-effort.
+        // CANCEL: install() now polls this flag inside its parallel chunk pool + assemble loop, so
+        // flipping it stops the download promptly (no new chunk starts, in-flight chunks are
+        // interrupted). Partial files stay on disk and resume cleanly via the #3 delta on retry.
         val cancelled = AtomicBoolean(false)
         cancelDownload = Runnable { cancelled.set(true) }
 
@@ -328,17 +369,22 @@ class EpicGameDetailActivity : ComponentActivity() {
 
                 var sanitized = (title ?: "").replace(Regex("[^a-zA-Z0-9 \\-_]"), "").trim()
                 if (sanitized.isEmpty()) sanitized = "epic_${an.hashCode()}"
-                val installDir = File(File(filesDir, "epic_games"), sanitized)
+                val installDir = File(File(filesDir, "imagefs/epic_games"), sanitized)
                 prefs!!.edit().putString("epic_dir_$an", installDir.absolutePath).apply()
+
+                // Feature #2 — download required(base) + the container language's files only.
+                val installTags = EpicInstallTags.tagsForCurrentContainer(appCtx)
 
                 val ok = EpicDownloadManager.install(
                     appCtx,
                     manifestJson,
                     token,
                     installDir.absolutePath,
+                    installTags,
+                    cancelled,
                 ) { _, pct ->
-                    // Freeze the card/label the moment the user hits Cancel (the download itself
-                    // can't be stopped \u2014 see WEAK CANCEL above).
+                    // Freeze the card/label the moment the user hits Cancel; install() also polls
+                    // `cancelled` internally and returns false promptly.
                     if (!cancelled.get()) {
                         StoreDownloadHooks.tick(Store.EPIC, an, pct)
                         if (!isDestroyed && !isFinishing) runOnUiThread {
@@ -349,7 +395,17 @@ class EpicGameDetailActivity : ComponentActivity() {
                     }
                 }
 
-                if (cancelled.get()) { onInstallCancelled(); return@launch }
+                if (cancelled.get()) {
+                    // Delete the partial download if the user chose "Delete files" on any Cancel dialog.
+                    if (EpicCancelPolicy.consumeDeleteOnCancel(an)) {
+                        try { deleteDir(installDir) } catch (_: Exception) {}
+                        // Also clear the install record (exe/dir/version/size prefs) so the action row
+                        // recomputes to "not installed" — otherwise a stale exe pref keeps Launch/Set
+                        // .exe/Uninstall showing after the files are gone.
+                        EpicInstallState.purge(applicationContext, an)
+                    }
+                    onInstallCancelled(); return@launch
+                }
                 if (!ok) { onInstallError("Download failed"); return@launch }
 
                 try {
@@ -373,6 +429,8 @@ class EpicGameDetailActivity : ComponentActivity() {
                 // 100%-stuck card when the user wasn't on the detail page. Exe choice stays
                 // available via "Set .exe\u2026".
                 prefs!!.edit().putString("epic_exe_$an", exeFiles[0].absolutePath).apply()
+                // Detect EOS SDK presence so the library can show an "EOS" badge.
+                EpicEosDetector.scanAsync(appCtx, an, installDir, null)
                 onInstallComplete()
             } catch (e: Exception) {
                 if (!cancelled.get()) onInstallError(e.message ?: "Unknown error")
@@ -409,10 +467,9 @@ class EpicGameDetailActivity : ComponentActivity() {
             if (isDestroyed || isFinishing) return@runOnUiThread
             progressVisible = false
             progressLabelVisible = false
-            installBtnText = "Install"
             installBtnColor = 0xFF1A73E8.toInt()
-            launchBtnVisible = true
-            setExeBtnVisible = true
+            // Reflect the true install state (a failed fresh download is NOT installed → Install-only).
+            refreshActionState()
             resultBarMsg = "Error: $msg"
         }
     }
@@ -424,10 +481,11 @@ class EpicGameDetailActivity : ComponentActivity() {
             if (isDestroyed || isFinishing) return@runOnUiThread
             progressVisible = false
             progressLabelVisible = false
-            installBtnText = "Install"
             installBtnColor = 0xFF1A73E8.toInt()
-            launchBtnVisible = true
-            setExeBtnVisible = true
+            // Recompute the action row from the true install state instead of hardcoding
+            // Launch/Set .exe visible: delete purged the record → Install-only; keep left it
+            // in place → whatever the game's real state is.
+            refreshActionState()
         }
     }
 
@@ -461,7 +519,10 @@ class EpicGameDetailActivity : ComponentActivity() {
         // Mirror the Epic games-list Launch (StarLaunchBridge container picker). The old hardcoded
         // LandscapeLauncherMainActivity component doesn't exist in this app (com.winlator.banner)
         // and crashed with ActivityNotFoundException — identical to the Amazon detail bug.
-        StarLaunchBridge.addToLauncher(this, title ?: appName ?: "Game", exe, artCover ?: "")
+        StarLaunchBridge.addToLauncher(
+            this, title ?: appName ?: "Game", exe, artCover ?: "",
+            StarLaunchBridge.EpicMeta(appName ?: "", namespace ?: "", catalogItemId ?: ""),
+        )
     }
 
     private fun onSetExeClicked() {
@@ -495,8 +556,11 @@ class EpicGameDetailActivity : ComponentActivity() {
         }
         lifecycleScope.launch(Dispatchers.IO) {
             val token = EpicCredentialStore.getValidAccessToken(this@EpicGameDetailActivity)
+            // Size reflects the language-filtered download set (Feature #2), so it matches what
+            // actually installs.
+            val installTags = EpicInstallTags.tagsForCurrentContainer(applicationContext)
             val size = if (token != null)
-                EpicDownloadManager.fetchInstallSizeBytes(token, namespace, catalogItemId, appName)
+                EpicDownloadManager.fetchInstallSizeBytes(token, namespace, catalogItemId, appName, installTags)
             else -1L
             if (size > 0) prefs!!.edit().putLong("epic_size_$appName", size).apply()
             val finalSize = size
@@ -554,6 +618,61 @@ class EpicGameDetailActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * Feature #3 — verify installed files against the latest manifest and repair damage. Re-hashes
+     * every language-selected file on disk; if any are missing or corrupt, re-runs the install,
+     * whose delta path re-downloads exactly those files (chunk-level SHA-1 verified). Runs on
+     * DownloadScope.io so it survives the Activity being backgrounded, like the install.
+     */
+    private fun doVerifyRepair() {
+        val an = appName ?: return
+        val dir = prefs!!.getString("epic_dir_$an", null)
+        if (dir == null) { resultBarMsg = "Not installed"; return }
+        verifyEnabled = false
+        verifyStatusText = "Verifying…"
+        val appCtx = applicationContext
+        DownloadScope.io.launch {
+            try {
+                val token = EpicCredentialStore.getValidAccessToken(appCtx)
+                if (token == null) {
+                    runOnUiThread { verifyEnabled = true; verifyStatusText = "Login required." }
+                    return@launch
+                }
+                val manifestJson = EpicApiClient.getManifestApiJson(token, namespace, catalogItemId, an)
+                if (manifestJson == null) {
+                    runOnUiThread { verifyEnabled = true; verifyStatusText = "Could not fetch manifest." }
+                    return@launch
+                }
+                val installTags = EpicInstallTags.tagsForCurrentContainer(appCtx)
+                val result = EpicDownloadManager.verifyInstall(manifestJson, token, dir, installTags) { msg, _ ->
+                    if (!isDestroyed && !isFinishing) runOnUiThread { verifyStatusText = msg }
+                }
+                if (result == null) {
+                    runOnUiThread { verifyEnabled = true; verifyStatusText = "Verify failed." }
+                    return@launch
+                }
+                if (!result.needsRepair()) {
+                    runOnUiThread {
+                        verifyEnabled = true
+                        verifyStatusText = "All ${result.ok}/${result.checked} files verified ✓"
+                    }
+                    return@launch
+                }
+                val damaged = result.corrupt + result.missing
+                runOnUiThread { verifyStatusText = "Repairing $damaged file(s)…" }
+                val ok = EpicDownloadManager.install(appCtx, manifestJson, token, dir, installTags) { _, pct ->
+                    if (!isDestroyed && !isFinishing) runOnUiThread { verifyStatusText = "Repairing… $pct%" }
+                }
+                runOnUiThread {
+                    verifyEnabled = true
+                    verifyStatusText = if (ok) "Repaired $damaged file(s) ✓" else "Repair failed."
+                }
+            } catch (e: Exception) {
+                runOnUiThread { verifyEnabled = true; verifyStatusText = "Verify error: ${e.message}" }
+            }
+        }
+    }
+
     private fun dlcInstall(dlcApp: String, dlcNs: String, dlcCat: String, dlcTitle: String) {
         lifecycleScope.launch(Dispatchers.IO) {
             try {
@@ -571,7 +690,7 @@ class EpicGameDetailActivity : ComponentActivity() {
 
                 var sanitized = dlcTitle.replace(Regex("[^a-zA-Z0-9 \\-_]"), "").trim()
                 if (sanitized.isEmpty()) sanitized = "dlc_${dlcApp.hashCode()}"
-                val installDir = File(File(filesDir, "epic_games"), sanitized)
+                val installDir = File(File(filesDir, "imagefs/epic_games"), sanitized)
                 prefs!!.edit().putString("epic_dir_$dlcApp", installDir.absolutePath).apply()
 
                 val ok = EpicDownloadManager.install(
@@ -606,30 +725,75 @@ class EpicGameDetailActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * Resolve this game's Epic save folder: prefer the auto-resolver
+     * ([EpicCloudSavePaths]: container match + CloudSaveFolder token-expand, same as the
+     * Save Manager Epic tab), and fall back to a manually-picked folder
+     * (`epic_save_dir_<appName>`) only if resolve yields nothing.
+     * Does file I/O (shortcut load + prefix walk) \u2014 MUST be called off the main thread.
+     */
+    private fun resolveEpicSaveDir(): File? {
+        val an = appName ?: return null
+        // Explicit manual pick (Browse) wins as a user override.
+        prefs!!.getString("epic_save_dir_$an", null)?.let { return File(it) }
+        // Otherwise auto-resolve exactly like the Save Manager Epic tab.
+        val installDir = prefs!!.getString("epic_dir_$an", null)
+        val container = try {
+            EpicCloudSavePaths.resolveContainer(this, an, installDir)
+        } catch (e: Exception) { null }
+        return EpicCloudSavePaths.resolveSaveDirectory(this, an, container)
+    }
+
+    /** Populate the Cloud Saves label from the auto-resolver (off-main) when no manual folder is set. */
+    private fun refreshResolvedSaveDirLabel() {
+        if (appName == null) return
+        Thread {
+            val dir = resolveEpicSaveDir()
+            runOnUiThread {
+                if (dir != null && dir.exists()) {
+                    cloudSaveDirText = "Auto: " + shortenPath(dir.absolutePath)
+                    cloudSaveDirColor = 0xFFCCCCCC.toInt()
+                }
+            }
+        }.start()
+    }
+
     private fun cloudUpload() {
-        val dir = prefs!!.getString("epic_save_dir_$appName", null)
-        if (dir == null) { resultBarMsg = "Set a save folder first"; return }
         cloudButtonsEnabled = false
-        cloudSaveStatusText = "Preparing upload\u2026"
+        cloudSaveStatusText = "Resolving save folder\u2026"
         cloudSaveStatusVisible = true
-        EpicCloudSaveManager.uploadSaves(this, appName!!, File(dir), object : EpicCloudSaveManager.Callback {
-            override fun onStatus(msg: String) { runOnUiThread { cloudSaveStatusText = msg } }
-            override fun onDone(msg: String) { runOnUiThread { cloudSaveStatusText = msg; cloudButtonsEnabled = true } }
-            override fun onError(msg: String) { runOnUiThread { cloudSaveStatusText = "Error: $msg"; cloudButtonsEnabled = true } }
-        })
+        Thread {
+            val dir = resolveEpicSaveDir()
+            if (dir == null || !dir.exists()) {
+                runOnUiThread { cloudSaveStatusText = "No save folder found for this game"; cloudButtonsEnabled = true }
+                return@Thread
+            }
+            runOnUiThread { cloudSaveStatusText = "Preparing upload\u2026" }
+            EpicCloudSaveManager.uploadSaves(this, appName!!, dir, object : EpicCloudSaveManager.Callback {
+                override fun onStatus(msg: String) { runOnUiThread { cloudSaveStatusText = msg } }
+                override fun onDone(msg: String) { runOnUiThread { cloudSaveStatusText = msg; cloudButtonsEnabled = true } }
+                override fun onError(msg: String) { runOnUiThread { cloudSaveStatusText = "Error: $msg"; cloudButtonsEnabled = true } }
+            })
+        }.start()
     }
 
     private fun cloudDownload() {
-        val dir = prefs!!.getString("epic_save_dir_$appName", null)
-        if (dir == null) { resultBarMsg = "Set a save folder first"; return }
         cloudButtonsEnabled = false
-        cloudSaveStatusText = "Preparing download\u2026"
+        cloudSaveStatusText = "Resolving save folder\u2026"
         cloudSaveStatusVisible = true
-        EpicCloudSaveManager.downloadSaves(this, appName!!, File(dir), object : EpicCloudSaveManager.Callback {
-            override fun onStatus(msg: String) { runOnUiThread { cloudSaveStatusText = msg } }
-            override fun onDone(msg: String) { runOnUiThread { cloudSaveStatusText = msg; cloudButtonsEnabled = true } }
-            override fun onError(msg: String) { runOnUiThread { cloudSaveStatusText = "Error: $msg"; cloudButtonsEnabled = true } }
-        })
+        Thread {
+            val dir = resolveEpicSaveDir()
+            if (dir == null) {
+                runOnUiThread { cloudSaveStatusText = "No save folder found for this game"; cloudButtonsEnabled = true }
+                return@Thread
+            }
+            runOnUiThread { cloudSaveStatusText = "Preparing download\u2026" }
+            EpicCloudSaveManager.downloadSaves(this, appName!!, dir, object : EpicCloudSaveManager.Callback {
+                override fun onStatus(msg: String) { runOnUiThread { cloudSaveStatusText = msg } }
+                override fun onDone(msg: String) { runOnUiThread { cloudSaveStatusText = msg; cloudButtonsEnabled = true } }
+                override fun onError(msg: String) { runOnUiThread { cloudSaveStatusText = "Error: $msg"; cloudButtonsEnabled = true } }
+            })
+        }.start()
     }
 
     private fun showExePicker(candidates: List<String>, onSelected: (String?) -> Unit) {
@@ -680,6 +844,7 @@ private fun EpicGameDetailScreen(
     installBtnVisible: Boolean,
     setExeBtnVisible: Boolean,
     uninstallBtnVisible: Boolean,
+    usesEos: Boolean,
     progressVisible: Boolean,
     progressValue: Int,
     progressLabelText: String,
@@ -688,6 +853,8 @@ private fun EpicGameDetailScreen(
     updateStatusText: String,
     checkUpdatesEnabled: Boolean,
     updateBtnVisible: Boolean,
+    verifyStatusText: String,
+    verifyEnabled: Boolean,
     dlcJson: String?,
     cloudSaveDirText: String,
     cloudSaveStatusText: String,
@@ -700,6 +867,7 @@ private fun EpicGameDetailScreen(
     onUninstallClick: () -> Unit,
     onCheckUpdates: () -> Unit,
     onUpdateClick: () -> Unit,
+    onVerifyRepair: () -> Unit,
     onDlcInstall: (String, String, String, String) -> Unit,
     onCloudBrowse: () -> Unit,
     onCloudUpload: () -> Unit,
@@ -737,6 +905,13 @@ private fun EpicGameDetailScreen(
                         .background(MaterialTheme.colorScheme.surfaceVariant),
                 )
             }
+            // Store badges overlaid top-left on the hero. EPIC unconditional (Epic store detail);
+            // EOS only when the game uses Epic Online Services.
+            StoreBadgeOverlay(
+                showEpic = true,
+                showEos = usesEos,
+                modifier = Modifier.align(Alignment.TopStart).padding(8.dp),
+            )
         }
 
         // Info section — name + metadata chips + description + install status.
@@ -841,6 +1016,19 @@ private fun EpicGameDetailScreen(
                     onClick = onCheckUpdates,
                     modifier = Modifier.fillMaxWidth(),
                     enabled = checkUpdatesEnabled,
+                )
+                // Verify / Repair: re-hash installed files against the manifest and re-download any
+                // missing/corrupt ones (chunk-level SHA-1). Also resumes an interrupted install.
+                Spacer(Modifier.height(8.dp))
+                if (verifyStatusText.isNotEmpty()) {
+                    StoreStatusText(verifyStatusText)
+                    Spacer(Modifier.height(8.dp))
+                }
+                StoreActionButton(
+                    text = "Verify / Repair Files",
+                    onClick = onVerifyRepair,
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = verifyEnabled,
                 )
             }
         }

@@ -32,6 +32,10 @@ fun buildLaunchSpec(shortcut: Shortcut, res: Resources): PreloaderSpec {
             .firstOrNull { StringUtils.parseIdentifier(it) == id } ?: ""
     }
 
+    // EOS badge: an Epic-store shortcut with EOS auth injection not disabled (mirrors the
+    // storeSource/epicEos gate XServerDisplayActivity uses to inject the launch args).
+    val eosEnabled = "epic" == shortcut.getExtra("storeSource") && "0" != shortcut.getExtra("epicEos")
+
     val meta = listOf(container?.name ?: "", resolution).filter { it.isNotEmpty() }.joinToString(" · ")
     return PreloaderSpec(
         meta = meta,
@@ -41,6 +45,7 @@ fun buildLaunchSpec(shortcut: Shortcut, res: Resources): PreloaderSpec {
         driverLabel = driverLabel,
         vkd3dVersion = vkd3dVersion,
         backendLabel = backendLabel,
+        eosEnabled = eosEnabled,
     )
 }
 

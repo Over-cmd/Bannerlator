@@ -1,5 +1,6 @@
 package com.winlator.star.store
 
+import android.app.AlertDialog
 import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -124,7 +125,7 @@ class DownloadManagerActivity : ComponentActivity() {
                     onEntryClick = { openDetail(it) },
                     onLaunch = { launch(it) },
                     onUninstall = { uninstall(it) },
-                    onCancel = { it.cancel?.invoke() },
+                    onCancel = { cancelEntry(it) },
                     onPauseResume = { it.pause?.invoke() },
                     onDismiss = { DownloadRegistry.remove(it.key) },
                 )
@@ -327,6 +328,33 @@ class DownloadManagerActivity : ComponentActivity() {
             Store.GOG -> GogInstallState.purge(this, entry.id)
             Store.EPIC -> EpicInstallState.purge(this, entry.id)
             Store.STEAM -> Unit   // handled via SteamRepository.markUninstalled in `mark`
+        }
+    }
+
+    /**
+     * Cancel a download from the Download Manager. For Epic this raises the same keep/delete dialog
+     * as the detail page + library list (synced via [EpicCancelPolicy]); the running download
+     * coroutine acts on the choice. Other stores cancel directly (their keep/delete semantics are
+     * unchanged).
+     */
+    private fun cancelEntry(entry: DownloadEntry) {
+        if (entry.store == Store.EPIC) {
+            AlertDialog.Builder(this)
+                .setTitle("Cancel download?")
+                .setMessage("Keep the partial download so you can resume later, or delete all " +
+                        "downloaded files for this game?")
+                .setPositiveButton("Keep files") { _, _ ->
+                    EpicCancelPolicy.setDeleteOnCancel(entry.id, false)
+                    entry.cancel?.invoke()
+                }
+                .setNegativeButton("Delete files") { _, _ ->
+                    EpicCancelPolicy.setDeleteOnCancel(entry.id, true)
+                    entry.cancel?.invoke()
+                }
+                .setNeutralButton("Keep downloading", null)
+                .show()
+        } else {
+            entry.cancel?.invoke()
         }
     }
 }

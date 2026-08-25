@@ -174,10 +174,8 @@ public class DXVKConfigDialog {
         // reason — see XServerDisplayActivity.dxvkLogDir().
         boolean dxvkLogs = androidx.preference.PreferenceManager
                 .getDefaultSharedPreferences(context).getBoolean("enable_dxvk_logs", true);
-        if (!dxvkLogs) {
-            envVars.put("DXVK_LOG_LEVEL", "none");
-            envVars.put("VKD3D_DEBUG", "none");
-        } else {
+        if (dxvkLogs) {
+            // Logging ON: co-locate the user-visible DXVK/DXGI/VKD3D logs in the chosen folder (unchanged).
             java.io.File logDir = logDirOverride != null
                     ? logDirOverride
                     : com.winlator.star.core.LogLocation.resolveLogDir(context);
@@ -185,6 +183,21 @@ public class DXVKConfigDialog {
                 envVars.put("DXVK_LOG_PATH", logDir.getAbsolutePath());
                 envVars.put("VKD3D_LOG_FILE", new java.io.File(logDir, "vkd3d-proton.log").getAbsolutePath());
             }
+        } else if (logDirOverride != null) {
+            // Logging OFF but a private HUD dir was supplied: instead of silencing the wrappers, write a
+            // MINIMAL startup-only signal there so the in-game HUD API resolver still gets ground truth
+            // (arm64ec hides the DX DLLs from /proc/maps, so this is the only host-visible signal). Both
+            // "info" is deliberate: VKD3D_DEBUG=info emits vkd3d-proton's "Program name" identity line and
+            // device init; DXVK_LOG_LEVEL=info emits DXVK's per-API <app>_d3dNN.log files with their
+            // header. These are startup-level logs (no per-frame spam) written to a per-launch private dir.
+            envVars.put("DXVK_LOG_PATH", logDirOverride.getAbsolutePath());
+            envVars.put("DXVK_LOG_LEVEL", "info");
+            envVars.put("VKD3D_LOG_FILE", new java.io.File(logDirOverride, "vkd3d-proton.log").getAbsolutePath());
+            envVars.put("VKD3D_DEBUG", "info");
+        } else {
+            // Logging OFF and no dir supplied (config previews) — keep the wrappers fully silent.
+            envVars.put("DXVK_LOG_LEVEL", "none");
+            envVars.put("VKD3D_DEBUG", "none");
         }
 
         // DXVK_CONFIG_FILE (config source path, e.g. /storage/emulated/0/dxvk.conf)

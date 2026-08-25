@@ -455,13 +455,15 @@ public class VulkanRenderer implements WindowManager.OnWindowModificationListene
             cd = cursor.cursorImage; hotX = (short)cursor.hotSpotX; hotY = (short)cursor.hotSpotY;
         } else { cd = rootCursorDrawable; }
         nativeSetCursorVisible(nativeHandle, effVis);
-        if (effVis && cd != null && cd.getBuffer() != null) {
+        if (effVis && cd != null) {
             synchronized (cd.renderLock) {
-                nativeUpdateCursorImage(nativeHandle, cd.getBuffer(), cd.width, cd.height, hotX, hotY);
+                java.nio.ByteBuffer buf = cd.getBuffer();
+                if (buf == null) return;
+                nativeUpdateCursorImage(nativeHandle, buf, cd.width, cd.height, hotX, hotY);
                 if (nativeMode) {
-                    java.nio.ByteBuffer buf = cd.getBuffer();
-                    short stride = (short)(buf.capacity() / (cd.height * 4));
-                    nativeScanoutSetCursorImage(nativeHandle, buf, cd.width, cd.height, stride);
+                    java.nio.ByteBuffer buf2 = cd.getBuffer();
+                    short stride = (short)(buf2.capacity() / (cd.height * 4));
+                    nativeScanoutSetCursorImage(nativeHandle, buf2, cd.width, cd.height, stride);
                 }
             }
         }
