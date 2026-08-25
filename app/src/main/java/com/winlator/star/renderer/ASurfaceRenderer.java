@@ -86,6 +86,8 @@ public class ASurfaceRenderer implements HostRenderer,
     private boolean gameCursorVisible = true; // guest-requested cursor visibility
     // Fullscreen aspect-ratio mode (#71). STRETCH fills the surface (distorts); OFF/FIT letterbox.
     private int fullscreenMode = Container.FULLSCREEN_OFF;
+    // Screen alignment (#413). Only moves the letterbox bar vertically; CENTER == historical output.
+    private int screenAlignment = Container.ALIGN_CENTER;
     private boolean isStretch() { return fullscreenMode == Container.FULLSCREEN_STRETCH; }
     private boolean screenOffsetYRelativeToCursor = false;
     private float magnifierZoom = 1.0f;
@@ -160,7 +162,7 @@ public class ASurfaceRenderer implements HostRenderer,
     public void onSurfaceChanged(Surface surface, int width, int height) {
         surfaceWidth = width;
         surfaceHeight = height;
-        viewTransformation.update(width, height, xServer.screenInfo.width, xServer.screenInfo.height, fullscreenMode);
+        viewTransformation.update(width, height, xServer.screenInfo.width, xServer.screenInfo.height, fullscreenMode, screenAlignment);
         if (!surfaceInitialized) {
             onSurfaceCreated(surface);
         } else {
@@ -186,7 +188,7 @@ public class ASurfaceRenderer implements HostRenderer,
         // live (setFullscreenMode -> updateTransform/updateScene). STRETCH ignores viewTransformation.
         if (surfaceWidth > 0 && surfaceHeight > 0)
             viewTransformation.update(surfaceWidth, surfaceHeight,
-                    xServer.screenInfo.width, xServer.screenInfo.height, fullscreenMode);
+                    xServer.screenInfo.width, xServer.screenInfo.height, fullscreenMode, screenAlignment);
         if (isStretch()) {
             nativeScanoutSetDst(0, 0, surfaceWidth, surfaceHeight);
         } else {
@@ -549,6 +551,8 @@ public class ASurfaceRenderer implements HostRenderer,
     @Override public boolean isFullscreen() { return fullscreenMode != Container.FULLSCREEN_OFF; }
     @Override public int getFullscreenMode() { return fullscreenMode; }
     @Override public void setFullscreenMode(int mode) { fullscreenMode = mode; updateTransform(); updateScene(); }
+    @Override public int getScreenAlignment() { return screenAlignment; }
+    @Override public void setScreenAlignment(int alignment) { screenAlignment = alignment; updateTransform(); updateScene(); }
     @Override public void setScreenOffsetYRelativeToCursor(boolean b) { screenOffsetYRelativeToCursor = b; }
     @Override public boolean isScreenOffsetYRelativeToCursor() { return screenOffsetYRelativeToCursor; }
     @Override public void setFpsWindowId(int id) { this.fpsWindowId = id; }

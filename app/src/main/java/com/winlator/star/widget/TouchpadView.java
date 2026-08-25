@@ -152,8 +152,11 @@ public class TouchpadView extends View {
 
     private void updateXform(int outerWidth, int outerHeight, int innerWidth, int innerHeight) {
         int fullscreenMode = xServer.getRenderer().getFullscreenMode();
+        // Screen alignment (#413): read it the same way as the mode so the touch->guest map tracks the
+        // letterbox bar. Miss this and touch input is vertically offset from the image on TOP/BOTTOM.
+        int screenAlignment = xServer.getRenderer().getScreenAlignment();
         ViewTransformation viewTransformation = new ViewTransformation();
-        viewTransformation.update(outerWidth, outerHeight, innerWidth, innerHeight, fullscreenMode);
+        viewTransformation.update(outerWidth, outerHeight, innerWidth, innerHeight, fullscreenMode, screenAlignment);
 
         float invAspect = 1.0f / viewTransformation.aspect;
         // OFF/FIT/FILL/INTEGER are all uniform, aspect-preserving maps (letterbox bars for FIT/INTEGER,

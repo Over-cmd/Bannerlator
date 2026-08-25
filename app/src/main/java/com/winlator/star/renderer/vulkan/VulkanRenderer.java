@@ -38,6 +38,8 @@ public class VulkanRenderer implements WindowManager.OnWindowModificationListene
     public final ViewTransformation viewTransformation = new ViewTransformation();
     // Fullscreen aspect-ratio mode (#71). STRETCH fills the surface (distorts); OFF/FIT letterbox.
     private int fullscreenMode = Container.FULLSCREEN_OFF;
+    // Screen alignment (#413). Only moves the letterbox bar vertically; CENTER == historical output.
+    private int screenAlignment = Container.ALIGN_CENTER;
     private boolean isStretch() { return fullscreenMode == Container.FULLSCREEN_STRETCH; }
     private float magnifierZoom = 1.0f;
     private boolean screenOffsetYRelativeToCursor = false;
@@ -218,7 +220,7 @@ public class VulkanRenderer implements WindowManager.OnWindowModificationListene
 
     public void onSurfaceChanged(int width, int height) {
         surfaceWidth = width; surfaceHeight = height;
-        viewTransformation.update(width, height, xServer.screenInfo.width, xServer.screenInfo.height, fullscreenMode);
+        viewTransformation.update(width, height, xServer.screenInfo.width, xServer.screenInfo.height, fullscreenMode, screenAlignment);
         synchronized (lock) {
             if (nativeHandle != 0) { nativeResize(nativeHandle, width, height); updateTransform(); }
         }
@@ -294,7 +296,7 @@ public class VulkanRenderer implements WindowManager.OnWindowModificationListene
         // on the in-game toggle without a surface change (STRETCH ignores viewTransformation anyway).
         if (surfaceWidth > 0 && surfaceHeight > 0)
             viewTransformation.update(surfaceWidth, surfaceHeight,
-                xServer.screenInfo.width, xServer.screenInfo.height, fullscreenMode);
+                xServer.screenInfo.width, xServer.screenInfo.height, fullscreenMode, screenAlignment);
         float zoom = magnifierZoom;
         if (isStretch()) {
             // Cursor-follow magnifier (parity with GLRenderer.drawFrame). The native compositor
@@ -314,8 +316,10 @@ public class VulkanRenderer implements WindowManager.OnWindowModificationListene
             float ox = Math.max(gw * (1f - zoom), Math.min(0f, gw * 0.5f - px * zoom));
             float oy = Math.max(gh * (1f - zoom), Math.min(0f, gh * 0.5f - py * zoom));
             nativeSetTransform(nativeHandle, ox, oy, zoom, zoom);
+            // STRETCH has no letterbox bar, so alignment is inert here — pin to CENTER to keep this
+            // magnifier scanout dst byte-identical to the historical output regardless of the setting.
             viewTransformation.update(surfaceWidth, surfaceHeight,
-                xServer.screenInfo.width, xServer.screenInfo.height);
+                xServer.screenInfo.width, xServer.screenInfo.height, fullscreenMode, Container.ALIGN_CENTER);
             nativeScanoutSetDst(nativeHandle,
                 viewTransformation.viewOffsetX,
                 viewTransformation.viewOffsetY,
@@ -847,6 +851,12 @@ public class VulkanRenderer implements WindowManager.OnWindowModificationListene
     public int getFullscreenMode() { return fullscreenMode; }
     public void setFullscreenMode(int mode) {
         fullscreenMode = mode;
+        synchronized (lock) { updateTransform(); }
+        xServerView.queueEvent(this::updateScene);
+    }
+    public int getScreenAlignment() { return screenAlignment; }
+    public void setScreenAlignment(int alignment) {
+        screenAlignment = alignment;
         synchronized (lock) { updateTransform(); }
         xServerView.queueEvent(this::updateScene);
     }

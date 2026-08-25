@@ -49,6 +49,8 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
     
     // Fullscreen aspect-ratio mode (#71). STRETCH fills the surface (distorts); OFF/FIT letterbox.
     private volatile int fullscreenMode = Container.FULLSCREEN_OFF;
+    // Screen alignment (#413). Only moves the letterbox bar vertically; CENTER == historical output.
+    private volatile int screenAlignment = Container.ALIGN_CENTER;
     private boolean toggleFullscreen = false;
     private boolean isStretch() { return fullscreenMode == Container.FULLSCREEN_STRETCH; }
     public boolean viewportNeedsUpdate = true;
@@ -551,13 +553,22 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
         if (nativeMode) xServerView.queueEvent(this::updateScanoutDst);
         xServerView.requestRender();
     }
+    @Override public int getScreenAlignment() { return screenAlignment; }
+    @Override public void setScreenAlignment(int alignment) {
+        this.screenAlignment = alignment;
+        viewportNeedsUpdate = true;
+        // Same recompute path as setFullscreenMode — alignment only shifts the letterbox rect vertically.
+        xServerView.queueEvent(this::recomputeViewTransformation);
+        if (nativeMode) xServerView.queueEvent(this::updateScanoutDst);
+        xServerView.requestRender();
+    }
 
     // Rebuild viewTransformation for the current surface size + fullscreen mode. Safe to call from
     // the GL thread only (matches the surface fields it reads).
     private void recomputeViewTransformation() {
         if (surfaceWidth <= 0 || surfaceHeight <= 0) return;
         viewTransformation.update(surfaceWidth, surfaceHeight,
-                xServer.screenInfo.width, xServer.screenInfo.height, fullscreenMode);
+                xServer.screenInfo.width, xServer.screenInfo.height, fullscreenMode, screenAlignment);
     }
     public float getMagnifierZoom() { return magnifierZoom; }
     public void setMagnifierZoom(float magnifierZoom) { this.magnifierZoom = magnifierZoom; xServerView.requestRender(); }

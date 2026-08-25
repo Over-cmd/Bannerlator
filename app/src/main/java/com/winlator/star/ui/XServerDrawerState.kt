@@ -164,6 +164,11 @@ object XServerDrawerState {
     private val _fullscreenMode = MutableStateFlow(0)
     val fullscreenMode: StateFlow<Int> = _fullscreenMode
 
+    // Current screen alignment (#413): Container.ALIGN_CENTER/TOP/BOTTOM. Drives the drawer's
+    // Center/Top/Bottom segmented selector; 0 (CENTER) is the default.
+    private val _screenAlignment = MutableStateFlow(0)
+    val screenAlignment: StateFlow<Int> = _screenAlignment
+
     // ---- External display / TV (Version A) --------------------------------------------------------
     // Whether a TV/external presentation display is currently connected. Gates the TV tab's visibility.
     private val _tvConnected = MutableStateFlow(false)
@@ -310,6 +315,9 @@ object XServerDrawerState {
     // selector picks a mode without cycling and WITHOUT closing the drawer. Takes the target
     // Container.FULLSCREEN_* value.
     @JvmField var onSetFullscreenMode:      java.util.function.IntConsumer? = null
+    // Direct set of the screen alignment (#413): the drawer's Center/Top/Bottom selector picks a
+    // value live, without closing the drawer. Takes the target Container.ALIGN_* value.
+    @JvmField var onSetScreenAlignment:     java.util.function.IntConsumer? = null
     @JvmField var onPauseResume:            Runnable? = null
     @JvmField var onPipMode:               Runnable? = null
     @JvmField var onActiveWindows:          Runnable? = null
@@ -392,6 +400,8 @@ object XServerDrawerState {
     fun setRuntimeBackend(v: RuntimeBackend) { _runtimeBackend.value = v }
 
     fun setFullscreenMode(v: Int) { _fullscreenMode.value = v }
+
+    fun setScreenAlignment(v: Int) { _screenAlignment.value = v }
 
     fun setBionicFgActive(v: Boolean)      { _bionicFgActive.value = v }
     fun setFrameGenEnabled(v: Boolean)     { _frameGenEnabled.value = v }
@@ -538,7 +548,7 @@ object XServerDrawerState {
         onResetPerfKey = null; onResetAllPerf = null
         onClose = null; onKeyboard = null; onInputControls = null
         onScreenEffects = null; onGraphicEngine = null; onVibration = null
-        onToggleFullscreen = null; onSetFullscreenMode = null; onPauseResume = null; onPipMode = null
+        onToggleFullscreen = null; onSetFullscreenMode = null; onSetScreenAlignment = null; onPauseResume = null; onPipMode = null
         onActiveWindows = null; onTaskManager = null; onMagnifier = null
         onLogs = null; onExit = null; onMoveCursorToTouchpoint = null; onGestureConfigChange = null
         onRelativeMouseMovement = null; onDisableMouse = null

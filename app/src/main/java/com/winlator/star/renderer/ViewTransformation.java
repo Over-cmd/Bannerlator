@@ -15,17 +15,18 @@ public class ViewTransformation {
 
     // Legacy entry point: letterbox (preserve aspect, center with bars). Same as OFF/FIT.
     public void update(int outerWidth, int outerHeight, int innerWidth, int innerHeight) {
-        update(outerWidth, outerHeight, innerWidth, innerHeight, Container.FULLSCREEN_FIT);
+        update(outerWidth, outerHeight, innerWidth, innerHeight, Container.FULLSCREEN_FIT, Container.ALIGN_CENTER);
     }
 
-    // Fullscreen aspect-ratio mode (issue #71). The whole mapping is driven by a single `aspect`
-    // scale factor; each mode only changes how that scale is chosen:
-    //   OFF/FIT   -> min(sx, sy)               letterbox: largest fit that keeps the guest fully on-screen
-    //   FILL      -> max(sx, sy)               crop-to-fill: smallest scale that covers the surface, overflow
-    //                                          runs off the edges (negative offset, oversized view rect -> cropped)
-    //   INTEGER   -> max(1, floor(min))        pixel-perfect: largest whole-number scale that still fits, centered
-    // STRETCH is handled by the renderers directly (full-surface viewport) and never reaches this.
+    // 5-arg overload: alignment defaults to CENTER (== legacy behavior) for callers that don't specify it.
     public void update(int outerWidth, int outerHeight, int innerWidth, int innerHeight, int fullscreenMode) {
+        update(outerWidth, outerHeight, innerWidth, innerHeight, fullscreenMode, Container.ALIGN_CENTER);
+    }
+
+    // Fullscreen aspect-ratio mode (#71) + vertical alignment (#413). A single `aspect` scale factor
+    // drives the whole mapping; fullscreenMode only chooses that scale, screenAlignment only moves the
+    // resulting rect vertically. CENTER is byte-identical to the historical output.
+    public void update(int outerWidth, int outerHeight, int innerWidth, int innerHeight, int fullscreenMode, int screenAlignment) {
         float sx = (float)outerWidth / innerWidth;
         float sy = (float)outerHeight / innerHeight;
 
@@ -46,11 +47,32 @@ public class ViewTransformation {
         viewWidth = (int)Math.ceil(innerWidth * aspect);
         viewHeight = (int)Math.ceil(innerHeight * aspect);
         viewOffsetX = (int)((outerWidth - innerWidth * aspect) * 0.5f);
-        viewOffsetY = (int)((outerHeight - innerHeight * aspect) * 0.5f);
 
         sceneScaleX = (innerWidth * aspect) / outerWidth;
         sceneScaleY = (innerHeight * aspect) / outerHeight;
         sceneOffsetX = (innerWidth - innerWidth * sceneScaleX) * 0.5f;
-        sceneOffsetY = (innerHeight - innerHeight * sceneScaleY) * 0.5f;
+
+        // Vertical placement of the letterbox rect. CENTER reproduces the exact historical formulas.
+        // TOP pins the game to y=0; BOTTOM sits it flush to the bottom using the already-ceiled
+        // viewHeight (avoids a 1px overflow). sceneOffsetY is kept consistent with viewOffsetY in guest
+        // units (sceneOffsetY = viewOffsetY * innerHeight/outerHeight) so touch mapping + scene render
+        // stay aligned. FILL uses a negative gap (crop overflow) and STRETCH never reaches here, so for
+        // those TOP/BOTTOM are inert — there is no bar to move.
+        float sceneGapY = innerHeight - innerHeight * sceneScaleY;
+        switch (screenAlignment) {
+            case Container.ALIGN_TOP:
+                viewOffsetY = 0;
+                sceneOffsetY = 0f;
+                break;
+            case Container.ALIGN_BOTTOM:
+                viewOffsetY = outerHeight - viewHeight;
+                sceneOffsetY = sceneGapY;
+                break;
+            case Container.ALIGN_CENTER:
+            default:
+                viewOffsetY = (int)((outerHeight - innerHeight * aspect) * 0.5f);
+                sceneOffsetY = sceneGapY * 0.5f;
+                break;
+        }
     }
 }
