@@ -152,8 +152,11 @@ public class TouchpadView extends View {
 
     private void updateXform(int outerWidth, int outerHeight, int innerWidth, int innerHeight) {
         int fullscreenMode = xServer.getRenderer().getFullscreenMode();
+        // Screen alignment (#413): read it the same way as the mode so the touch->guest map tracks the
+        // letterbox bar. Miss this and touch input is vertically offset from the image on TOP/BOTTOM.
+        int screenAlignment = xServer.getRenderer().getScreenAlignment();
         ViewTransformation viewTransformation = new ViewTransformation();
-        viewTransformation.update(outerWidth, outerHeight, innerWidth, innerHeight, fullscreenMode);
+        viewTransformation.update(outerWidth, outerHeight, innerWidth, innerHeight, fullscreenMode, screenAlignment);
 
         float invAspect = 1.0f / viewTransformation.aspect;
         // OFF/FIT/FILL/INTEGER are all uniform, aspect-preserving maps (letterbox bars for FIT/INTEGER,
@@ -161,10 +164,21 @@ public class TouchpadView extends View {
         // of them. Only STRETCH is non-uniform. Gate on the mode, not isFullscreen(), because
         // isFullscreen() is now true for FIT too (#71).
         if (fullscreenMode != Container.FULLSCREEN_STRETCH) {
+            // OFF/FIT/FILL/INTEGER: subtract the (region-confined) draw-rect offset, then divide by
+            // aspect. viewOffset*/aspect are already region-aware (#413), so touches in the game's half
+            // map correctly whether the game is letterboxed or FILL-cropped inside that half.
             XForm.makeTranslation(xform, -viewTransformation.viewOffsetX, -viewTransformation.viewOffsetY);
             XForm.scale(xform, invAspect, invAspect);
-        } else
+        } else if (screenAlignment == Container.ALIGN_CENTER) {
+            // CENTER STRETCH: unchanged (region == full surface) — byte-identical historical map.
             XForm.makeScale(xform, (float) innerWidth / outerWidth, (float) innerHeight / outerHeight);
+        } else {
+            // TOP/BOTTOM STRETCH (#413): the guest fills only its region (a half), so invert against the
+            // region: (touch - regionOffset) * guest/region.
+            XForm.makeTranslation(xform, -viewTransformation.regionOffsetX, -viewTransformation.regionOffsetY);
+            XForm.scale(xform, (float) innerWidth / viewTransformation.regionWidth,
+                               (float) innerHeight / viewTransformation.regionHeight);
+        }
     }
 
     private class Finger {

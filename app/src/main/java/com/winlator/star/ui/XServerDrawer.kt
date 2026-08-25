@@ -892,6 +892,21 @@ private fun GraphicsContent(state: XServerDrawerState) {
     Spacer(Modifier.height(6.dp))
     FullscreenModeButtons(selected = fullscreenMode) { state.onSetFullscreenMode?.accept(it) }
 
+    // Screen alignment (#413): Center/Top/Bottom, live like the mode above. Now applies in EVERY
+    // fullscreen mode — TOP/BOTTOM confine the game (Fit/Fill/Stretch/Integer alike) to its half and
+    // leave the other half for the controls, so the control is always live (no more STRETCH/FILL greying).
+    val screenAlignment by state.screenAlignment.collectAsState()
+    Spacer(Modifier.height(8.dp))
+    Text(
+        stringResource(R.string.screen_alignment),
+        color = MaterialTheme.colorScheme.onSurface,
+        modifier = Modifier.fillMaxWidth()
+    )
+    Spacer(Modifier.height(6.dp))
+    ScreenAlignmentButtons(selected = screenAlignment, enabled = true) {
+        state.onSetScreenAlignment?.accept(it)
+    }
+
     Spacer(Modifier.height(4.dp))
     HorizontalDivider(color = MaterialTheme.colorScheme.outline, modifier = Modifier.padding(vertical = 6.dp))
 
@@ -1904,6 +1919,53 @@ private fun FullscreenModeButtons(selected: Int, onSelect: (Int) -> Unit) {
                 }
                 // Pad the short (2-chip) row so its buttons keep the same width as the 3-chip row.
                 repeat(3 - row.size) { Spacer(Modifier.weight(1f)) }
+            }
+        }
+    }
+}
+
+// Screen alignment (#413): vertical placement of the letterbox bar (Center/Top/Bottom), same
+// segmented-chip idiom as FullscreenModeButtons. [enabled]=false greys it out for STRETCH/FILL,
+// where there is no bar to move. 0/1/2 map to Container.ALIGN_CENTER/TOP/BOTTOM.
+@Composable
+private fun ScreenAlignmentButtons(selected: Int, enabled: Boolean = true, onSelect: (Int) -> Unit) {
+    val accent = MaterialTheme.colorScheme.primary
+    val accentDim = LocalAccentDim.current
+    val options = listOf(
+        0 to stringResource(R.string.screen_alignment_center_short),
+        1 to stringResource(R.string.screen_alignment_top_short),
+        2 to stringResource(R.string.screen_alignment_bottom_short)
+    )
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        options.forEach { (align, label) ->
+            val isSel = selected == align
+            Box(
+                contentAlignment = Alignment.Center,
+                modifier = Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(if (isSel && enabled) accent else Color.Black)
+                    .border(
+                        width = 1.dp,
+                        color = if (isSel && enabled) accent else accentDim,
+                        shape = RoundedCornerShape(8.dp)
+                    )
+                    .clickable(enabled = enabled) { onSelect(align) }
+                    .padding(vertical = 9.dp)
+            ) {
+                Text(
+                    label,
+                    color = when {
+                        !enabled -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
+                        isSel    -> Color.Black
+                        else     -> accent
+                    },
+                    fontSize = 12.sp,
+                    fontWeight = if (isSel && enabled) FontWeight.Bold else FontWeight.Medium
+                )
             }
         }
     }

@@ -195,6 +195,10 @@ public:
 
     void onSurfaceResized(int width, int height);
     void setTransform(float ox, float oy, float sx, float sy);
+    // #413: game-region clip rect (surface px). Stored and applied as the swapchain scissor in
+    // recordCmdBuf so a FILL/STRETCH game confined to a half (TOP/BOTTOM alignment) can't bleed into
+    // the on-screen-controls half. A full-surface (or w<=0) rect means "no clip" (CENTER).
+    void setClipRegion(int x, int y, int w, int h);
     void updatePointerPosition(short x, short y);
     void updateWindowContent(int64_t id, void* pixels, short w, short h, short stride, int x, int y);
     void updateWindowContentAHB(int64_t id, AHardwareBuffer* ahb, short w, short h, int x, int y);
@@ -288,6 +292,9 @@ private:
 
     ANativeWindow* window;
     int surfaceWidth, surfaceHeight, containerWidth, containerHeight;
+    // #413 compositor clip rect (surface px). clipRegionW<=0 => disabled (whole swapchain). Written from
+    // the renderer thread (setClipRegion), read from the render thread (recordCmdBuf) -> atomic.
+    std::atomic<int> clipRegionX{0}, clipRegionY{0}, clipRegionW{0}, clipRegionH{0};
     void* adrenotoolsHandle = nullptr;
     int filterMode = 0;
     bool swapRB = false;

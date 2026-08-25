@@ -5586,6 +5586,12 @@ internal fun ShortcutSettingsDialogScreen(
         mutableStateOf(if (rawScreenSize.contains("x")) rawScreenSize.substringAfter("x") else "600")
     }
 
+    // Screen alignment (#413) — per-game override of the container's letterbox pinning. Sentinel model:
+    // "" = inherit container (Container Default), "0"/"1"/"2" = Center/Top/Bottom (Container.ALIGN_*).
+    // Launch reads shortcut.getExtra("screenAlignment") and falls back to the container when empty/absent,
+    // so a true inherit is a CLEARED extra — not a snapshot of the container's current value.
+    var screenAlignment by remember { mutableStateOf(shortcut.getExtra("screenAlignment", "")) }
+
     // Graphics driver — bundled entries + user-imported wrappers (issue #132 Step 2), built via the
     // SHARED WrapperManager.driverEntries helper so this list matches ContainerDetailViewModel's
     // exactly (dynamic-dropdown drift is the feature's top-ranked risk). Keyed on wrapperRefreshKey
@@ -6078,6 +6084,9 @@ internal fun ShortcutSettingsDialogScreen(
             if (isEpicShortcut) putExtra("epicOffline", if (epicOffline) "1" else "0")
             if (isEpicShortcut) putExtra("epicOverlay", if (epicOverlayEnabled) "1" else "0")
             putExtra("screenSize", screenSize)
+            // #413: "" (Container Default) -> null -> putExtra removes the key, so launch re-inherits the
+            // container each time (true inherit, not a snapshot). "0"/"1"/"2" store the Center/Top/Bottom override.
+            putExtra("screenAlignment", screenAlignment.ifEmpty { null })
             putExtra("graphicsDriver", StringUtils.parseIdentifier(selectedGfxDriver))
             putExtra("graphicsDriverConfig", graphicsDriverConfig)
             putExtra("renderer", StringUtils.parseIdentifier(selectedRenderer))
@@ -6178,6 +6187,7 @@ internal fun ShortcutSettingsDialogScreen(
             0 -> { // General
                 add("name"); add("execArgs"); add("screenSize")
                 if (selectedScreenSize == "Custom") { add("customW"); add("customH") }
+                add("screenAlignment")
                 add("selectIcon"); add("gfxDriver"); add("gfxWrapper"); add("gfxConfig")
                 add("dxWrapper"); add("dxConfig"); add("renderer")
                 if (selectedRenderer == "SurfaceFlinger") add("sfCompat")
@@ -6450,6 +6460,28 @@ internal fun ShortcutSettingsDialogScreen(
                                 onLeftId = "customW"
                             )
                         }
+                    }
+
+                    // Screen alignment (#413) — per-game override. Sentinel value "" = inherit the
+                    // container (Container Default); "0"/"1"/"2" = Center/Top/Bottom. Reuses the same
+                    // strings the container editor + in-game drawer show, plus the shared "Use container
+                    // default" inherit label used by the refresh dropdown above.
+                    run {
+                        val saValues = listOf("", "0", "1", "2")
+                        val saLabels = listOf(
+                            stringResource(R.string.use_container_default),
+                            stringResource(R.string.screen_alignment_center),
+                            stringResource(R.string.screen_alignment_top),
+                            stringResource(R.string.screen_alignment_bottom)
+                        )
+                        val saIdx = saValues.indexOf(screenAlignment).coerceAtLeast(0)
+                        DpDrop(
+                            dp, "screenAlignment",
+                            label = stringResource(R.string.screen_alignment),
+                            options = saLabels,
+                            selected = saLabels[saIdx],
+                            onSelect = { screenAlignment = saValues[saLabels.indexOf(it)] }
+                        )
                     }
 
                     // Icon

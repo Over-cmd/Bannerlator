@@ -1661,6 +1661,9 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // Drawer segmented selector (#71 Stage 2): set the picked mode directly, live, without
         // closing the drawer so the user can compare modes before dismissing it.
         state.onSetFullscreenMode      = this::applyFullscreenMode;
+        // Drawer segmented selector (#413): set the picked alignment directly, live, without closing
+        // the drawer — same pattern as onSetFullscreenMode.
+        state.onSetScreenAlignment     = this::applyScreenAlignment;
         state.onPauseResume            = () -> setPausedState(!isPaused);
         state.onPipMode                = () -> enterPictureInPictureMode();
         state.onActiveWindows          = () -> showActiveWindowsDialog();
@@ -5468,7 +5471,22 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // for the whole session via AppUtils.hideSystemUI); OFF is the default windowed letterbox.
         renderer.setFullscreenMode(fullscreenMode);
         XServerDrawerState.INSTANCE.setFullscreenMode(fullscreenMode);
-        if (fullscreenMode != Container.FULLSCREEN_OFF) touchpadView.toggleFullscreen();
+
+        // Resolve the screen alignment (#413) the same way as the mode: per-game shortcut override wins,
+        // else the container setting; absent -> ALIGN_CENTER (== today's centered letterbox).
+        int screenAlignment = Container.ALIGN_CENTER;
+        String scAlign = shortcut != null ? shortcut.getExtra("screenAlignment") : "";
+        if (shortcut != null && scAlign != null && !scAlign.isEmpty()) {
+            try { screenAlignment = Integer.parseInt(scAlign); } catch (NumberFormatException ignored) {}
+        } else if (container != null) {
+            screenAlignment = container.getScreenAlignment();
+        }
+        renderer.setScreenAlignment(screenAlignment);
+        XServerDrawerState.INSTANCE.setScreenAlignment(screenAlignment);
+        inputControlsView.setScreenAlignment(screenAlignment); // #413: size the OSC overlay to its half (TOP/BOTTOM)
+        // touchpadView.toggleFullscreen() just re-runs updateXform (it does NOT change the mode), so it
+        // also picks up a non-center alignment. CENTER keeps the original OFF-only condition unchanged.
+        if (fullscreenMode != Container.FULLSCREEN_OFF || screenAlignment != Container.ALIGN_CENTER) touchpadView.toggleFullscreen();
 
         if (shortcut != null) {
             String controlsProfile = shortcut.getExtra("controlsProfile");
@@ -5505,6 +5523,25 @@ public class XServerDisplayActivity extends AppCompatActivity {
             shortcut.saveData();
         } else if (container != null) {
             container.setFullscreenMode(mode);
+            container.saveData();
+        }
+    }
+
+    // Apply a screen alignment (#413) live and remember it PER GAME (the per-game shortcut override if
+    // launched from one, else the container). Mirrors applyFullscreenMode. Only moves the letterbox bar
+    // position — CENTER reproduces today's output.
+    private void applyScreenAlignment(int alignment) {
+        HostRenderer r = xServerView.getRenderer();
+        r.setScreenAlignment(alignment);
+        touchpadView.toggleFullscreen();          // recompute touch->guest map for the new alignment
+        XServerDrawerState.INSTANCE.setScreenAlignment(alignment);
+        // #413: live-resize the OSC overlay to own its half (TOP/BOTTOM), or full screen (CENTER restores).
+        if (inputControlsView != null) inputControlsView.setScreenAlignment(alignment);
+        if (shortcut != null) {
+            shortcut.putExtra("screenAlignment", String.valueOf(alignment));
+            shortcut.saveData();
+        } else if (container != null) {
+            container.setScreenAlignment(alignment);
             container.saveData();
         }
     }

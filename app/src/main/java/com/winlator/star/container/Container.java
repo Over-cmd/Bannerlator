@@ -95,6 +95,13 @@ public class Container {
     public static final int FULLSCREEN_FILL = 3;     // fullscreen-immersive, crop-to-fill (preserve aspect, no bars)
     public static final int FULLSCREEN_INTEGER = 4;  // fullscreen-immersive, largest whole-number scale (pixel-perfect, centered)
     private int fullscreenMode = FULLSCREEN_OFF;
+    // Screen alignment (issue #413): vertical placement of the letterbox rect on square-ish/foldable
+    // displays. CENTER is the historical behavior (equal bars top+bottom); TOP/BOTTOM pool the empty
+    // space on the opposite edge for touch controls. Aspect is preserved — only the bar moves.
+    public static final int ALIGN_CENTER = 0;
+    public static final int ALIGN_TOP = 1;
+    public static final int ALIGN_BOTTOM = 2;
+    private int screenAlignment = ALIGN_CENTER;
     private byte startupSelection = STARTUP_SELECTION_ESSENTIAL;
     // CSV of ENABLED service raw names when startupSelection == CUSTOM. "" (default) = none enabled
     // (Custom starts every service off). Ignored by the other three presets. Per-game shortcuts
@@ -249,6 +256,10 @@ public class Container {
     public int getFullscreenMode() { return fullscreenMode; }
 
     public void setFullscreenMode(int mode) { this.fullscreenMode = mode; }
+
+    public int getScreenAlignment() { return screenAlignment; }
+
+    public void setScreenAlignment(int a) { this.screenAlignment = a; }
 
     // Legacy compat: derived helper so any lingering callers still compile/behave.
     public boolean isFullscreenStretched() { return fullscreenMode == FULLSCREEN_STRETCH; }
@@ -1056,6 +1067,7 @@ public class Container {
             data.put("showFPS", showFPS);
             data.put("fpsCounterConfig", fpsCounterConfig);
             data.put("fullscreenMode", fullscreenMode);
+            data.put("screenAlignment", screenAlignment);
             data.put("inputType", inputType);
             data.put("startupSelection", startupSelection);
             data.put("startupServices", startupServices);
@@ -1139,6 +1151,10 @@ public class Container {
                     break;
                 case "fullscreenMode" :
                     setFullscreenMode(data.getInt(key));
+                    break;
+                case "screenAlignment" :
+                    // Absent key -> stays default ALIGN_CENTER, so existing containers are unaffected.
+                    setScreenAlignment(data.getInt(key));
                     break;
                 case "fullscreenStretched" :
                     // Backward-compat migration: only honour the legacy boolean when the new int
