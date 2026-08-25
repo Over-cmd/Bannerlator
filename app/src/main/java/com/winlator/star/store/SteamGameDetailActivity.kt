@@ -46,6 +46,7 @@ import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -55,6 +56,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -71,6 +73,9 @@ import com.winlator.star.store.download.DownloadsButton
 import com.winlator.star.store.download.formatDownloadSpeed
 import com.winlator.star.store.download.formatEta
 import com.winlator.star.ui.theme.WinlatorTheme
+import coil.compose.AsyncImage
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.net.URL
 
@@ -234,6 +239,8 @@ class SteamGameDetailActivity : ComponentActivity(), SteamRepository.SteamEventL
         setContent {
             WinlatorTheme {
                 SteamGameDetailScreen(
+                    appId = appId,
+                    signedIn = SteamPrefs.isLoggedIn,
                     headerBitmap = headerBitmap,
                     steamStatus = steamStatus,
                     onReconnect = { SteamRepository.getInstance().reconnectNow() },
@@ -1122,6 +1129,8 @@ private data class ExePickerDataGame(
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 private fun SteamGameDetailScreen(
+    appId: Int,
+    signedIn: Boolean,
     headerBitmap: Bitmap?,
     steamStatus: SteamRepository.SteamStatus,
     onReconnect: () -> Unit,
@@ -1415,6 +1424,11 @@ private fun SteamGameDetailScreen(
             ) { Text("Launch", maxLines = 1) }
         }
 
+        // Achievements — launch-mode agnostic (shown whether the game runs via Goldberg or a real
+        // Steam session). Self-contained: loads its own data and renders its own loading/empty/
+        // not-signed-in states.
+        AchievementsSection(appId = appId, signedIn = signedIn)
+
         if (goldbergVisible) {
             GoldbergSection(
                 installed = goldbergInstalled,
@@ -1612,6 +1626,197 @@ private fun SteamGameDetailScreen(
             }
         }
     }
+}
+
+/**
+ * Achievements grid — launch-mode agnostic (works whether the game runs via Goldberg or a real Steam
+ * session). Self-contained: on open it loads its own data on IO (try [SteamAchievementStore.fetch];
+ * if that comes back empty — offline or no network — fall back to [SteamAchievementStore.cached]),
+ * then renders one of: loading spinner, "sign in" prompt (not logged in), "no achievements" (empty),
+ * or the header (N / M · P%) + progress bar + a responsive grid of cards. Unlocked cards lead (schema
+ * order preserved within each group), showing the color icon + unlock date; locked cards use the gray
+ * icon and read "Hidden achievement" when the achievement is hidden.
+ */
+@Composable
+private fun AchievementsSection(appId: Int, signedIn: Boolean) {
+    val context = LocalContext.current
+    var loading by remember { mutableStateOf(true) }
+    var achievements by remember { mutableStateOf<List<SteamAchievement>>(emptyList()) }
+
+    // Load once per game. Not-signed-in short-circuits (no network / DB read) so the section renders
+    // its sign-in prompt immediately. fetch() is blocking network → IO; empty result falls back to the
+    // offline cache. Sorted unlocked-first with schema order preserved inside each group (stable sort).
+    LaunchedEffect(appId, signedIn) {
+        if (!signedIn) { loading = false; return@LaunchedEffect }
+        loading = true
+        val list = withContext(Dispatchers.IO) {
+            val fetched = try { SteamAchievementStore.fetch(context, appId) } catch (_: Throwable) { emptyList() }
+            val base = if (fetched.isNotEmpty()) fetched
+                       else try { SteamAchievementStore.cached(context, appId) } catch (_: Throwable) { emptyList() }
+            base.sortedByDescending { it.unlocked }
+        }
+        achievements = list
+        loading = false
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp)
+            .padding(bottom = 16.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .padding(16.dp),
+    ) {
+        Text(
+            text = "Achievements",
+            style = MaterialTheme.typography.titleSmall,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
+
+        when {
+            !signedIn -> {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = "Sign in to Steam to view achievements.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            loading -> {
+                Spacer(Modifier.height(12.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(18.dp),
+                        color = MaterialTheme.colorScheme.primary,
+                        strokeWidth = 2.dp,
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = "Loading achievements…",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            achievements.isEmpty() -> {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = "This game has no achievements.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            else -> {
+                val total = achievements.size
+                val unlocked = achievements.count { it.unlocked }
+                val pct = SteamAchievementStore.percentUnlocked(achievements)
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    text = "$unlocked / $total · $pct%",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(8.dp))
+                LinearProgressIndicator(
+                    progress = { (pct / 100f).coerceIn(0f, 1f) },
+                    modifier = Modifier.fillMaxWidth(),
+                    color = MaterialTheme.colorScheme.primary,
+                    trackColor = MaterialTheme.colorScheme.surface,
+                )
+                Spacer(Modifier.height(12.dp))
+
+                // Responsive grid inside the page's verticalScroll (a LazyVerticalGrid can't nest in a
+                // vertical scroll) — chunk into rows of `cols` cards, each weighted evenly.
+                val cols = if (LocalConfiguration.current.orientation ==
+                        android.content.res.Configuration.ORIENTATION_LANDSCAPE) 2 else 1
+                achievements.chunked(cols).forEach { row ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        for (a in row) {
+                            AchievementCard(a, modifier = Modifier.weight(1f))
+                        }
+                        // Keep the last (short) row's cards left-aligned + evenly sized.
+                        repeat(cols - row.size) { Spacer(Modifier.weight(1f)) }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AchievementCard(a: SteamAchievement, modifier: Modifier = Modifier) {
+    // Color icon when unlocked, gray when locked; prefer the downloaded local file, fall back to URL.
+    val iconModel: Any? = if (a.unlocked) {
+        a.localIconPath?.takeIf { it.isNotEmpty() }?.let { File(it) } ?: a.iconUrl.takeIf { it.isNotEmpty() }
+    } else {
+        a.localIconGrayPath?.takeIf { it.isNotEmpty() }?.let { File(it) } ?: a.iconGrayUrl.takeIf { it.isNotEmpty() }
+    }
+    val desc = if (a.hidden && !a.unlocked) "Hidden achievement" else a.description
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = modifier
+            .clip(RoundedCornerShape(10.dp))
+            .background(MaterialTheme.colorScheme.surface)
+            .padding(10.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .size(44.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(MaterialTheme.colorScheme.surfaceVariant),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (iconModel != null) {
+                AsyncImage(
+                    model = iconModel,
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+        }
+        Spacer(Modifier.width(10.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = a.displayName.ifEmpty { a.apiName },
+                style = MaterialTheme.typography.bodyMedium,
+                color = if (a.unlocked) MaterialTheme.colorScheme.onSurface
+                        else MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (desc.isNotEmpty()) {
+                Text(
+                    text = desc,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            if (a.unlocked && a.unlockTimeSec > 0L) {
+                Text(
+                    text = "Unlocked ${formatUnlockDate(a.unlockTimeSec)}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color(0xFF4CAF50), // semantic unlocked-green, matches the installed status
+                    maxLines = 1,
+                )
+            }
+        }
+    }
+}
+
+/** Format an achievement unlock time (epoch seconds) as a readable date; "" when unknown. */
+private fun formatUnlockDate(epochSeconds: Long): String {
+    if (epochSeconds <= 0L) return ""
+    return try {
+        java.text.SimpleDateFormat("MMM d, yyyy", java.util.Locale.getDefault())
+            .format(java.util.Date(epochSeconds * 1000L))
+    } catch (_: Throwable) { "" }
 }
 
 /**
