@@ -34,6 +34,10 @@
  *   max_buffer_frames=<n>     cap for adaptive growth (0 = device buffer capacity)
  */
 
+#include <sys/resource.h>
+#include <sys/types.h>
+#include <unistd.h>
+
 #include <config.h>
 
 #include <pulse/timeval.h>
@@ -126,15 +130,47 @@ static void banner_adapt_buffer(struct userdata *u) {
                       ? u->max_buffer_frames : u->buffer_capacity;
     if (u->cur_buffer_size >= cap) return;
 
-    int32_t want = u->cur_buffer_size + u->frames_per_burst;
+    /* BANNERLATOR: Crecimiento geométrico más agresivo (1.5x) para absorber picos de JIT */
+    int32_t step = u->frames_per_burst * 2;
+    int32_t want = u->cur_buffer_size * 1.5;
+    if (want < u->cur_buffer_size + step) {
+        want = u->cur_buffer_size + step;
+    }
+
     if (want > cap) want = cap;
 
     int32_t got = AAudioStream_setBufferSizeInFrames(u->stream, want);
     if (got > 0) {
         u->cur_buffer_size = got;
-        pa_log_debug("aaudio-sink: grew buffer to %d frames after %d xruns", (int) got, (int) xruns);
+        pa_log_info("aaudio-sink: grew buffer aggressively to %d frames after %d xruns", (int) got, (int) xruns);
+    }
+}static void banner_adapt_buffer(struct userdata *u) {
+    if (!u->adaptive || u->frames_per_burst <= 0 || u->cur_buffer_size <= 0) return;
+
+    int32_t xruns = AAudioStream_getXRunCount(u->stream);
+    if (xruns <= u->last_xrun) return;
+    u->last_xrun = xruns;
+
+    int32_t cap = (u->max_buffer_frames > 0 && u->max_buffer_frames < u->buffer_capacity)
+                      ? u->max_buffer_frames : u->buffer_capacity;
+    if (u->cur_buffer_size >= cap) return;
+
+    /* BANNERLATOR: Crecimiento geométrico más agresivo (1.5x) para absorber picos de JIT */
+    int32_t step = u->frames_per_burst * 2;
+    int32_t want = u->cur_buffer_size * 1.5;
+    if (want < u->cur_buffer_size + step) {
+        want = u->cur_buffer_size + step;
+    }
+
+    if (want > cap) want = cap;
+
+    int32_t got = AAudioStream_setBufferSizeInFrames(u->stream, want);
+    if (got > 0) {
+        u->cur_buffer_size = got;
+        pa_log_info("aaudio-sink: grew buffer aggressively to %d frames after %d xruns", (int) got, (int) xruns);
     }
 }
+
 
 static aaudio_data_callback_result_t aaudio_data_callback(AAudioStream *stream, void *userdata, void *audioData, int32_t numFrames) {
     struct userdata* u = userdata;
@@ -235,14 +271,20 @@ static void thread_func(void *userdata) {
     struct userdata *u = userdata;
     pa_thread_mq_install(&u->thread_mq);
 
+    /* BANNERLATOR: Eleva el hilo nativo de audio a prioridad de tiempo real */
+    /* Evita que el JIT de Box64 congele el flujo de sonido en cinemáticas */
+    #ident "Bannerlator Thread Optimization"
+    int priority_tid = (int)gettid();
+    setpriority(0, priority_tid, -19); 
+
     for (;;) {
         if (PA_UNLIKELY(u->sink->thread_info.rewind_requested)) pa_sink_process_rewind(u->sink, 0);
 
-		int res = pa_rtpoll_run(u->rtpoll);
+        int res = pa_rtpoll_run(u->rtpoll);
         if (res < 0) {
-			goto error;
-		}
-		else if (res == 0) break;
+            goto error;
+        }
+        else if (res == 0) break;
     }
 
 error:
