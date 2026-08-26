@@ -1891,6 +1891,15 @@ public class XServerDisplayActivity extends AppCompatActivity {
             return;
         }
 
+        // Initialise the Steam DB singleton in THIS process. A game launched directly (from a
+        // library shortcut, not via the store) never ran SteamRepository.initialize(ctx), so the
+        // repo's appContext is null and getDatabase() throws IllegalStateException ("SteamDatabase
+        // not initialised"). That silently broke the achievement seed/schema/appId-resolve AND the
+        // Steam cloud-save auto-triggers at launch/exit (all their DB reads threw and were caught).
+        // getInstance(ctx) is idempotent + lightweight (SQLiteOpenHelper, no CM connection).
+        try { SteamDatabase.getInstance(getApplicationContext()); }
+        catch (Throwable t) { Log.w("XServerDisplayActivity", "SteamDatabase init failed", t); }
+
         // Construct the shortcut (if any) up front so per-game overrides (frame-gen engine, fps
         // limiter, renderer) can be resolved against it below; each falls back to the container value.
         if (shortcutPath != null && !shortcutPath.isEmpty()) {
