@@ -38,6 +38,8 @@ public class VulkanRenderer implements WindowManager.OnWindowModificationListene
     public final ViewTransformation viewTransformation = new ViewTransformation();
     // Fullscreen aspect-ratio mode (#71). STRETCH fills the surface (distorts); OFF/FIT letterbox.
     private int fullscreenMode = Container.FULLSCREEN_OFF;
+    // Screen alignment (#413). Only moves the letterbox bar vertically; CENTER == historical output.
+    private int screenAlignment = Container.ALIGN_CENTER;
     private boolean isStretch() { return fullscreenMode == Container.FULLSCREEN_STRETCH; }
     private float magnifierZoom = 1.0f;
     private boolean screenOffsetYRelativeToCursor = false;
@@ -105,6 +107,9 @@ public class VulkanRenderer implements WindowManager.OnWindowModificationListene
     private native boolean nativeIsGameFrameDelivered(long handle);
     private native void nativeSetScanoutWindow(long handle, android.view.Surface game, android.view.Surface cursor);
     private native void nativeScanoutSetDst(long handle, int x, int y, int w, int h);
+    // #413: compositor clip rect (surface px). recordCmdBuf uses it as the swapchain scissor so
+    // FILL/STRETCH overflow is cropped to the game's half. w<=0 (or the full surface) => no clip.
+    private native void nativeSetClipRegion(long handle, int x, int y, int w, int h);
     private native void nativeSetVerboseLog(long handle, boolean v);
     private native void nativeDumpRendererInfo(long handle);
     private native void nativeSetFilterMode(long handle, int mode);
@@ -218,7 +223,7 @@ public class VulkanRenderer implements WindowManager.OnWindowModificationListene
 
     public void onSurfaceChanged(int width, int height) {
         surfaceWidth = width; surfaceHeight = height;
-        viewTransformation.update(width, height, xServer.screenInfo.width, xServer.screenInfo.height, fullscreenMode);
+        viewTransformation.update(width, height, xServer.screenInfo.width, xServer.screenInfo.height, fullscreenMode, screenAlignment);
         synchronized (lock) {
             if (nativeHandle != 0) { nativeResize(nativeHandle, width, height); updateTransform(); }
         }
@@ -294,7 +299,20 @@ public class VulkanRenderer implements WindowManager.OnWindowModificationListene
         // on the in-game toggle without a surface change (STRETCH ignores viewTransformation anyway).
         if (surfaceWidth > 0 && surfaceHeight > 0)
             viewTransformation.update(surfaceWidth, surfaceHeight,
-                xServer.screenInfo.width, xServer.screenInfo.height, fullscreenMode);
+                xServer.screenInfo.width, xServer.screenInfo.height, fullscreenMode, screenAlignment);
+        // #413 region: the sub-rect the game may occupy (surface px). Capture it BEFORE the STRETCH
+        // ALIGN_CENTER re-compute below overwrites viewTransformation's region fields. Feed it to the
+        // compositor as the swapchain scissor so FILL/STRETCH overflow is cropped to the game's half.
+        // At CENTER the region == the full surface, so the native side treats it as "no clip" and the
+        // output stays byte-identical.
+        final int rOffX = viewTransformation.regionOffsetX, rOffY = viewTransformation.regionOffsetY;
+        final int rW = viewTransformation.regionWidth, rH = viewTransformation.regionHeight;
+        final boolean regionIsFullSurface = rOffX == 0 && rOffY == 0 && rW == surfaceWidth && rH == surfaceHeight;
+        // CENTER: pass the disabled sentinel (w=h=0) rather than the full-surface rect, so the native
+        // scissor stays exactly the full swapchain even if swapchainExt transiently differs from the Java
+        // surface size during a resize -> guaranteed byte-identical. TOP/BOTTOM: the real region.
+        if (regionIsFullSurface) nativeSetClipRegion(nativeHandle, 0, 0, 0, 0);
+        else nativeSetClipRegion(nativeHandle, rOffX, rOffY, rW, rH);
         float zoom = magnifierZoom;
         if (isStretch()) {
             // Cursor-follow magnifier (parity with GLRenderer.drawFrame). The native compositor
@@ -311,16 +329,32 @@ public class VulkanRenderer implements WindowManager.OnWindowModificationListene
             // Keep the point under the cursor fixed under zoom, then clamp so the magnified content
             // still covers the screen (no black gutters). At zoom == 1 the clamp range collapses to
             // [0,0] -> identity, independent of the pointer.
-            float ox = Math.max(gw * (1f - zoom), Math.min(0f, gw * 0.5f - px * zoom));
-            float oy = Math.max(gh * (1f - zoom), Math.min(0f, gh * 0.5f - py * zoom));
-            nativeSetTransform(nativeHandle, ox, oy, zoom, zoom);
-            viewTransformation.update(surfaceWidth, surfaceHeight,
-                xServer.screenInfo.width, xServer.screenInfo.height);
-            nativeScanoutSetDst(nativeHandle,
-                viewTransformation.viewOffsetX,
-                viewTransformation.viewOffsetY,
-                viewTransformation.viewWidth,
-                viewTransformation.viewHeight);
+            float magOffX = Math.max(gw * (1f - zoom), Math.min(0f, gw * 0.5f - px * zoom));
+            float magOffY = Math.max(gh * (1f - zoom), Math.min(0f, gh * 0.5f - py * zoom));
+            // #413: STRETCH now maps the guest onto the REGION (non-uniform). At CENTER regionOffset=0
+            // and region == surface, so baseOx/baseOy=0 and baseSx/baseSy=1, collapsing to the historical
+            // (magOffX, magOffY, zoom, zoom) — byte-identical. On TOP/BOTTOM the guest is squished into
+            // the half (the compositor scissor then guarantees nothing bleeds past it).
+            float baseSx = surfaceWidth  > 0 ? (float) rW / surfaceWidth  : 1f;
+            float baseSy = surfaceHeight > 0 ? (float) rH / surfaceHeight : 1f;
+            float baseOx = surfaceWidth  > 0 ? gw * rOffX / surfaceWidth  : 0f;
+            float baseOy = surfaceHeight > 0 ? gh * rOffY / surfaceHeight : 0f;
+            nativeSetTransform(nativeHandle,
+                baseOx + baseSx * magOffX, baseOy + baseSy * magOffY, baseSx * zoom, baseSy * zoom);
+            if (regionIsFullSurface) {
+                // CENTER: alignment is inert — pin the scanout dst to the historical CENTER letterbox
+                // rect so the Native Rendering+ stretch path stays byte-identical.
+                viewTransformation.update(surfaceWidth, surfaceHeight,
+                    xServer.screenInfo.width, xServer.screenInfo.height, fullscreenMode, Container.ALIGN_CENTER);
+                nativeScanoutSetDst(nativeHandle,
+                    viewTransformation.viewOffsetX,
+                    viewTransformation.viewOffsetY,
+                    viewTransformation.viewWidth,
+                    viewTransformation.viewHeight);
+            } else {
+                // TOP/BOTTOM: the scanned-out game fills its region (its half).
+                nativeScanoutSetDst(nativeHandle, rOffX, rOffY, rW, rH);
+            }
         } else {
             float py = 0;
             if (screenOffsetYRelativeToCursor) {
@@ -356,11 +390,25 @@ public class VulkanRenderer implements WindowManager.OnWindowModificationListene
                 baseOy + baseSy * magOffY,
                 baseSx * zoom,
                 baseSy * zoom);
-            nativeScanoutSetDst(nativeHandle,
-                viewTransformation.viewOffsetX,
-                viewTransformation.viewOffsetY,
-                viewTransformation.viewWidth,
-                viewTransformation.viewHeight);
+            if (regionIsFullSurface) {
+                // CENTER: unchanged draw rect (FILL may exceed the surface; the compositor NDC / the
+                // scanout SurfaceControl clips it to the display) -> byte-identical.
+                nativeScanoutSetDst(nativeHandle,
+                    viewTransformation.viewOffsetX,
+                    viewTransformation.viewOffsetY,
+                    viewTransformation.viewWidth,
+                    viewTransformation.viewHeight);
+            } else {
+                // TOP/BOTTOM: clip the draw rect to the region so the scanned-out game stays in its half.
+                // (Scanout scales the full guest buffer into this dst, so a FILL rect larger than the
+                // region is confined by squishing; the compositor path crops FILL properly via the
+                // region scissor.)
+                int l = Math.max(viewTransformation.viewOffsetX, rOffX);
+                int t = Math.max(viewTransformation.viewOffsetY, rOffY);
+                int r = Math.min(viewTransformation.viewOffsetX + viewTransformation.viewWidth,  rOffX + rW);
+                int b = Math.min(viewTransformation.viewOffsetY + viewTransformation.viewHeight, rOffY + rH);
+                nativeScanoutSetDst(nativeHandle, l, t, Math.max(0, r - l), Math.max(0, b - t));
+            }
         }
     }
 
@@ -850,6 +898,12 @@ public class VulkanRenderer implements WindowManager.OnWindowModificationListene
         synchronized (lock) { updateTransform(); }
         xServerView.queueEvent(this::updateScene);
     }
+    public int getScreenAlignment() { return screenAlignment; }
+    public void setScreenAlignment(int alignment) {
+        screenAlignment = alignment;
+        synchronized (lock) { updateTransform(); }
+        xServerView.queueEvent(this::updateScene);
+    }
     public void toggleFullscreen() { setFullscreenMode(Container.nextFullscreenMode(fullscreenMode)); }
     public void setScreenOffsetYRelativeToCursor(boolean b) { screenOffsetYRelativeToCursor = b; synchronized (lock) { updateTransform(); } }
     public boolean isScreenOffsetYRelativeToCursor() { return screenOffsetYRelativeToCursor; }
@@ -896,6 +950,7 @@ public class VulkanRenderer implements WindowManager.OnWindowModificationListene
     }
     public int getSurfaceWidth() { return surfaceWidth; }
     public int getSurfaceHeight() { return surfaceHeight; }
+
     public void requestRender() {}
 
     // HostRenderer

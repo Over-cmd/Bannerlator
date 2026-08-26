@@ -156,6 +156,8 @@ class ContainerDetailViewModel(app: Application) : AndroidViewModel(app) {
     var fpsCounterConfig by mutableStateOf(Container.DEFAULT_FPS_COUNTER_CONFIG)
     // Fullscreen aspect-ratio mode (#71): Container.FULLSCREEN_OFF/FIT/STRETCH.
     var fullscreenMode by mutableStateOf(Container.FULLSCREEN_OFF)
+    // Screen alignment (#413): Container.ALIGN_CENTER/TOP/BOTTOM — vertical placement of the letterbox bar.
+    var screenAlignment by mutableStateOf(Container.ALIGN_CENTER)
 
     // Frame-gen engine (per-container): "off" | "bionic" | "lsfg" (mutually exclusive).
     // multiplier & flow scale are tuned live from the in-game side menu (bionic-fg).
@@ -507,6 +509,7 @@ class ContainerDetailViewModel(app: Application) : AndroidViewModel(app) {
         showFPS           = seed?.isShowFPS == true
         fpsCounterConfig  = seed?.getFPSCounterConfig() ?: Container.DEFAULT_FPS_COUNTER_CONFIG
         fullscreenMode      = seed?.getFullscreenMode() ?: Container.FULLSCREEN_OFF
+        screenAlignment     = seed?.getScreenAlignment() ?: Container.ALIGN_CENTER
 
         frameGenEngine     = seed?.frameGenEngine ?: "off"
         frameGenModel      = seed?.frameGenModel ?: 0
@@ -929,6 +932,7 @@ class ContainerDetailViewModel(app: Application) : AndroidViewModel(app) {
             c.setShowFPS(showFPS)
             c.setFPSCounterConfig(fpsConfig)
             c.setFullscreenMode(fullscreenMode)
+            c.setScreenAlignment(screenAlignment)
             c.setFrameGenEngine(frameGenEngine)
             c.setFrameGenModel(frameGenModel)
             c.setLsfgPerformanceMode(lsfgPerformanceMode)
@@ -1082,6 +1086,7 @@ class ContainerDetailViewModel(app: Application) : AndroidViewModel(app) {
         put("showFPS", showFPS)
         put("fpsCounterConfig", fpsConfig)
         put("fullscreenMode", fullscreenMode)
+        put("screenAlignment", screenAlignment)
         put("exclusiveXInput", exclusiveXInput)
         put("renderer", StringUtils.parseIdentifier(selectedRenderer))
         put("rendererNative", rendererNative)

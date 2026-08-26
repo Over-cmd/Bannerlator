@@ -59,9 +59,14 @@ import com.winlator.star.container.Container;
 import com.winlator.star.container.ContainerManager;
 import com.winlator.star.container.Shortcut;
 import com.winlator.star.core.CustomSaveVault;
+import com.winlator.star.store.AchievementWatcher;
 import com.winlator.star.store.EpicOverlayManager;
 import com.winlator.star.store.GogCloudSaveManager;
 import com.winlator.star.store.GogCloudSavePaths;
+import com.winlator.star.store.GoldbergMode;
+import com.winlator.star.store.GoldbergPatcher;
+import com.winlator.star.store.SteamAchievementStore;
+import com.winlator.star.store.SteamPrefs;
 import com.winlator.star.store.SteamCloudSaveManager;
 import com.winlator.star.store.SteamDatabase;
 import com.winlator.star.store.SteamRepository;
@@ -252,6 +257,16 @@ public class XServerDisplayActivity extends AppCompatActivity {
     private boolean userWantsControlsShown;
     private boolean controlsEditorOpen;
     private Shortcut shortcut;
+    // In-game Steam achievement watcher (Goldberg/GSE achievements.json → gold pills). Genuine-Steam
+    // shortcuts only; armed on the launch worker thread in setupXEnvironment, stopped in onDestroy. Null
+    // for non-Steam launches.
+    private AchievementWatcher achievementWatcher;
+    // The seed/watch hook (maybeSeedAndStartAchievementWatcher) is called once, from setupXEnvironment on
+    // the launch WORKER thread (off-main so its fetch/read can't block the launch → the setupUI call site
+    // was removed after it caused a first-launch black screen). This flag still guards the WATCHER so, if
+    // the hook is ever re-entered, it re-runs the (idempotent) seed but never re-arms/double-arms the
+    // FileObserver. Reset on teardown so a later launch in the same activity instance re-arms cleanly.
+    private boolean achievementWatcherArmed = false;
     private String graphicsDriver = Container.DEFAULT_GRAPHICS_DRIVER;
     // Which Vulkan driver the host compositor/present layer runs on ("system" = Android's own driver,
     // or an installed adrenotools Turnip). Separate from graphicsDriver (which the guest game renders
@@ -1448,6 +1463,19 @@ public class XServerDisplayActivity extends AppCompatActivity {
             if (inputControlsView != null) inputControlsView.setOverlayOpacity(v); // setter invalidates → live redraw
             preferences.edit().putFloat("overlay_opacity", v).apply();
         };
+        // Swipeable OSC (Stage 2): the drawer's Swipe tab toggles → apply live to the overlay + persist.
+        state.onSetSwipeButtons        = (v) -> {
+            if (inputControlsView != null) inputControlsView.setSwipeButtonsEnabled(v);
+            preferences.edit().putBoolean("touchscreen_swipe_buttons_enabled", v).apply();
+        };
+        state.onSetSwipeDpad           = (v) -> {
+            if (inputControlsView != null) inputControlsView.setSwipeDpadEnabled(v);
+            preferences.edit().putBoolean("touchscreen_swipe_dpad_enabled", v).apply();
+        };
+        state.onSetSwipeSticks         = (v) -> {
+            if (inputControlsView != null) inputControlsView.setSwipeSticksEnabled(v);
+            preferences.edit().putBoolean("touchscreen_swipe_sticks_enabled", v).apply();
+        };
         state.onControlsColorChange    = () -> {
             // Per-profile on-screen controls accent. Write the two drawer values onto the ACTIVE
             // profile (the one bound to the running game), persist, and invalidate for a live redraw.
@@ -1536,6 +1564,9 @@ public class XServerDisplayActivity extends AppCompatActivity {
                 // multiplier <= 1 as passthrough, so map anything below 2 to 1 — NOT max(2,mult),
                 // which would force 2x on Off.
                 writeLsfgConfig(mult >= 2 ? mult : 1, flow, dll.getAbsolutePath(), perfMode);
+                // Keep the vsync clock running only while frame-gen is actually generating (mult>=2),
+                // so the layer has a grid to phase-lock to; stop it in passthrough.
+                if (mult >= 2) startVsyncClock(); else stopVsyncClock();
                 if (fgOn) container.setFrameGenMultiplier(mult);
                 container.setFrameGenFlowScale(flow);
                 container.setLsfgPerformanceMode(perfMode);
@@ -1546,6 +1577,12 @@ public class XServerDisplayActivity extends AppCompatActivity {
                 // ... and re-apply the host present mode: mailbox while multiplying (so the generated
                 // frames aren't strangled by FIFO backpressure), back to the user's mode when off.
                 applyEffectivePresentMode();
+                // Frame-gen change (Off/On/2×/3×/4×) → full presentation reset. lsfg-vk restarts on the
+                // conf.toml rewrite above, but a swapchain-only recreate leaves it over-queued → generated
+                // frames present BLACK until a background/foreground cycle. Deterministically replicate
+                // that cycle: pause the guest, tear the surface fully down, and prompt Resume. Fires once
+                // per effective-level change (flow/perf-mode edits keep the level, so they don't reset).
+                maybeTriggerFgReset(mult >= 2 ? mult : 0);
                 return;
             }
             // FPS limiter is no longer part of frame gen — it's a standalone host pacer
@@ -1652,6 +1689,9 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // Drawer segmented selector (#71 Stage 2): set the picked mode directly, live, without
         // closing the drawer so the user can compare modes before dismissing it.
         state.onSetFullscreenMode      = this::applyFullscreenMode;
+        // Drawer segmented selector (#413): set the picked alignment directly, live, without closing
+        // the drawer — same pattern as onSetFullscreenMode.
+        state.onSetScreenAlignment     = this::applyScreenAlignment;
         state.onPauseResume            = () -> setPausedState(!isPaused);
         state.onPipMode                = () -> enterPictureInPictureMode();
         state.onActiveWindows          = () -> showActiveWindowsDialog();
@@ -1850,6 +1890,15 @@ public class XServerDisplayActivity extends AppCompatActivity {
             finish();  // Gracefully exit the activity to avoid crashing
             return;
         }
+
+        // Initialise the Steam DB singleton in THIS process. A game launched directly (from a
+        // library shortcut, not via the store) never ran SteamRepository.initialize(ctx), so the
+        // repo's appContext is null and getDatabase() throws IllegalStateException ("SteamDatabase
+        // not initialised"). That silently broke the achievement seed/schema/appId-resolve AND the
+        // Steam cloud-save auto-triggers at launch/exit (all their DB reads threw and were caught).
+        // getInstance(ctx) is idempotent + lightweight (SQLiteOpenHelper, no CM connection).
+        try { SteamDatabase.getInstance(getApplicationContext()); }
+        catch (Throwable t) { Log.w("XServerDisplayActivity", "SteamDatabase init failed", t); }
 
         // Construct the shortcut (if any) up front so per-game overrides (frame-gen engine, fps
         // limiter, renderer) can be resolved against it below; each falls back to the container value.
@@ -2435,6 +2484,11 @@ public class XServerDisplayActivity extends AppCompatActivity {
         if (isPaused) setPausedState(false);
         // Re-assert the VRR vote — onStop() released it when backgrounded.
         reapplyVrr();
+        // A real foreground IS the bg/fg reset an FG-reset overlay was waiting on, and it already
+        // resumed the guest above — but the game SurfaceView is still torn down (its visibility
+        // isn't restored automatically). Complete the reset so the surface comes back and the
+        // overlay clears (no-op unless a reset was mid-flight).
+        if (fgResetInProgress) resumeFromFgReset();
         // onPause() dropped the gyro listener so it can't drain the battery in the background.
         registerGyroSensor();
         // The user may have been away recalibrating (Input Controls -> Gyroscope), which writes the
@@ -2642,6 +2696,11 @@ public class XServerDisplayActivity extends AppCompatActivity {
             File configDir = new File(imageFs.home_path, ".config/lsfg-vk");
             configDir.mkdirs();
             File confFile = new File(configDir, "conf.toml");
+            // Guest layer present mode: mailbox while generating, fifo in passthrough (GameNative parity).
+            // The layer already paces itself against the vsync clock we publish (vsync.txt); mesa's FIFO
+            // queue underneath the layer breaks the display cadence and backs frames up in the host
+            // compositor (device-proven SmoMoState over-queue -> generated frames present black).
+            boolean generating = multiplier >= 2;
             String toml = "# Written by Bannerlator (per-container lsfg-vk frame generation)\n"
                     + "version = 1\n\n"
                     + "[global]\n"
@@ -2653,11 +2712,70 @@ public class XServerDisplayActivity extends AppCompatActivity {
                     + "flow_scale = " + String.format(java.util.Locale.US, "%.2f", flowScale) + "\n"
                     + "performance_mode = " + performanceMode + "\n"
                     + "hdr_mode = false\n"
-                    + "experimental_present_mode = \"fifo\"\n";
+                    + "experimental_present_mode = " + (generating ? "\"mailbox\"" : "\"fifo\"") + "\n";
             FileUtils.writeString(confFile, toml);
         }
         catch (Exception e) {
             Log.e("lsfg-vk", "Failed to write lsfg-vk conf.toml", e);
+        }
+    }
+
+    // === lsfg-vk vsync clock ===================================================================
+    // The lsfg-vk fork layer phase-locks its frame pacing to a display vsync grid published here as
+    // vsync.txt (sibling of conf.toml). Without it the layer free-runs and over-queues the host
+    // compositor — device-proven root cause of the LSFG black-frame flicker: Qualcomm's composer
+    // spams "SmoMoState::FrameIsLate: queued_frames >= 2" while frame-gen pushes ~124fps unpaced, so
+    // dropped/stale generated frames reach the glass BLACK. GameNative ships the byte-identical .so
+    // yet doesn't flicker because it publishes this clock; we did not. Rewritten once a second off the
+    // UI thread. Choreographer frame timestamps are CLOCK_MONOTONIC — the clock the layer paces with.
+    private android.os.Handler vsyncClockHandler;
+    private java.util.concurrent.ExecutorService vsyncWriteExecutor;
+
+    private void startVsyncClock() {
+        stopVsyncClock();
+        if (imageFs == null) return;
+        final File vsyncFile = new File(imageFs.home_path, ".config/lsfg-vk/vsync.txt");
+        if (vsyncWriteExecutor == null) {
+            vsyncWriteExecutor = Executors.newSingleThreadExecutor(r -> {
+                Thread t = new Thread(r, "lsfg-vsync");
+                t.setDaemon(true);
+                return t;
+            });
+        }
+        final android.os.Handler h = new android.os.Handler(android.os.Looper.getMainLooper());
+        vsyncClockHandler = h;
+        final Runnable tick = new Runnable() {
+            @Override public void run() {
+                if (vsyncClockHandler != h) return;
+                android.view.Choreographer.getInstance().postFrameCallback(frameTimeNanos -> {
+                    if (vsyncClockHandler != h) return;
+                    float refreshRate = 60f;
+                    try {
+                        android.view.WindowManager wm = (android.view.WindowManager) getSystemService(WINDOW_SERVICE);
+                        if (wm != null && wm.getDefaultDisplay() != null) {
+                            float rr = wm.getDefaultDisplay().getRefreshRate();
+                            if (rr > 1f) refreshRate = rr;
+                        }
+                    } catch (Exception ignored) {}
+                    final long periodNs = (long) (1_000_000_000.0 / refreshRate);
+                    vsyncWriteExecutor.execute(() -> {
+                        try {
+                            File parent = vsyncFile.getParentFile();
+                            if (parent != null) parent.mkdirs();
+                            FileUtils.writeString(vsyncFile, "vsync_ns=" + frameTimeNanos + "\nperiod_ns=" + periodNs + "\n");
+                        } catch (Exception ignored) {}
+                    });
+                });
+                h.postDelayed(this, 1000);
+            }
+        };
+        h.post(tick);
+    }
+
+    private void stopVsyncClock() {
+        if (vsyncClockHandler != null) {
+            vsyncClockHandler.removeCallbacksAndMessages(null);
+            vsyncClockHandler = null;
         }
     }
 
@@ -3583,6 +3701,83 @@ public class XServerDisplayActivity extends AppCompatActivity {
         }, 500);
     }
 
+    // === Frame-gen change → full presentation reset (LSFG black-frame flicker fix) ================
+    // Device-proven: with lsfg-vk generating, a plain swapchain recreate on the SAME surface (which
+    // the conf.toml rewrite already triggers) does NOT clear the black-frame flicker — only a real
+    // background/foreground cycle does, because that fully tears down + rebuilds the Android window
+    // surface AND pauses/resumes the guest, resetting the host compositor's over-queue. This
+    // replicates that cycle deterministically on an in-game FG change and gates the resume behind a
+    // user "Resume" tap so the surface is guaranteed rebuilt before input returns to the game.
+    private boolean fgResetInProgress = false;   // a reset is showing / the surface is torn down
+    private int lastCommittedFgLevel = -1;       // effective FG level last committed: 0 = off, else 2/3/4
+
+    // Called from onBionicFgConfigChange (lsfg branch) after each committed change. Fires the reset
+    // ONLY when the effective FG level actually changes (Off/On/2×/3×/4×) — flow-scale / performance-
+    // mode / model edits keep the level, so they never reset. Tracks the latest level regardless so a
+    // change that lands while a reset is already up is still remembered (the Resume rebuild picks up
+    // the newest conf.toml the handler already wrote).
+    private void maybeTriggerFgReset(int newLevel) {
+        boolean changed = (newLevel != lastCommittedFgLevel);
+        lastCommittedFgLevel = newLevel;
+        if (!changed) return;
+        triggerFgPresentationReset();
+    }
+
+    // Background half: freeze the guest (SIGSTOP via the same path onPause() / a manual Pause use),
+    // release the renderer, then tear the Android render surface FULLY down (SurfaceView → GONE →
+    // surfaceDestroyed → nativeDetachSurface), and raise the Resume overlay. Does NOT flip isPaused —
+    // the FG-reset overlay is its own state so it never collides with the manual-pause / ReShade box.
+    private void triggerFgPresentationReset() {
+        if (fgResetInProgress || environment == null) return;
+        // A manual Pause / ReShade freeze is already suspending the guest — mirroring bg/fg needs a
+        // running-then-frozen guest, and stacking another cycle would fight the manual resume. Skip;
+        // the next FG change after the user resumes will reset cleanly.
+        if (isPaused) return;
+        // GL renderer owns its own EGL lifecycle (no detachable window surface to cycle) — no-op.
+        if (xServerView == null || !xServerView.canRecreateSurface()) return;
+        fgResetInProgress = true;
+        environment.onPause();
+        xServerView.onPause();
+        ProcessHelper.pauseAllWineProcesses();
+        // Mirror onStop()'s display-rate release: a real background DROPS the panel refresh-rate vote
+        // entirely (setDisplayFrameRate 0f) and unhooks the display listener, so the panel re-negotiates
+        // its refresh mode clean on the way back. The old reset skipped this — it only re-asserted the
+        // vote on resume, never released it, so the panel stayed stuck in a stale VRR mode and the
+        // vsync clock (which reads getRefreshRate()) fed the layer the wrong cadence → generated frames
+        // paced against the wrong grid (device symptom: spurty FPS drops after an in-game multiplier
+        // change that ONLY a genuine bg/fg cleared). Release it here, while the surface is still alive,
+        // so the Resume half re-negotiates from scratch exactly like onStop→onResume.
+        if (xServerView != null) xServerView.setDisplayFrameRate(0f, VRR_FRAME_RATE_COMPATIBILITY);
+        unregisterVrrDisplayListener();
+        xServerView.teardownSurface();
+        XServerDialogState.INSTANCE.setFgResetPaused(true);
+    }
+
+    // Foreground half (Resume tap, or an incidental real foreground while a reset is up): dismiss the
+    // overlay, rebuild a FRESH surface (SurfaceView → VISIBLE → surfaceCreated → nativeReattachSurface
+    // + swapchain recreate), then resume the guest (SIGCONT) and re-assert present mode / VRR. Ordered
+    // so input only returns to the game after the surface is coming back. Idempotent + main-thread.
+    private void resumeFromFgReset() {
+        if (!fgResetInProgress) return;
+        fgResetInProgress = false;
+        XServerDialogState.INSTANCE.setFgResetPaused(false);
+        if (xServerView != null) {
+            xServerView.rebuildSurface();
+            xServerView.onResume();
+        }
+        if (environment != null) environment.onResume();
+        ProcessHelper.resumeAllWineProcesses();
+        applyEffectivePresentMode();
+        reapplyVrr();
+        // Mirror onResume(): re-hook the display listener and re-read the live panel rate so the vsync
+        // pacing clock picks up the freshly re-negotiated cadence instead of a stale one. Idempotent —
+        // when a REAL foreground drove this (onResume → resumeFromFgReset), onResume already did both;
+        // registerVrrDisplayListener() no-ops if already hooked. Completes the full VRR release→re-
+        // negotiate cycle a genuine bg/fg performs, which the old half-reset was missing.
+        registerVrrDisplayListener();
+        updateCurrentRefreshRate();
+    }
+
     private void savePlaytimeData() {
         long endTime = System.currentTimeMillis();
         long playtime = endTime - startTime;
@@ -3680,6 +3875,14 @@ public class XServerDisplayActivity extends AppCompatActivity {
                         SharedPreferences savePrefs = getSharedPreferences("save_manager_prefs", MODE_PRIVATE);
                         if (isGenuineSteamShortcut()) {
                             if (savePrefs.getBoolean("auto_collect_steam_on_exit", true)) autoCollectSteamSavesBlocking();
+                            // Additionally push to Steam Cloud (opt-in) — ONLY once the user has accepted
+                            // the third-party cloud disclaimer (steam_prefs). Absent flag → skip; we never
+                            // auto-upload to a real Steam Cloud without consent. The local Collect above
+                            // stays unconditional (independent of this cloud toggle).
+                            boolean cloudDisclaimerOk = getSharedPreferences("steam_prefs", MODE_PRIVATE)
+                                    .getBoolean("cloud_saves_disclaimer_accepted", false);
+                            if (cloudDisclaimerOk && savePrefs.getBoolean("auto_upload_steam_on_exit", true))
+                                autoUploadSteamSavesBlocking();
                         } else {
                             // GOG-library games (untagged, installed under gog_games/) push their saves to
                             // GOG cloud — the Galaxy-parity auto-trigger. Additive: they ALSO keep the local
@@ -3688,6 +3891,13 @@ public class XServerDisplayActivity extends AppCompatActivity {
                             if (isGogShortcut() && savePrefs.getBoolean("auto_upload_gog_on_exit", true))
                                 autoUploadGogSavesBlocking();
                             if (savePrefs.getBoolean("auto_backup_custom_on_exit", true)) autoSnapshotCustomSavesBlocking();
+                        }
+                        // Flush any queued achievement unlocks back to the user's Steam profile. Safe
+                        // no-op unless the default-OFF "sync unlocks" toggle is on (guarded inside).
+                        try {
+                            SteamAchievementStore.flushPendingSyncBack(getApplicationContext());
+                        } catch (Throwable t) {
+                            Log.w("BH_STEAM_ACHV", "flushPendingSyncBack on exit errored", t);
                         }
                     } catch (Throwable t) {
                         Log.w("XServerDisplayActivity", "exit save-backup phase errored", t);
@@ -3874,6 +4084,430 @@ public class XServerDisplayActivity extends AppCompatActivity {
             if (segs[i].equalsIgnoreCase("steam_games") && segs[i + 1].equalsIgnoreCase(folder)) return true;
         }
         return false;
+    }
+
+    /** Resolved [appId, installDir] for a genuine Steam-library shortcut. */
+    private static final class SteamAppRef {
+        final int appId;
+        final String installDir;
+        SteamAppRef(int appId, String installDir) { this.appId = appId; this.installDir = installDir; }
+    }
+
+    /**
+     * Resolve the running shortcut's Steam appId + install dir, REUSING the exact derivation
+     * {@link #autoCollectSteamSavesBlocking()} uses: genuine-Steam gate (storeSource=steam OR exec under
+     * steam_games/), then the tagged {@code steamAppId} fast-path, else match the exec path's
+     * {@code steam_games/<folder>} against the installed-games DB. Returns null when not a genuine Steam
+     * game or the appId/installDir can't be resolved. MUST be called off the main thread (queries Room).
+     */
+    private SteamAppRef resolveSteamAppRef() {
+        final Shortcut sc = shortcut;
+        if (sc == null) return null;
+        int tagged;
+        try {
+            tagged = Integer.parseInt(sc.getExtra("steamAppId", "0").trim());
+        } catch (Exception e) {
+            tagged = 0;
+        }
+        return resolveSteamAppRefFrom(sc.path, sc.getExtra("storeSource", ""), tagged);
+    }
+
+    /**
+     * Resolve a Steam appId + install dir from raw identity signals (exec path / storeSource / tagged
+     * appId) rather than requiring the live {@link #shortcut}. Extracted from {@link #resolveSteamAppRef()}
+     * (which now just feeds it the shortcut's signals — behaviour is byte-identical for that caller) so the
+     * achievement hook can also resolve when {@code shortcut} is null, off a fallback identity rebuilt from
+     * the launch intent / container. Genuine-Steam gate (storeSource=steam OR exec under steam_games/),
+     * then the tagged appId fast-path, else match the exec path's {@code steam_games/<folder>} against the
+     * installed-games DB. Returns null when not genuine-Steam or the appId/installDir can't be resolved.
+     * MUST be called off the main thread (queries Room).
+     */
+    private SteamAppRef resolveSteamAppRefFrom(String execPath, String storeSource, int taggedAppId) {
+        String pathLower = execPath != null ? execPath.toLowerCase() : "";
+        boolean genuineSteam = "steam".equals(storeSource) || pathLower.contains("steam_games");
+        if (!genuineSteam) {
+            logResolveSteamAppRefFailure("not genuine-Steam", execPath, storeSource, taggedAppId);
+            return null;
+        }
+
+        int appId = taggedAppId;
+        String installDir = "";
+        try {
+            SteamDatabase db = SteamRepository.getInstance().getDatabase();
+
+            // (1) Tagged appId fast-path — the shortcut carried a real steamAppId.
+            if (appId > 0) {
+                SteamDatabase.GameRow row = db.getGame(appId);
+                installDir = (row != null && row.installDir != null) ? row.installDir : "";
+            }
+
+            // Installed set — fetched once (lazily), reused by the DB-match fallbacks below.
+            List<SteamDatabase.GameRow> installed = null;
+
+            // (2) Segment match: exec path's steam_games/<folder> vs an installed row's steam_games/<folder>
+            //     (case-insensitive, slash-normalized so "Half-Life" can't false-match "Half-Life 2").
+            String folder = steamGamesFolderOf(execPath);
+            if ((appId <= 0 || installDir.isEmpty()) && folder != null) {
+                installed = db.getInstalledGames();
+                if (installed != null) {
+                    for (SteamDatabase.GameRow r : installed) {
+                        if (installDirMatchesFolder(r.installDir, folder)) {
+                            appId = r.appId;
+                            installDir = (r.installDir != null) ? r.installDir : "";
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // (3) NEW lenient fallback for legacy / drive-mapped exec paths that don't literally carry a
+            //     steam_games/<folder> segment (untagged legacy shortcuts, backslash Z:\ paths, etc.): for
+            //     each installed row, match if the normalized+lowercased exec path CONTAINS that row's
+            //     normalized+lowercased install_dir, OR contains "/<install_dir basename>/" (the game folder).
+            if (appId <= 0 || installDir.isEmpty()) {
+                if (installed == null) installed = db.getInstalledGames();
+                String execNorm = pathNorm(execPath);
+                if (installed != null && !execNorm.isEmpty()) {
+                    for (SteamDatabase.GameRow r : installed) {
+                        String instNorm = pathNorm(r.installDir);
+                        while (instNorm.endsWith("/")) instNorm = instNorm.substring(0, instNorm.length() - 1);
+                        if (instNorm.isEmpty()) continue;
+                        String base = basenameNorm(instNorm);
+                        boolean hit = execNorm.contains(instNorm)
+                                || (!base.isEmpty() && execNorm.contains("/" + base + "/"));
+                        if (hit) {
+                            appId = r.appId;
+                            installDir = (r.installDir != null) ? r.installDir : "";
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // (4) NEW last-ditch: genuine-Steam exec path but still unresolved and EXACTLY ONE steam game is
+            //     installed → it can only be that one.
+            if (appId <= 0 || installDir.isEmpty()) {
+                if (installed == null) installed = db.getInstalledGames();
+                if (installed != null && installed.size() == 1) {
+                    SteamDatabase.GameRow only = installed.get(0);
+                    if (only.installDir != null && !only.installDir.isEmpty()) {
+                        appId = only.appId;
+                        installDir = only.installDir;
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            Log.w("BH_SAVE_SYNC", "resolveSteamAppRef errored", t);
+        }
+        if (appId <= 0 || installDir.isEmpty()) {
+            logResolveSteamAppRefFailure("unresolved appId/installDir", execPath, storeSource, taggedAppId);
+            return null;
+        }
+        return new SteamAppRef(appId, installDir);
+    }
+
+    /** Slash-normalized ("\\"->"/") + lowercased form of a path, or "" for null. */
+    private static String pathNorm(String p) {
+        return p == null ? "" : p.replace('\\', '/').toLowerCase();
+    }
+
+    /** Last non-empty path segment (basename) of an already slash-normalized path, or "". */
+    private static String basenameNorm(String norm) {
+        if (norm == null || norm.isEmpty()) return "";
+        String s = norm;
+        while (s.endsWith("/")) s = s.substring(0, s.length() - 1);
+        int slash = s.lastIndexOf('/');
+        return slash >= 0 ? s.substring(slash + 1) : s;
+    }
+
+    /**
+     * B1 diagnostic — dump exactly why {@link #resolveSteamAppRefFrom} gave up so a device log stops the
+     * guessing: the raw identity signals, the extracted steam_games/<folder>, and the whole installed-games
+     * table (appId + install_dir). Fully guarded — never throws, never blocks the launch.
+     */
+    private void logResolveSteamAppRefFailure(String reason, String execPath, String storeSource, int taggedAppId) {
+        try {
+            StringBuilder sb = new StringBuilder();
+            sb.append("resolveSteamAppRef FAIL (").append(reason).append("): execPath=").append(execPath)
+              .append(" storeSource=").append(storeSource)
+              .append(" taggedAppId=").append(taggedAppId)
+              .append(" steamGamesFolder=").append(steamGamesFolderOf(execPath));
+            List<SteamDatabase.GameRow> installed =
+                    SteamRepository.getInstance().getDatabase().getInstalledGames();
+            sb.append(" installedCount=").append(installed != null ? installed.size() : 0);
+            if (installed != null) {
+                for (SteamDatabase.GameRow r : installed) {
+                    sb.append(" [appId=").append(r.appId)
+                      .append(" installDir=").append(r.installDir).append("]");
+                }
+            }
+            Log.i("BH_STEAM_ACHV", sb.toString());
+        } catch (Throwable t) {
+            Log.w("BH_STEAM_ACHV", "resolveSteamAppRef failure-diagnostic errored", t);
+        }
+    }
+
+    /** Raw Steam-identity signals (exec path / storeSource / tagged appId) — from the live shortcut, else
+     *  rebuilt from the launch intent's {@code shortcut_path} .desktop (+ container). Fields may be empty. */
+    private static final class SteamIdentity {
+        final String execPath;
+        final String storeSource;
+        final int taggedAppId;
+        SteamIdentity(String execPath, String storeSource, int taggedAppId) {
+            this.execPath = execPath;
+            this.storeSource = storeSource != null ? storeSource : "";
+            this.taggedAppId = taggedAppId;
+        }
+        /** Mirrors {@link #isGenuineSteamShortcut()} but off raw signals (survives a null shortcut). */
+        boolean isGenuineSteam() {
+            if ("steam".equals(storeSource)) return true;
+            return execPath != null && execPath.toLowerCase().contains("steam_games");
+        }
+    }
+
+    /**
+     * Build the running game's Steam identity, preferring the live {@link #shortcut}. If the shortcut is
+     * null on this launch path, rebuild it from the launch intent's {@code shortcut_path} .desktop — parsed
+     * the same way {@code onCreate} builds {@code shortcut} — so a genuine-Steam game stays identifiable for
+     * seed/schema/watch even when the Shortcut object never got constructed. Never returns null (empty
+     * fields when nothing identifies the game); fully guarded so a parse failure can't crash the launch.
+     */
+    private SteamIdentity resolveSteamIdentity() {
+        final Shortcut sc = shortcut;
+        if (sc != null) {
+            int tagged;
+            try {
+                tagged = Integer.parseInt(sc.getExtra("steamAppId", "0").trim());
+            } catch (Exception e) {
+                tagged = 0;
+            }
+            return new SteamIdentity(sc.path, sc.getExtra("storeSource", ""), tagged);
+        }
+        // Fallback: the Shortcut object is null but the launch intent may still name the .desktop, whose
+        // Exec line (steam_games/<folder>) + Extra Data (steamAppId/storeSource) identify the game. Parsing
+        // it also lets the DB match in resolveSteamAppRefFrom stand in for the "container's game exec path".
+        try {
+            Intent li = getIntent();
+            String shortcutPath = (li != null) ? li.getStringExtra("shortcut_path") : null;
+            if (shortcutPath != null && !shortcutPath.isEmpty() && container != null) {
+                java.io.File f = new java.io.File(shortcutPath);
+                if (f.isFile()) {
+                    Shortcut probe = new Shortcut(container, f);
+                    int tagged;
+                    try {
+                        tagged = Integer.parseInt(probe.getExtra("steamAppId", "0").trim());
+                    } catch (Exception e) {
+                        tagged = 0;
+                    }
+                    Log.i("BH_STEAM_ACHV", "seed/watch: rebuilt identity from intent shortcut_path (exec="
+                            + probe.path + ", storeSource=" + probe.getExtra("storeSource", "")
+                            + ", steamAppId=" + tagged + ")");
+                    return new SteamIdentity(probe.path, probe.getExtra("storeSource", ""), tagged);
+                }
+            }
+        } catch (Throwable t) {
+            Log.w("BH_STEAM_ACHV", "seed/watch: intent-shortcut identity fallback failed", t);
+        }
+        return new SteamIdentity(null, "", 0);
+    }
+
+    /**
+     * On game exit, push a genuine Steam-library game's saves UP to Steam Cloud (local → cloud) — the
+     * Steam-parity mirror of {@link #autoUploadGogSavesBlocking()}. Additive to the unconditional local
+     * Collect above: this ONLY runs when the Save Manager toggle {@code auto_upload_steam_on_exit} is on
+     * AND the user has accepted the third-party cloud disclaimer (checked by the caller).
+     *
+     * Best-effort + fully guarded (logs to "BH_SAVE_SYNC"). The blocking cloud sync runs on its own
+     * worker thread and we bound-wait on a latch so a stalled network can never freeze game-exit, while
+     * the copy still finishes before {@link AppUtils#restartApplication}'s exit(0) aborts it. Safe by
+     * construction: {@link SteamCloudSaveManager#syncToCloudBlocking} only ADDS/REPLACES cloud files.
+     */
+    private void autoUploadSteamSavesBlocking() {
+        try {
+            final Context appCtx = getApplicationContext();
+            // We're on the exit worker thread ("BH-ExitSaveBackup") → Room query is safely off-main.
+            final SteamAppRef ref = resolveSteamAppRef();
+            if (ref == null) {
+                Log.i("BH_SAVE_SYNC", "auto-upload Steam: could not resolve appId — skip");
+                return;
+            }
+            try { if (preloaderDialog != null) preloaderDialog.hint(getString(R.string.saving_on_exit)); } catch (Throwable ignored) {}
+
+            final CountDownLatch latch = new CountDownLatch(1);
+            new Thread(() -> {
+                try {
+                    // .INSTANCE. mirrors the existing SteamCloudSaveManager.INSTANCE.collectFromContainer
+                    // call in this file (a @JvmStatic method is still callable this way, so this is
+                    // robust whether or not the frozen method is annotated static).
+                    String summary = SteamCloudSaveManager.INSTANCE.syncToCloudBlocking(appCtx, ref.appId, ref.installDir);
+                    Log.i("BH_SAVE_SYNC", "auto-upload Steam on exit (appId " + ref.appId + "): " + summary);
+                    try { if (preloaderDialog != null) preloaderDialog.hint(summary); } catch (Throwable ignored) {}
+                } catch (Throwable t) {
+                    Log.w("BH_SAVE_SYNC", "auto-upload Steam on exit failed (appId " + ref.appId + ")", t);
+                } finally {
+                    latch.countDown();
+                }
+            }, "BH-SteamCloudAutoUpload").start();
+
+            // Network op — bounded so a stalled upload never hangs game-exit (Steam saves are small).
+            if (!latch.await(20, TimeUnit.SECONDS))
+                Log.w("BH_SAVE_SYNC", "auto-upload Steam on exit timed out (20s) — proceeding with exit");
+        } catch (Throwable t) {
+            Log.w("BH_SAVE_SYNC", "auto-upload Steam on exit wrapper errored", t);
+        }
+    }
+
+    /**
+     * Before the guest boots, pull a genuine Steam-library game's saves DOWN from Steam Cloud (cloud →
+     * local, newest-wins) — the Steam-parity mirror of {@link #autoDownloadGogSavesBlocking()}. Called
+     * from {@link #setupXEnvironment()} on the launch WORKER thread just before the guest starts, so
+     * blocking here is safe and naturally GATES the launch until the pull completes or its bound elapses.
+     *
+     * Best-effort + fully guarded: no-op for non-Steam games / when the toggle is off / when the appId
+     * can't be resolved. {@link SteamCloudSaveManager#syncFromCloudNewestWins} never overwrites a newer
+     * local save, so an offline save since the last upload is preserved.
+     */
+    private void autoDownloadSteamSavesBlocking() {
+        try {
+            final Shortcut sc = shortcut;
+            if (sc == null) return;
+            if (!isGenuineSteamShortcut()) return;
+
+            SharedPreferences savePrefs = getSharedPreferences("save_manager_prefs", MODE_PRIVATE);
+            if (!savePrefs.getBoolean("auto_download_steam_on_launch", true)) return;
+
+            final Context appCtx = getApplicationContext();
+            // We're on the launch worker thread → Room query is safely off-main.
+            final SteamAppRef ref = resolveSteamAppRef();
+            if (ref == null) {
+                Log.i("BH_SAVE_SYNC", "auto-download Steam: could not resolve appId for " + sc.path + " — skip");
+                return;
+            }
+
+            preloaderDialog.hint(getString(R.string.downloading_on_launch));
+            final CountDownLatch latch = new CountDownLatch(1);
+            new Thread(() -> {
+                try {
+                    String summary = SteamCloudSaveManager.INSTANCE.syncFromCloudNewestWins(appCtx, ref.appId, ref.installDir);
+                    Log.i("BH_SAVE_SYNC", "auto-download Steam on launch (appId " + ref.appId + "): " + summary);
+                    try { if (preloaderDialog != null) preloaderDialog.hint(summary); } catch (Throwable ignored) {}
+                } catch (Throwable t) {
+                    Log.w("BH_SAVE_SYNC", "auto-download Steam on launch failed (appId " + ref.appId + ")", t);
+                } finally {
+                    latch.countDown();
+                }
+            }, "BH-SteamCloudAutoDownload").start();
+
+            if (!latch.await(20, TimeUnit.SECONDS))
+                Log.w("BH_SAVE_SYNC", "auto-download Steam on launch timed out (20s) — launching with local saves");
+        } catch (Throwable t) {
+            Log.w("BH_SAVE_SYNC", "auto-download Steam on launch wrapper errored", t);
+        }
+    }
+
+    /**
+     * For a genuine Steam-library game running under Goldberg: (1) SEED this container's Goldberg/GSE
+     * {@code achievements.json} with the user's REAL earned achievements, then (2) arm
+     * {@link AchievementWatcher} on it. Guarded like {@link #autoCollectSteamSavesBlocking()} and
+     * best-effort — a seed/arm failure must never block or crash the launch. No-op for non-Steam
+     * shortcuts.
+     *
+     * ORDERING (critical) — this runs SYNCHRONOUSLY on the launch worker thread, immediately BEFORE
+     * {@code environment.startEnvironmentComponents()} boots the guest, so:
+     *   seed (write real earned) → watcher.start() (snapshot now INCLUDES the seeded/owned set, so
+     *   owned achievements can't false-toast) → guest boots (gbe_fork reads the seeded file at startup
+     *   → the game's own achievement screen reflects what the user really owns).
+     * Blocking here is fine (worker thread); seeding is a small local read/merge/write (the real state
+     * is normally already cached by the detail page).
+     */
+    private void maybeSeedAndStartAchievementWatcher() {
+        try {
+            // Establish the game's Steam identity from the live shortcut, else fall back to the launch
+            // intent / container (the shortcut can be null on some launch paths — e.g. a launch whose
+            // Shortcut object never got constructed — yet the game is still identifiable). Never null;
+            // its fields are empty when unknown, and isGenuineSteam()/appId then resolve to skip.
+            final SteamIdentity id = resolveSteamIdentity();
+            final boolean genuine = id.isGenuineSteam();
+            // Entry breadcrumb so a silent no-op is always diagnosable (this was previously an unlogged
+            // guard return). shortcutGate = the raw shortcut-only signal; genuine = the effective gate
+            // (identity-based, so it can still be true via the intent/container fallback when shortcut==null).
+            Log.i("BH_STEAM_ACHV", "seed/watch: entry shortcut=" + (shortcut != null)
+                    + " container=" + (container != null) + " genuine=" + genuine
+                    + " (shortcutGate=" + isGenuineSteamShortcut() + ")");
+
+            if (container == null) {
+                Log.i("BH_STEAM_ACHV", "seed/watch: container null — skip");
+                return;
+            }
+            if (!genuine) {
+                Log.i("BH_STEAM_ACHV", "seed/watch: not a genuine-Steam shortcut — skip");
+                return;
+            }
+            final java.io.File containerRoot = container.getRootDir();
+            final Context appCtx = getApplicationContext();
+            // appId resolution touches Room — we're already on the launch worker thread, so blocking OK.
+            // Resolve from the identity (shortcut OR intent/container fallback) rather than the shortcut only.
+            SteamAppRef ref = resolveSteamAppRefFrom(id.execPath, id.storeSource, id.taggedAppId);
+            if (ref == null) {
+                Log.i("BH_STEAM_ACHV", "achievement seed/watch: could not resolve appId — skip");
+                return;
+            }
+            final int appId = ref.appId;
+
+            // (1) Seed — only for Goldberg-on games (an OFF game runs genuine Steam, no GSE store to
+            // seed). Uses the SAME GSE path the watcher watches (shared helper). Best-effort/no-op on
+            // no-real-state; never wipes local unlocks.
+            try {
+                SteamPrefs.INSTANCE.init(appCtx); // idempotent + cheap; XServer path may not have inited it
+                if (SteamPrefs.INSTANCE.getGoldbergMode(appId) != GoldbergMode.OFF) {
+                    java.io.File gseFile = AchievementWatcher.gseAchievementsFile(containerRoot, appId);
+                    SteamAchievementStore.seedGse(appCtx, appId, gseFile);
+
+                    // Also ensure the gbe_fork achievement SCHEMA (definitions) exists beside each
+                    // swapped steam_api dll. A fresh Goldberg apply writes this in GoldbergPatcher's
+                    // sharedPrep, but an install patched BEFORE this fix never got it — writing it here
+                    // makes those existing installs (e.g. HL2) work on next launch WITHOUT a manual
+                    // re-apply. DEFS only (real earned state is the seedGse call above); fully guarded
+                    // and a no-op when no defs are cached, so it can never break the launch. Runs here,
+                    // before the guest boots, so gbe_fork reads it at startup.
+                    try {
+                        java.io.File installRoot = new java.io.File(ref.installDir);
+                        if (installRoot.isDirectory()) {
+                            for (GoldbergPatcher.PatchTarget target : GoldbergPatcher.analyze(installRoot)) {
+                                java.io.File settingsDir = new java.io.File(target.getDir(), "steam_settings");
+                                settingsDir.mkdirs();
+                                SteamAchievementStore.writeGbeAchievementSchema(appCtx, appId, settingsDir);
+                            }
+                        }
+                    } catch (Throwable t) {
+                        Log.w("BH_STEAM_ACHV", "achievement schema ensure failed (appId=" + appId + ")", t);
+                    }
+                } else {
+                    Log.i("BH_STEAM_ACHV", "achievement seed: Goldberg OFF for appId=" + appId + " — no seed");
+                }
+            } catch (Throwable t) {
+                Log.w("BH_STEAM_ACHV", "GSE seed failed (appId=" + appId + ")", t);
+            }
+
+            // (2) Arm the watcher — its snapshot now includes the seeded state. start()/stop() are
+            // synchronized on the instance; the post-start destroy re-check avoids leaking the watcher
+            // if the activity tore down while we were seeding/arming. This hook runs from BOTH setupUI
+            // and setupXEnvironment, so guard against a double-arm: the seed above is idempotent and is
+            // refreshed on every call, but the watcher (FileObserver + scheduler) is armed only once.
+            if (achievementWatcherArmed) {
+                Log.i("BH_STEAM_ACHV", "seed/watch: watcher already armed (appId=" + appId
+                        + ") — seed refreshed, not re-arming");
+                return;
+            }
+            if (achievementWatcher == null) achievementWatcher = new AchievementWatcher();
+            final AchievementWatcher watcher = achievementWatcher;
+            if (isFinishing() || isDestroyed()) { watcher.stop(); return; }
+            watcher.start(appCtx, appId, containerRoot);
+            if (isFinishing() || isDestroyed()) { watcher.stop(); return; }
+            achievementWatcherArmed = true;
+        } catch (Throwable t) {
+            Log.w("BH_STEAM_ACHV", "maybeSeedAndStartAchievementWatcher errored", t);
+        }
     }
 
     /**
@@ -4163,6 +4797,13 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // can't run against a tearing-down activity.
         if (winHandler != null) winHandler.setControllerAssignmentListener(null);
         controllerToastHandler.removeCallbacks(fireControllerToast);
+        // Stop the in-game achievement watcher (FileObserver + its scheduler) so a late file event
+        // can't run against a tearing-down activity.
+        if (achievementWatcher != null) {
+            try { achievementWatcher.stop(); } catch (Throwable ignored) {}
+            achievementWatcher = null;
+        }
+        achievementWatcherArmed = false;
         // Drop the failure-card callbacks so this activity isn't retained via the static holder.
         com.winlator.star.core.PreloaderState.setOnClose(null);
         com.winlator.star.core.PreloaderState.setOnOpenLog(null);
@@ -4175,6 +4816,16 @@ public class XServerDisplayActivity extends AppCompatActivity {
             wineDebugWriter.close();
             wineDebugWriter = null;
         }
+        // Stop publishing the lsfg-vk vsync clock on game exit.
+        stopVsyncClock();
+        if (vsyncWriteExecutor != null) {
+            vsyncWriteExecutor.shutdownNow();
+            vsyncWriteExecutor = null;
+        }
+        // Clear the FG-reset overlay state (XServerDialogState is a singleton — a torn-down reset must
+        // not survive into the next game's launch).
+        fgResetInProgress = false;
+        XServerDialogState.INSTANCE.setFgResetPaused(false);
     }
 
     @Override
@@ -4608,6 +5259,15 @@ public class XServerDisplayActivity extends AppCompatActivity {
                     envVars.put("ENABLE_LSFG", "1");
                     envVars.put("LSFG_CONFIG", lsfgConf.getAbsolutePath());
                     envVars.put("LSFG_PROCESS", "bannerlator-lsfg");
+                    // Publish the display vsync clock so the layer phase-locks its pacing instead of
+                    // free-running and over-queuing the host compositor (the black-frame flicker root
+                    // cause). Runs from launch so it's live the instant FG is toggled on in-game; the
+                    // toggle path stops/restarts it, and onDestroy stops it.
+                    startVsyncClock();
+                    // Baseline the FG-reset tracker to the launch level so the first in-game change
+                    // fires the presentation reset. Auto-enable containers already generate from frame
+                    // one (lsfgLaunchMult >= 2), so a passthrough launch is level 0.
+                    lastCommittedFgLevel = (lsfgLaunchMult >= 2) ? lsfgLaunchMult : 0;
                 } else {
                     Log.w("XServerDisplayActivity", "lsfg-vk selected but no Lossless.dll imported (Settings) — leaving frame gen off");
                 }
@@ -4794,6 +5454,19 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // overwritten by an older cloud copy (e.g. a save made offline since the last upload). No-op
         // for non-GOG games and when the download toggle is off.
         autoDownloadGogSavesBlocking();
+        // Steam-parity: pull the freshest Steam Cloud saves into the prefix before boot (newest-wins).
+        // Same launch-worker-thread gating + best-effort envelope as the GOG pull above; no-op for
+        // non-Steam games and when the download toggle is off.
+        autoDownloadSteamSavesBlocking();
+
+        // In-game achievements (genuine-Steam + Goldberg-on games): seed the Goldberg/GSE
+        // achievements.json with the user's REAL earned achievements, THEN arm the watcher so its
+        // snapshot includes the seeded (owned) set — BOTH must happen before the guest boots below, so
+        // gbe_fork reads the seeded file at startup (its screen shows what the user owns) and owned
+        // achievements don't false-toast. We're on the launch worker thread → the small local
+        // read/merge/write can block here. Best-effort; never blocks/crashes the launch. No-op for
+        // non-Steam / Goldberg-OFF shortcuts.
+        maybeSeedAndStartAchievementWatcher();
 
         // Start all environment components (XServer, Audio, Wine, etc.)
         preloaderDialog.step(4, "Launching Windows…");
@@ -5249,6 +5922,18 @@ public class XServerDisplayActivity extends AppCompatActivity {
         float savedOverlayOpacity = preferences.getFloat("overlay_opacity", InputControlsView.DEFAULT_OVERLAY_OPACITY);
         inputControlsView.setOverlayOpacity(savedOverlayOpacity);
         XServerDrawerState.INSTANCE.setOverlayOpacity(savedOverlayOpacity); // seed the Controls-tab slider
+
+        // Swipeable OSC (Stage 2): resolve per-category swipe gates (Buttons default ON; D-pad and Sticks
+        // default OFF), apply to the live overlay, and seed the drawer's Swipe tab so its chips match.
+        boolean swipeButtons = preferences.getBoolean("touchscreen_swipe_buttons_enabled", true);
+        boolean swipeDpad = preferences.getBoolean("touchscreen_swipe_dpad_enabled", false);
+        boolean swipeSticks = preferences.getBoolean("touchscreen_swipe_sticks_enabled", false);
+        inputControlsView.setSwipeButtonsEnabled(swipeButtons);
+        inputControlsView.setSwipeDpadEnabled(swipeDpad);
+        inputControlsView.setSwipeSticksEnabled(swipeSticks);
+        XServerDrawerState.INSTANCE.setSwipeButtons(swipeButtons);
+        XServerDrawerState.INSTANCE.setSwipeDpad(swipeDpad);
+        XServerDrawerState.INSTANCE.setSwipeSticks(swipeSticks);
         inputControlsView.setTouchpadView(touchpadView);
         inputControlsView.setXServer(xServer);
         inputControlsView.setVisibility(View.GONE);
@@ -5294,7 +5979,22 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // for the whole session via AppUtils.hideSystemUI); OFF is the default windowed letterbox.
         renderer.setFullscreenMode(fullscreenMode);
         XServerDrawerState.INSTANCE.setFullscreenMode(fullscreenMode);
-        if (fullscreenMode != Container.FULLSCREEN_OFF) touchpadView.toggleFullscreen();
+
+        // Resolve the screen alignment (#413) the same way as the mode: per-game shortcut override wins,
+        // else the container setting; absent -> ALIGN_CENTER (== today's centered letterbox).
+        int screenAlignment = Container.ALIGN_CENTER;
+        String scAlign = shortcut != null ? shortcut.getExtra("screenAlignment") : "";
+        if (shortcut != null && scAlign != null && !scAlign.isEmpty()) {
+            try { screenAlignment = Integer.parseInt(scAlign); } catch (NumberFormatException ignored) {}
+        } else if (container != null) {
+            screenAlignment = container.getScreenAlignment();
+        }
+        renderer.setScreenAlignment(screenAlignment);
+        XServerDrawerState.INSTANCE.setScreenAlignment(screenAlignment);
+        inputControlsView.setScreenAlignment(screenAlignment); // #413: size the OSC overlay to its half (TOP/BOTTOM)
+        // touchpadView.toggleFullscreen() just re-runs updateXform (it does NOT change the mode), so it
+        // also picks up a non-center alignment. CENTER keeps the original OFF-only condition unchanged.
+        if (fullscreenMode != Container.FULLSCREEN_OFF || screenAlignment != Container.ALIGN_CENTER) touchpadView.toggleFullscreen();
 
         if (shortcut != null) {
             String controlsProfile = shortcut.getExtra("controlsProfile");
@@ -5315,6 +6015,12 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // Epic Friends Overlay pill — added last so it sits above the HUD/controls (only for an Epic
         // shortcut with the overlay toggle on).
         attachEpicOverlayPill();
+
+        // NOTE: the in-game achievement seed/watch hook is deliberately NOT called here. It used to be
+        // (redundant with the setupXEnvironment call), but on the MAIN thread its fetch()/CM work could
+        // block launch → first-launch black screen / 0 FPS (second launch worked because the cache was
+        // warm). The single call now lives on the launch WORKER thread in setupXEnvironment(), just before
+        // the guest boots — off-main, and still ordered before gbe_fork's first read of achievements.json.
     }
 
     // Apply a fullscreen aspect-ratio mode (#71) live and remember it PER GAME: the per-game shortcut
@@ -5331,6 +6037,25 @@ public class XServerDisplayActivity extends AppCompatActivity {
             shortcut.saveData();
         } else if (container != null) {
             container.setFullscreenMode(mode);
+            container.saveData();
+        }
+    }
+
+    // Apply a screen alignment (#413) live and remember it PER GAME (the per-game shortcut override if
+    // launched from one, else the container). Mirrors applyFullscreenMode. Only moves the letterbox bar
+    // position — CENTER reproduces today's output.
+    private void applyScreenAlignment(int alignment) {
+        HostRenderer r = xServerView.getRenderer();
+        r.setScreenAlignment(alignment);
+        touchpadView.toggleFullscreen();          // recompute touch->guest map for the new alignment
+        XServerDrawerState.INSTANCE.setScreenAlignment(alignment);
+        // #413: live-resize the OSC overlay to own its half (TOP/BOTTOM), or full screen (CENTER restores).
+        if (inputControlsView != null) inputControlsView.setScreenAlignment(alignment);
+        if (shortcut != null) {
+            shortcut.putExtra("screenAlignment", String.valueOf(alignment));
+            shortcut.saveData();
+        } else if (container != null) {
+            container.setScreenAlignment(alignment);
             container.saveData();
         }
     }
@@ -5642,6 +6367,9 @@ public class XServerDisplayActivity extends AppCompatActivity {
         };
         // Tapping the centered pause box = full resume (covers preview pause AND manual pause).
         ds.onRequestResume = () -> runOnUiThread(() -> setPausedState(false));
+        // Tapping the frame-gen-reset "Resume" = rebuild the surface + SIGCONT the guest so FG
+        // restarts into a clean, non-over-queued state (the LSFG black-frame flicker fix).
+        ds.onFgResetResume = () -> runOnUiThread(this::resumeFromFgReset);
 
         // Input Controls state (renderer-independent: controller profiles + vibration work on
         // BOTH the GL and Vulkan host renderers, so this must run before the GL-only guard below.
@@ -7420,14 +8148,16 @@ return true;
             && s.getFrameGenMultiplier().getValue() >= 2;
     }
 
-    // Host present mode with the frame-gen mailbox override applied.
+    // Host present mode — the user's chosen mode is always honored (mailbox lock removed:
+    // frame gen no longer forces mailbox, so FIFO/etc. can be used with FG on).
     private String effectivePresentMode() {
-        return frameGenGenerating() ? "mailbox" : resolvedRendererPresentMode();
+        return resolvedRendererPresentMode();
     }
 
-    // (Re)apply the effective host present mode to the live Vulkan renderer — called at launch and
-    // whenever frame gen toggles / the multiplier changes, so the mailbox override tracks FG live
-    // (and reverts to the user's mode when FG goes off). No-op on non-Vulkan renderers / before setup.
+    // (Re)apply the host present mode to the live Vulkan renderer — called at launch and whenever
+    // frame gen toggles / the multiplier changes. Mailbox lock removed: the user's chosen present
+    // mode is honored regardless of FG, and the drawer selector stays unlocked so it can be changed
+    // live with FG on. No-op on non-Vulkan renderers / before setup.
     private void applyEffectivePresentMode() {
         if (xServerView == null) return;
         HostRenderer r = xServerView.getRenderer();
@@ -7435,11 +8165,9 @@ return true;
             String pm = effectivePresentMode();
             int pmInt = "immediate".equals(pm) ? 0 : "mailbox".equals(pm) ? 1 : 2; // VkPresentModeKHR
             ((com.winlator.star.renderer.vulkan.VulkanRenderer) r).setVkPresentMode(pmInt);
-            // Mirror the EFFECTIVE mode into the drawer's live Present Mode selector so the highlight
-            // tracks the auto-switch to Mailbox the instant FG toggles (and reverts to the user's mode
-            // when FG goes off). presentModeLocked drives the drawer's tap-block during FG.
+            // Mirror the mode into the drawer selector; never lock it (mailbox lock removed).
             XServerDrawerState.INSTANCE.setPresentMode(pm);
-            XServerDrawerState.INSTANCE.setPresentModeLocked(frameGenGenerating());
+            XServerDrawerState.INSTANCE.setPresentModeLocked(false);
         }
     }
 

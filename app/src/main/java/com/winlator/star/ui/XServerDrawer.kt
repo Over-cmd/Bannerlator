@@ -892,6 +892,21 @@ private fun GraphicsContent(state: XServerDrawerState) {
     Spacer(Modifier.height(6.dp))
     FullscreenModeButtons(selected = fullscreenMode) { state.onSetFullscreenMode?.accept(it) }
 
+    // Screen alignment (#413): Center/Top/Bottom, live like the mode above. Now applies in EVERY
+    // fullscreen mode — TOP/BOTTOM confine the game (Fit/Fill/Stretch/Integer alike) to its half and
+    // leave the other half for the controls, so the control is always live (no more STRETCH/FILL greying).
+    val screenAlignment by state.screenAlignment.collectAsState()
+    Spacer(Modifier.height(8.dp))
+    Text(
+        stringResource(R.string.screen_alignment),
+        color = MaterialTheme.colorScheme.onSurface,
+        modifier = Modifier.fillMaxWidth()
+    )
+    Spacer(Modifier.height(6.dp))
+    ScreenAlignmentButtons(selected = screenAlignment, enabled = true) {
+        state.onSetScreenAlignment?.accept(it)
+    }
+
     Spacer(Modifier.height(4.dp))
     HorizontalDivider(color = MaterialTheme.colorScheme.outline, modifier = Modifier.padding(vertical = 6.dp))
 
@@ -1232,8 +1247,11 @@ private fun FrameGenSection(state: XServerDrawerState) {
         FgMultiplierButtons(fgMult, engine) { newMult ->
             val wasOff = fgMult == 0
             fgMult = newMult; applyFg()
-            // Turning FG on: pulse a bg/fg reset so win-fg starts clean, not artifacty.
-            if (wasOff && newMult >= 2) state.onFgResetPulse?.run()
+            // Turning FG on: win-fg pulses a soft bg/fg reset so its optical flow starts clean, not
+            // artifacty. lsfg-vk instead does a FULL surface-teardown reset with a Resume prompt —
+            // driven by onBionicFgConfigChange in the activity (the device-proven fix for its
+            // black-frame flicker) — so it must NOT also fire the soft pulse here.
+            if (engine == "bionic" && wasOff && newMult >= 2) state.onFgResetPulse?.run()
         }
 
         // Interpolation model, win-fg only. The layer rebuilds its framegen context when the
@@ -1901,6 +1919,53 @@ private fun FullscreenModeButtons(selected: Int, onSelect: (Int) -> Unit) {
                 }
                 // Pad the short (2-chip) row so its buttons keep the same width as the 3-chip row.
                 repeat(3 - row.size) { Spacer(Modifier.weight(1f)) }
+            }
+        }
+    }
+}
+
+// Screen alignment (#413): vertical placement of the letterbox bar (Center/Top/Bottom), same
+// segmented-chip idiom as FullscreenModeButtons. [enabled]=false greys it out for STRETCH/FILL,
+// where there is no bar to move. 0/1/2 map to Container.ALIGN_CENTER/TOP/BOTTOM.
+@Composable
+private fun ScreenAlignmentButtons(selected: Int, enabled: Boolean = true, onSelect: (Int) -> Unit) {
+    val accent = MaterialTheme.colorScheme.primary
+    val accentDim = LocalAccentDim.current
+    val options = listOf(
+        0 to stringResource(R.string.screen_alignment_center_short),
+        1 to stringResource(R.string.screen_alignment_top_short),
+        2 to stringResource(R.string.screen_alignment_bottom_short)
+    )
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        options.forEach { (align, label) ->
+            val isSel = selected == align
+            Box(
+                contentAlignment = Alignment.Center,
+                modifier = Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(if (isSel && enabled) accent else Color.Black)
+                    .border(
+                        width = 1.dp,
+                        color = if (isSel && enabled) accent else accentDim,
+                        shape = RoundedCornerShape(8.dp)
+                    )
+                    .clickable(enabled = enabled) { onSelect(align) }
+                    .padding(vertical = 9.dp)
+            ) {
+                Text(
+                    label,
+                    color = when {
+                        !enabled -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
+                        isSel    -> Color.Black
+                        else     -> accent
+                    },
+                    fontSize = 12.sp,
+                    fontWeight = if (isSel && enabled) FontWeight.Bold else FontWeight.Medium
+                )
             }
         }
     }
@@ -2801,6 +2866,7 @@ private fun ControlsContent(state: XServerDrawerState) {
             Triple("Vibration", subTab == 2) { state.setControlsSubTab(2) },
             Triple("Gyro", subTab == 3) { state.setControlsSubTab(3) },
             Triple("Players", subTab == 4) { state.setControlsSubTab(4) },
+            Triple(stringResource(R.string.swipe_tab), subTab == 5) { state.setControlsSubTab(5) },
         ),
         perRow = 3
     )
@@ -3021,7 +3087,49 @@ private fun ControlsContent(state: XServerDrawerState) {
 
         // ── Players ── manual per-device slot assignment (override when auto-assignment guesses wrong).
         4 -> PlayersSection()
+
+        // ── Swipe ── live per-category on-screen-control swipe gates (Buttons/D-pad/Sticks).
+        5 -> SwipeSection(state)
     }
+}
+
+// ───── Controls > Swipe — live per-category swipe toggles ─────
+// Buttons/D-pad let a finger slide onto (and off) those controls without lifting; Sticks lets a free
+// finger slide into a stick to grab it. Each chip reflects its StateFlow and round-trips through its
+// callback (apply-live-to-InputControlsView + persist), mirroring the Touch sub-tab's flag chips.
+@Composable
+private fun SwipeSection(state: XServerDrawerState) {
+    val accent = MaterialTheme.colorScheme.primary
+    val swipeButtons by state.swipeButtons.collectAsState()
+    val swipeDpad by state.swipeDpad.collectAsState()
+    val swipeSticks by state.swipeSticks.collectAsState()
+
+    Text(stringResource(R.string.swipe_tab), color = accent, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+    Spacer(Modifier.height(4.dp))
+    Text(
+        "Slide a finger onto a control to press it — chain buttons and roll the d-pad without lifting.",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant
+    )
+    Spacer(Modifier.height(8.dp))
+
+    ToggleChipGrid(
+        listOf(
+            ToggleChipItem(stringResource(R.string.swipe_buttons), swipeButtons) {
+                state.setSwipeButtons(it)
+                state.onSetSwipeButtons?.accept(it)
+            },
+            ToggleChipItem(stringResource(R.string.swipe_dpad), swipeDpad) {
+                state.setSwipeDpad(it)
+                state.onSetSwipeDpad?.accept(it)
+            },
+            ToggleChipItem(stringResource(R.string.swipe_sticks), swipeSticks) {
+                state.setSwipeSticks(it)
+                state.onSetSwipeSticks?.accept(it)
+            },
+        ),
+        perRow = 3
+    )
 }
 
 // ───── Controls > Players — manual per-device XInput slot assignment ─────

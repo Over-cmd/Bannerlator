@@ -95,6 +95,13 @@ public class Container {
     public static final int FULLSCREEN_FILL = 3;     // fullscreen-immersive, crop-to-fill (preserve aspect, no bars)
     public static final int FULLSCREEN_INTEGER = 4;  // fullscreen-immersive, largest whole-number scale (pixel-perfect, centered)
     private int fullscreenMode = FULLSCREEN_OFF;
+    // Screen alignment (issue #413): vertical placement of the letterbox rect on square-ish/foldable
+    // displays. CENTER is the historical behavior (equal bars top+bottom); TOP/BOTTOM pool the empty
+    // space on the opposite edge for touch controls. Aspect is preserved — only the bar moves.
+    public static final int ALIGN_CENTER = 0;
+    public static final int ALIGN_TOP = 1;
+    public static final int ALIGN_BOTTOM = 2;
+    private int screenAlignment = ALIGN_CENTER;
     private byte startupSelection = STARTUP_SELECTION_ESSENTIAL;
     // CSV of ENABLED service raw names when startupSelection == CUSTOM. "" (default) = none enabled
     // (Custom starts every service off). Ignored by the other three presets. Per-game shortcuts
@@ -249,6 +256,10 @@ public class Container {
     public int getFullscreenMode() { return fullscreenMode; }
 
     public void setFullscreenMode(int mode) { this.fullscreenMode = mode; }
+
+    public int getScreenAlignment() { return screenAlignment; }
+
+    public void setScreenAlignment(int a) { this.screenAlignment = a; }
 
     // Legacy compat: derived helper so any lingering callers still compile/behave.
     public boolean isFullscreenStretched() { return fullscreenMode == FULLSCREEN_STRETCH; }
@@ -412,7 +423,7 @@ public class Container {
     // lsfg-vk runs best at a higher flow scale than bionic-fg (GameNative's proven default). Only the
     // UNSET default differs per engine (see getFrameGenFlowScale) — an explicit user value wins either way.
     public static final float LSFG_DEFAULT_FLOW_SCALE = 0.80f;
-    public static final int FRAMEGEN_DEFAULT_MODEL = 0;
+    public static final int FRAMEGEN_DEFAULT_MODEL = 3;   // win-fg model 3 = Optical flow (~2ms; device-proven best base-FPS retention)
 
     public boolean isFrameGenEnabled() {
         return getExtra("frameGenEnabled", "0").equals("1");
@@ -486,8 +497,9 @@ public class Container {
     //       match window, sub-pixel refinement and a true bidirectional solve whose
     //       forward/backward disagreement gates the flow at occlusion edges. 3 is kept
     //       unchanged alongside it so the two can be compared live in the same scene.
-    // 1-4 are unproven on device; 0 stays the default so behaviour is unchanged unless chosen.
-    // BIONIC_FG_MODEL in the container/shortcut env vars still overrides this at the layer.
+    // win-fg models: 3 = Optical flow (default; ~2ms, best base-FPS retention on GPU-bound titles,
+    // device-proven 2026-08-25), 4 = Bidirectional (~10ms, heavier). An explicit per-container/shortcut
+    // pick still wins; the layer clamps to [3,4].
     public int getFrameGenModel() {
         try {
             int m = Integer.parseInt(getExtra("frameGenModel", String.valueOf(FRAMEGEN_DEFAULT_MODEL)));
@@ -1056,6 +1068,7 @@ public class Container {
             data.put("showFPS", showFPS);
             data.put("fpsCounterConfig", fpsCounterConfig);
             data.put("fullscreenMode", fullscreenMode);
+            data.put("screenAlignment", screenAlignment);
             data.put("inputType", inputType);
             data.put("startupSelection", startupSelection);
             data.put("startupServices", startupServices);
@@ -1139,6 +1152,10 @@ public class Container {
                     break;
                 case "fullscreenMode" :
                     setFullscreenMode(data.getInt(key));
+                    break;
+                case "screenAlignment" :
+                    // Absent key -> stays default ALIGN_CENTER, so existing containers are unaffected.
+                    setScreenAlignment(data.getInt(key));
                     break;
                 case "fullscreenStretched" :
                     // Backward-compat migration: only honour the legacy boolean when the new int

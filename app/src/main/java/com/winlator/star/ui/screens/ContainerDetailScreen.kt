@@ -1093,6 +1093,24 @@ private fun TopLevelFields(
         )
         Spacer(Modifier.height(8.dp))
 
+        // Screen alignment (#413): Center / Top / Bottom on square-ish foldables. TOP/BOTTOM confine the
+        // game to half the panel (a handheld split) and give the other half to the on-screen controls.
+        // Applies in EVERY fullscreen mode now — Fit/Fill/Stretch/Integer all scale within the game's half
+        // — so it's always available. Option index maps 1:1 to Container.ALIGN_*.
+        val screenAlignmentLabels = listOf(
+            stringResource(R.string.screen_alignment_center),
+            stringResource(R.string.screen_alignment_top),
+            stringResource(R.string.screen_alignment_bottom)
+        )
+        val alignSelIdx = viewModel.screenAlignment.coerceIn(0, screenAlignmentLabels.size - 1)
+        LabeledDropdown(
+            label = stringResource(R.string.screen_alignment),
+            options = screenAlignmentLabels,
+            selectedOption = screenAlignmentLabels[alignSelIdx],
+            onSelect = { viewModel.screenAlignment = screenAlignmentLabels.indexOf(it).coerceAtLeast(0) }
+        )
+        Spacer(Modifier.height(8.dp))
+
         // Frame Generation engine: Off / bionic-fg / lsfg-vk (mutually exclusive). lsfg-vk is grayed
         // out until a Lossless.dll is imported (Settings). This is the ONLY per-container FG control;
         // the multiplier & flow scale for BOTH engines are tuned live from the in-game side menu.

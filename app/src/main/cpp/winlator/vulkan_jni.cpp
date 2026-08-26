@@ -196,6 +196,16 @@ Java_com_winlator_star_renderer_vulkan_VulkanRenderer_nativeScanoutSetDst(
     if (r) r->scanoutSetDst(x, y, w, h);
 }
 
+// #413: compositor clip rect (surface px) used as the swapchain scissor in recordCmdBuf so FILL/STRETCH
+// overflow is cropped to the game's half. A full-surface (or w<=0) rect disables the clip.
+extern "C" JNIEXPORT void JNICALL
+Java_com_winlator_star_renderer_vulkan_VulkanRenderer_nativeSetClipRegion(
+    JNIEnv*, jobject, jlong handle, jint x, jint y, jint w, jint h)
+{
+    auto* r = reinterpret_cast<VulkanRendererContext*>(handle);
+    if (r) r->setClipRegion(x, y, w, h);
+}
+
 extern "C" JNIEXPORT void JNICALL
 Java_com_winlator_star_renderer_vulkan_VulkanRenderer_nativeSetScanoutWindow(
     JNIEnv* env, jobject, jlong handle, jobject gameSurface, jobject cursorSurface)

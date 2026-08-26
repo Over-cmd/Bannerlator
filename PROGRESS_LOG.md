@@ -1,5 +1,114 @@
 # Star-Compose — Progress Log
 
+## 2026-08-25 — 🏆✅ **Steam achievements IN-GAME PILLS device-proven — feature validated + merged to main**
+> Follows the checkpoint below. **Merged to `main` @ `dd7f96ae`** (no-ff; revert `git revert -m 1 dd7f96ae`). The last unproven piece is now DEVICE-PROVEN on HL2 (appId 220) under Goldberg (Regular): the `AchievementWatcher` logged `watching appId=220 (0 already earned) under …/AppData/Roaming` (**Phase-0 GSE path confirmed** — gbe_fork created `GSE Saves/220/` at exactly the watched path), then a simulated real unlock — wrote `achievements.json` with `HL2_BEAT_DONTTOUCHSAND=earned`, correct owner `u0_a249` + SELinux ctx `c249…` via temp+mv — fired `BH_STEAM_ACHV: unlocked: HL2_BEAT_DONTTOUCHSAND (Keep Off the Sand!)`, and the **gold pill rendered over the live game surface** (icon + name + description, top-right beside the perf HUD, screenshot-confirmed). Whole chain proven: gbe_fork write → FileObserver re-armed down to `220/` → snapshot diff → `lookup` name+icon → pass-through-Dialog pill above the SurfaceView. Test artifact reverted (fake unlock deleted; sync-back was OFF so the real profile was untouched). **Optional-remaining:** naturally-triggered unlock (identical code path), 3-surface pause/resume sync, profile sync-back (default-OFF, bit-math still unproven). → memory `project_bannerlator_steam_achievements`.
+
+## 2026-08-25 — 🏆🛒🔖 **CHECKPOINT: Steam Achievements + Tabbed Detail Page + Auto-Cloud — UI device-proven, in-game pills pending**
+> **Where we are (resume here):** branch `feat/steam-achievements-cloud` @ `01b8186b` (rebased on main `cb4ba764`, clean, force-pushed), CI run `32915101803` GREEN (all 3 flavors). STAGED `/sdcard/Download/Bannerlator-steam-achv-tabs-pubg.apk` sha `d14be86f54de275b73fd984aadedaf4a593df0c070b123f38695f75f50775aab` (installed+verified on device). NOT merged.
+>
+> **What's built (two features on this branch):** (1) **Steam auto-cloud parity** — download-from-cloud on launch (newest-wins) + upload-to-cloud on exit, gated by `hasCloudSupport` + Save-Manager toggles; keeps local auto-collect. (2) **Steam achievements** — detail-page grid, in-game stacking gold pills + `AchievementWatcher` FileObserver, local icon cache, profile sync-back (**DEFAULT-OFF**, bit-math unproven). Plus a full **detail-page rework**: tabbed layout (Details/Achievements/DLC/Cloud saves), single state-driven primary button (Install → Downloading… N% → Add to shortcuts) with 2-layer fill + info line underneath, ⚙ gear dropdown for the rest, Goldberg as a gear popup, long-press achievement help dialog, theme/accent-driven, gear menu outlined + dividers. `steamUserStats` bound; `SteamAchievementStore` facade via `getUserStats`/`getExpandedAchievements`; DB v8→9 `steam_achievements`. javasteam already the joshuatam fork (exposes `storeUserStats`) — zero dep change.
+>
+> **DEVICE-PROVEN this session (HL2 appId 220):** download→install (~10 GB, flat memory/no OOM, completion-guard accepted ≥90% — no false-fail), download↔Download-Manager badge sync, tabbed page, real cached achievement icons (colour/greyscale/lock), theme accent (orange), gear menu outline+dividers, Goldberg greyed-until-installed, single 2-layer progress button + info line (thin bar removed), Goldberg gear popup (Download-Steam-Emulator button → mode picker Off/Regular/Experimental/ColdClient), no inline Goldberg section.
+>
+> **STILL UNPROVEN (resume here):** in-game achievement **PILLS** = the Phase-0 GSE unknown — does gbe_fork write `<container>/.wine/drive_c/users/xuser/AppData/Roaming/GSE Saves/220/achievements.json` where `AchievementWatcher` watches. To test: Goldberg popup → Regular/Experimental → Add to shortcuts → launch HL2 → unlock → watch `BH_STEAM_ACHV` + that GSE path. Also unproven: 3-surface pause/resume sync; profile sync-back (default-OFF). Verify installed sha `d14be86f…` first.
+>
+> Full detail: memory `project_bannerlator_steam_achievements` + `project_bannerlator_steam_autocloud_parity`. Design mockup `/sdcard/Download/Bannerlator-Achievements-Tab-Mockup.html`; spec artifact `claude.ai/code/artifact/87e38bc9-179e-48f7-82f9-52008bbce66f`.
+
+## 2026-08-25 — ⏸️🔖 **CHECKPOINT: LSFG black-frame flicker — paused for device test**
+> **Where we are (resume here):** branch `fix/lsfg-flicker-pacing` @ `6a63e35a`, CI `32795455567` GREEN (all 3 flavors),
+> STAGED `/sdcard/Download/Bannerlator-lsfg-fgreset-pubg.apk` sha `219fa4716886b0210a6d423d8d3a5817fad39f7f5faf0f3f2d4e299841b55f0d`.
+> NOT merged, NOT device-proven.
+>
+> **Root cause (DEVICE-PROVEN, live logcat 2026-08-24):** host-compositor frame OVER-QUEUE from unpaced
+> frame-gen — `SmoMoState::FrameIsLate: queued_frames>=2` ~55/s during flicker → ~14/s after bg/fg; the
+> lsfg-vk GENERATED frames present BLACK (real frames + host HUD fine). **Disproven on-device:** not a driver
+> cap (probe: fp16/memModel/robustness2/sync2 all present); not the AHB fn-ptr miss (AHB context creates fine)
+> → the earlier Wrapper→Turnip lead is dead.
+>
+> **What's on the branch (3 stacked changes):** (A) guest `experimental_present_mode` mailbox-when-generating
+> (`writeLsfgConfig`); (B) vsync clock `vsync.txt` via Choreographer (both VERIFIED live on-disk but did NOT
+> clear the flicker alone); mailbox-lock removal (host present mode user-selectable during FG, `8250c5e9`);
+> (C) FG-CHANGE FULL-RESET (`6a63e35a`) — selecting On/2×/3×/4× (lsfg only) → pause guest → REAL SurfaceView
+> teardown → on-screen Resume overlay → rebuild+resume (only a full surface teardown clears it; a plain
+> swapchain recreate does not).
+>
+> **NEXT (resume):** device-test `219fa471…` — install → set 2× → tap Resume → is the menu clean without
+> manual bg/fg? Also try Present Mode→FIFO with FG on. Optional objective proof: re-run the `scratchpad/lsfgcap/`
+> logcat capture during DiRT+2× and compare `FrameIsLate` vs the ~55/s baseline. Verify installed sha first.
+> Full detail: memory `project_bannerlator_lsfg_black_frame_flicker`.
+
+## 2026-08-24 — 🖥️🎞️ **Feature: frame-gen change → full presentation reset (LSFG black-frame flicker)**
+> Additive to the pacing fix (A+B) + mailbox-lock-removal already on `fix/lsfg-flicker-pacing`. Device
+> finding: with lsfg-vk generating, only a **background/foreground cycle** clears the black-frame
+> flicker — a plain swapchain recreate on the SAME surface (which the `conf.toml` rewrite already
+> triggers, ~0.8s in too) does **not**, because bg/fg does a **full Android SURFACE teardown + rebuild**
+> plus a **guest pause/resume**, which resets the host-compositor over-queue. So on an in-game frame-gen
+> change we now **deterministically replicate that cycle** and gate the resume behind a user tap.
+>
+> **Trigger + debounce** (`XServerDisplayActivity.onBionicFgConfigChange`, lsfg branch): after each
+> committed change, `maybeTriggerFgReset(mult>=2?mult:0)` fires the reset **only when the effective FG
+> level changes** (Off/On/2×/3×/4×) — flow-scale / performance-mode / model edits keep the level so they
+> never reset; `lastCommittedFgLevel` is baselined at launch (`lsfgLaunchMult`). A reset already up
+> swallows further changes (conf is still rewritten; the Resume rebuild picks up the newest conf).
+> **win-fg unaffected**: the drawer's soft `onFgResetPulse` is now gated to `engine == "bionic"`
+> (`XServerDrawer.kt` FgMultiplierButtons) so lsfg no longer double-fires it against the new full reset.
+>
+> **Pause + teardown** (`triggerFgPresentationReset`): mirrors the `onPause` background half —
+> `environment.onPause()` + `xServerView.onPause()` + `ProcessHelper.pauseAllWineProcesses()` (the same
+> SIGSTOP path backgrounding/manual-pause use) — then a **real surface teardown** via new
+> `XServerView.teardownSurface()` (game `SurfaceView` → `GONE` → `surfaceDestroyed` →
+> `VulkanRenderer.onSurfaceDestroyed`/`nativeDetachSurface`; the load-bearing difference vs a
+> swapchain-only recreate). Does NOT flip `isPaused` (own overlay state, so no collision with the
+> ReShade/manual pause box). No-op for GL (`canRecreateSurface()` false — GLSurfaceView owns its EGL).
+>
+> **Resume overlay**: new `XServerDialogState.fgResetPaused` + `onFgResetResume`, rendered by
+> `FgResetOverlay` (new file, modeled on `PauseBoxOverlay` — a top-level dimmed **modal Dialog window**
+> so it stacks above the game surface; back / tap-outside inert, Resume is the only exit). On Resume,
+> `resumeFromFgReset()` mirrors the `onResume` foreground half: `rebuildSurface()` (`SurfaceView` →
+> `VISIBLE` → `surfaceCreated` → `nativeReattachSurface` + swapchain recreate), resume guest (SIGCONT),
+> re-assert present mode + VRR. Robustness: a real foreground mid-reset auto-completes it in `onResume`
+> (surface visibility isn't auto-restored), and `onDestroy` clears the singleton overlay state.
+>
+> Files: `XServerDisplayActivity.java`, `widget/XServerView.java`, `ui/XServerDialogState.kt`,
+> `ui/XServerDialogHost.kt`, `ui/XServerDrawer.kt`, new `ui/overlays/FgResetOverlay.kt`. **No
+> versionCode bump.** Implementation-only — **NOT device-proven** (see risks: the surface rebuild is
+> async vs the immediate guest resume — same ordering as real bg/fg, renderer buffers until reattach).
+
+## 2026-08-24 — 🖥️🎞️ **Fix: LSFG (lsfg-vk) black-frame flicker — pace the layer (vsync clock + mailbox)**
+> Device-proven root cause (DiRT Rally 2.0 / Adreno 750 live logcat): with lsfg-vk frame-gen on, the
+> generated frames present **BLACK** because the guest layer **free-runs unpaced** and **over-queues the
+> host compositor** — Qualcomm's composer spams `SmoMoState::FrameIsLate: queued_frames >= 2` at ~55/s
+> during flicker (dropping ~4× to ~14/s right after a swapchain recreate), while frame-gen pushes
+> ~124fps with no pacing → the compositor queue backs up and dropped/stale generated frames reach the
+> glass black. NOT a driver-cap gap and NOT the AHB fn-ptr miss (both disproven on-device — all features
+> present, AHB context creates fine). **GameNative ships the byte-identical lsfg-vk `.so` yet does NOT
+> flicker because it PACES the layer** (publishes a vsync clock the layer phase-locks to) and runs the
+> guest layer in **mailbox**; we published neither and hardcoded fifo.
+>
+> **FIX A** (`XServerDisplayActivity.writeLsfgConfig`, ~:2665): guest `experimental_present_mode` fifo →
+> **mailbox while generating (multiplier≥2), fifo in passthrough** (GameNative parity). Mesa's FIFO
+> queue underneath the layer breaks the display cadence and feeds the host-compositor over-queue.
+> **FIX B** (the real fix): port GameNative's vsync clock — `startVsyncClock()`/`stopVsyncClock()` use
+> `Choreographer.postFrameCallback` to write `<home>/.config/lsfg-vk/vsync.txt`
+> (`vsync_ns=<frameTimeNanos>` + `period_ns=<1e9/refreshRate>`, refreshRate from the default display,
+> fallback 60) once a second, off the UI thread (single-thread daemon executor). Started at LSFG launch
+> (:4681, next to `writeLsfgConfig`) and on the in-game FG toggle-on (mult≥2); stopped on toggle-off and
+> in `onDestroy`. Our byte-identical `.so` already consumes vsync.txt → no native change. This gives the
+> layer a display grid to phase-lock to instead of free-running, killing the over-queue at the source.
+> **FIX C SKIPPED** (assessed, not implemented): a forced post-launch guest swapchain recreate is
+> redundant + risky here. A host swapchain recreate already fires ~0.8s in via `applyEffectivePresentMode`,
+> and for the common path (launch passthrough → user toggles FG on live) the toggle already re-touches
+> conf.toml → the layer returns `VK_ERROR_OUT_OF_DATE_KHR` → a clean guest recreate happens naturally.
+> Its only unique coverage (auto-enable-at-launch) is already addressed by FIX B's pacing, and a blind
+> timed re-touch would inject a deliberate extra black frame (and race the 0.8s host recreate + any
+> user toggle in that window). Root cause is over-queue-from-no-pacing → B fixes it directly; C only
+> resets symptoms.
+>
+> Surgical, one file (`app/src/main/java/com/winlator/star/XServerDisplayActivity.java`). **No
+> versionCode bump** (fix build). Branch `fix/lsfg-flicker-pacing` off `origin/main`. Risk: mailbox on a
+> surface that only supports fifo — but the device capture showed host `supportedPresentModes=[1,2]`
+> (mailbox+fifo), and the guest layer applies its own present mode. NOT yet built/device-proven.
+
 ## 2026-08-24 — 📦🛒 **Vendor the JavaSteam fork in-repo (durability follow-up to #408)**
 > After the #408 OOM fix merged (`a586f73d`) with the dep pinned to the immutable timestamped snapshot
 > `io.github.joshuatam:javasteam(-depotdownloader):1.8.0.1-26-20260801.180149-1`, the artifact was still

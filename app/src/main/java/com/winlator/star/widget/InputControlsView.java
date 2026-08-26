@@ -18,6 +18,7 @@ import android.os.Vibrator;
 import android.util.Log;
 import android.util.SparseArray;
 import android.util.SparseBooleanArray;
+import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.PointerIcon;
@@ -30,6 +31,7 @@ import androidx.preference.PreferenceManager;
 
 import com.winlator.star.R;
 import com.winlator.star.ControlsEditorActivity;
+import com.winlator.star.container.Container;
 import com.winlator.star.inputcontrols.Binding;
 import com.winlator.star.inputcontrols.ControlElement;
 import com.winlator.star.inputcontrols.ControlsProfile;
@@ -90,6 +92,15 @@ public class InputControlsView extends View {
     private final Map<ExternalController, PointF> controllerMouseMoveOffsets = new IdentityHashMap<>();
     private boolean showTouchscreenControls = true;
 
+    // --- Handheld 50/50 split (issue #413) -----------------------------------------------------------
+    // When Screen Alignment is TOP/BOTTOM on a foldable, the game renders in one half of the panel and
+    // this overlay OWNS the other half as a full-size controller. We do NOT transform the controls — we
+    // RESIZE the view to occupy that half (see onMeasure + setScreenAlignment). Because control layouts
+    // are resolution-independent (ControlsProfile.loadElements materializes stored FRACTIONS against
+    // getMaxWidth()/getMaxHeight()), a half-height view auto-lays-out the profile to fill the half at
+    // correct, full size. CENTER keeps the view full-screen -> byte-identical to before this feature.
+    private int screenAlignment = Container.ALIGN_CENTER;
+
     // Background image for editor reference
     private Bitmap backgroundImage;
     private float backgroundOpacity = 0.65f;
@@ -113,6 +124,11 @@ public class InputControlsView extends View {
     private ControlElement expandedElement;
     private final SparseBooleanArray swallowedExpandablePointers = new SparseBooleanArray();
     private final SparseBooleanArray touchpadPointers = new SparseBooleanArray();
+    // Stage 2: live per-category swipe gates, mirrored to the drawer's Swipe tab + prefs.
+    // Buttons default ON; D-pad and Sticks (slide-to-engage) default OFF.
+    private boolean swipeButtonsEnabled = true;
+    private boolean swipeDpadEnabled = false;
+    private boolean swipeSticksEnabled = false;
     private final Map<ExternalController, Set<Integer>> activeControllerKeys = new IdentityHashMap<>();
     private final Map<ExternalController, Set<Binding>> activeControllerBindings = new IdentityHashMap<>();
     private final Map<Binding, Integer> activeControllerBindingCounts = new EnumMap<>(Binding.class);
@@ -211,6 +227,9 @@ public class InputControlsView extends View {
         }
         this.editMode = editMode;
         setVisibility(View.VISIBLE);
+        // #413: the editor always edits the FULL-screen authored layout, so re-measure back to full when
+        // entering it and to the half again when leaving (onMeasure keys off editMode + screenAlignment).
+        requestLayout();
         invalidate();
     }
 
@@ -251,6 +270,30 @@ public class InputControlsView extends View {
 
     public int getSnappingSize() {
         return snappingSize;
+    }
+
+    // #413 handheld split: in-game (not the editor) a TOP/BOTTOM alignment makes this overlay own exactly
+    // HALF the panel; the FrameLayout gravity (set in setScreenAlignment) then places that half top/bottom.
+    // The editor and CENTER keep the full-screen measurement (byte-identical to before this feature).
+    @Override
+    protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+        if (!editMode && (screenAlignment == Container.ALIGN_TOP || screenAlignment == Container.ALIGN_BOTTOM)) {
+            int w = MeasureSpec.getSize(widthMeasureSpec);
+            int h = MeasureSpec.getSize(heightMeasureSpec);
+            setMeasuredDimension(w, h / 2);
+        } else {
+            super.onMeasure(widthMeasureSpec, heightMeasureSpec);
+        }
+    }
+
+    @Override
+    protected void onSizeChanged(int w, int h, int oldw, int oldh) {
+        super.onSizeChanged(w, h, oldw, oldh);
+        // A resize (fold/unfold, rotation, or entering/leaving the half via alignment) changes
+        // getMaxHeight(), which the resolution-independent control fractions are materialized against.
+        // Drop the cached load so onDraw re-lays-out the profile against the new size, then redraw.
+        if (profile != null) profile.invalidateElements();
+        invalidate();
     }
 
     @Override
@@ -645,6 +688,37 @@ public class InputControlsView extends View {
         updateMouseMoveTimer();
     }
 
+    // #413 handheld split: the active screen alignment (Container.ALIGN_CENTER/TOP/BOTTOM). TOP => the game
+    // owns the top half, so this overlay owns the BOTTOM half (FrameLayout gravity BOTTOM); BOTTOM => the
+    // overlay owns the TOP half (gravity TOP); CENTER => full screen (historical, gravity irrelevant for a
+    // full-size child). The half-HEIGHT is enforced in onMeasure; here we only set the gravity + re-measure.
+    // The re-measure fires onSizeChanged whenever the half<->full state actually changes, which drops the
+    // cached load so the resolution-independent control fractions re-materialize against the new
+    // getMaxHeight() and fill the half at full size. Called at launch and live from applyScreenAlignment.
+    public void setScreenAlignment(int alignment) {
+        this.screenAlignment = alignment;
+        ViewGroup.LayoutParams lp = getLayoutParams();
+        if (lp instanceof FrameLayout.LayoutParams) {
+            FrameLayout.LayoutParams flp = (FrameLayout.LayoutParams) lp;
+            int gravity = alignment == Container.ALIGN_TOP    ? Gravity.BOTTOM
+                        : alignment == Container.ALIGN_BOTTOM ? Gravity.TOP
+                        : (Gravity.TOP | Gravity.START); // CENTER: full-screen anchor (top-left)
+            if (flp.gravity != gravity) {
+                flp.gravity = gravity;
+                setLayoutParams(flp); // triggers requestLayout -> onMeasure re-runs
+            } else {
+                requestLayout();
+            }
+        } else {
+            requestLayout();
+        }
+        invalidate();
+    }
+
+    public int getScreenAlignment() {
+        return screenAlignment;
+    }
+
     public int getMaxWidth() {
         return (int)Mathf.roundTo(getWidth(), snappingSize);
     }
@@ -941,6 +1015,26 @@ public class InputControlsView extends View {
         return super.onGenericMotionEvent(event);
     }
 
+    // #413 handheld split: forward an unhandled touch to the full-screen TouchpadView. When this overlay
+    // owns only a half (TOP/BOTTOM), it is physically offset in the parent, so its event coords are shifted
+    // from the touchpad's full-screen coords by exactly getTop() (getLeft() is always 0 — the overlay spans
+    // full width). Shift the event into touchpad space, forward, then shift back so any later per-pointer
+    // element logic on the SAME event is unaffected. For CENTER the overlay is full-screen at getTop()==0,
+    // so this is a plain pass-through — byte-identical to the pre-split behavior. Without this, absolute
+    // touch modes (simTouchScreen / cursor-to-touch) would map OSC-half empty-area touches to the mirrored
+    // game-half position; relative touchpad mode uses deltas and is unaffected either way.
+    private void forwardToTouchpad(MotionEvent event) {
+        if (touchpadView == null) return;
+        int dy = getTop();
+        if (dy != 0) {
+            event.offsetLocation(0, dy);
+            touchpadView.onTouchEvent(event);
+            event.offsetLocation(0, -dy);
+        } else {
+            touchpadView.onTouchEvent(event);
+        }
+    }
+
     @Override
     public boolean onTouchEvent(MotionEvent event) {
         boolean hapticsEnabled = preferences.getBoolean("touchscreen_haptics_enabled", true);
@@ -1099,7 +1193,7 @@ public class InputControlsView extends View {
                         swallowedExpandablePointers.put(pointerId, true);
                     } else if (!handled && touchpadView != null) {
                         touchpadPointers.put(pointerId, true);
-                        touchpadView.onTouchEvent(event);
+                        forwardToTouchpad(event);
                     }
                     break;
                 }
@@ -1113,23 +1207,80 @@ public class InputControlsView extends View {
                             handled = expandedElement.handleExpandableChildMove(pid);
                         }
                         if (!handled) {
-                            for (ControlElement element : profile.getElements()) {
-                                if (isElementHiddenByGroup(element)) continue;
-                                if (element.handleTouchMove(pid, x, y)) {
+                            // Swipeable OSC: a finger may slide onto/between BUTTON/D_PAD targets without
+                            // lifting (d-pad rolls, face-button chaining) — INCLUDING a finger that started
+                            // on empty space and is currently panning the mouse (a touchpad pointer): it
+                            // "converts" to a button press when it slides over a swipe target, and stops
+                            // driving the mouse. The owner (if any) is discovered via currentPointerId.
+                            ControlElement owner = findCapturingElement(pid);
+
+                            // (1) A swipeable D_PAD this pointer holds has slid outside its bounds:
+                            // hand the press to whatever swipe target now sits under the finger.
+                            // Gated by the live D-pad category toggle (off -> d-pad keeps today's clamped capture).
+                            if (swipeDpadEnabled && owner != null && owner.getType() == ControlElement.Type.D_PAD
+                                    && owner.isSwipeTarget() && owner.isCapturing(pid)
+                                    && !owner.containsPoint(x, y)) {
+                                ControlElement target = findSwipeTargetAt(pid, x, y, owner);
+                                if (target != null) {
+                                    owner.handleTouchUp(pid);
                                     handled = true;
-                                    break;
+                                    performTouchHaptic();
+                                }
+                            }
+
+                            // (2) Normal per-element move scan (original behavior). A swipeable BUTTON
+                            // releases itself inside handleTouchMove when the finger leaves its bounds.
+                            if (!handled) {
+                                for (ControlElement element : profile.getElements()) {
+                                    if (isElementHiddenByGroup(element)) continue;
+                                    if (element.handleTouchMove(pid, x, y)) {
+                                        handled = true;
+                                        break;
+                                    }
+                                }
+                            }
+
+                            // (3) The pointer holds nothing pressable — a swipeable BUTTON that just
+                            // released on slide-off, a genuinely free finger, or a finger currently panning
+                            // the mouse (touchpad pointer). If it's over a swipe target, press it; a
+                            // touchpad finger converts and stops feeding the mouse.
+                            boolean ownerReleasedButton = owner != null
+                                    && owner.getType() == ControlElement.Type.BUTTON
+                                    && !owner.isCapturing(pid);
+                            boolean pointerFree = !handled && findCapturingElement(pid) == null;
+                            if (ownerReleasedButton || pointerFree) {
+                                ControlElement target = findSwipeTargetAt(pid, x, y, owner);
+                                if (target != null) {
+                                    handled = true;
+                                    performTouchHaptic();
+                                    // Converted from mouse-pan to a button press: detach this finger from
+                                    // the touchpad so the mouse stops AND the touchpad's finger count stays
+                                    // balanced. The eventual ACTION_UP then releases the button via the
+                                    // element scan (it's no longer a touchpad pointer).
+                                    detachTouchpadPointer(pid);
+                                }
+                            }
+
+                            // Stick slide-to-engage: a free OR mouse-panning finger sliding into a stick's
+                            // region grabs it via the normal DOWN capture path (and converts off the
+                            // touchpad). Gated ONLY by the live Sticks toggle (no per-element flag);
+                            // default OFF -> sticks must be tapped to grab, exactly as today.
+                            if (swipeSticksEnabled && !handled && pointerFree) {
+                                if (engageStickAt(pid, x, y) != null) {
+                                    handled = true;
+                                    detachTouchpadPointer(pid);
                                 }
                             }
                         }
                     }
-                    if (hasTouchpadPointer(event) && touchpadView != null) touchpadView.onTouchEvent(event);
+                    if (hasTouchpadPointer(event)) forwardToTouchpad(event);
                     break;
                 }
                 case MotionEvent.ACTION_UP:
                 case MotionEvent.ACTION_POINTER_UP:
                     if (touchpadPointers.get(pointerId)) {
                         touchpadPointers.delete(pointerId);
-                        if (touchpadView != null) touchpadView.onTouchEvent(event);
+                        forwardToTouchpad(event);
                         handled = true;
                     } else if (swallowedExpandablePointers.get(pointerId)) {
                         swallowedExpandablePointers.delete(pointerId);
@@ -1149,7 +1300,7 @@ public class InputControlsView extends View {
                     break;
                 case MotionEvent.ACTION_CANCEL:
                     releaseActiveControls();
-                    if (touchpadView != null) touchpadView.onTouchEvent(event);
+                    forwardToTouchpad(event);
                     touchpadPointers.clear();
                     break;
             }
@@ -1198,6 +1349,86 @@ public class InputControlsView extends View {
         }
         return false;
     }
+
+    /** The control element currently capturing this pointer (matched by pointer id), or null. */
+    private ControlElement findCapturingElement(int pointerId) {
+        if (profile == null) return null;
+        for (ControlElement element : profile.getElements()) {
+            if (element.isCapturing(pointerId)) return element;
+        }
+        return null;
+    }
+
+    // A finger that was panning the mouse has just been taken over by a swipe control. Detach it from the
+    // touchpad: stop routing it to the mouse AND tell TouchpadView to end its tracking for that pointer
+    // (releasePointer) so its finger count stays balanced — otherwise, since no ACTION_UP will reach the
+    // touchpad for this pointer, TouchpadView.numFingers would leak and eventually freeze the cursor.
+    private void detachTouchpadPointer(int pointerId) {
+        if (!touchpadPointers.get(pointerId)) return;
+        if (touchpadView != null) touchpadView.releasePointer(pointerId);
+        touchpadPointers.delete(pointerId);
+    }
+
+    /**
+     * Find and press the swipe target sitting under (x, y) for this pointer. Iterates topmost-first
+     * (matching the DOWN hit-test order) and presses the first free swipe target the finger is over.
+     * Returns the pressed element, or null when the finger is not over a pressable swipe target.
+     */
+    private ControlElement findSwipeTargetAt(int pointerId, float x, float y, ControlElement exclude) {
+        if (profile == null) return null;
+        List<ControlElement> elements = profile.getElements();
+        for (int index = elements.size() - 1; index >= 0; index--) {
+            ControlElement element = elements.get(index);
+            if (element == exclude || isElementHiddenByGroup(element)) continue;
+            if (!isSwipeCategoryEnabled(element)) continue;
+            if (element.isSwipeTarget() && element.handleTouchDown(pointerId, x, y)) return element;
+        }
+        return null;
+    }
+
+    /** Whether the live per-category toggle allows this element's type to be a swipe target. */
+    private boolean isSwipeCategoryEnabled(ControlElement element) {
+        ControlElement.Type type = element.getType();
+        if (type == ControlElement.Type.BUTTON) return swipeButtonsEnabled;
+        if (type == ControlElement.Type.D_PAD) return swipeDpadEnabled;
+        return false;
+    }
+
+    /**
+     * Engage the stick element under (x, y) for a free pointer via the normal DOWN capture path
+     * (handleTouchDown starts tracking exactly as a tap-down would). Topmost-first; returns the
+     * engaged stick or null. Only called when the live Sticks toggle is on.
+     */
+    private ControlElement engageStickAt(int pointerId, float x, float y) {
+        if (profile == null) return null;
+        List<ControlElement> elements = profile.getElements();
+        for (int index = elements.size() - 1; index >= 0; index--) {
+            ControlElement element = elements.get(index);
+            if (isElementHiddenByGroup(element)) continue;
+            ControlElement.Type type = element.getType();
+            if ((type == ControlElement.Type.STICK || type == ControlElement.Type.DYNAMIC_STICK)
+                    && element.handleTouchDown(pointerId, x, y)) return element;
+        }
+        return null;
+    }
+
+    private void performTouchHaptic() {
+        if (!preferences.getBoolean("touchscreen_haptics_enabled", true)) return;
+        Vibrator vibrator = (Vibrator) getContext().getSystemService(Context.VIBRATOR_SERVICE);
+        if (vibrator != null && vibrator.hasVibrator()) {
+            vibrator.vibrate(VibrationEffect.createOneShot(50, VibrationEffect.DEFAULT_AMPLITUDE));
+        }
+    }
+
+    // ── Live per-category swipe gates (Stage 2). Mirrored to the drawer's Swipe tab + prefs. ──
+    public boolean isSwipeButtonsEnabled() { return swipeButtonsEnabled; }
+    public void setSwipeButtonsEnabled(boolean enabled) { swipeButtonsEnabled = enabled; }
+
+    public boolean isSwipeDpadEnabled() { return swipeDpadEnabled; }
+    public void setSwipeDpadEnabled(boolean enabled) { swipeDpadEnabled = enabled; }
+
+    public boolean isSwipeSticksEnabled() { return swipeSticksEnabled; }
+    public void setSwipeSticksEnabled(boolean enabled) { swipeSticksEnabled = enabled; }
 
     private void routeDirectlyToTouchpad(MotionEvent event) {
         int action = event.getActionMasked();

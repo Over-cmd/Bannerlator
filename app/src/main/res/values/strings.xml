@@ -169,6 +169,11 @@
     <string name="cursor_speed">Cursor Speed</string>
     <string name="relative_mouse_movement">Relative Mouse Movement</string>
     <string name="toggle_switch">Toggle Switch</string>
+    <string name="input_controls_editor_swipeable">Swipeable</string>
+    <string name="swipe_tab">Swipe</string>
+    <string name="swipe_buttons">Buttons</string>
+    <string name="swipe_dpad">D-pad</string>
+    <string name="swipe_sticks">Sticks</string>
     <string name="profile_exported_to">Profile exported to</string>
     <string name="unable_to_import_profile">Unable to import profile</string>
     <string name="import_control_profile">Import ICP / ICpx</string>
@@ -824,6 +829,15 @@
     <string name="fullscreen_mode_stretch_short">Stretch</string>
     <string name="fullscreen_mode_fill_short">Fill</string>
     <string name="fullscreen_mode_integer_short">Integer</string>
+    <!-- Screen alignment (#413): vertical placement of the letterbox bar on square-ish/foldable displays -->
+    <string name="screen_alignment">Screen Alignment</string>
+    <string name="screen_alignment_center">Center</string>
+    <string name="screen_alignment_top">Top</string>
+    <string name="screen_alignment_bottom">Bottom</string>
+    <string name="screen_alignment_center_short">Center</string>
+    <string name="screen_alignment_top_short">Top</string>
+    <string name="screen_alignment_bottom_short">Bottom</string>
+    <string name="screen_alignment_disabled_hint">No effect in Stretch or Fill (no letterbox bars to move).</string>
     <string name="frame_generation">Frame Generation (AI)</string>
     <string name="frame_generation_off">Off</string>
     <string name="frame_generation_bionic">win-fg</string>

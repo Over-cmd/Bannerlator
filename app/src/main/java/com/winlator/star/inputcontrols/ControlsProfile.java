@@ -223,6 +223,14 @@ public class ControlsProfile implements Comparable<ControlsProfile> {
         return elementsLoaded;
     }
 
+    // #413 handheld split: drop the cached element load so the next loadElements(view) re-materializes the
+    // stored FRACTIONS against the view's current getMaxWidth()/getMaxHeight(). Called by InputControlsView
+    // whenever its size changes (fold/unfold/rotation, or entering/leaving a TOP/BOTTOM half) so a resized
+    // overlay re-lays-out the profile to fill the new region at correct, full size.
+    public void invalidateElements() {
+        elementsLoaded = false;
+    }
+
     private void loadGroupsFromJSONObject(JSONObject profileJSONObject) throws JSONException {
         groups.clear();
         JSONArray groupsJSONArray = profileJSONObject.optJSONArray("groups");
@@ -522,6 +530,7 @@ public class ControlsProfile implements Comparable<ControlsProfile> {
                     element.setType(ControlElement.Type.valueOf(elementJSONObject.getString("type")));
                     element.setShape(ControlElement.Shape.valueOf(elementJSONObject.getString("shape")));
                     element.setToggleSwitch(elementJSONObject.getBoolean("toggleSwitch"));
+                    element.setSwipeable(elementJSONObject.optBoolean("swipeable", true));
                     element.setX((int)(elementJSONObject.getDouble("x") * inputControlsView.getMaxWidth()));
                     element.setY((int)(elementJSONObject.getDouble("y") * inputControlsView.getMaxHeight()));
                     element.setScale((float)elementJSONObject.getDouble("scale"));

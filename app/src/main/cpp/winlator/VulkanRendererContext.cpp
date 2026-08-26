@@ -1053,7 +1053,26 @@ void VulkanRendererContext::recordCmdBuf(VkCommandBuffer cb, uint32_t imgIdx,
     vk_.CmdBeginRenderPass(cb, &rpi, VK_SUBPASS_CONTENTS_INLINE);
     VkViewport vp{0,0,(float)swapchainExt.width,(float)swapchainExt.height,0,1};
     vk_.CmdSetViewport(cb, 0, 1, &vp);
-    VkRect2D sc{{0,0},swapchainExt}; vk_.CmdSetScissor(cb, 0, 1, &sc);
+    // #413: clip the compositor draws to the game region (a half of the surface on TOP/BOTTOM alignment)
+    // so a FILL/STRETCH game that overflows the region is cropped and can't bleed into the on-screen-
+    // controls half. The renderpass clear still covers the whole renderArea (full swapchain, above), so
+    // the controls half is painted black each frame. A full-surface (or w<=0) clip region disables the
+    // crop, making the scissor the whole swapchain -> byte-identical to the historical CENTER output.
+    VkRect2D sc{{0,0},swapchainExt};
+    {
+        int32_t cx = clipRegionX.load(std::memory_order_relaxed);
+        int32_t cy = clipRegionY.load(std::memory_order_relaxed);
+        int32_t cw = clipRegionW.load(std::memory_order_relaxed);
+        int32_t ch = clipRegionH.load(std::memory_order_relaxed);
+        if (cw > 0 && ch > 0) {
+            int32_t l = std::max(0, cx);
+            int32_t t = std::max(0, cy);
+            int32_t r = std::min((int32_t)swapchainExt.width,  cx + cw);
+            int32_t b = std::min((int32_t)swapchainExt.height, cy + ch);
+            if (r > l && b > t) { sc.offset = {l, t}; sc.extent = {(uint32_t)(r - l), (uint32_t)(b - t)}; }
+        }
+    }
+    vk_.CmdSetScissor(cb, 0, 1, &sc);
 
     vk_.CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     for (auto& d : draws) {
@@ -1700,6 +1719,16 @@ bool VulkanRendererContext::reattachSurface(ANativeWindow* newWindow) {
 
 void VulkanRendererContext::setTransform(float ox, float oy, float sx, float sy) {
     { std::lock_guard<std::mutex> lk(renderMutex); sceneOffsetX=ox;sceneOffsetY=oy;sceneScaleX=sx;sceneScaleY=sy; }
+    needsRender.store(true); dirtyCV.notify_one();
+}
+
+void VulkanRendererContext::setClipRegion(int x, int y, int w, int h) {
+    // #413 game-region scissor (surface px), consumed by recordCmdBuf. Atomics only (no renderMutex) —
+    // it composes with setTransform, which already kicks a render.
+    clipRegionX.store(x, std::memory_order_relaxed);
+    clipRegionY.store(y, std::memory_order_relaxed);
+    clipRegionW.store(w, std::memory_order_relaxed);
+    clipRegionH.store(h, std::memory_order_relaxed);
     needsRender.store(true); dirtyCV.notify_one();
 }
 
