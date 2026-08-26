@@ -63,7 +63,9 @@ import com.winlator.star.store.AchievementWatcher;
 import com.winlator.star.store.EpicOverlayManager;
 import com.winlator.star.store.GogCloudSaveManager;
 import com.winlator.star.store.GogCloudSavePaths;
+import com.winlator.star.store.GoldbergMode;
 import com.winlator.star.store.SteamAchievementStore;
+import com.winlator.star.store.SteamPrefs;
 import com.winlator.star.store.SteamCloudSaveManager;
 import com.winlator.star.store.SteamDatabase;
 import com.winlator.star.store.SteamRepository;
@@ -4219,38 +4221,58 @@ public class XServerDisplayActivity extends AppCompatActivity {
     }
 
     /**
-     * Start the in-game achievement watcher for a genuine Steam-library game (guarded like
-     * {@link #autoCollectSteamSavesBlocking()}). Resolves the appId off the main thread (Room), then
-     * arms {@link AchievementWatcher} on this container's Goldberg/GSE store. Best-effort — never blocks
-     * or crashes setup. No-op for non-Steam shortcuts.
+     * For a genuine Steam-library game running under Goldberg: (1) SEED this container's Goldberg/GSE
+     * {@code achievements.json} with the user's REAL earned achievements, then (2) arm
+     * {@link AchievementWatcher} on it. Guarded like {@link #autoCollectSteamSavesBlocking()} and
+     * best-effort — a seed/arm failure must never block or crash the launch. No-op for non-Steam
+     * shortcuts.
+     *
+     * ORDERING (critical) — this runs SYNCHRONOUSLY on the launch worker thread, immediately BEFORE
+     * {@code environment.startEnvironmentComponents()} boots the guest, so:
+     *   seed (write real earned) → watcher.start() (snapshot now INCLUDES the seeded/owned set, so
+     *   owned achievements can't false-toast) → guest boots (gbe_fork reads the seeded file at startup
+     *   → the game's own achievement screen reflects what the user really owns).
+     * Blocking here is fine (worker thread); seeding is a small local read/merge/write (the real state
+     * is normally already cached by the detail page).
      */
-    private void maybeStartAchievementWatcher() {
+    private void maybeSeedAndStartAchievementWatcher() {
         try {
             if (!isGenuineSteamShortcut() || container == null) return;
             final java.io.File containerRoot = container.getRootDir();
             final Context appCtx = getApplicationContext();
-            // Create the watcher on the main thread so the field is set before onDestroy can read it;
-            // start()/stop() are synchronized on the instance, so the worker start below and an onDestroy
-            // stop() can't race destructively.
+            // appId resolution touches Room — we're already on the launch worker thread, so blocking OK.
+            SteamAppRef ref = resolveSteamAppRef();
+            if (ref == null) {
+                Log.i("BH_STEAM_ACHV", "achievement seed/watch: could not resolve appId — skip");
+                return;
+            }
+            final int appId = ref.appId;
+
+            // (1) Seed — only for Goldberg-on games (an OFF game runs genuine Steam, no GSE store to
+            // seed). Uses the SAME GSE path the watcher watches (shared helper). Best-effort/no-op on
+            // no-real-state; never wipes local unlocks.
+            try {
+                SteamPrefs.INSTANCE.init(appCtx); // idempotent + cheap; XServer path may not have inited it
+                if (SteamPrefs.INSTANCE.getGoldbergMode(appId) != GoldbergMode.OFF) {
+                    java.io.File gseFile = AchievementWatcher.gseAchievementsFile(containerRoot, appId);
+                    SteamAchievementStore.seedGse(appCtx, appId, gseFile);
+                } else {
+                    Log.i("BH_STEAM_ACHV", "achievement seed: Goldberg OFF for appId=" + appId + " — no seed");
+                }
+            } catch (Throwable t) {
+                Log.w("BH_STEAM_ACHV", "GSE seed failed (appId=" + appId + ")", t);
+            }
+
+            // (2) Arm the watcher — its snapshot now includes the seeded state. start()/stop() are
+            // synchronized on the instance; the post-start destroy re-check avoids leaking the watcher
+            // if the activity tore down while we were seeding/arming.
             if (achievementWatcher == null) achievementWatcher = new AchievementWatcher();
             final AchievementWatcher watcher = achievementWatcher;
-            // appId resolution touches Room → off the main thread; arm the watcher once it's known.
-            new Thread(() -> {
-                try {
-                    SteamAppRef ref = resolveSteamAppRef();
-                    if (ref == null) {
-                        Log.i("BH_STEAM_ACHV", "achievement watcher: could not resolve appId — skip");
-                        return;
-                    }
-                    // Don't arm against a torn-down activity (destroy during the resolve).
-                    if (isFinishing() || isDestroyed()) return;
-                    watcher.start(appCtx, ref.appId, containerRoot);
-                } catch (Throwable t) {
-                    Log.w("BH_STEAM_ACHV", "achievement watcher start failed", t);
-                }
-            }, "BH-AchvWatchStart").start();
+            if (isFinishing() || isDestroyed()) { watcher.stop(); return; }
+            watcher.start(appCtx, appId, containerRoot);
+            if (isFinishing() || isDestroyed()) watcher.stop();
         } catch (Throwable t) {
-            Log.w("BH_STEAM_ACHV", "maybeStartAchievementWatcher errored", t);
+            Log.w("BH_STEAM_ACHV", "maybeSeedAndStartAchievementWatcher errored", t);
         }
     }
 
@@ -5202,6 +5224,15 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // non-Steam games and when the download toggle is off.
         autoDownloadSteamSavesBlocking();
 
+        // In-game achievements (genuine-Steam + Goldberg-on games): seed the Goldberg/GSE
+        // achievements.json with the user's REAL earned achievements, THEN arm the watcher so its
+        // snapshot includes the seeded (owned) set — BOTH must happen before the guest boots below, so
+        // gbe_fork reads the seeded file at startup (its screen shows what the user owns) and owned
+        // achievements don't false-toast. We're on the launch worker thread → the small local
+        // read/merge/write can block here. Best-effort; never blocks/crashes the launch. No-op for
+        // non-Steam / Goldberg-OFF shortcuts.
+        maybeSeedAndStartAchievementWatcher();
+
         // Start all environment components (XServer, Audio, Wine, etc.)
         preloaderDialog.step(4, "Launching Windows…");
         environment.startEnvironmentComponents();
@@ -5749,10 +5780,10 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // Epic Friends Overlay pill — added last so it sits above the HUD/controls (only for an Epic
         // shortcut with the overlay toggle on).
         attachEpicOverlayPill();
-
-        // In-game achievement pills — watch this Steam game's Goldberg/GSE store (container + shortcut
-        // are known here). Genuine-Steam shortcuts only; no-op otherwise.
-        maybeStartAchievementWatcher();
+        // NOTE: the Goldberg/GSE achievement seed + watcher are armed later, on the launch WORKER
+        // thread just before the guest boots (see maybeSeedAndStartAchievementWatcher in
+        // setupXEnvironment), so the seed lands before both the watcher snapshot and gbe_fork's first
+        // read — an ordering the async setupUI tail could not guarantee.
     }
 
     // Apply a fullscreen aspect-ratio mode (#71) live and remember it PER GAME: the per-game shortcut

@@ -5,6 +5,7 @@ import android.util.Log
 import `in`.dragonbra.javasteam.enums.EResult
 import `in`.dragonbra.javasteam.steam.handlers.steamuserstats.Stats
 import `in`.dragonbra.javasteam.types.SteamID
+import org.json.JSONObject
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
@@ -162,6 +163,127 @@ object SteamAchievementStore {
         if (list.isEmpty()) return 0
         val unlocked = list.count { it.unlocked }
         return Math.round(100.0 * unlocked / list.size).toInt()
+    }
+
+    // ── GSE SEED (launch-time) ─────────────────────────────────────────────────────
+
+    /**
+     * Seed a Goldberg/GSE `achievements.json` for [appId] with the user's REAL earned achievements,
+     * so a game launched under Goldberg shows what the user actually owns in its OWN in-game
+     * achievement screen — and already-owned achievements don't fire a false unlock pill when the
+     * game re-reports them. Call on the launch worker thread, BEFORE arming the watcher's snapshot and
+     * BEFORE the guest boots (gbe_fork reads this file at startup).
+     *
+     * MERGE — union of keys, and we never lose a local Goldberg-earned unlock:
+     *   - real earned state = [cached] (offline DB, the usual case) falling back to a bounded [fetch];
+     *   - local state = whatever the EXISTING [gseAchievementsFile] already records (Goldberg's own
+     *     unlocks from prior play);
+     *   - for every apiName in either source: `earned = realEarned OR localEarned`,
+     *     `earned_time = max(realTs, localTs)`, and when earned with no known time, "now" (unix secs);
+     *   - known-locked achievements are still written as `earned:false` so the game's list is complete.
+     *
+     * SAFETY: if NO real state is available at all (offline / not-logged-in / nothing cached) this is a
+     * NO-OP — the existing file is left untouched (we never wipe a user's local unlocks). The merged
+     * JSON is written to a temp file in the SAME directory and atomically renamed into place, so a
+     * reader (and the watcher's FileObserver) only ever sees one complete file, and exactly one event.
+     * The app writes its own file → correct owner/SELinux context automatically (no chown/chcon).
+     * Non-throwing; logs to "BH_STEAM_ACHV".
+     */
+    @JvmStatic
+    fun seedGse(ctx: Context, appId: Int, gseAchievementsFile: File) {
+        try {
+            // 1) Real earned state — prefer the offline cache (the detail page usually populated it),
+            //    else a bounded best-effort online fetch. Empty from BOTH ⇒ we know nothing real ⇒ skip.
+            var real = cached(ctx, appId)
+            if (real.isEmpty()) real = fetch(ctx, appId)
+            if (real.isEmpty()) {
+                Log.i(TAG, "seedGse($appId): no real achievement state available — skip (GSE untouched)")
+                return
+            }
+            val realEarned = HashMap<String, Pair<Boolean, Long>>(real.size * 2)
+            for (a in real) {
+                if (a.apiName.isBlank()) continue
+                realEarned[a.apiName] = a.unlocked to a.unlockTimeSec.coerceAtLeast(0L)
+            }
+            if (realEarned.isEmpty()) {
+                Log.i(TAG, "seedGse($appId): real list carried no usable apiNames — skip (GSE untouched)")
+                return
+            }
+
+            // 2) Existing local GSE unlocks (Goldberg's own record) — merged in so none are lost.
+            val localEarned = readGse(gseAchievementsFile)
+
+            // 3) Merge: union of keys; earned = OR; time = max (else "now" when earned but time unknown).
+            val nowSec = System.currentTimeMillis() / 1000L
+            val keys = LinkedHashSet<String>().apply { addAll(realEarned.keys); addAll(localEarned.keys) }
+            val root = JSONObject()
+            var earnedCount = 0
+            for (api in keys) {
+                val r = realEarned[api]
+                val l = localEarned[api]
+                val earned = (r?.first ?: false) || (l?.first ?: false)
+                var ts = maxOf(r?.second ?: 0L, l?.second ?: 0L)
+                if (earned && ts <= 0L) ts = nowSec
+                root.put(api, JSONObject().put("earned", earned).put("earned_time", if (earned) ts else 0L))
+                if (earned) earnedCount++
+            }
+
+            // 4) Atomic write (temp-in-same-dir + rename) so gbe_fork/the watcher see one clean file.
+            writeAtomically(gseAchievementsFile, root.toString())
+            Log.i(
+                TAG,
+                "seedGse($appId): seeded $earnedCount earned into GSE (${keys.size} total) → " +
+                    gseAchievementsFile.absolutePath,
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "seedGse($appId) failed", e)
+        }
+    }
+
+    /**
+     * Parse an existing GSE `achievements.json` → apiName -> (earned, earnedTimeSec). Tolerates a
+     * boolean OR 0/1-int `earned` and a numeric-or-string `earned_time`. Empty on absent/garbage file.
+     */
+    private fun readGse(file: File): Map<String, Pair<Boolean, Long>> {
+        if (!file.isFile) return emptyMap()
+        return try {
+            val root = JSONObject(file.readText())
+            val out = HashMap<String, Pair<Boolean, Long>>()
+            val keys = root.keys()
+            while (keys.hasNext()) {
+                val api = keys.next()
+                val entry = root.optJSONObject(api) ?: continue
+                val earned = entry.optBoolean("earned", false) || entry.optInt("earned", 0) != 0
+                // optLong coerces a numeric string too; clamp negatives away.
+                val ts = entry.optLong("earned_time", 0L).coerceAtLeast(0L)
+                out[api] = earned to ts
+            }
+            out
+        } catch (e: Exception) {
+            Log.w(TAG, "readGse failed: ${file.absolutePath}", e)
+            emptyMap()
+        }
+    }
+
+    /**
+     * Write [content] to [dest] atomically: create parent dirs, write a temp file in the SAME
+     * directory, then rename over the target (rename(2) atomically replaces on Linux), so a reader
+     * never sees a partial file and the FileObserver gets one clean event. Falls back to a direct
+     * overwrite only if the rename fails (some FUSE-backed prefixes). Cleans up the temp on exit.
+     */
+    private fun writeAtomically(dest: File, content: String) {
+        val dir = dest.parentFile
+        if (dir != null && !dir.isDirectory) dir.mkdirs()
+        val tmp = File(dir, "${dest.name}.seed.tmp")
+        try {
+            tmp.writeText(content)
+            if (tmp.renameTo(dest)) return
+            if (dest.exists()) dest.delete()
+            if (tmp.renameTo(dest)) return
+            dest.writeText(content)
+        } finally {
+            try { if (tmp.exists()) tmp.delete() } catch (_: Exception) {}
+        }
     }
 
     // ── WRITE (safety-gated) ──────────────────────────────────────────────────────
