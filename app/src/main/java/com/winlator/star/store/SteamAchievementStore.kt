@@ -5,6 +5,7 @@ import android.util.Log
 import `in`.dragonbra.javasteam.enums.EResult
 import `in`.dragonbra.javasteam.steam.handlers.steamuserstats.Stats
 import `in`.dragonbra.javasteam.types.SteamID
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.net.HttpURLConnection
@@ -284,6 +285,97 @@ object SteamAchievementStore {
         } finally {
             try { if (tmp.exists()) tmp.delete() } catch (_: Exception) {}
         }
+    }
+
+    // ── GBE SCHEMA (achievement DEFINITIONS, patch/launch-time) ─────────────────────
+
+    /**
+     * Write the gbe_fork achievement DEFINITIONS file (`achievements.json`) into [steamSettingsDir]
+     * (the `steam_settings` folder beside a swapped steam_api dll). Without this file gbe_fork does NOT
+     * know the game has any achievements and reports every one as not-earned in the game's own in-game
+     * achievement screen — regardless of the earned state we seed into GSE Saves (see [seedGse]). This
+     * is the fix for "in-game achievements always show 0".
+     *
+     * DEFS ONLY — no earned state: every entry is written `earned:false`/`earn_time:0` (exactly as
+     * GameNative's StatsAchievementsGenerator does). The REAL earned state lives in the GSE Saves
+     * `achievements.json`, which [seedGse] populates separately; gbe_fork merges the two at runtime.
+     *
+     * FORMAT — matches GameNative's proven generator
+     * (app/.../statsgen/StatsAchievementsGenerator.kt): a JSON ARRAY of objects, each with
+     *   - `hidden`      : int (0/1),
+     *   - `displayName` : language object `{"english": "…"}`,
+     *   - `description` : language object `{"english": "…"}`,
+     *   - `icon`        : "img/<cdn-filename>" (gbe_fork "steam_default_icon_unlocked.jpg" when unknown),
+     *   - `icon_gray`   : "img/<cdn-filename>" (gbe_fork "steam_default_icon_locked.jpg" when unknown),
+     *   - `name`        : the achievement apiName,
+     *   - `earned`      : false,  `earn_time`: 0.
+     *
+     * Source = the [cached] defs (offline DB) falling back to a bounded [fetch]. If NOTHING is available
+     * (offline / not-logged-in / the game genuinely has no achievements) this is a NO-OP returning 0 and
+     * writes nothing — we never drop an empty `[]` that would mask a later good write. Raw CDN icon
+     * FILENAMES are read from the DB rows (the [SteamAchievement] model exposes only rebuilt URLs).
+     * Atomic write (temp-in-same-dir + rename) so a reader only ever sees a complete file. Non-throwing;
+     * returns the count written. Call on a worker thread ([fetch] can block on a CM round-trip).
+     */
+    @JvmStatic
+    fun writeGbeAchievementSchema(ctx: Context, appId: Int, steamSettingsDir: File): Int {
+        return try {
+            // Ensure the achievements cache is populated: offline DB first, bounded online fallback.
+            // (fetch() upserts into the same steam_achievements table cached()/getAchievements() read.)
+            if (cached(ctx, appId).isEmpty() && fetch(ctx, appId).isEmpty()) {
+                Log.i(TAG, "writeGbeAchievementSchema($appId): no achievement defs available — no-op")
+                return 0
+            }
+
+            // Build from the DB rows: they carry the raw CDN icon FILENAMES (icon/icon_gray columns);
+            // the SteamAchievement UI model exposes only the rebuilt CDN URLs.
+            val rows = SteamRepository.getInstance().database.getAchievements(appId)
+            if (rows.isEmpty()) {
+                Log.i(TAG, "writeGbeAchievementSchema($appId): rows empty after populate — no-op")
+                return 0
+            }
+
+            val arr = JSONArray()
+            var count = 0
+            for (r in rows) {
+                if (r.apiName.isNullOrBlank()) continue
+                val obj = JSONObject()
+                obj.put("hidden", if (r.hidden) 1 else 0)
+                obj.put("displayName", JSONObject().put("english", r.displayName ?: ""))
+                obj.put("description", JSONObject().put("english", r.description ?: ""))
+                obj.put("icon", gbeIconPath(r.icon, unlocked = true))
+                obj.put("icon_gray", gbeIconPath(r.iconGray, unlocked = false))
+                obj.put("name", r.apiName)
+                obj.put("earned", false)
+                obj.put("earn_time", 0)
+                arr.put(obj)
+                count++
+            }
+            if (count == 0) {
+                Log.i(TAG, "writeGbeAchievementSchema($appId): rows carried no usable apiNames — no-op")
+                return 0
+            }
+
+            val dest = File(steamSettingsDir, "achievements.json")
+            writeAtomically(dest, arr.toString(2))
+            Log.i(TAG, "writeGbeAchievementSchema($appId): wrote schema: $count achievements → ${dest.absolutePath}")
+            count
+        } catch (e: Exception) {
+            Log.w(TAG, "writeGbeAchievementSchema($appId) failed", e)
+            0
+        }
+    }
+
+    /**
+     * gbe_fork icon path for a raw CDN [filename]: "img/<filename>" when known, else gbe_fork's standard
+     * placeholder name (mirrors GameNative's fallback). Icon IMAGES are not shipped into
+     * steam_settings/img here — a missing icon just renders as gbe_fork's default; the achievement itself
+     * still appears in the list (earned/locked state is what this fix is about).
+     */
+    private fun gbeIconPath(filename: String?, unlocked: Boolean): String {
+        val f = filename?.trim().orEmpty()
+        if (f.isNotEmpty()) return "img/$f"
+        return if (unlocked) "img/steam_default_icon_unlocked.jpg" else "img/steam_default_icon_locked.jpg"
     }
 
     // ── WRITE (safety-gated) ──────────────────────────────────────────────────────

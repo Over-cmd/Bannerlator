@@ -64,6 +64,7 @@ import com.winlator.star.store.EpicOverlayManager;
 import com.winlator.star.store.GogCloudSaveManager;
 import com.winlator.star.store.GogCloudSavePaths;
 import com.winlator.star.store.GoldbergMode;
+import com.winlator.star.store.GoldbergPatcher;
 import com.winlator.star.store.SteamAchievementStore;
 import com.winlator.star.store.SteamPrefs;
 import com.winlator.star.store.SteamCloudSaveManager;
@@ -4256,6 +4257,26 @@ public class XServerDisplayActivity extends AppCompatActivity {
                 if (SteamPrefs.INSTANCE.getGoldbergMode(appId) != GoldbergMode.OFF) {
                     java.io.File gseFile = AchievementWatcher.gseAchievementsFile(containerRoot, appId);
                     SteamAchievementStore.seedGse(appCtx, appId, gseFile);
+
+                    // Also ensure the gbe_fork achievement SCHEMA (definitions) exists beside each
+                    // swapped steam_api dll. A fresh Goldberg apply writes this in GoldbergPatcher's
+                    // sharedPrep, but an install patched BEFORE this fix never got it — writing it here
+                    // makes those existing installs (e.g. HL2) work on next launch WITHOUT a manual
+                    // re-apply. DEFS only (real earned state is the seedGse call above); fully guarded
+                    // and a no-op when no defs are cached, so it can never break the launch. Runs here,
+                    // before the guest boots, so gbe_fork reads it at startup.
+                    try {
+                        java.io.File installRoot = new java.io.File(ref.installDir);
+                        if (installRoot.isDirectory()) {
+                            for (GoldbergPatcher.PatchTarget target : GoldbergPatcher.analyze(installRoot)) {
+                                java.io.File settingsDir = new java.io.File(target.getDir(), "steam_settings");
+                                settingsDir.mkdirs();
+                                SteamAchievementStore.writeGbeAchievementSchema(appCtx, appId, settingsDir);
+                            }
+                        }
+                    } catch (Throwable t) {
+                        Log.w("BH_STEAM_ACHV", "achievement schema ensure failed (appId=" + appId + ")", t);
+                    }
                 } else {
                     Log.i("BH_STEAM_ACHV", "achievement seed: Goldberg OFF for appId=" + appId + " — no seed");
                 }
