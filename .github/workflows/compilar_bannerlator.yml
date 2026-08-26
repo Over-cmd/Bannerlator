@@ -22,26 +22,11 @@ jobs:
           rm -f app/gradlew app/gradlew.bat app/gradle.properties
           git clean -fd
 
-      - name: Configurar Repositorios Multiarquitectura y Reparar Submódulos
+      - name: Configurar Entorno de Compilación Nativa y Reparar Submódulos
         run: |
-          echo "-> Configurando arquitectura armhf en el sistema..."
-          sudo dpkg --add-architecture armhf
-          
-          echo "-> Reconfigurando fuentes de apt para evitar errores 404..."
-          cat << 'EOF' | sudo tee /etc/apt/sources.list
-          deb [arch=amd64] http://ubuntu.com noble main restricted universe multiverse
-          deb [arch=amd64] http://ubuntu.com noble-updates main restricted universe multiverse
-          deb [arch=amd64] http://ubuntu.com noble-backports main restricted universe multiverse
-          deb [arch=amd64] http://ubuntu.com noble-security main restricted universe multiverse
-          deb [arch=armhf,arm64] http://ubuntu.com noble main restricted universe multiverse
-          deb [arch=armhf,arm64] http://ubuntu.com noble-updates main restricted universe multiverse
-          deb [arch=armhf,arm64] http://ubuntu.com noble-backports main restricted universe multiverse
-          deb [arch=armhf,arm64] http://ubuntu.com noble-security main restricted universe multiverse
-          EOF
-          
-          echo "-> Actualizando paquetes e instalando compiladores cruzados..."
+          echo "-> Instalando compiladores cruzados nativos aislados para 32 y 64 bits..."
           sudo apt-get update -y
-          sudo apt-get install -y build-essential make cmake g++-arm-linux-gnueabihf gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+          sudo apt-get install -y build-essential make cmake gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 
           echo "-> Reparando redirecciones de submódulos huérfanos..."
           if [ -f ".gitmodules" ]; then
