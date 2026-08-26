@@ -24,11 +24,11 @@ jobs:
 
       - name: Configurar Repositorios Multiarquitectura y Reparar Submódulos
         run: |
-          echo "-> Reparando conflicto de espejos apt para arquitectura armhf..."
+          echo "-> Configurando arquitectura armhf en el sistema..."
           sudo dpkg --add-architecture armhf
           
-          # Copiamos la configuración de repositorios limpia especificando arquitecturas nativas
-          sudo json_config=$(cat << 'EOF'
+          echo "-> Reconfigurando fuentes de apt para evitar errores 404..."
+          cat << 'EOF' | sudo tee /etc/apt/sources.list
           deb [arch=amd64] http://ubuntu.com noble main restricted universe multiverse
           deb [arch=amd64] http://ubuntu.com noble-updates main restricted universe multiverse
           deb [arch=amd64] http://ubuntu.com noble-backports main restricted universe multiverse
@@ -38,9 +38,8 @@ jobs:
           deb [arch=armhf,arm64] http://ubuntu.com noble-backports main restricted universe multiverse
           deb [arch=armhf,arm64] http://ubuntu.com noble-security main restricted universe multiverse
           EOF
-          )
-          echo "$json_config" | sudo tee /etc/apt/sources.list > /dev/null
           
+          echo "-> Actualizando paquetes e instalando compiladores cruzados..."
           sudo apt-get update -y
           sudo apt-get install -y build-essential make cmake g++-arm-linux-gnueabihf gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 
