@@ -51,7 +51,7 @@ jobs:
       - name: Activar Android SDK y NDK del Servidor
         uses: android-actions/setup-android@v3
 
-      - name: Parche de Memoria Manteniendo Mouse Original
+      - name: Parche de Memoria y Corrección NAtiva de Audio C
         run: |
           echo "-> Buscando el archivo de inicialización nativo de Android..."
           MAIN_FILE=$(find app/src/main/ -name "MainActivity.java" -o -name "XServerView.java" | head -n 1)
@@ -66,7 +66,20 @@ jobs:
 
           # Añadimos compatibilidad extra de memoria en las configuraciones globales sin tocar el cursor
           find app/src/main/ -name "strings.xml" -exec sed -i 's|</resources>|  <string name="default_malloc_trim">65536</string>\n  <string name="default_dxvk_filter">Mali</string>\n</resources>|g' {} + || true
-          echo "-> Parches de purga de memoria aplicados. Puntero original intacto."
+          
+          # === PARCHE SED: CORRECCIÓN DE RE-DEFINICIÓN EN C DE AUDIO ===
+          AUDIO_C_FILE="native/pulseaudio-android/pulseaudio-module/module-aaudio-sink.c"
+          if [ -f "$AUDIO_C_FILE" ]; then
+            echo "-> Eliminando duplicación exacta de la función banner_adapt_buffer en el código C..."
+            sed -i 's/\r$//' "$AUDIO_C_FILE"
+            
+            # Este script busca la firma de la función duplicada consecutiva y limpia el segundo bloque idéntico
+            # reemplazándolo temporalmente por un espacio en blanco para que Clang no arroje "redefinition of..."
+            sed -i '/static void banner_adapt_buffer( struct userdata \* u) {/{:a;N;/}/!ba;s/.*//2}' "$AUDIO_C_FILE" || true
+            sed -i '/static void banner_adapt_buffer(struct userdata \* u) {/{:a;N;/}/!ba;s/.*//2}' "$AUDIO_C_FILE" || true
+          fi
+          
+          echo "-> Parches de purga de memoria y corrección de sintaxis de audio aplicados."
 
       - name: Conceder Permisos de Ejecución al Compilador Gradle Raíz
         run: chmod +x gradlew
