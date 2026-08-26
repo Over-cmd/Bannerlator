@@ -298,7 +298,6 @@ class SteamGameDetailActivity : ComponentActivity(), SteamRepository.SteamEventL
                     downloadProgressValue = downloadProgressValue,
                     progressText = progressText,
                     progressTextVisible = progressTextVisible,
-                    goldbergVisible = gameStatus == GameStatus.INSTALLED,
                     goldbergMode = goldbergMode,
                     goldbergBusy = goldbergBusy,
                     goldbergInstalled = goldbergInstalled,
@@ -1230,7 +1229,6 @@ private fun SteamGameDetailScreen(
     downloadProgressValue: Int,
     progressText: String,
     progressTextVisible: Boolean,
-    goldbergVisible: Boolean,
     goldbergMode: GoldbergMode,
     goldbergBusy: Boolean,
     goldbergInstalled: Boolean,
@@ -1262,6 +1260,8 @@ private fun SteamGameDetailScreen(
     var selectedTab by remember { mutableStateOf(DetailTab.DETAILS) }
     // Anchored gear (⚙) dropdown beside the primary action button.
     var gearMenuExpanded by remember { mutableStateOf(false) }
+    // Goldberg (Steam emulator) popup — opened from the gear menu (installed games only).
+    var goldbergDialogOpen by remember { mutableStateOf(false) }
 
     // Achievements are loaded ONCE at the screen level so the tab count badge (done/total) and the
     // Achievements tab body share a single source of truth. Same strategy as the old section: fetch
@@ -1365,46 +1365,8 @@ private fun SteamGameDetailScreen(
             )
         }
 
-        // Progress — overlapping dual bar. A lighter "download" (network) fill leads a
-        // solid "install" (on-disk) fill; they move nearly together, download slightly ahead.
-        // Kept above the tab strip so an active download stays visible on whichever tab is open.
-        if (progressVisible) {
-            val installFrac  = (progressValue / 100f).coerceIn(0f, 1f)
-            val downloadFrac = (downloadProgressValue / 100f).coerceIn(0f, 1f)
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp)
-                    .height(6.dp)
-                    .clip(RoundedCornerShape(3.dp))
-                    .background(MaterialTheme.colorScheme.surfaceVariant),
-            ) {
-                // Download (network) fill — wider, lighter, underneath.
-                Box(
-                    modifier = Modifier
-                        .fillMaxHeight()
-                        .fillMaxWidth(downloadFrac)
-                        .clip(RoundedCornerShape(3.dp))
-                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.4f)),
-                )
-                // Install (on-disk) fill — narrower, solid, on top.
-                Box(
-                    modifier = Modifier
-                        .fillMaxHeight()
-                        .fillMaxWidth(installFrac)
-                        .clip(RoundedCornerShape(3.dp))
-                        .background(MaterialTheme.colorScheme.primary),
-                )
-            }
-        }
-        if (progressTextVisible) {
-            Text(
-                text = progressText,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
-            )
-        }
+        // (Download progress is shown ON the large primary button below — 2-layer fill + an info
+        // line beneath it — so there's a single progress indicator, not a separate under-title bar.)
 
         // Primary action + gear menu — a single state-driven button (per the mockup) replacing the
         // old Install/Pause/Launch trio. EVERY former action stays reachable: the button drives
@@ -1421,9 +1383,12 @@ private fun SteamGameDetailScreen(
         ) {
             // ── Primary button ──────────────────────────────────────────────────────────────────
             if (downloading) {
-                // Read-only progress button: gradient fill under a "Downloading… N%" / "Paused — N%"
-                // label. Pause/cancel live in the gear, so this itself is non-actionable.
-                val frac = (progressValue / 100f).coerceIn(0f, 1f)
+                // Read-only download button: the SINGLE progress indicator. Same 2-layer fill the old
+                // under-title bar used — lighter back layer = bytes fetched (downloadProgressValue),
+                // solid front layer = bytes on disk (progressValue) — now on the primary button, in
+                // theme primary. Pause/cancel live in the gear, so the button itself is non-actionable.
+                val installFrac  = (progressValue / 100f).coerceIn(0f, 1f)
+                val downloadFrac = (downloadProgressValue / 100f).coerceIn(0f, 1f)
                 val label = if (pauseAction == PauseAction.RESUME) "Paused — $progressValue%"
                             else "Downloading… $progressValue%"
                 Box(
@@ -1435,19 +1400,21 @@ private fun SteamGameDetailScreen(
                         .border(1.dp, AchvLine, primaryShape),
                     contentAlignment = Alignment.Center,
                 ) {
+                    // Download (network) fill — lighter, underneath.
                     Box(
                         modifier = Modifier
                             .align(Alignment.CenterStart)
                             .fillMaxHeight()
-                            .fillMaxWidth(frac)
-                            .background(
-                                Brush.horizontalGradient(
-                                    listOf(
-                                        MaterialTheme.colorScheme.primary.copy(alpha = 0.6f),
-                                        MaterialTheme.colorScheme.primary,
-                                    ),
-                                ),
-                            ),
+                            .fillMaxWidth(downloadFrac)
+                            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.4f)),
+                    )
+                    // Install (on-disk) fill — solid, on top.
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.CenterStart)
+                            .fillMaxHeight()
+                            .fillMaxWidth(installFrac)
+                            .background(MaterialTheme.colorScheme.primary),
                     )
                     Text(
                         text = label,
@@ -1517,9 +1484,10 @@ private fun SteamGameDetailScreen(
                     GearMenuItem("🧩", "Manage DLC", enabled = dlcEntries.isNotEmpty(),
                         onClick = { gearMenuExpanded = false; onDlcLineClick() })
                     MenuItemDivider()
-                    // Goldberg patches installed game files, so it's only meaningful once installed.
+                    // Goldberg patches installed game files, so it's only meaningful once installed;
+                    // opens the Goldberg popup.
                     GearMenuItem("🛡️", "Goldberg mode", enabled = installAction == InstallAction.UNINSTALL,
-                        onClick = { gearMenuExpanded = false; selectedTab = DetailTab.DETAILS })
+                        onClick = { gearMenuExpanded = false; goldbergDialogOpen = true })
                     // Installed → Uninstall at the bottom.
                     if (installAction == InstallAction.UNINSTALL) {
                         MenuItemDivider()
@@ -1528,6 +1496,17 @@ private fun SteamGameDetailScreen(
                     }
                 }
             }
+        }
+
+        // Download info line — moved out from under the (removed) small bar to directly under the
+        // large button: "…% (done / total) · speed · ETA". Same content/format + gate as before.
+        if (downloading && progressTextVisible) {
+            Text(
+                text = progressText,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 8.dp),
+            )
         }
 
         // Tab strip — Details · Achievements (done/total) · DLC · Cloud saves. Styled like the
@@ -1542,8 +1521,8 @@ private fun SteamGameDetailScreen(
         // Tab body — every old section routed into its tab; behaviour unchanged, only the layout
         // moved (sections became tab bodies).
         when (selectedTab) {
-            // Details = the former info block: type/size chips, size breakdown, branch selector,
-            // install status, and the Goldberg (Steam emulator) section for an installed game.
+            // Details = the former info block: type/size chips, size breakdown, branch selector and
+            // install status. (Goldberg moved to a popup opened from the gear menu.)
             DetailTab.DETAILS -> Column(modifier = Modifier.padding(bottom = 8.dp)) {
                 Column(modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 6.dp, bottom = 8.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1600,18 +1579,6 @@ private fun SteamGameDetailScreen(
                             GameStatus.FAILED    -> MaterialTheme.colorScheme.error
                             else                 -> MaterialTheme.colorScheme.onSurfaceVariant
                         },
-                    )
-                }
-                if (goldbergVisible) {
-                    GoldbergSection(
-                        installed = goldbergInstalled,
-                        downloading = goldbergDownloading,
-                        downloadProgress = goldbergDownloadProgress,
-                        sizeLabel = goldbergSizeLabel,
-                        mode = goldbergMode,
-                        busy = goldbergBusy,
-                        onDownloadClick = onGoldbergDownloadClick,
-                        onModeSelected = onGoldbergModeSelected,
                     )
                 }
             }
@@ -1872,6 +1839,21 @@ private fun SteamGameDetailScreen(
                 ) { Text("Done") }
             }
         }
+    }
+
+    // Goldberg (Steam emulator) popup — the former inline Details section, now a gear-menu dialog.
+    if (goldbergDialogOpen) {
+        GoldbergModeDialog(
+            installed = goldbergInstalled,
+            downloading = goldbergDownloading,
+            downloadProgress = goldbergDownloadProgress,
+            sizeLabel = goldbergSizeLabel,
+            mode = goldbergMode,
+            busy = goldbergBusy,
+            onDownloadClick = onGoldbergDownloadClick,
+            onModeSelected = onGoldbergModeSelected,
+            onDismiss = { goldbergDialogOpen = false },
+        )
     }
 }
 
@@ -2396,12 +2378,59 @@ private fun formatUnlockDate(epochSeconds: Long): String {
 }
 
 /**
+ * Goldberg popup — opened from the gear menu (installed games only). Wraps the [GoldbergSection]
+ * content (title + description + at-your-own-risk note + the component download button when it isn't
+ * installed yet + the Off/Regular/Experimental/ColdClient mode picker) in the app's standard
+ * [OutlinedAlertDialog], with a "Done" confirm. All Goldberg behaviour is unchanged — just relocated
+ * from the inline Details section into this dialog.
+ */
+@Composable
+private fun GoldbergModeDialog(
+    installed: Boolean,
+    downloading: Boolean,
+    downloadProgress: Float,
+    sizeLabel: String,
+    mode: GoldbergMode,
+    busy: Boolean,
+    onDownloadClick: () -> Unit,
+    onModeSelected: (GoldbergMode) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    OutlinedAlertDialog(
+        onDismissRequest = onDismiss,
+        text = {
+            // Bound + scroll the body so the picker + download button always fit (short landscape too).
+            val maxHeight = (LocalConfiguration.current.screenHeightDp * 0.6f).dp
+            Column(
+                modifier = Modifier
+                    .heightIn(max = maxHeight)
+                    .verticalScroll(rememberScrollState()),
+            ) {
+                GoldbergSection(
+                    installed = installed,
+                    downloading = downloading,
+                    downloadProgress = downloadProgress,
+                    sizeLabel = sizeLabel,
+                    mode = mode,
+                    busy = busy,
+                    onDownloadClick = onDownloadClick,
+                    onModeSelected = onModeSelected,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("Done") }
+        },
+    )
+}
+
+/**
  * Opt-in "Steam Emulator (Goldberg)" section. Goldberg is ONE global download
  * shared by every game: until it's installed, this shows a "Download Steam
  * Emulator" button (with progress + MD5-verified extract); once installed it
  * shows the tier selector. Tiers are escalating fallbacks. The helper text is
  * deliberately honest: Goldberg only lets a game *start* without Steam — it
- * can't reach a publisher's own online servers.
+ * can't reach a publisher's own online servers. Rendered inside [GoldbergModeDialog].
  */
 @Composable
 private fun GoldbergSection(
@@ -2420,15 +2449,9 @@ private fun GoldbergSection(
         GoldbergMode.EXPERIMENTAL to "Experimental",
         GoldbergMode.COLDCLIENT to "Cold Client Loader",
     )
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp)
-            .padding(bottom = 16.dp)
-            .clip(RoundedCornerShape(12.dp))
-            .background(MaterialTheme.colorScheme.surfaceVariant)
-            .padding(16.dp),
-    ) {
+    // Rendered inside the Goldberg popup (OutlinedAlertDialog provides the card), so this is a plain
+    // content column with no card wrapper of its own.
+    Column(modifier = Modifier.fillMaxWidth()) {
         Text(
             text = "Steam Emulator (Goldberg)",
             style = MaterialTheme.typography.titleSmall,
