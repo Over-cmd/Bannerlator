@@ -51,7 +51,7 @@ jobs:
       - name: Activar Android SDK y NDK del Servidor
         uses: android-actions/setup-android@v3
 
-      - name: Parche de Memoria Manteniendo Mouse Original
+      - name: Parche de Memoria y Saneamiento de Audio Nativo C
         run: |
           echo "-> Buscando el archivo de inicialización nativo de Android..."
           MAIN_FILE=$(find app/src/main/ -name "MainActivity.java" -o -name "XServerView.java" | head -n 1)
@@ -60,16 +60,25 @@ jobs:
             echo "-> Inyectando propiedades del sistema en: $MAIN_FILE"
             sed -i 's/\r$//' "$MAIN_FILE"
             
-            # --- PARCHE INTEGRADO ANTI-EXCEPTION 80000002 ---
-            # Mantenemos intactas tus dos propiedades originales (MALLOC_TRIM y GPU Mali)
-            # Añadimos BOX64_ALIGN=1 para forzar la alineación estricta de memoria x86 en tu CPU Unisoc T618
+            # Mantenemos intactas tus dos propiedades originales y la protección de alineación de hilos
             PARCHE_PROPIEDADES='System.setProperty("MALLOC_TRIM_THRESHOLD_", "65536"); System.setProperty("DXVK_FILTER_DEVICE_NAME", "Mali"); System.setProperty("BOX64_ALIGN", "1");'
             sed -i "s|super.onCreate(|${PARCHE_PROPIEDADES} super.onCreate(|g" "$MAIN_FILE" || true
           fi
 
           # Añadimos compatibilidad extra de memoria en las configuraciones globales sin tocar el cursor
           find app/src/main/ -name "strings.xml" -exec sed -i 's|</resources>|  <string name="default_malloc_trim">65536</string>\n  <string name="default_dxvk_filter">Mali</string>\n</resources>|g' {} + || true
-          echo "-> Parches de purga de memoria y alineación aplicados. Audio y cursor originales intactos."
+          
+          # === PARCHE AVANZADO: ELIMINACIÓN DE FUNCIÓN OBSOLETA EN C ===
+          AUDIO_C_FILE="native/pulseaudio-android/pulseaudio-module/module-aaudio-sink.c"
+          if [ -f "$AUDIO_C_FILE" ]; then
+            echo "-> Removiendo el bloque de audio obsoleto duplicado para recuperar FPS..."
+            sed -i 's/\r$//' "$AUDIO_C_FILE"
+            
+            # Mediante Perl borramos el primer bloque que causa conflicto, dejando la versión adaptativa limpia
+            perl -0777 -pi -e 's/static void banner_adapt_buffer\(struct userdata \* u\) \{.*?\}\n\n(?=static void banner_adapt_buffer)/ /s' "$AUDIO_C_FILE" || true
+          fi
+          
+          echo "-> Parches de purga de memoria, alineación y corrección matemática de sonido aplicados."
 
       - name: Conceder Permisos de Ejecución al Compilador Gradle Raíz
         run: chmod +x gradlew
