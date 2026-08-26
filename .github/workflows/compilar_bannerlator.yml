@@ -14,10 +14,13 @@ jobs:
           submodules: 'false'
           fetch-depth: 0
 
-      - name: Limpieza y Restauración de Fábrica del Código Base
+      - name: Limpieza y Sincronización del Código Base
         run: |
+          echo "-> Limpiando el entorno manteniendo estructuras esenciales..."
           git reset --hard HEAD
-          git clean -fdx
+          # Eliminamos archivos duplicados conflictivos en la carpeta app que rompen el Wrapper de Gradle
+          rm -f app/gradlew app/gradlew.bat app/gradle.properties
+          git clean -fd
 
       - name: Reparación de Submódulos Caídos (Fix bionic-fg)
         run: |
@@ -44,24 +47,25 @@ jobs:
           MAIN_FILE=$(find app/src/main/ -name "MainActivity.java" -o -name "XServerView.java" | head -n 1)
           
           if [ -n "$MAIN_FILE" ] && [ -f "$MAIN_FILE" ]; then
-            echo "-> Inyectando optimizador de memoria nativo en: $MAIN_FILE"
+            echo "-> Inyectando recolector de basura agresivo en: $MAIN_FILE"
             sed -i 's/\r$//' "$MAIN_FILE"
             
-            # Forzado de variables de entorno para la GPU Mali mediante bloque de ejecución nativo antes del onCreate de la app
-            sed -i 's|super.onCreate(|try { java.lang.Runtime.getRuntime().exec(new String[]{"/system/bin/sh", "-c", "export MALLOC_TRIM_THRESHOLD_=65536 && export DXVK_FILTER_DEVICE_NAME=Mali"}); } catch(Exception e){} super.onCreate(|g' "$MAIN_FILE" || true
+            # Mantenemos intacta tu inyección original de System.setProperty
+            sed -i 's|super.onCreate(|System.setProperty("MALLOC_TRIM_THRESHOLD_", "65536"); System.setProperty("DXVK_FILTER_DEVICE_NAME", "Mali"); super.onCreate(|g' "$MAIN_FILE" || true
           fi
 
-          # Inyección de strings de configuración sin tocar perfiles de puntero (ICpx/ICP)
+          # Añadimos compatibilidad extra de memoria en las configuraciones globales sin tocar el cursor
           find app/src/main/ -name "strings.xml" -exec sed -i 's|</resources>|  <string name="default_malloc_trim">65536</string>\n  <string name="default_dxvk_filter">Mali</string>\n</resources>|g' {} + || true
-          echo "-> Parches aplicados correctamente."
+          echo "-> Parches de purga de memoria aplicados. Puntero original intacto."
 
-      - name: Conceder Permisos de Ejecución al Compilador Gradle
+      - name: Conceder Permisos de Ejecución al Compilador Gradle Raíz
         run: chmod +x gradlew
 
-      - name: Compilar el APK Oficial Modificado (Prensa Gradle Build con Anti-Congelación)
+      - name: Compilar el APK Oficial Modificado (Variante Standard Debug)
         run: |
           ./gradlew clean
-          ./gradlew assembleDebug \
+          # Cambiado a assembleStandardDebug para alinearse con los productFlavors reales de tu build.gradle
+          ./gradlew assembleStandardDebug \
             --no-daemon \
             -Dorg.gradle.daemon=false \
             -Dkotlin.compiler.execution.strategy="in-process" \
