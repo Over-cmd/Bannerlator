@@ -258,12 +258,14 @@ public class XServerDisplayActivity extends AppCompatActivity {
     private boolean controlsEditorOpen;
     private Shortcut shortcut;
     // In-game Steam achievement watcher (Goldberg/GSE achievements.json → gold pills). Genuine-Steam
-    // shortcuts only; armed in setupUI, stopped in onDestroy. Null for non-Steam launches.
+    // shortcuts only; armed on the launch worker thread in setupXEnvironment, stopped in onDestroy. Null
+    // for non-Steam launches.
     private AchievementWatcher achievementWatcher;
-    // The seed/watch hook (maybeSeedAndStartAchievementWatcher) is called from BOTH setupUI and
-    // setupXEnvironment so whichever has shortcut/container available wins; this guards the WATCHER so
-    // a second call re-runs the (idempotent) seed but never re-arms/double-arms the FileObserver. Reset
-    // on teardown so a later launch in the same activity instance re-arms cleanly.
+    // The seed/watch hook (maybeSeedAndStartAchievementWatcher) is called once, from setupXEnvironment on
+    // the launch WORKER thread (off-main so its fetch/read can't block the launch → the setupUI call site
+    // was removed after it caused a first-launch black screen). This flag still guards the WATCHER so, if
+    // the hook is ever re-entered, it re-runs the (idempotent) seed but never re-arms/double-arms the
+    // FileObserver. Reset on teardown so a later launch in the same activity instance re-arms cleanly.
     private boolean achievementWatcherArmed = false;
     private String graphicsDriver = Container.DEFAULT_GRAPHICS_DRIVER;
     // Which Vulkan driver the host compositor/present layer runs on ("system" = Android's own driver,
@@ -4114,19 +4116,30 @@ public class XServerDisplayActivity extends AppCompatActivity {
     private SteamAppRef resolveSteamAppRefFrom(String execPath, String storeSource, int taggedAppId) {
         String pathLower = execPath != null ? execPath.toLowerCase() : "";
         boolean genuineSteam = "steam".equals(storeSource) || pathLower.contains("steam_games");
-        if (!genuineSteam) return null;
+        if (!genuineSteam) {
+            logResolveSteamAppRefFailure("not genuine-Steam", execPath, storeSource, taggedAppId);
+            return null;
+        }
 
         int appId = taggedAppId;
         String installDir = "";
         try {
+            SteamDatabase db = SteamRepository.getInstance().getDatabase();
+
+            // (1) Tagged appId fast-path — the shortcut carried a real steamAppId.
             if (appId > 0) {
-                SteamDatabase.GameRow row = SteamRepository.getInstance().getDatabase().getGame(appId);
+                SteamDatabase.GameRow row = db.getGame(appId);
                 installDir = (row != null && row.installDir != null) ? row.installDir : "";
             }
+
+            // Installed set — fetched once (lazily), reused by the DB-match fallbacks below.
+            List<SteamDatabase.GameRow> installed = null;
+
+            // (2) Segment match: exec path's steam_games/<folder> vs an installed row's steam_games/<folder>
+            //     (case-insensitive, slash-normalized so "Half-Life" can't false-match "Half-Life 2").
             String folder = steamGamesFolderOf(execPath);
             if ((appId <= 0 || installDir.isEmpty()) && folder != null) {
-                List<SteamDatabase.GameRow> installed =
-                        SteamRepository.getInstance().getDatabase().getInstalledGames();
+                installed = db.getInstalledGames();
                 if (installed != null) {
                     for (SteamDatabase.GameRow r : installed) {
                         if (installDirMatchesFolder(r.installDir, folder)) {
@@ -4137,11 +4150,92 @@ public class XServerDisplayActivity extends AppCompatActivity {
                     }
                 }
             }
+
+            // (3) NEW lenient fallback for legacy / drive-mapped exec paths that don't literally carry a
+            //     steam_games/<folder> segment (untagged legacy shortcuts, backslash Z:\ paths, etc.): for
+            //     each installed row, match if the normalized+lowercased exec path CONTAINS that row's
+            //     normalized+lowercased install_dir, OR contains "/<install_dir basename>/" (the game folder).
+            if (appId <= 0 || installDir.isEmpty()) {
+                if (installed == null) installed = db.getInstalledGames();
+                String execNorm = pathNorm(execPath);
+                if (installed != null && !execNorm.isEmpty()) {
+                    for (SteamDatabase.GameRow r : installed) {
+                        String instNorm = pathNorm(r.installDir);
+                        while (instNorm.endsWith("/")) instNorm = instNorm.substring(0, instNorm.length() - 1);
+                        if (instNorm.isEmpty()) continue;
+                        String base = basenameNorm(instNorm);
+                        boolean hit = execNorm.contains(instNorm)
+                                || (!base.isEmpty() && execNorm.contains("/" + base + "/"));
+                        if (hit) {
+                            appId = r.appId;
+                            installDir = (r.installDir != null) ? r.installDir : "";
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // (4) NEW last-ditch: genuine-Steam exec path but still unresolved and EXACTLY ONE steam game is
+            //     installed → it can only be that one.
+            if (appId <= 0 || installDir.isEmpty()) {
+                if (installed == null) installed = db.getInstalledGames();
+                if (installed != null && installed.size() == 1) {
+                    SteamDatabase.GameRow only = installed.get(0);
+                    if (only.installDir != null && !only.installDir.isEmpty()) {
+                        appId = only.appId;
+                        installDir = only.installDir;
+                    }
+                }
+            }
         } catch (Throwable t) {
             Log.w("BH_SAVE_SYNC", "resolveSteamAppRef errored", t);
         }
-        if (appId <= 0 || installDir.isEmpty()) return null;
+        if (appId <= 0 || installDir.isEmpty()) {
+            logResolveSteamAppRefFailure("unresolved appId/installDir", execPath, storeSource, taggedAppId);
+            return null;
+        }
         return new SteamAppRef(appId, installDir);
+    }
+
+    /** Slash-normalized ("\\"->"/") + lowercased form of a path, or "" for null. */
+    private static String pathNorm(String p) {
+        return p == null ? "" : p.replace('\\', '/').toLowerCase();
+    }
+
+    /** Last non-empty path segment (basename) of an already slash-normalized path, or "". */
+    private static String basenameNorm(String norm) {
+        if (norm == null || norm.isEmpty()) return "";
+        String s = norm;
+        while (s.endsWith("/")) s = s.substring(0, s.length() - 1);
+        int slash = s.lastIndexOf('/');
+        return slash >= 0 ? s.substring(slash + 1) : s;
+    }
+
+    /**
+     * B1 diagnostic — dump exactly why {@link #resolveSteamAppRefFrom} gave up so a device log stops the
+     * guessing: the raw identity signals, the extracted steam_games/<folder>, and the whole installed-games
+     * table (appId + install_dir). Fully guarded — never throws, never blocks the launch.
+     */
+    private void logResolveSteamAppRefFailure(String reason, String execPath, String storeSource, int taggedAppId) {
+        try {
+            StringBuilder sb = new StringBuilder();
+            sb.append("resolveSteamAppRef FAIL (").append(reason).append("): execPath=").append(execPath)
+              .append(" storeSource=").append(storeSource)
+              .append(" taggedAppId=").append(taggedAppId)
+              .append(" steamGamesFolder=").append(steamGamesFolderOf(execPath));
+            List<SteamDatabase.GameRow> installed =
+                    SteamRepository.getInstance().getDatabase().getInstalledGames();
+            sb.append(" installedCount=").append(installed != null ? installed.size() : 0);
+            if (installed != null) {
+                for (SteamDatabase.GameRow r : installed) {
+                    sb.append(" [appId=").append(r.appId)
+                      .append(" installDir=").append(r.installDir).append("]");
+                }
+            }
+            Log.i("BH_STEAM_ACHV", sb.toString());
+        } catch (Throwable t) {
+            Log.w("BH_STEAM_ACHV", "resolveSteamAppRef failure-diagnostic errored", t);
+        }
     }
 
     /** Raw Steam-identity signals (exec path / storeSource / tagged appId) — from the live shortcut, else
@@ -5913,16 +6007,11 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // shortcut with the overlay toggle on).
         attachEpicOverlayPill();
 
-        // In-game achievements — FIRST of two call sites (the other is setupXEnvironment, just before the
-        // guest boots). setupUI runs to completion on the main thread BEFORE the off-main launch executor
-        // (and thus setupXEnvironment) starts, so this call races nothing: it seeds + arms here where the
-        // shortcut/container are proven available, and the later setupXEnvironment call — if this one
-        // couldn't resolve (e.g. cold DB) — resolves then. The method is idempotent: the seed/schema
-        // writes are merge/atomic and re-run harmlessly, and the watcher is guarded to arm exactly once
-        // (achievementWatcherArmed), so the second call is a cheap no-op. Fully guarded — never blocks or
-        // crashes the launch (SteamDatabase is a plain SQLiteOpenHelper, so its read is main-thread-safe).
-        // Ordering still holds: the seed lands well before startEnvironmentComponents (gbe_fork's first read).
-        maybeSeedAndStartAchievementWatcher();
+        // NOTE: the in-game achievement seed/watch hook is deliberately NOT called here. It used to be
+        // (redundant with the setupXEnvironment call), but on the MAIN thread its fetch()/CM work could
+        // block launch → first-launch black screen / 0 FPS (second launch worked because the cache was
+        // warm). The single call now lives on the launch WORKER thread in setupXEnvironment(), just before
+        // the guest boots — off-main, and still ordered before gbe_fork's first read of achievements.json.
     }
 
     // Apply a fullscreen aspect-ratio mode (#71) live and remember it PER GAME: the per-game shortcut
