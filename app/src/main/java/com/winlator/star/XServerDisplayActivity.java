@@ -260,6 +260,11 @@ public class XServerDisplayActivity extends AppCompatActivity {
     // In-game Steam achievement watcher (Goldberg/GSE achievements.json → gold pills). Genuine-Steam
     // shortcuts only; armed in setupUI, stopped in onDestroy. Null for non-Steam launches.
     private AchievementWatcher achievementWatcher;
+    // The seed/watch hook (maybeSeedAndStartAchievementWatcher) is called from BOTH setupUI and
+    // setupXEnvironment so whichever has shortcut/container available wins; this guards the WATCHER so
+    // a second call re-runs the (idempotent) seed but never re-arms/double-arms the FileObserver. Reset
+    // on teardown so a later launch in the same activity instance re-arms cleanly.
+    private boolean achievementWatcherArmed = false;
     private String graphicsDriver = Container.DEFAULT_GRAPHICS_DRIVER;
     // Which Vulkan driver the host compositor/present layer runs on ("system" = Android's own driver,
     // or an installed adrenotools Turnip). Separate from graphicsDriver (which the guest game renders
@@ -4087,26 +4092,38 @@ public class XServerDisplayActivity extends AppCompatActivity {
     private SteamAppRef resolveSteamAppRef() {
         final Shortcut sc = shortcut;
         if (sc == null) return null;
-        String storeSource = sc.getExtra("storeSource", "");
-        String pathLower = sc.path != null ? sc.path.toLowerCase() : "";
-        boolean genuineSteam = "steam".equals(storeSource) || pathLower.contains("steam_games");
-        if (!genuineSteam) return null;
-
         int tagged;
         try {
             tagged = Integer.parseInt(sc.getExtra("steamAppId", "0").trim());
         } catch (Exception e) {
             tagged = 0;
         }
+        return resolveSteamAppRefFrom(sc.path, sc.getExtra("storeSource", ""), tagged);
+    }
 
-        int appId = tagged;
+    /**
+     * Resolve a Steam appId + install dir from raw identity signals (exec path / storeSource / tagged
+     * appId) rather than requiring the live {@link #shortcut}. Extracted from {@link #resolveSteamAppRef()}
+     * (which now just feeds it the shortcut's signals — behaviour is byte-identical for that caller) so the
+     * achievement hook can also resolve when {@code shortcut} is null, off a fallback identity rebuilt from
+     * the launch intent / container. Genuine-Steam gate (storeSource=steam OR exec under steam_games/),
+     * then the tagged appId fast-path, else match the exec path's {@code steam_games/<folder>} against the
+     * installed-games DB. Returns null when not genuine-Steam or the appId/installDir can't be resolved.
+     * MUST be called off the main thread (queries Room).
+     */
+    private SteamAppRef resolveSteamAppRefFrom(String execPath, String storeSource, int taggedAppId) {
+        String pathLower = execPath != null ? execPath.toLowerCase() : "";
+        boolean genuineSteam = "steam".equals(storeSource) || pathLower.contains("steam_games");
+        if (!genuineSteam) return null;
+
+        int appId = taggedAppId;
         String installDir = "";
         try {
             if (appId > 0) {
                 SteamDatabase.GameRow row = SteamRepository.getInstance().getDatabase().getGame(appId);
                 installDir = (row != null && row.installDir != null) ? row.installDir : "";
             }
-            String folder = steamGamesFolderOf(sc.path);
+            String folder = steamGamesFolderOf(execPath);
             if ((appId <= 0 || installDir.isEmpty()) && folder != null) {
                 List<SteamDatabase.GameRow> installed =
                         SteamRepository.getInstance().getDatabase().getInstalledGames();
@@ -4125,6 +4142,70 @@ public class XServerDisplayActivity extends AppCompatActivity {
         }
         if (appId <= 0 || installDir.isEmpty()) return null;
         return new SteamAppRef(appId, installDir);
+    }
+
+    /** Raw Steam-identity signals (exec path / storeSource / tagged appId) — from the live shortcut, else
+     *  rebuilt from the launch intent's {@code shortcut_path} .desktop (+ container). Fields may be empty. */
+    private static final class SteamIdentity {
+        final String execPath;
+        final String storeSource;
+        final int taggedAppId;
+        SteamIdentity(String execPath, String storeSource, int taggedAppId) {
+            this.execPath = execPath;
+            this.storeSource = storeSource != null ? storeSource : "";
+            this.taggedAppId = taggedAppId;
+        }
+        /** Mirrors {@link #isGenuineSteamShortcut()} but off raw signals (survives a null shortcut). */
+        boolean isGenuineSteam() {
+            if ("steam".equals(storeSource)) return true;
+            return execPath != null && execPath.toLowerCase().contains("steam_games");
+        }
+    }
+
+    /**
+     * Build the running game's Steam identity, preferring the live {@link #shortcut}. If the shortcut is
+     * null on this launch path, rebuild it from the launch intent's {@code shortcut_path} .desktop — parsed
+     * the same way {@code onCreate} builds {@code shortcut} — so a genuine-Steam game stays identifiable for
+     * seed/schema/watch even when the Shortcut object never got constructed. Never returns null (empty
+     * fields when nothing identifies the game); fully guarded so a parse failure can't crash the launch.
+     */
+    private SteamIdentity resolveSteamIdentity() {
+        final Shortcut sc = shortcut;
+        if (sc != null) {
+            int tagged;
+            try {
+                tagged = Integer.parseInt(sc.getExtra("steamAppId", "0").trim());
+            } catch (Exception e) {
+                tagged = 0;
+            }
+            return new SteamIdentity(sc.path, sc.getExtra("storeSource", ""), tagged);
+        }
+        // Fallback: the Shortcut object is null but the launch intent may still name the .desktop, whose
+        // Exec line (steam_games/<folder>) + Extra Data (steamAppId/storeSource) identify the game. Parsing
+        // it also lets the DB match in resolveSteamAppRefFrom stand in for the "container's game exec path".
+        try {
+            Intent li = getIntent();
+            String shortcutPath = (li != null) ? li.getStringExtra("shortcut_path") : null;
+            if (shortcutPath != null && !shortcutPath.isEmpty() && container != null) {
+                java.io.File f = new java.io.File(shortcutPath);
+                if (f.isFile()) {
+                    Shortcut probe = new Shortcut(container, f);
+                    int tagged;
+                    try {
+                        tagged = Integer.parseInt(probe.getExtra("steamAppId", "0").trim());
+                    } catch (Exception e) {
+                        tagged = 0;
+                    }
+                    Log.i("BH_STEAM_ACHV", "seed/watch: rebuilt identity from intent shortcut_path (exec="
+                            + probe.path + ", storeSource=" + probe.getExtra("storeSource", "")
+                            + ", steamAppId=" + tagged + ")");
+                    return new SteamIdentity(probe.path, probe.getExtra("storeSource", ""), tagged);
+                }
+            }
+        } catch (Throwable t) {
+            Log.w("BH_STEAM_ACHV", "seed/watch: intent-shortcut identity fallback failed", t);
+        }
+        return new SteamIdentity(null, "", 0);
     }
 
     /**
@@ -4238,11 +4319,32 @@ public class XServerDisplayActivity extends AppCompatActivity {
      */
     private void maybeSeedAndStartAchievementWatcher() {
         try {
-            if (!isGenuineSteamShortcut() || container == null) return;
+            // Establish the game's Steam identity from the live shortcut, else fall back to the launch
+            // intent / container (the shortcut can be null on some launch paths — e.g. a launch whose
+            // Shortcut object never got constructed — yet the game is still identifiable). Never null;
+            // its fields are empty when unknown, and isGenuineSteam()/appId then resolve to skip.
+            final SteamIdentity id = resolveSteamIdentity();
+            final boolean genuine = id.isGenuineSteam();
+            // Entry breadcrumb so a silent no-op is always diagnosable (this was previously an unlogged
+            // guard return). shortcutGate = the raw shortcut-only signal; genuine = the effective gate
+            // (identity-based, so it can still be true via the intent/container fallback when shortcut==null).
+            Log.i("BH_STEAM_ACHV", "seed/watch: entry shortcut=" + (shortcut != null)
+                    + " container=" + (container != null) + " genuine=" + genuine
+                    + " (shortcutGate=" + isGenuineSteamShortcut() + ")");
+
+            if (container == null) {
+                Log.i("BH_STEAM_ACHV", "seed/watch: container null — skip");
+                return;
+            }
+            if (!genuine) {
+                Log.i("BH_STEAM_ACHV", "seed/watch: not a genuine-Steam shortcut — skip");
+                return;
+            }
             final java.io.File containerRoot = container.getRootDir();
             final Context appCtx = getApplicationContext();
             // appId resolution touches Room — we're already on the launch worker thread, so blocking OK.
-            SteamAppRef ref = resolveSteamAppRef();
+            // Resolve from the identity (shortcut OR intent/container fallback) rather than the shortcut only.
+            SteamAppRef ref = resolveSteamAppRefFrom(id.execPath, id.storeSource, id.taggedAppId);
             if (ref == null) {
                 Log.i("BH_STEAM_ACHV", "achievement seed/watch: could not resolve appId — skip");
                 return;
@@ -4286,12 +4388,20 @@ public class XServerDisplayActivity extends AppCompatActivity {
 
             // (2) Arm the watcher — its snapshot now includes the seeded state. start()/stop() are
             // synchronized on the instance; the post-start destroy re-check avoids leaking the watcher
-            // if the activity tore down while we were seeding/arming.
+            // if the activity tore down while we were seeding/arming. This hook runs from BOTH setupUI
+            // and setupXEnvironment, so guard against a double-arm: the seed above is idempotent and is
+            // refreshed on every call, but the watcher (FileObserver + scheduler) is armed only once.
+            if (achievementWatcherArmed) {
+                Log.i("BH_STEAM_ACHV", "seed/watch: watcher already armed (appId=" + appId
+                        + ") — seed refreshed, not re-arming");
+                return;
+            }
             if (achievementWatcher == null) achievementWatcher = new AchievementWatcher();
             final AchievementWatcher watcher = achievementWatcher;
             if (isFinishing() || isDestroyed()) { watcher.stop(); return; }
             watcher.start(appCtx, appId, containerRoot);
-            if (isFinishing() || isDestroyed()) watcher.stop();
+            if (isFinishing() || isDestroyed()) { watcher.stop(); return; }
+            achievementWatcherArmed = true;
         } catch (Throwable t) {
             Log.w("BH_STEAM_ACHV", "maybeSeedAndStartAchievementWatcher errored", t);
         }
@@ -4590,6 +4700,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
             try { achievementWatcher.stop(); } catch (Throwable ignored) {}
             achievementWatcher = null;
         }
+        achievementWatcherArmed = false;
         // Drop the failure-card callbacks so this activity isn't retained via the static holder.
         com.winlator.star.core.PreloaderState.setOnClose(null);
         com.winlator.star.core.PreloaderState.setOnOpenLog(null);
@@ -5801,10 +5912,17 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // Epic Friends Overlay pill — added last so it sits above the HUD/controls (only for an Epic
         // shortcut with the overlay toggle on).
         attachEpicOverlayPill();
-        // NOTE: the Goldberg/GSE achievement seed + watcher are armed later, on the launch WORKER
-        // thread just before the guest boots (see maybeSeedAndStartAchievementWatcher in
-        // setupXEnvironment), so the seed lands before both the watcher snapshot and gbe_fork's first
-        // read — an ordering the async setupUI tail could not guarantee.
+
+        // In-game achievements — FIRST of two call sites (the other is setupXEnvironment, just before the
+        // guest boots). setupUI runs to completion on the main thread BEFORE the off-main launch executor
+        // (and thus setupXEnvironment) starts, so this call races nothing: it seeds + arms here where the
+        // shortcut/container are proven available, and the later setupXEnvironment call — if this one
+        // couldn't resolve (e.g. cold DB) — resolves then. The method is idempotent: the seed/schema
+        // writes are merge/atomic and re-run harmlessly, and the watcher is guarded to arm exactly once
+        // (achievementWatcherArmed), so the second call is a cheap no-op. Fully guarded — never blocks or
+        // crashes the launch (SteamDatabase is a plain SQLiteOpenHelper, so its read is main-thread-safe).
+        // Ordering still holds: the seed lands well before startEnvironmentComponents (gbe_fork's first read).
+        maybeSeedAndStartAchievementWatcher();
     }
 
     // Apply a fullscreen aspect-ratio mode (#71) live and remember it PER GAME: the per-game shortcut
