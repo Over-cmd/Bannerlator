@@ -51,7 +51,7 @@ jobs:
       - name: Activar Android SDK y NDK del Servidor
         uses: android-actions/setup-android@v3
 
-      - name: Parche de Memoria y Corrección NAtiva de Audio C
+      - name: Parche de Memoria y Corrección Nativa de Audio C
         run: |
           echo "-> Buscando el archivo de inicialización nativo de Android..."
           MAIN_FILE=$(find app/src/main/ -name "MainActivity.java" -o -name "XServerView.java" | head -n 1)
@@ -60,8 +60,11 @@ jobs:
             echo "-> Inyectando recolector de basura agresivo en: $MAIN_FILE"
             sed -i 's/\r$//' "$MAIN_FILE"
             
-            # Mantenemos intacta tu inyección original de System.setProperty
-            sed -i 's|super.onCreate(|System.setProperty("MALLOC_TRIM_THRESHOLD_", "65536"); System.setProperty("DXVK_FILTER_DEVICE_NAME", "Mali"); super.onCreate(|g' "$MAIN_FILE" || true
+            # --- PARCHE INTEGRADO ANTI-EXCEPTION 80000002 ---
+            # Mantenemos intacta tu inyección original de System.setProperty de la memoria y la GPU Mali
+            # Pero añadimos de forma nativa BOX64_ALIGN=1 (obliga a alinear la memoria) y BOX64_SIGSEGV=1 (atrapa el error en Wine en lugar de colgarse)
+            PARCHE_EXCEPCION='System.setProperty("MALLOC_TRIM_THRESHOLD_", "65536"); System.setProperty("DXVK_FILTER_DEVICE_NAME", "Mali"); System.setProperty("BOX64_ALIGN", "1"); System.setProperty("BOX64_SIGSEGV", "1");'
+            sed -i "s|super.onCreate(|${PARCHE_EXCEPCION} super.onCreate(|g" "$MAIN_FILE" || true
           fi
 
           # Añadimos compatibilidad extra de memoria en las configuraciones globales sin tocar el cursor
@@ -74,12 +77,11 @@ jobs:
             sed -i 's/\r$//' "$AUDIO_C_FILE"
             
             # Este script busca la firma de la función duplicada consecutiva y limpia el segundo bloque idéntico
-            # reemplazándolo temporalmente por un espacio en blanco para que Clang no arroje "redefinition of..."
             sed -i '/static void banner_adapt_buffer( struct userdata \* u) {/{:a;N;/}/!ba;s/.*//2}' "$AUDIO_C_FILE" || true
             sed -i '/static void banner_adapt_buffer(struct userdata \* u) {/{:a;N;/}/!ba;s/.*//2}' "$AUDIO_C_FILE" || true
           fi
           
-          echo "-> Parches de purga de memoria y corrección de sintaxis de audio aplicados."
+          echo "-> Parches de purga de memoria, corrección de hilos y sintaxis de audio aplicados."
 
       - name: Conceder Permisos de Ejecución al Compilador Gradle Raíz
         run: chmod +x gradlew
