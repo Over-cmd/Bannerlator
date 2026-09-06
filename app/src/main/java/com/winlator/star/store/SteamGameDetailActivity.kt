@@ -1,13 +1,12 @@
 package com.winlator.star.store
 
 import android.content.Intent
-import android.graphics.Bitmap
-import android.graphics.BitmapFactory
+import android.content.res.Configuration
 import android.os.Bundle
 import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.foundation.Image
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -28,12 +27,16 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Help
+import com.winlator.star.R
+import com.winlator.star.ui.screens.HelpDialog
 import com.winlator.star.ui.screens.MenuItemDivider
 import com.winlator.star.ui.screens.OutlinedAlertDialog
 import com.winlator.star.ui.screens.outlinedMenuCard
@@ -52,6 +55,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -73,7 +77,6 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.ColorMatrix
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.SpanStyle
@@ -84,12 +87,16 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import com.winlator.star.store.compose.AddResultDialog
 import com.winlator.star.store.compose.AddShortcutResult
 import com.winlator.star.store.compose.AddToShortcutsRequest
 import com.winlator.star.store.compose.ContainerPickerDialog
 import com.winlator.star.store.compose.openShortcutsScreen
+import com.winlator.star.store.download.DownloadRegistry
 import com.winlator.star.store.download.DownloadsButton
+import com.winlator.star.store.download.Store
 import com.winlator.star.store.download.formatDownloadSpeed
 import com.winlator.star.store.download.formatEta
 import com.winlator.star.ui.theme.WinlatorTheme
@@ -140,6 +147,24 @@ private data class BranchDisplay(
     val unlocked: Boolean,     // selectable now (public, or a verified password on file)
 )
 
+/** One entry in the DLC tab's full owned-DLC list. `tag` is the human delivery label derived from
+ *  the DB `kind` ("Installs with game" for depot/app, "Owned — no separate download" for
+ *  entitlement, "Owned" while unresolved, "Not owned" for unowned). DISPLAY-ONLY. */
+private data class DlcTabEntry(
+    val appId: Int,
+    val name: String,
+    val owned: Boolean,
+    val tag: String,
+)
+
+/** Map the steam_dlc `kind` + ownership to the tab's delivery label. */
+private fun dlcKindTag(kind: String, owned: Boolean): String = when {
+    !owned                                 -> "Not owned"
+    kind == "depot" || kind == "app"       -> "Installs with game"
+    kind == "entitlement"                  -> "Owned — no separate download"
+    else                                   -> "Owned"   // owned but not yet resolved
+}
+
 /** Format a branch's build timestamp (epoch seconds) as a readable date; "" when unknown. */
 private fun formatBranchUpdated(epochSeconds: Long): String {
     if (epochSeconds <= 0L) return ""
@@ -162,7 +187,6 @@ class SteamGameDetailActivity : ComponentActivity(), SteamRepository.SteamEventL
     private var lastSpeedTier = DownloadSpeedConfig.DEFAULT_TIER  // 24 = Fast
 
     // UI state
-    private var headerBitmap by mutableStateOf<Bitmap?>(null)
     private var nameText by mutableStateOf("Loading…")
     private var typeText by mutableStateOf("GAME")
     // Headline chip = on-disk footprint (estimate with "~", or the real measured size once installed).
@@ -204,6 +228,9 @@ class SteamGameDetailActivity : ComponentActivity(), SteamRepository.SteamEventL
     private var progressTextVisible by mutableStateOf(false)
 
     private var showSpeedPicker by mutableStateOf(false)
+    // Removable SD card detected when the download dialog opens (null = none, so the SD option is
+    // hidden). Detected off the UI thread in onInstallClicked before the picker is shown.
+    private var sdTarget by mutableStateOf<SteamSdInstall.SdTarget?>(null)
     // Non-null while an uninstall is deleting files → shows the blocking progress spinner.
     private var uninstallingName by mutableStateOf<String?>(null)
     // Non-null briefly after an uninstall → themed auto-dismiss confirmation bar (not a Toast).
@@ -211,6 +238,9 @@ class SteamGameDetailActivity : ComponentActivity(), SteamRepository.SteamEventL
     private var showExePicker by mutableStateOf<ExePickerDataGame?>(null)
     private var addToShortcuts by mutableStateOf<AddToShortcutsRequest?>(null)
     private var addResult by mutableStateOf<AddShortcutResult?>(null)
+    // Destructive "Cancel & delete download" confirm — gates the guaranteed wipe+reset (gear item).
+    // The partial is only nuked once the user confirms; dismiss keeps the download exactly as-is.
+    private var showCancelDeleteConfirm by mutableStateOf(false)
 
     // Goldberg (Steam emulator) state — only meaningful once the game is installed.
     // The component is ONE global download shared by every game; the tier toggle
@@ -250,11 +280,20 @@ class SteamGameDetailActivity : ComponentActivity(), SteamRepository.SteamEventL
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Honour the user's App-orientation preference (Appearance -> AUTO / PORTRAIT / LANDSCAPE).
+        // The whole Steam section previously ignored it: these activities pinned themselves in the
+        // manifest and never asked. Applied before any content so the first frame is already in the
+        // requested orientation. The game's XServerDisplayActivity is deliberately NOT touched.
+        com.winlator.star.core.AppOrientation.apply(this)
         appId = intent.getIntExtra(EXTRA_APP_ID, 0)
         if (appId == 0) { finish(); return }
 
         SteamPrefs.init(this)
         SteamRepository.getInstance().initialize(this)
+        // This page can be entered cold (drawer -> Save Manager -> a card) without the Library tab
+        // ever having run, so point the PICS art store at a Context here too. init() only restores
+        // the on-disk mirror — no snapshot read, no network — so it's safe on the main thread.
+        SteamLibraryArt.init(this)
         // Lazy-connect: opening a detail page directly (e.g. drawer → Save Manager → tap a card) skips
         // the store home that starts SteamForegroundService, so the CM connection would stay down and
         // the status badge read offline. Ensure it here when signed in — idempotent (start/connect
@@ -266,7 +305,6 @@ class SteamGameDetailActivity : ComponentActivity(), SteamRepository.SteamEventL
                 SteamGameDetailScreen(
                     appId = appId,
                     signedIn = SteamPrefs.isLoggedIn,
-                    headerBitmap = headerBitmap,
                     steamStatus = steamStatus,
                     onReconnect = { SteamRepository.getInstance().reconnectNow() },
                     nameText = nameText,
@@ -330,6 +368,7 @@ class SteamGameDetailActivity : ComponentActivity(), SteamRepository.SteamEventL
                     onBack = { finish() },
                     onInstallClick = { onInstallClicked() },
                     onPauseResumeClick = { onPauseResumeClicked() },
+                    onCancelDeleteClick = { showCancelDeleteConfirm = true },
                     onLaunchClick = { onLaunchClicked() },
                 )
 
@@ -385,13 +424,46 @@ class SteamGameDetailActivity : ComponentActivity(), SteamRepository.SteamEventL
                             DownloadSpeedConfig.TIER_BLAZING -> 3
                             else -> 2  // Fast
                         },
+                        sdTarget = sdTarget,
                         onDismiss = { showSpeedPicker = false },
-                        onDownload = { tier, debugLog ->
+                        onDownload = { tier, debugLog, installToSd ->
                             showSpeedPicker = false
                             lastSpeedTier = tier
                             installBtnEnabled = false
                             installBtnText = "Starting…"
-                            downloadHandle = SteamDepotDownloader.installApp(appId, applicationContext, lastSpeedTier, debugLog)
+                            // SD toggle → install under <sd>/bannerlator/steam_games; else internal default.
+                            val installRoot = if (installToSd) sdTarget?.steamGamesBase?.absolutePath else null
+                            downloadHandle = SteamDepotDownloader.installApp(
+                                appId, applicationContext, lastSpeedTier, debugLog, installRoot)
+                        },
+                    )
+                }
+
+                // Destructive confirm for the gear's "Cancel & delete download". Names the game and
+                // spells out that this stops the download, deletes every downloaded file and resets it
+                // for a fresh, full download. The wipe runs ONLY on confirm; dismiss keeps the partial.
+                if (showCancelDeleteConfirm) {
+                    val gName = game?.name?.takeIf { it.isNotBlank() } ?: "this game"
+                    OutlinedAlertDialog(
+                        onDismissRequest = { showCancelDeleteConfirm = false },
+                        title = { Text("Cancel & delete download?") },
+                        text = {
+                            Text(
+                                "This stops the download for \"$gName\", deletes every file already " +
+                                    "downloaded, and resets it so the next tap starts a fresh, full " +
+                                    "download from the beginning. This can't be undone."
+                            )
+                        },
+                        confirmButton = {
+                            TextButton(onClick = {
+                                showCancelDeleteConfirm = false
+                                performCancelDeleteReset()
+                            }) { Text("Delete & reset", color = MaterialTheme.colorScheme.error) }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = { showCancelDeleteConfirm = false }) {
+                                Text("Keep download")
+                            }
                         },
                     )
                 }
@@ -457,7 +529,6 @@ class SteamGameDetailActivity : ComponentActivity(), SteamRepository.SteamEventL
 
         SteamRepository.getInstance().addListener(this)
         loadGame()
-        loadHeaderImage()
     }
 
     override fun onDestroy() {
@@ -521,6 +592,22 @@ class SteamGameDetailActivity : ComponentActivity(), SteamRepository.SteamEventL
                 pauseBtnText = "Resume"
                 pauseAction = PauseAction.RESUME
             }
+            event.startsWith("DownloadQueued:") -> {
+                val id = event.substringAfter("DownloadQueued:").toIntOrNull() ?: return
+                if (id != appId) return
+                // Waiting behind the active download (managed queue). Keep the facade in downloadHandle
+                // so Cancel still works (it removes the item from the queue); pause/resume is
+                // meaningless while queued. Auto-advances to the DownloadProgress: handler once it starts.
+                progressVisible = true
+                progressValue = 0
+                downloadProgressValue = 0
+                progressTextVisible = true
+                progressText = "Queued…"
+                installBtnEnabled = true
+                installBtnText = "Cancel"
+                installAction = InstallAction.CANCEL
+                resetPauseBtn()
+            }
             event.startsWith("DownloadComplete:") -> {
                 val id = event.substringAfter("DownloadComplete:").toIntOrNull() ?: return
                 if (id != appId) return
@@ -533,14 +620,21 @@ class SteamGameDetailActivity : ComponentActivity(), SteamRepository.SteamEventL
             event.startsWith("DownloadCancelled:") -> {
                 val id = event.substringAfter("DownloadCancelled:").toIntOrNull() ?: return
                 if (id != appId) return
+                // Cancel now means "delete + fresh restart" (performCancelDeleteReset). This async
+                // engine event lands AFTER that reset for the live-download case, so settle on the same
+                // pristine NOT_INSTALLED state rather than overriding it with a lingering "cancelled".
                 downloadHandle = null
                 progressVisible = false
+                progressValue = 0
+                downloadProgressValue = 0
                 progressTextVisible = false
-                statusText = "Download cancelled"
-                gameStatus = GameStatus.CANCELLED
+                progressText = ""
+                statusText = "Not installed"
+                gameStatus = GameStatus.NOT_INSTALLED
                 installBtnEnabled = true
                 installBtnText = "Install"
                 installAction = InstallAction.INSTALL
+                launchBtnEnabled = false
                 resetPauseBtn()
             }
             event.startsWith("DownloadFailed:") -> {
@@ -753,6 +847,21 @@ class SteamGameDetailActivity : ComponentActivity(), SteamRepository.SteamEventL
         refreshUI()
 
         val dlRow = SteamRepository.getInstance().database.getDownload(appId)
+        // Installed-first reconciliation (MUST precede the "no live worker → PAUSED" flip below):
+        // a finished download can leave a stale steam_downloads row behind (e.g. a zero-work
+        // re-download that completed with no progress events, or a completion that predates
+        // row-clearing). If the game is already installed AND no worker is live for it, that row is
+        // meaningless — the install lives in steam_games (is_installed=1) and refreshUI() has
+        // already painted Installed — so clear it and keep that state instead of flipping to a
+        // phantom downloading/paused UI. The liveness check (isDownloading/isQueued) is what keeps
+        // a genuine in-place update/verify of an installed game (SteamGameUpdater still holds a live
+        // worker + row, is_installed stays 1) from being wiped — that falls through to the live
+        // DL_DOWNLOADING branch. The PAUSED reconciliation below stays for the NOT-installed case.
+        if (dlRow != null && game?.isInstalled == true &&
+            !SteamDepotDownloader.isDownloading(appId) && !DownloadQueue.isQueued(appId)) {
+            SteamRepository.getInstance().database.deleteDownload(appId)
+            return
+        }
         if (dlRow != null) {
             val pct = if (dlRow.bytesTotal > 0) (dlRow.bytesDownloaded * 100 / dlRow.bytesTotal).toInt().coerceIn(0, 100) else 0
             // DB restore only has install bytes — mirror them onto the download fill.
@@ -771,7 +880,24 @@ class SteamGameDetailActivity : ComponentActivity(), SteamRepository.SteamEventL
                         pauseBtnText = "Pause"
                         pauseAction = PauseAction.PAUSE
                     } else {
-                        SteamRepository.getInstance().database.deleteDownload(appId)
+                        // Interrupted download: the DB says "downloading" but no live worker exists — the
+                        // process was killed mid-download (e.g. a backgrounded WiFi-throttle stall the OEM
+                        // task-killer later reaped; the worker never ran its terminal, so no fail/cancel).
+                        // Do NOT delete the row — that discards resumable partial progress and leaves
+                        // nothing to resume on foreground. Flip it to PAUSED so the partial files + install
+                        // dir survive and the user can Resume (resumeApp) from where it stopped.
+                        SteamRepository.getInstance().database.markDownloadPaused(appId, dlRow.bytesDownloaded)
+                        progressVisible = true
+                        progressValue = pct
+                        downloadProgressValue = pct
+                        progressTextVisible = true
+                        progressText = "Paused — $pct%  (${fmtSize(dlRow.bytesDownloaded)} / ${fmtSize(dlRow.bytesTotal)})"
+                        installBtnEnabled = true
+                        installBtnText = "Cancel"
+                        installAction = InstallAction.CANCEL
+                        pauseBtnEnabled = true
+                        pauseBtnText = "Resume"
+                        pauseAction = PauseAction.RESUME
                     }
                 }
                 SteamDatabase.DL_PAUSED -> {
@@ -786,6 +912,39 @@ class SteamGameDetailActivity : ComponentActivity(), SteamRepository.SteamEventL
                     pauseBtnEnabled = true
                     pauseBtnText = "Resume"
                     pauseAction = PauseAction.RESUME
+                }
+                SteamDatabase.DL_QUEUED -> {
+                    // Waiting in the managed queue. Mirror the DL_DOWNLOADING liveness check with
+                    // isQueued: a `queued` row that isn't actually in the live queue is stale (process
+                    // died) — keep it as a resumable PAUSED row rather than dropping it (see else).
+                    if (DownloadQueue.isQueued(appId)) {
+                        progressVisible = true
+                        progressValue = 0
+                        downloadProgressValue = 0
+                        progressTextVisible = true
+                        progressText = "Queued…"
+                        installBtnEnabled = true
+                        installBtnText = "Cancel"
+                        installAction = InstallAction.CANCEL
+                        resetPauseBtn()
+                    } else {
+                        // Stale queued row: the DB says "queued" but it isn't in the live queue — the
+                        // process died before it started (or while it waited). Keep it resumable instead
+                        // of deleting: flip to PAUSED so a Resume re-enqueues it (any partial bytes + the
+                        // install dir are preserved; a fresh 0-byte row just restarts).
+                        SteamRepository.getInstance().database.markDownloadPaused(appId, dlRow.bytesDownloaded)
+                        progressVisible = true
+                        progressValue = pct
+                        downloadProgressValue = pct
+                        progressTextVisible = true
+                        progressText = "Paused — $pct%  (${fmtSize(dlRow.bytesDownloaded)} / ${fmtSize(dlRow.bytesTotal)})"
+                        installBtnEnabled = true
+                        installBtnText = "Cancel"
+                        installAction = InstallAction.CANCEL
+                        pauseBtnEnabled = true
+                        pauseBtnText = "Resume"
+                        pauseAction = PauseAction.RESUME
+                    }
                 }
             }
         }
@@ -846,53 +1005,24 @@ class SteamGameDetailActivity : ComponentActivity(), SteamRepository.SteamEventL
         }
     }
 
-    private fun loadHeaderImage() {
-        val g = game ?: return
-        val url = g.headerUrl ?: return
-        Thread {
-            try {
-                val bmp = BitmapFactory.decodeStream(URL(url).openStream())
-                headerBitmap = bmp
-            } catch (_: Exception) {}
-        }.start()
-    }
-
     private fun onInstallClicked() {
         val g = game ?: return
 
-        val handle = downloadHandle
-        if (handle != null) {
-            val db = SteamRepository.getInstance().database
-            val dir = db.getDownload(appId)?.installDir ?: ""
-            handle.cancel.run()
-            downloadHandle = null
-            if (dir.isNotEmpty()) Thread { File(dir).deleteRecursively() }.start()
-            progressVisible = false
-            progressTextVisible = false
-            statusText = "Download cancelled"
-            gameStatus = GameStatus.CANCELLED
-            installBtnText = "Install"
-            installAction = InstallAction.INSTALL
-            installBtnEnabled = true
-            resetPauseBtn()
-            return
-        }
-
+        // A live OR paused download → the destructive "Cancel & delete → fresh restart". BOTH branches
+        // now converge on the SAME confirm-gated guaranteed reset (performCancelDeleteReset), so the old
+        // divergence is gone: the active branch used to skip db.deleteDownload() (leaving a stale
+        // DL_DOWNLOADING row), and each deleted only the DB-row dir. In practice the gear's
+        // "Cancel & delete download" item calls the confirm directly; this keeps any other caller that
+        // reaches here in a cancel state on the same confirmed path (never an unconfirmed wipe).
+        if (downloadHandle != null) { showCancelDeleteConfirm = true; return }
         val db = SteamRepository.getInstance().database
         val dlRow = db.getDownload(appId)
-        if (dlRow != null && dlRow.status == SteamDatabase.DL_PAUSED) {
-            db.deleteDownload(appId)
-            val dir = dlRow.installDir
-            if (dir.isNotEmpty()) Thread { File(dir).deleteRecursively() }.start()
-            progressVisible = false
-            progressTextVisible = false
-            statusText = "Download cancelled"
-            gameStatus = GameStatus.CANCELLED
-            installBtnText = "Install"
-            installAction = InstallAction.INSTALL
-            installBtnEnabled = true
-            resetPauseBtn()
-            return
+        if (dlRow != null && dlRow.status == SteamDatabase.DL_PAUSED) { showCancelDeleteConfirm = true; return }
+        // A still-queued download (page reopened onto it, so no facade in downloadHandle): pull it
+        // from the queue directly — no files to wipe, so skip the destructive delete-and-reset confirm.
+        // The DownloadCancelled: event it emits settles the UI back to Install.
+        if (dlRow != null && dlRow.status == SteamDatabase.DL_QUEUED && DownloadQueue.isQueued(appId)) {
+            DownloadQueue.cancel(appId); return
         }
 
         if (g.isInstalled) {
@@ -930,8 +1060,103 @@ class SteamGameDetailActivity : ComponentActivity(), SteamRepository.SteamEventL
                     }
                 })
         } else {
-            showSpeedPicker = true
+            // Detect a removable SD card off the UI thread (StorageRoots does Binder + filesystem
+            // work), then open the download dialog. The SD "Install to…" option is shown only when a
+            // card is actually present; internal stays the default.
+            Thread {
+                val sd = try { SteamSdInstall.detect(this) } catch (_: Throwable) { null }
+                runOnUiThread {
+                    sdTarget = sd
+                    showSpeedPicker = true
+                }
+            }.apply { isDaemon = true; name = "SteamSdDetect" }.start()
         }
+    }
+
+    /**
+     * GUARANTEED "Cancel & delete → fresh restart" for a wedged/stuck/looping OR paused Steam download.
+     * Nukes every trace of the partial so the NEXT Install is a genuine fresh full download, never a
+     * resume onto dead chunks. Runs only after the destructive confirm (see showCancelDeleteConfirm).
+     *
+     * The sequence, in order:
+     *   1. cancel the live download handle if present — flips the engine's `cancelled` flag and closes
+     *      the downloader (async). Its own finally then ALSO deletes the DB row + drops the registry
+     *      row (all idempotent with the synchronous cleanup below); it does NOT delete files, so the
+     *      on-disk wipe here is the sole file-deleter.
+     *   2. ALWAYS delete the steam_downloads row NOW (don't wait on the async engine finally) — this is
+     *      the fix for the old active-branch bug that left a stale DL_DOWNLOADING row. The download row
+     *      (not the game row) is where a wedged download records its dir, so read it first.
+     *   3. clear the game row's installed flag / install_dir (defensive — a wedged DOWNLOAD never sets
+     *      these; a not-installed game is already blank — but a hard reset must leave nothing behind),
+     *      and drop the cross-store Download-Manager registry row.
+     *   4. delete every on-disk partial off the UI thread: the recorded DB-row dir AND the defensively
+     *      recomputed internal (imagefs/steam_games/<safeName>) and SD
+     *      (<sd>/bannerlator/steam_games/<safeName>) candidates — using the SAME safe-name the installer
+     *      derives, so paths match exactly and a stale/missing row still wipes the bytes. Deleting the
+     *      install dir also removes DepotDownloader's own <installDir>/.DepotDownloader/{depot.config,
+     *      staging} store (it lives INSIDE the install dir), so the engine can't skip already-fetched
+     *      chunks on the next run either. A short grace + second sweep defeats the race where the
+     *      still-closing engine flushes a few more chunks after the first delete.
+     *   5. reset the UI to pristine NOT_INSTALLED + InstallAction.INSTALL, exactly the not-installed
+     *      entry state, so the next tap routes to onInstallClicked's fresh installApp(isResume=false).
+     */
+    private fun performCancelDeleteReset() {
+        val db = SteamRepository.getInstance().database
+
+        // (2, read-first) Authoritative on-disk location for THIS download (internal or SD), captured
+        // BEFORE the row is deleted. The game row's install_dir stays blank until a successful
+        // markInstalled, so the steam_downloads row is the only record of a wedged download's dir.
+        val rowDir = db.getDownload(appId)?.installDir?.takeIf { it.isNotBlank() }
+
+        // (1) Cancel the live handle (async close; its finally re-deletes the row + drops the registry —
+        // all idempotent). No-op if the download is paused (no live handle).
+        downloadHandle?.let { try { it.cancel.run() } catch (_: Throwable) {} }
+        downloadHandle = null
+
+        // (2, 3) Drop the app's resume state synchronously: the DB download row, the game's installed
+        // flag/dir, and the Download-Manager registry row.
+        db.deleteDownload(appId)
+        db.markUninstalled(appId)   // is_installed=0, install_dir="" (idempotent; invalidates game cache)
+        try { DownloadRegistry.remove("${Store.STEAM}:$appId") } catch (_: Throwable) {}
+
+        // (4) Wipe every on-disk partial off the UI thread. Recompute internal + SD candidates with the
+        // SAME sanitisation SteamDepotDownloader uses (row.name → safeName) so the paths match exactly.
+        val gName = game?.name ?: ""
+        Thread {
+            val targets = LinkedHashSet<File>()
+            rowDir?.let { targets.add(File(it)) }
+            val safeName = gName.replace(Regex("[/\\\\:*?\"<>|]"), "_").trim()
+            if (safeName.isNotEmpty()) {
+                // Internal default: imagefs/steam_games/<safeName>.
+                targets.add(File(File(filesDir, "imagefs/steam_games"), safeName))
+                // SD default: <sd>/bannerlator/steam_games/<safeName>. detect() does Binder + filesystem
+                // work, so it must run here (off the UI thread), not in the caller.
+                val sd = try { SteamSdInstall.detect(this) } catch (_: Throwable) { null }
+                sd?.let { targets.add(File(it.steamGamesBase, safeName)) }
+            }
+            fun sweep() = targets.forEach { d ->
+                try { if (d.exists()) d.deleteRecursively() } catch (_: Throwable) {}
+            }
+            sweep()
+            try { Thread.sleep(1500L) } catch (_: InterruptedException) { Thread.currentThread().interrupt() }
+            sweep()   // second pass sweeps anything the closing engine re-wrote mid-cancel
+        }.apply { isDaemon = true; name = "SteamCancelDeleteWipe" }.start()
+
+        // (5) Pristine NOT_INSTALLED — mirrors refreshUI()'s not-installed branch, so the next tap is a
+        // fresh installApp(). (The async DownloadCancelled: event, if the engine emits one for the live
+        // case, lands on the same pristine state — see that handler.)
+        progressVisible = false
+        progressValue = 0
+        downloadProgressValue = 0
+        progressTextVisible = false
+        progressText = ""
+        statusText = "Not installed"
+        gameStatus = GameStatus.NOT_INSTALLED
+        installBtnText = "Install"
+        installAction = InstallAction.INSTALL
+        installBtnEnabled = true
+        launchBtnEnabled = false
+        resetPauseBtn()
     }
 
     private fun onPauseResumeClicked() {
@@ -977,7 +1202,10 @@ class SteamGameDetailActivity : ComponentActivity(), SteamRepository.SteamEventL
             exeFiles.sortWith { a, b ->
                 AmazonLaunchHelper.scoreExe(b, lowerTitle) - AmazonLaunchHelper.scoreExe(a, lowerTitle)
             }
-            val coverUrl = "https://shared.steamstatic.com/store_item_assets/steam/apps/${g.appId}/library_600x900.jpg"
+            // Prefer the app's PUBLISHED portrait cover from PICS; the constructed URL is the
+            // fallback for anything the library snapshot doesn't carry.
+            val coverUrl = SteamLibraryArt.libraryCapsule(g.appId)
+                ?: "https://shared.steamstatic.com/store_item_assets/steam/apps/${g.appId}/library_600x900.jpg"
 
             if (exeFiles.size == 1) {
                 runOnUiThread { startAddToShortcuts(g.name, exeFiles[0].absolutePath, coverUrl) }
@@ -1212,7 +1440,6 @@ private val AchvPillOnBorder    = Color(0x66E8B652) // rgba(232,182,82,.40)
 private fun SteamGameDetailScreen(
     appId: Int,
     signedIn: Boolean,
-    headerBitmap: Bitmap?,
     steamStatus: SteamRepository.SteamStatus,
     onReconnect: () -> Unit,
     nameText: String,
@@ -1276,6 +1503,7 @@ private fun SteamGameDetailScreen(
     onBack: () -> Unit,
     onInstallClick: () -> Unit,
     onPauseResumeClick: () -> Unit,
+    onCancelDeleteClick: () -> Unit,
     onLaunchClick: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -1302,6 +1530,38 @@ private fun SteamGameDetailScreen(
         achievements = list
         achLoading = false
     }
+
+    // DLC tab — the FULL owned-DLC catalogue (broader than the depot-bundled `dlcEntries` picker set:
+    // it also lists DLC that are owned but ship no separate download, e.g. Risk of Rain 2's DLC). Loaded
+    // like achievements: paint from the cached steam_dlc rows, kick a best-effort PICS resolve for
+    // names/kinds off the UI thread, then re-read. `dlcHasAny` distinguishes "no DLC" from "not resolved
+    // yet". This never touches the depot-bundled picker/size path (still driven by `dlcEntries`).
+    var dlcTabRows by remember(appId) { mutableStateOf<List<DlcTabEntry>>(emptyList()) }
+    var dlcHasAny by remember(appId) { mutableStateOf(false) }
+    var dlcTabLoading by remember(appId) { mutableStateOf(true) }
+    LaunchedEffect(appId, signedIn) {
+        dlcTabLoading = true
+        val repo = SteamRepository.getInstance()
+        fun readRows(): Pair<List<DlcTabEntry>, Boolean> = try {
+            val db = repo.database
+            val rows = db.getDlcRows(appId).map {
+                DlcTabEntry(it.dlcAppId, it.name, it.owned, dlcKindTag(it.kind, it.owned))
+            }
+            rows to db.hasAnyDlc(appId)
+        } catch (_: Throwable) { emptyList<DlcTabEntry>() to false }
+
+        // Instant paint from cache.
+        val (cached, cachedHas) = withContext(Dispatchers.IO) { readRows() }
+        dlcTabRows = cached; dlcHasAny = cachedHas
+        // Best-effort resolve (self-heal + names/kinds), then re-read. No-op when signed out.
+        withContext(Dispatchers.IO) {
+            try { repo.resolveOwnedDlc(appId, 15_000L) } catch (_: Throwable) {}
+        }
+        val (fresh, freshHas) = withContext(Dispatchers.IO) { readRows() }
+        dlcTabRows = fresh; dlcHasAny = freshHas
+        dlcTabLoading = false
+    }
+
     // The tile tapped in the icon-only grid → drives the caption bar. Reset when the game changes.
     var selectedAch by remember(appId) { mutableStateOf<SteamAchievement?>(null) }
 
@@ -1343,25 +1603,19 @@ private fun SteamGameDetailScreen(
             modifier = Modifier.fillMaxWidth().height(180.dp),
             contentAlignment = Alignment.Center,
         ) {
-            if (headerBitmap != null) {
-                Image(
-                    bitmap = headerBitmap!!.asImageBitmap(),
-                    contentDescription = null,
-                    modifier = Modifier.fillMaxSize(),
-                    contentScale = ContentScale.Crop,
-                )
-            } else {
-                Box(
-                    modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceVariant),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(32.dp),
-                        color = MaterialTheme.colorScheme.primary,
-                        strokeWidth = 3.dp,
-                    )
-                }
-            }
+            // The SAME resolve chain the storefront cards use: PICS published art -> constructed
+            // CDN hosts -> appdetails -> SteamGridDB -> themed placeholder.
+            //
+            // Previously this page built ONE constructed URL of its own, so a game that showed art
+            // in the Library showed nothing here — and when that URL 404'd the `else` branch left a
+            // spinner running forever, which is the one failure mode the chain must never produce.
+            // aspectRatio = null because this hero is a fixed-height band, not a 92:43 card.
+            StoreCapsule(
+                appId = appId,
+                title = nameText,
+                modifier = Modifier.fillMaxSize(),
+                aspectRatio = null,
+            )
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1496,8 +1750,8 @@ private fun SteamGameDetailScreen(
                         GearMenuItem(pauseEmoji, pauseBtnText, enabled = pauseBtnEnabled,
                             onClick = { gearMenuExpanded = false; onPauseResumeClick() })
                         MenuItemDivider()
-                        GearMenuItem("✕", "Cancel download", danger = true, // installAction == CANCEL
-                            onClick = { gearMenuExpanded = false; onInstallClick() })
+                        GearMenuItem("🗑", "Cancel & delete download", danger = true, // hard delete + fresh-restart reset
+                            onClick = { gearMenuExpanded = false; onCancelDeleteClick() })
                         MenuItemDivider()
                     }
                     GearMenuItem("🌿", "Choose branch",
@@ -1505,11 +1759,8 @@ private fun SteamGameDetailScreen(
                     MenuItemDivider()
                     GearMenuItem("🧩", "Manage DLC", enabled = dlcEntries.isNotEmpty(),
                         onClick = { gearMenuExpanded = false; onDlcLineClick() })
-                    MenuItemDivider()
-                    // Goldberg patches installed game files, so it's only meaningful once installed;
-                    // opens the Goldberg popup.
-                    GearMenuItem("🛡️", "Goldberg mode", enabled = installAction == InstallAction.UNINSTALL,
-                        onClick = { gearMenuExpanded = false; goldbergDialogOpen = true })
+                    // Goldberg mode moved to the pre-launch launch-method popup (SteamLite vs Goldberg,
+                    // see LaunchMethodSheet) — no longer a gear item here.
                     // Installed → Uninstall at the bottom.
                     if (installAction == InstallAction.UNINSTALL) {
                         MenuItemDivider()
@@ -1614,26 +1865,88 @@ private fun SteamGameDetailScreen(
                 onSelect = { selectedAch = it },
             )
 
-            // DLC = the owned-DLC summary + the existing (bottom-sheet) picker.
+            // DLC = the FULL owned-DLC list (each tagged by how its content is delivered) + the existing
+            // depot-bundled picker. `dlcTabRows` broadens what the tab DISPLAYS to every owned DLC;
+            // `dlcEntries` (depot-bundled subset) still drives the "Choose DLC" download picker/size.
             DetailTab.DLC -> Column(
                 modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 6.dp, bottom = 16.dp),
             ) {
-                if (dlcEntries.isEmpty()) {
-                    Text(
+                val ownedDlc = dlcTabRows.filter { it.owned }
+                val unownedDlc = dlcTabRows.filter { !it.owned }
+                when {
+                    // Still resolving and nothing cached yet — brief, only on a never-resolved game.
+                    dlcTabLoading && dlcTabRows.isEmpty() && !dlcHasAny -> Text(
+                        text = "Loading DLC…",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    // Resolved and the game genuinely lists no DLC.
+                    !dlcHasAny -> Text(
                         text = "No DLC available for this game.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                } else {
-                    Text(
-                        text = includedDlcText.ifEmpty { "Choose which owned DLC download with this game." },
+                    // Has DLC, but the user owns none of it.
+                    ownedDlc.isEmpty() -> Text(
+                        text = "You don't own any DLC for this game.",
                         style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurface,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                    OutlinedButton(
-                        onClick = onDlcLineClick,
-                        modifier = Modifier.padding(top = 10.dp),
-                    ) { Text("Choose DLC") }
+                    else -> {
+                        Text(
+                            text = "Your DLC",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        ownedDlc.forEach { entry ->
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                            ) {
+                                Text(
+                                    text = entry.name,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                InfoChip(entry.tag)
+                            }
+                        }
+                        // Depot-bundled owned DLC can be opted out of the download — keep the existing
+                        // picker (gated on the depot-bundled subset; entitlement DLC have nothing to toggle).
+                        if (dlcEntries.isNotEmpty()) {
+                            Spacer(Modifier.height(10.dp))
+                            Text(
+                                text = includedDlcText.ifEmpty { "Choose which owned DLC download with this game." },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            OutlinedButton(
+                                onClick = onDlcLineClick,
+                                modifier = Modifier.padding(top = 8.dp),
+                            ) { Text("Choose DLC") }
+                        }
+                    }
+                }
+                // Optional: DLC the game has but the user doesn't own, greyed, for context.
+                if (unownedDlc.isNotEmpty()) {
+                    Spacer(Modifier.height(14.dp))
+                    Text(
+                        text = "Not owned",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    unownedDlc.forEach { entry ->
+                        Text(
+                            text = entry.name,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                        )
+                    }
                 }
             }
 
@@ -2936,8 +3249,9 @@ private fun InfoChip(label: String) {
 @Composable
 private fun DownloadSpeedPickerDialog(
     selectedIndex: Int,
+    sdTarget: SteamSdInstall.SdTarget?,
     onDismiss: () -> Unit,
-    onDownload: (speedTier: Int, debugLog: Boolean) -> Unit,
+    onDownload: (speedTier: Int, debugLog: Boolean, installToSd: Boolean) -> Unit,
 ) {
     // Tiers mirror GameNative: cores × ratio scales download + decompress concurrency.
     // Higher tiers download faster but use more RAM/CPU during decompression.
@@ -2950,13 +3264,331 @@ private fun DownloadSpeedPickerDialog(
     var selected by remember { mutableIntStateOf(selectedIndex) }
     // Per-download, not persisted — defaults off each time (scoped to this one download).
     var debugLog by remember { mutableStateOf(false) }
+    // SD-card install opt-in — off by default; only offered when a removable card is present.
+    var installToSd by remember { mutableStateOf(false) }
+
+    // Per-"?" help — a general one on the header plus one per speed tier. Reuses the shared
+    // HelpDialog (a centered, scrollable Compose dialog); it layers on top of whichever layout
+    // is showing, so it's rendered once here before the landscape/portrait branch.
+    var helpRes by remember { mutableStateOf<Int?>(null) }
+    helpRes?.let { HelpDialog(it) { helpRes = null } }
+    fun tierHelpRes(tier: Int): Int = when (tier) {
+        DownloadSpeedConfig.TIER_SLOW -> R.string.help_download_speed_slow
+        DownloadSpeedConfig.TIER_MEDIUM -> R.string.help_download_speed_medium
+        DownloadSpeedConfig.TIER_FAST -> R.string.help_download_speed_fast
+        else -> R.string.help_download_speed_blazing
+    }
+
+    // Landscape gets a WIDE two-column variant. In landscape the portrait Column (4 radios +
+    // debug checkbox +warning + SD checkbox +warning) stacks past the short screen height and
+    // clips the action buttons with no scroll, so split it into two scrollable columns under a
+    // pinned action bar. Portrait is unchanged. Same state + callback as below — only the layout
+    // differs. (State is remembered above, before this branch, so both paths share it.)
+    val isLandscape =
+        LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
+    if (isLandscape) {
+        val cs = MaterialTheme.colorScheme
+        // Match ExePicker/PerformanceDashboard: bound to the CURRENT (short) landscape height so
+        // the card + its pinned bar always fit; the columns scroll inside.
+        val maxH = (LocalConfiguration.current.screenHeightDp * 0.94f).dp
+        Dialog(
+            onDismissRequest = onDismiss,
+            properties = DialogProperties(usePlatformDefaultWidth = false),
+        ) {
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth(0.96f)
+                    .widthIn(max = 720.dp)
+                    .heightIn(max = maxH),
+                shape = RoundedCornerShape(16.dp),
+                color = cs.surface,
+                border = BorderStroke(1.dp, cs.primary.copy(alpha = 0.22f)),
+            ) {
+                Column(Modifier.heightIn(max = maxH)) {
+                    // Header — no download-size/on-disk values are in scope in this composable, so
+                    // per the mock's subline we keep the header to the title only rather than
+                    // inventing numbers (portrait shows the same title). A general "?" sits at the
+                    // end of the header row.
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(start = 16.dp, end = 8.dp, top = 8.dp, bottom = 6.dp),
+                    ) {
+                        Text(
+                            text = "Download speed",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = cs.onSurface,
+                            modifier = Modifier.weight(1f),
+                        )
+                        IconButton(onClick = { helpRes = R.string.help_download_speed }) {
+                            Icon(
+                                Icons.Default.Help,
+                                contentDescription = "What is this?",
+                                modifier = Modifier.size(18.dp),
+                            )
+                        }
+                    }
+                    Box(
+                        Modifier
+                            .fillMaxWidth()
+                            .height(1.dp)
+                            .background(cs.outline.copy(alpha = 0.20f)),
+                    )
+
+                    // ── Two scrollable columns; the action bar below sits OUTSIDE this Row. ──
+                    Row(Modifier.weight(1f).fillMaxWidth()) {
+                        // LEFT — speed tiers with an inline 4-segment RAM/CPU load meter.
+                        Column(
+                            modifier = Modifier
+                                .weight(1.15f)
+                                .fillMaxHeight()
+                                .verticalScroll(rememberScrollState())
+                                .padding(start = 14.dp, end = 12.dp, top = 10.dp, bottom = 10.dp),
+                        ) {
+                            Text(
+                                text = "SPEED & RESOURCE USE",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = cs.onSurfaceVariant,
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            // Iterate the SAME options list — tier value + selection index are
+                            // unchanged; only the display name/hint are derived for the wide layout.
+                            options.forEachIndexed { index, (_, tier) ->
+                                val isSel = selected == index
+                                val name = when (tier) {
+                                    DownloadSpeedConfig.TIER_SLOW -> "Slow"
+                                    DownloadSpeedConfig.TIER_MEDIUM -> "Medium"
+                                    DownloadSpeedConfig.TIER_FAST -> "Fast"
+                                    else -> "Blazing"
+                                }
+                                val hint = when (tier) {
+                                    DownloadSpeedConfig.TIER_SLOW ->
+                                        "Lowest RAM / CPU — gentlest on the device"
+                                    DownloadSpeedConfig.TIER_MEDIUM ->
+                                        "Balanced throughput and resource use"
+                                    DownloadSpeedConfig.TIER_FAST ->
+                                        "Best speed for most devices"
+                                    else -> "Fastest — highest RAM / CPU on decompress"
+                                }
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 3.dp)
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(
+                                            if (isSel) cs.primary.copy(alpha = 0.16f)
+                                            else Color.Transparent,
+                                        )
+                                        .border(
+                                            width = 1.dp,
+                                            color = if (isSel) cs.primary.copy(alpha = 0.55f)
+                                            else cs.outline.copy(alpha = 0.25f),
+                                            shape = RoundedCornerShape(10.dp),
+                                        )
+                                        .clickable { selected = index }
+                                        .padding(start = 10.dp, end = 10.dp, top = 7.dp, bottom = 7.dp),
+                                ) {
+                                    RadioButton(
+                                        selected = isSel,
+                                        onClick = { selected = index },
+                                    )
+                                    Spacer(Modifier.width(6.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Text(
+                                                text = name,
+                                                style = MaterialTheme.typography.bodyMedium,
+                                                fontWeight = FontWeight.SemiBold,
+                                                color = cs.onSurface,
+                                            )
+                                            // Fast is the recommended default — flag it by tier
+                                            // value (not a hard index) so it tracks the list.
+                                            if (tier == DownloadSpeedConfig.TIER_FAST) {
+                                                Spacer(Modifier.width(6.dp))
+                                                Box(
+                                                    modifier = Modifier
+                                                        .clip(RoundedCornerShape(5.dp))
+                                                        .background(cs.primary)
+                                                        .padding(horizontal = 6.dp, vertical = 1.dp),
+                                                ) {
+                                                    Text(
+                                                        text = "RECOMMENDED",
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                        color = cs.onPrimary,
+                                                        fontWeight = FontWeight.Bold,
+                                                    )
+                                                }
+                                            }
+                                            Spacer(Modifier.width(8.dp))
+                                            // Meter fills Slow=1 … Blazing=4.
+                                            SpeedLoadMeter(filled = index + 1)
+                                        }
+                                        Text(
+                                            text = hint,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = cs.onSurfaceVariant,
+                                        )
+                                    }
+                                    // Per-tier "?" — has its own onClick, so tapping it opens
+                                    // help without selecting the row.
+                                    IconButton(onClick = { helpRes = tierHelpRes(tier) }) {
+                                        Icon(
+                                            Icons.Default.Help,
+                                            contentDescription = "What is this?",
+                                            modifier = Modifier.size(18.dp),
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        // Column divider.
+                        Box(
+                            Modifier
+                                .fillMaxHeight()
+                                .width(1.dp)
+                                .background(cs.outline.copy(alpha = 0.20f)),
+                        )
+
+                        // RIGHT — the two option checkboxes + their contextual warnings. Same
+                        // conditions as portrait: debug warning only when checked; the whole SD
+                        // block only when sdTarget != null, its warning only when checked.
+                        Column(
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxHeight()
+                                .verticalScroll(rememberScrollState())
+                                .padding(start = 14.dp, end = 14.dp, top = 10.dp, bottom = 10.dp),
+                        ) {
+                            Text(
+                                text = "OPTIONS",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = cs.onSurfaceVariant,
+                            )
+                            Spacer(Modifier.height(8.dp))
+
+                            Row(
+                                verticalAlignment = Alignment.Top,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { debugLog = !debugLog }
+                                    .padding(vertical = 4.dp),
+                            ) {
+                                Checkbox(
+                                    checked = debugLog,
+                                    onCheckedChange = { debugLog = it },
+                                )
+                                Spacer(Modifier.width(6.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "Log debug session",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = cs.onSurface,
+                                    )
+                                    Text(
+                                        text = "Writes a detailed log to help diagnose download problems.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = cs.onSurfaceVariant,
+                                    )
+                                    if (debugLog) {
+                                        Spacer(Modifier.height(6.dp))
+                                        DownloadDialogWarning(
+                                            text = "⚠️ Don't post this log publicly. Share it only directly " +
+                                                "with the developer or someone you trust — unless you're " +
+                                                "debugging it yourself.",
+                                        )
+                                    }
+                                }
+                            }
+
+                            if (sdTarget != null) {
+                                Spacer(Modifier.height(6.dp))
+                                Row(
+                                    verticalAlignment = Alignment.Top,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { installToSd = !installToSd }
+                                        .padding(vertical = 4.dp),
+                                ) {
+                                    Checkbox(
+                                        checked = installToSd,
+                                        onCheckedChange = { installToSd = it },
+                                    )
+                                    Spacer(Modifier.width(6.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = "Install to SD card (frees internal space)",
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            color = cs.onSurface,
+                                        )
+                                        Text(
+                                            text = "${sdTarget.label} · ${SteamSdInstall.fmtBytes(sdTarget.freeBytes)} free",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = cs.onSurfaceVariant,
+                                        )
+                                        if (installToSd) {
+                                            Spacer(Modifier.height(6.dp))
+                                            DownloadDialogWarning(
+                                                text = "⚠️ The SD card is slower than internal storage. Some " +
+                                                    "games stall on intro movies or asset loads from the card — " +
+                                                    "if that happens, open the shortcut and use \"Copy game to " +
+                                                    "Drive C\" to move it onto fast internal storage.",
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // ── Pinned action bar — OUTSIDE the scroll, so Cancel/Download never clip. ──
+                    Box(
+                        Modifier
+                            .fillMaxWidth()
+                            .height(1.dp)
+                            .background(cs.outline.copy(alpha = 0.20f)),
+                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.End,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                    ) {
+                        TextButton(onClick = onDismiss) { Text("Cancel") }
+                        Spacer(Modifier.width(4.dp))
+                        Button(
+                            onClick = {
+                                onDownload(options[selected].second, debugLog, installToSd)
+                            },
+                        ) { Text("Download") }
+                    }
+                }
+            }
+        }
+        return
+    }
 
     OutlinedAlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Download speed") },
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                Text("Download speed", modifier = Modifier.weight(1f))
+                IconButton(onClick = { helpRes = R.string.help_download_speed }) {
+                    Icon(
+                        Icons.Default.Help,
+                        contentDescription = "What is this?",
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
+            }
+        },
         text = {
             Column {
-                options.forEachIndexed { index, (label, _) ->
+                options.forEachIndexed { index, (label, tier) ->
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier
@@ -2974,6 +3606,14 @@ private fun DownloadSpeedPickerDialog(
                             style = MaterialTheme.typography.bodyMedium,
                             modifier = Modifier.weight(1f),
                         )
+                        // Per-tier "?" — its own onClick opens help without changing selection.
+                        IconButton(onClick = { helpRes = tierHelpRes(tier) }) {
+                            Icon(
+                                Icons.Default.Help,
+                                contentDescription = "What is this?",
+                                modifier = Modifier.size(18.dp),
+                            )
+                        }
                     }
                 }
 
@@ -3017,10 +3657,54 @@ private fun DownloadSpeedPickerDialog(
                         modifier = Modifier.padding(start = 4.dp, end = 4.dp),
                     )
                 }
+
+                // SD-card install toggle — only when a removable card is present. Internal is the fast
+                // default; the card frees internal space but is FUSE-backed and slower, so it's an
+                // explicit opt-in with a one-time warning (and the Copy-to-Drive-C escape hatch).
+                if (sdTarget != null) {
+                    Spacer(Modifier.height(8.dp))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { installToSd = !installToSd }
+                            .padding(vertical = 4.dp),
+                    ) {
+                        Checkbox(
+                            checked = installToSd,
+                            onCheckedChange = { installToSd = it },
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Install to SD card (frees internal space)",
+                                style = MaterialTheme.typography.bodyMedium,
+                            )
+                            Text(
+                                text = "${sdTarget.label} · ${SteamSdInstall.fmtBytes(sdTarget.freeBytes)} free",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+
+                    if (installToSd) {
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            text = "⚠️ The SD card is slower than internal storage. Some games stall on " +
+                                "intro movies or asset loads from the card — if that happens, open the " +
+                                "shortcut and use \"Copy game to Drive C\" to move it onto fast internal " +
+                                "storage.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.padding(start = 4.dp, end = 4.dp),
+                        )
+                    }
+                }
             }
         },
         confirmButton = {
-            TextButton(onClick = { onDownload(options[selected].second, debugLog) }) {
+            TextButton(onClick = { onDownload(options[selected].second, debugLog, installToSd) }) {
                 Text("Download")
             }
         },
@@ -3028,6 +3712,44 @@ private fun DownloadSpeedPickerDialog(
             TextButton(onClick = onDismiss) { Text("Cancel") }
         },
     )
+}
+
+/** 4-segment RAM/CPU load meter used by the landscape [DownloadSpeedPickerDialog] tiers —
+ *  [filled] of 4 boxes lit (Slow=1 … Blazing=4). Display-only. */
+@Composable
+private fun SpeedLoadMeter(filled: Int) {
+    val cs = MaterialTheme.colorScheme
+    Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+        repeat(4) { i ->
+            Box(
+                modifier = Modifier
+                    .size(width = 12.dp, height = 4.dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(if (i < filled) cs.primary else cs.surfaceVariant),
+            )
+        }
+    }
+}
+
+/** Inline red ⚠️ warning box used by the landscape [DownloadSpeedPickerDialog] options column —
+ *  same wording as portrait, boxed to read compactly beside its checkbox. */
+@Composable
+private fun DownloadDialogWarning(text: String) {
+    val cs = MaterialTheme.colorScheme
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .background(cs.error.copy(alpha = 0.12f))
+            .border(1.dp, cs.error.copy(alpha = 0.30f), RoundedCornerShape(8.dp))
+            .padding(horizontal = 8.dp, vertical = 6.dp),
+    ) {
+        Text(
+            text = text,
+            style = MaterialTheme.typography.bodySmall,
+            color = cs.error,
+        )
+    }
 }
 
 @Composable

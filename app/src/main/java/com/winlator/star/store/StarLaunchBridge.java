@@ -18,6 +18,7 @@ import com.winlator.star.container.Container;
 import com.winlator.star.container.ContainerManager;
 import com.winlator.star.container.Shortcut;
 import com.winlator.star.core.FileUtils;
+import com.winlator.star.core.WinePath;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -198,6 +199,52 @@ public final class StarLaunchBridge {
     }
 
     /**
+     * Store-tagged variant for the non-Steam, non-Epic stores (GOG, Amazon). Stamps
+     * {@code storeSource=<store>} into the shortcut so the Games tab can badge it without
+     * guessing from the exec path, and — when {@code preferSgdbCover} — resolves the cover as a
+     * SteamGridDB 600x900 poster FIRST, falling back to the store's own {@code coverArtUrl}.
+     * Amazon only publishes a square icon, so its tiles would otherwise be the odd ones out.
+     */
+    public static void addToLauncher(Activity activity,
+                                     String gameName,
+                                     String exePath,
+                                     String coverArtUrl,
+                                     String storeSource,
+                                     boolean preferSgdbCover) {
+        Handler h = new Handler(Looper.getMainLooper());
+        new Thread(() -> {
+            try {
+                ContainerManager manager = new ContainerManager(activity);
+                ArrayList<Container> containers = manager.getContainers();
+                if (containers == null || containers.isEmpty()) {
+                    h.post(() -> showToast(activity,
+                            "No Wine container found — create one first in the Containers screen."));
+                    return;
+                }
+                String[] names = new String[containers.size()];
+                for (int i = 0; i < containers.size(); i++) {
+                    String n = containers.get(i).getName();
+                    names[i] = (n != null && !n.isEmpty()) ? n : "Container " + (i + 1);
+                }
+                ArrayList<Container> finalContainers = containers;
+                h.post(() -> new AlertDialog.Builder(activity, R.style.StoreAlertDialogDark)
+                        .setTitle("Add \"" + gameName + "\" to…")
+                        .setItems(names, (dialog, which) -> {
+                            Container chosen = finalContainers.get(which);
+                            writeShortcutAsync(activity, chosen, gameName, exePath, coverArtUrl, 0, null,
+                                    storeSource, preferSgdbCover,
+                                    (success, message) -> showToast(activity, message));
+                        })
+                        .setNegativeButton("Cancel", null)
+                        .show());
+            } catch (Exception e) {
+                Log.e(TAG, "addToLauncher(store) failed", e);
+                h.post(() -> showToast(activity, "Error loading containers: " + e.getMessage()));
+            }
+        }, "store-launcher-picker").start();
+    }
+
+    /**
      * Convenience overload — falls back to SteamGridDB for cover art.
      */
     public static void addToLauncher(Activity activity, String gameName, String exePath) {
@@ -250,6 +297,24 @@ public final class StarLaunchBridge {
                                           int steamAppId,
                                           EpicMeta epic,
                                           ResultCallback cb) {
+        writeShortcutAsync(activity, container, gameName, exePath, coverArtUrl, steamAppId, epic, null, false, cb);
+    }
+
+    /**
+     * The core writer. {@code storeSource} (e.g. "gog", "amazon") is stamped as
+     * {@code storeSource=} when no Steam appId / Epic meta claims the shortcut first;
+     * {@code preferSgdbCover} tries the SteamGridDB poster before the store's own URL.
+     */
+    public static void writeShortcutAsync(Activity activity,
+                                          Container container,
+                                          String gameName,
+                                          String exePath,
+                                          String coverArtUrl,
+                                          int steamAppId,
+                                          EpicMeta epic,
+                                          String storeSource,
+                                          boolean preferSgdbCover,
+                                          ResultCallback cb) {
         Handler h = new Handler(Looper.getMainLooper());
         new Thread(() -> {
             try {
@@ -271,23 +336,34 @@ public final class StarLaunchBridge {
 
                 File shortcutFile = new File(desktopDir, safeName + ".desktop");
 
-                // Derive path relative to imagefs root (forward slashes)
+                // Build the shortcut's Exec= path. No WINEPREFIX in Exec=; Winlator derives WINEPREFIX
+                // from the container object via container_id. Both branches emit 4 backslashes per
+                // separator so StringUtils.unescape()'s two-pass strip yields a valid X:\path\game.exe.
+                //
+                //   • A game under imagefs/ is reachable as the container's fixed Z: drive, so keep the
+                //     historical Z:\… mapping for it (byte-identical to before).
+                //   • A game installed OFF imagefs — the "Install to SD card" option parks it on the
+                //     physical card — has no fixed letter, so resolve it through the container's drive
+                //     map exactly like the "+" add-game importer: WinePath.resolveWindowsPath maps its
+                //     storage volume to a drive letter (reusing a pre-declared one like F:, else
+                //     auto-mounting a fresh letter) AND persists container.drives itself, so the letter
+                //     survives to launch time with no extra mount code. escapeForExec applies the
+                //     4-backslash separators.
                 String imageFsRoot = new java.io.File(activity.getFilesDir(), "imagefs").getAbsolutePath();
-                String relPath = exePath.startsWith(imageFsRoot)
-                        ? exePath.substring(imageFsRoot.length()) : exePath;
-                if (relPath.startsWith("/")) relPath = relPath.substring(1);
-
-                // Convert to Windows path — match Winlator's native shortcut format.
-                // No WINEPREFIX in Exec=; Winlator derives WINEPREFIX from the container
-                // object via container_id.
-                // Use 4 backslashes per separator so StringUtils.unescape() produces
-                // a valid Z:\path\to\game.exe after its two-pass strip.
-                String windowsPath = relPath.replace("/", "\\\\\\\\");
+                String execPath;
+                if (exePath.startsWith(imageFsRoot)) {
+                    String relPath = exePath.substring(imageFsRoot.length());
+                    if (relPath.startsWith("/")) relPath = relPath.substring(1);
+                    execPath = "Z:\\\\\\\\" + relPath.replace("/", "\\\\\\\\");
+                } else {
+                    String winPath = WinePath.INSTANCE.resolveWindowsPath(container, exePath);
+                    execPath = WinePath.INSTANCE.escapeForExec(winPath);
+                }
 
                 // Icon= references a PNG saved in container.getIconsDir(64) by saveCoverArt().
                 String content = "[Desktop Entry]\n"
                         + "Name=" + gameName + "\n"
-                        + "Exec=wine Z:\\\\\\\\" + windowsPath + "\n"
+                        + "Exec=wine " + execPath + "\n"
                         + "Icon=" + safeName + "\n"
                         + "Type=Application\n"
                         + "StartupWMClass=explorer\n"
@@ -299,6 +375,22 @@ public final class StarLaunchBridge {
                 if (steamAppId > 0) {
                     content += "storeSource=steam\n"
                             + "steamAppId=" + steamAppId + "\n";
+                    // EA-published title (EA Desktop launcher chain): stamp it on the shortcut like the
+                    // store tags above, so the Games tab knows it needs the EA setup / SteamLite path
+                    // without re-deriving anything from paths at launch time (EaSupport.detectForShortcut
+                    // reads this first). eaAntiCheat=1 marks EA Javelin titles (unsupported under Wine).
+                    try {
+                        java.io.File eaDir = com.winlator.star.store.steamscript.InstallScriptExecutor.INSTANCE
+                                .locateInstallDir(new File(exePath));
+                        com.winlator.star.store.EaSupport.Profile ea = com.winlator.star.store.EaSupport.detect(eaDir);
+                        if (ea != null) {
+                            content += com.winlator.star.store.EaSupport.EXTRA_EA + "=1\n";
+                            if (ea.getJavelinAntiCheat()) content += com.winlator.star.store.EaSupport.EXTRA_JAVELIN + "=1\n";
+                            Log.i(TAG, "EA title tagged on shortcut: " + gameName + (ea.getJavelinAntiCheat() ? " (Javelin anti-cheat)" : ""));
+                        }
+                    } catch (Throwable t) {
+                        Log.w(TAG, "EA detection at shortcut write failed for " + gameName, t);
+                    }
                 } else if (epic != null && !epic.appName.isEmpty()) {
                     // EOS Phase 1: tag Epic-origin shortcuts so EpicLaunchArgs can scope the
                     // real-Epic auth args to this game. epicEos=1 default (non-EOS games ignore
@@ -315,6 +407,9 @@ public final class StarLaunchBridge {
                     if (EpicEosDetector.hasBeenScanned(activity, epic.appName)) {
                         content += "eos=" + (EpicEosDetector.isEosCached(activity, epic.appName) ? "1" : "0") + "\n";
                     }
+                } else if (storeSource != null && !storeSource.isEmpty()) {
+                    // GOG / Amazon: an explicit tag, so the badge never has to guess from the path.
+                    content += "storeSource=" + storeSource + "\n";
                 }
 
                 try (FileWriter fw = new FileWriter(shortcutFile)) {
@@ -323,12 +418,34 @@ public final class StarLaunchBridge {
 
                 Log.d(TAG, "Wrote shortcut: " + shortcutFile.getPath());
 
+                // Steam install-recipe (local stages): a depot's installScript.vdf Registry + Copy Files
+                // (EA entitlement keys + Origin licence files) land in the chosen container now — the
+                // first moment (container, appId, installDir) all exist. The Run Process step (EA Desktop
+                // installer, needs a Wine session) is driven from the Games tab's EA setup flow instead of
+                // restarting the app mid-add. Best-effort — a failure never blocks the shortcut.
+                if (steamAppId > 0) {
+                    try {
+                        com.winlator.star.store.steamscript.InstallScriptExecutor.applyLocalStagesForLaunch(
+                                activity, container, steamAppId, exePath);
+                    } catch (Throwable t) {
+                        Log.w(TAG, "installScript local stages failed for " + gameName, t);
+                    }
+                }
+
                 // Resolve cover art URL: fix protocol-relative, then try store URL,
                 // fall back to SteamGridDB if needed.
-                String artUrl = normalizeUrl(coverArtUrl);
-                if (artUrl == null || artUrl.isEmpty()) {
-                    Log.d(TAG, "No store cover art URL — trying SteamGridDB for: " + gameName);
+                String artUrl;
+                if (preferSgdbCover) {
+                    // Poster first (600x900 SteamGridDB grid, the same shape Steam / GOG tiles carry),
+                    // the store's own image only if SGDB has nothing.
                     artUrl = sgdbFetchCover(gameName);
+                    if (artUrl == null || artUrl.isEmpty()) artUrl = normalizeUrl(coverArtUrl);
+                } else {
+                    artUrl = normalizeUrl(coverArtUrl);
+                    if (artUrl == null || artUrl.isEmpty()) {
+                        Log.d(TAG, "No store cover art URL — trying SteamGridDB for: " + gameName);
+                        artUrl = sgdbFetchCover(gameName);
+                    }
                 }
 
                 if (artUrl != null && !artUrl.isEmpty()) {
@@ -551,6 +668,63 @@ public final class StarLaunchBridge {
     }
 
     /**
+     * The SteamGridDB token to use: the user's own key when they have enabled one in Settings
+     * ("enable_custom_api_key" / "custom_api_key", written by both SettingsFragment and
+     * SettingsScreen), otherwise the bundled {@link #SGDB_KEY}.
+     *
+     * NOTE: at the time of writing this is the ONLY reader of that preference — the setting is
+     * offered in two settings screens and saved, but the two older SteamGridDB call sites still use
+     * the bundled key unconditionally. Routing them through here too is a separate change.
+     *
+     * Never logged, and never returned to Kotlin — callers pass it straight to {@link #httpGet}.
+     */
+    private static String sgdbKey(Context ctx) {
+        if (ctx == null) return SGDB_KEY;
+        try {
+            android.content.SharedPreferences p =
+                    androidx.preference.PreferenceManager.getDefaultSharedPreferences(ctx);
+            if (p.getBoolean("enable_custom_api_key", false)) {
+                String custom = p.getString("custom_api_key", "");
+                if (custom != null && !custom.trim().isEmpty()) return custom.trim();
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "custom SteamGridDB key unreadable, using the bundled one");
+        }
+        return SGDB_KEY;
+    }
+
+    /**
+     * LAST-RESORT capsule art for a Steam {@code appId}, in the store's 92:43 LANDSCAPE shape.
+     *
+     * Sibling of {@link #sgdbFetchCoverBySteamAppId}, which asks for the 600x900 PORTRAIT cover
+     * used by the games wall. The storefront's capsules are 92:43, and 460x215 (Steam's own header
+     * size) is exactly that ratio — a portrait cover stretched into a capsule slot looks worse than
+     * the themed placeholder it would replace, so the dimensions filter here is deliberately
+     * landscape-only and must stay that way.
+     *
+     * Queried by Steam appId through SteamGridDB's by-platform endpoint, so there is no fuzzy
+     * name-matching and no wrong-game hits. BLOCKING — call off the main thread. Returns the image
+     * URL, or "" for "no art" / any failure, which the caller treats as a negative result.
+     */
+    public static String sgdbFetchCapsuleBySteamAppId(Context ctx, int appId) {
+        if (appId <= 0) return "";
+        try {
+            String gridsJson = httpGet(
+                    "https://www.steamgriddb.com/api/v2/grids/steam/" + appId
+                            + "?dimensions=460x215,920x430"
+                            + "&types=static&nsfw=false&mimes=image/jpeg,image/png&limit=1",
+                    sgdbKey(ctx));
+            if (gridsJson == null) return "";
+            JSONArray grids = new JSONObject(gridsJson).optJSONArray("data");
+            if (grids == null || grids.length() == 0) return "";
+            return grids.getJSONObject(0).optString("url", "");
+        } catch (Exception e) {
+            Log.w(TAG, "sgdbFetchCapsuleBySteamAppId failed for " + appId + ": " + e.getMessage());
+            return "";
+        }
+    }
+
+    /**
      * Searches SteamGridDB for all available covers matching {@code title}
      * and returns a JSON array of {thumb, url} objects, or "[]" on failure.
      */
@@ -588,11 +762,22 @@ public final class StarLaunchBridge {
     }
 
     private static String httpGet(String url) {
+        return httpGet(url, SGDB_KEY);
+    }
+
+    /**
+     * Same request, with an explicit SteamGridDB bearer token so a caller that has a Context can
+     * pass the user's own key (see {@link #sgdbKey}). Split out rather than duplicated so there is
+     * still exactly ONE SteamGridDB HTTP path in the app.
+     *
+     * The token is never logged, here or anywhere else.
+     */
+    private static String httpGet(String url, String bearer) {
         try {
             HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
             conn.setConnectTimeout(15_000);
             conn.setReadTimeout(15_000);
-            conn.setRequestProperty("Authorization", "Bearer " + SGDB_KEY);
+            conn.setRequestProperty("Authorization", "Bearer " + bearer);
             conn.setRequestProperty("User-Agent", "Mozilla/5.0");
             if (conn.getResponseCode() != 200) { conn.disconnect(); return null; }
             StringBuilder sb = new StringBuilder();

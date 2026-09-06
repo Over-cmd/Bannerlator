@@ -11,7 +11,10 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 
 enum class TabType {
-    GRAPHICS, HUD, RESHADE, CONTROLS, ADVANCED, TASK_MANAGER, TV, AUDIO
+    GRAPHICS, HUD, RESHADE, CONTROLS, ADVANCED, TASK_MANAGER, TV, AUDIO,
+    // Steam friends + chat while playing. Only in the rail while InGameFriendsSource says a live
+    // source exists (see ui/XServerFriendsTab.kt).
+    FRIENDS
 }
 
 object XServerDrawerState {
@@ -94,6 +97,11 @@ object XServerDrawerState {
     private val _frameGenModel = MutableStateFlow(0)
     val frameGenModel: StateFlow<Int> = _frameGenModel
 
+    // win-fg performance preset (0 = Quality, 1 = Balanced (default), 2 = Performance). Switchable
+    // live: the layer hot-reloads conf.toml and self-rebuilds on a perf_preset change (no bg/fg pulse).
+    private val _frameGenPerfPreset = MutableStateFlow(1)
+    val frameGenPerfPreset: StateFlow<Int> = _frameGenPerfPreset
+
     // Which FG engine the container runs: "off" / "bionic" / "lsfg". Shown as a label above the
     // in-game multiplier/flow controls so the user knows which engine they're tuning.
     private val _frameGenEngine = MutableStateFlow("off")
@@ -110,6 +118,15 @@ object XServerDrawerState {
     val presentMode: StateFlow<String> = _presentMode
     fun setPresentMode(v: String) { _presentMode.value = v }
 
+    // LSFG Native generating: the limiter is locked ON and Auto refresh (VRR)
+    // locked OFF, because that is the configuration the engine was proven in
+    // and the only one that behaves. Uncapped guest x multiplier overruns the
+    // panel and FIFO stalls the compositor; a VRR mode switch mid-game stutters.
+    // The drawer greys both controls out while this is set.
+    private val _nativeFgLocks = MutableStateFlow(false)
+    val nativeFgLocks: StateFlow<Boolean> = _nativeFgLocks
+    fun setNativeFgLocks(v: Boolean) { _nativeFgLocks.value = v }
+
     private val _presentModeLocked = MutableStateFlow(false)
     val presentModeLocked: StateFlow<Boolean> = _presentModeLocked
     fun setPresentModeLocked(v: Boolean) { _presentModeLocked.value = v }
@@ -125,6 +142,12 @@ object XServerDrawerState {
 
     // lsfg-vk only: performance_mode (lower interpolation quality, higher FPS — for low-end devices).
     // Seeded from the container when the drawer opens; toggled live from the FG pane (rewrites conf.toml).
+    // Live readout for the native LSFG engine: what the governor currently
+    // trusts and what the panel is actually getting. Empty when it is not the
+    // running engine. Pushed from the activity, which polls the renderer.
+    private val _frameGenReadout = MutableStateFlow("")
+    val frameGenReadout: StateFlow<String> = _frameGenReadout
+
     private val _lsfgPerformanceMode = MutableStateFlow(false)
     val lsfgPerformanceMode: StateFlow<Boolean> = _lsfgPerformanceMode
 
@@ -425,7 +448,9 @@ object XServerDrawerState {
     fun setFrameGenMultiplier(v: Int)      { _frameGenMultiplier.value = v }
     fun setFrameGenFlowScale(v: Float)     { _frameGenFlowScale.value = v }
     fun setFrameGenModel(v: Int)           { _frameGenModel.value = v.coerceIn(0, 4) }
+    fun setFrameGenPerfPreset(v: Int)      { _frameGenPerfPreset.value = v.coerceIn(0, 2) }
     fun setFrameGenEngine(v: String)       { _frameGenEngine.value = v }
+    fun setFrameGenReadout(v: String)      { _frameGenReadout.value = v }
     fun setLsfgPerformanceMode(v: Boolean) { _lsfgPerformanceMode.value = v }
     fun setFpsLimiterEnabled(v: Boolean)   { _fpsLimiterEnabled.value = v }
     fun setFpsLimit(v: Int)                { _fpsLimit.value = v }
@@ -536,9 +561,11 @@ object XServerDrawerState {
         _frameGenMultiplier.value = 2
         _frameGenFlowScale.value = 0.6f
         _frameGenModel.value = 0
+        _frameGenPerfPreset.value = 1
         _frameGenEngine.value = "off"
         _presentMode.value = "fifo"
         _presentModeLocked.value = false
+        _nativeFgLocks.value = false
         _rendererIsVulkan.value = false
         _lsfgPerformanceMode.value = false
         _fpsLimiterEnabled.value = false

@@ -27,7 +27,11 @@ public class Container {
         BUTTON_A, BUTTON_B, BUTTON_X, BUTTON_Y, BUTTON_GRIP, BUTTON_TRIGGER,
         THUMBSTICK_UP, THUMBSTICK_DOWN, THUMBSTICK_LEFT, THUMBSTICK_RIGHT
     }
-    public static final String DEFAULT_ENV_VARS = "WRAPPER_MAX_IMAGE_COUNT=0 ZINK_DESCRIPTORS=lazy ZINK_DEBUG=compact MESA_SHADER_CACHE_DISABLE=false MESA_SHADER_CACHE_MAX_SIZE=512MB mesa_glthread=true WINEESYNC=1 TU_DEBUG=noconform,sysmem DXVK_HUD=devinfo,fps,frametimes,gpuload,version,api";
+    // DXVK_HUD is left listed but EMPTY by default: the variable stays visible in the container's
+    // env-var editor (so its HUD-element chips are one tap away) while nothing is shown until a user
+    // opts in. EnvVars keeps "DXVK_HUD=" (index of '=' > 0) with an empty value, and DXVK renders no
+    // overlay for an empty element list — so a fresh container starts with the HUD off.
+    public static final String DEFAULT_ENV_VARS = "WRAPPER_MAX_IMAGE_COUNT=0 ZINK_DESCRIPTORS=lazy ZINK_DEBUG=compact MESA_SHADER_CACHE_DISABLE=false MESA_SHADER_CACHE_MAX_SIZE=512MB mesa_glthread=true WINEESYNC=1 TU_DEBUG=noconform,sysmem DXVK_HUD=";
     public static final String DEFAULT_SCREEN_SIZE = "1280x720";
     public static final String DEFAULT_GRAPHICS_DRIVER = "wrapper";
     /**
@@ -424,6 +428,12 @@ public class Container {
     // UNSET default differs per engine (see getFrameGenFlowScale) — an explicit user value wins either way.
     public static final float LSFG_DEFAULT_FLOW_SCALE = 0.80f;
     public static final int FRAMEGEN_DEFAULT_MODEL = 3;   // win-fg model 3 = Optical flow (~2ms; device-proven best base-FPS retention)
+    // win-fg performance preset (conf.toml `perf_preset`): 0 = Quality, 1 = Balanced (default), 2 = Performance.
+    // The layer hot-reloads + self-rebuilds when this changes, so it's live-tunable from the in-game FG drawer.
+    public static final int FRAMEGEN_PERF_PRESET_QUALITY = 0;
+    public static final int FRAMEGEN_PERF_PRESET_BALANCED = 1;
+    public static final int FRAMEGEN_PERF_PRESET_PERFORMANCE = 2;
+    public static final int FRAMEGEN_DEFAULT_PERF_PRESET = FRAMEGEN_PERF_PRESET_BALANCED;
 
     public boolean isFrameGenEnabled() {
         return getExtra("frameGenEnabled", "0").equals("1");
@@ -438,6 +448,10 @@ public class Container {
     public String getFrameGenEngine() {
         String e = getExtra("frameGenEngine", "");
         if (e.isEmpty()) return isFrameGenEnabled() ? "bionic" : "off";
+        // lsfg-vk retired 2026-09-05: a container still set to it runs LSFG Native,
+        // which uses the same imported DLL and is the engine whose frames reach
+        // the panel. The lsfg-vk code paths are parked, not deleted.
+        if (e.equals("lsfg")) return "lsfg-native";
         return e;
     }
 
@@ -512,6 +526,23 @@ public class Container {
 
     public void setFrameGenModel(int model) {
         putExtra("frameGenModel", String.valueOf(model));
+    }
+
+    // win-fg performance preset (conf.toml perf_preset, layer clamp 0-2): 0 = Quality, 1 = Balanced
+    // (default), 2 = Performance. Default Balanced keeps existing behavior unchanged. Live-tunable from
+    // the in-game FG drawer (the layer hot-reloads + self-rebuilds — no bg/fg pulse needed).
+    public int getFrameGenPerfPreset() {
+        try {
+            int p = Integer.parseInt(getExtra("frameGenPerfPreset", String.valueOf(FRAMEGEN_DEFAULT_PERF_PRESET)));
+            return (p < 0 || p > 2) ? FRAMEGEN_DEFAULT_PERF_PRESET : p;
+        }
+        catch (NumberFormatException e) {
+            return FRAMEGEN_DEFAULT_PERF_PRESET;
+        }
+    }
+
+    public void setFrameGenPerfPreset(int preset) {
+        putExtra("frameGenPerfPreset", String.valueOf(preset));
     }
 
     // lsfg-vk "performance mode" (conf.toml performance_mode): trades interpolation quality for FPS.

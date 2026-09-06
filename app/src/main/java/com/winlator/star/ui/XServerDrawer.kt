@@ -153,6 +153,14 @@ fun XServerDrawer() {
     val isPaused by state.isPaused.collectAsState()
     val tvConnected by state.tvConnected.collectAsState()
     val castSupported by state.castSupported.collectAsState()
+    // Friends tab: present only while a live friends source exists for this launch (agent relay during
+    // a SteamLite game, else the app's own session); unread dot = a message landed while the thread
+    // wasn't open. See XServerFriendsTab.kt.
+    val friendsSource by com.winlator.star.store.InGameFriendsSource.state.collectAsState()
+    val friendsUnread by com.winlator.star.store.SteamFriendsStore.unread.collectAsState()
+    // Re-check the friends source on every drawer open (its liveness isn't all flow-driven).
+    val menuOpen by XServerDialogState.menuOpen.collectAsState()
+    LaunchedEffect(menuOpen) { if (menuOpen) com.winlator.star.store.InGameFriendsSource.poke() }
     val pauseIcon = if (isPaused) R.drawable.icon_play else R.drawable.icon_pause
     val accent = MaterialTheme.colorScheme.primary
     val surface = MaterialTheme.colorScheme.surface
@@ -217,6 +225,15 @@ fun XServerDrawer() {
                         TabIconButton(R.drawable.icon_debug, selectedTab == TabType.ADVANCED) {
                             handleTabClick(TabType.ADVANCED, state)
                         }
+                        if (friendsSource.tabVisible) {
+                            Spacer(Modifier.height(6.dp))
+                            FriendsTabButton(
+                                isSelected = selectedTab == TabType.FRIENDS,
+                                unread = friendsUnread.values.any { it > 0 },
+                            ) {
+                                handleTabClick(TabType.FRIENDS, state)
+                            }
+                        }
                         // TV / Cast tab: shown while a TV is wired-connected OR wireless casting is
                         // available (so the "Cast to a TV" button is always reachable). Gated behind
                         // FeatureFlags.TV_OUTPUT_ENABLED so the whole tab disappears while the feature
@@ -267,11 +284,14 @@ fun XServerDrawer() {
                 .background(accent)
         )
 
+        // The Friends tab owns its own scrolling (a LazyColumn roster / thread with the send box
+        // pinned at the bottom) — nesting that inside the pane's verticalScroll is illegal in
+        // Compose, so that one tab gets the pane without it.
         Column(
             modifier = Modifier
                 .weight(1f)
                 .fillMaxHeight()
-                .verticalScroll(rememberScrollState())
+                .then(if (selectedTab == TabType.FRIENDS) Modifier else Modifier.verticalScroll(rememberScrollState()))
                 .padding(14.dp),
         ) {
             when (selectedTab) {
@@ -283,6 +303,7 @@ fun XServerDrawer() {
                 TabType.TASK_MANAGER -> TmContent()
                 TabType.TV -> TvContent(state)
                 TabType.AUDIO -> AudioContent(state)
+                TabType.FRIENDS -> FriendsContent(state)
             }
         }
     }
@@ -1187,6 +1208,7 @@ private fun FrameGenSection(state: XServerDrawerState) {
     val initFgMult by state.frameGenMultiplier.collectAsState()
     val initFgFlow by state.frameGenFlowScale.collectAsState()
     val initFgModel by state.frameGenModel.collectAsState()
+    val initFgPreset by state.frameGenPerfPreset.collectAsState()
     val engine by state.frameGenEngine.collectAsState()
     val layerActive by state.bionicFgActive.collectAsState()
     val initLsfgPerf by state.lsfgPerformanceMode.collectAsState()
@@ -1195,9 +1217,10 @@ private fun FrameGenSection(state: XServerDrawerState) {
     // session). Replaces the old standalone "Frame Generation (AI)" header so the engine isn't
     // labeled twice. Badge shows bionic-fg / lsfg-vk depending on the container's selection.
     val engineLabel = when (engine) {
-        "lsfg"   -> "lsfg-vk"
-        "bionic" -> "win-fg"
-        else     -> "Off"
+        "lsfg"        -> "lsfg-vk"
+        "lsfg-native" -> "LSFG Native"
+        "bionic"      -> "win-fg"
+        else          -> "Off"
     }
     // Green dot = engine actually multiplying frames right now. Frame gen starts at multiplier 0
     // (Off) every launch even when the container has an engine selected, so gate on initFgMult too
@@ -1231,27 +1254,40 @@ private fun FrameGenSection(state: XServerDrawerState) {
             )
         }
     }
+
+    // Native LSFG reports what it is actually achieving, because the requested
+    // multiplier is a ceiling to earn rather than a setting that is obeyed: the
+    // governor only keeps an extra generated frame when it measurably helps.
+    val readout by state.frameGenReadout.collectAsState()
+    if (readout.isNotEmpty()) {
+        Spacer(Modifier.height(4.dp))
+        Text(
+            readout,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
+            fontSize = 10.sp
+        )
+    }
     Spacer(Modifier.height(8.dp))
 
     if (frameGenEnabled) {
         var fgMult by remember(initFgMult) { mutableIntStateOf(initFgMult) }
         var fgFlow by remember(initFgFlow) { mutableFloatStateOf(initFgFlow) }
         var fgModel by remember(initFgModel) { mutableIntStateOf(initFgModel) }
+        var fgPreset by remember(initFgPreset) { mutableIntStateOf(initFgPreset) }
         fun applyFg() {
             state.setFrameGenMultiplier(fgMult)
             state.setFrameGenFlowScale(fgFlow)
             state.setFrameGenModel(fgModel)
+            state.setFrameGenPerfPreset(fgPreset)
             state.onBionicFgConfigChange?.run()
         }
 
         FgMultiplierButtons(fgMult, engine) { newMult ->
-            val wasOff = fgMult == 0
             fgMult = newMult; applyFg()
-            // Turning FG on: win-fg pulses a soft bg/fg reset so its optical flow starts clean, not
-            // artifacty. lsfg-vk instead does a FULL surface-teardown reset with a Resume prompt —
-            // driven by onBionicFgConfigChange in the activity (the device-proven fix for its
-            // black-frame flicker) — so it must NOT also fire the soft pulse here.
-            if (engine == "bionic" && wasOff && newMult >= 2) state.onFgResetPulse?.run()
+            // Both engines now do the FULL surface-teardown reset with a Resume prompt, driven from
+            // onBionicFgConfigChange in the activity (win-fg on an On/Off/multiplier/model/preset
+            // change, lsfg on a level change). The old soft pulseFgReset for win-fg is retired, so
+            // nothing extra fires here.
         }
 
         // Interpolation model, win-fg only. The layer rebuilds its framegen context when the
@@ -1272,9 +1308,39 @@ private fun FrameGenSection(state: XServerDrawerState) {
                 )
                 FgModelButtons(fgModel) { newModel ->
                     fgModel = newModel; applyFg()
-                    // Model switch while FG is on -> same bg/fg reset pulse.
-                    if (fgMult >= 2) state.onFgResetPulse?.run()
+                    // Model switch → full presentation reset, fired from onBionicFgConfigChange.
                 }
+            }
+        }
+
+        // Performance preset, win-fg only. Writes conf.toml `perf_preset` (0 Quality / 1 Balanced /
+        // 2 Performance). Like a model change, this fires the full presentation reset from
+        // onBionicFgConfigChange — safe now that the win-fg .so re-reads the conf on the swapchain
+        // recreate (so the layer's own perf_preset rebuild doesn't ALSO fire and collide with the
+        // teardown, which was the Fold-8 freeze). Hidden while frame gen is Off.
+        AnimatedVisibility(
+            visible = engine == "bionic" && fgMult > 0,
+            enter = expandVertically() + fadeIn(),
+            exit = shrinkVertically() + fadeOut()
+        ) {
+            Column {
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    "Performance preset",
+                    color = MaterialTheme.colorScheme.onSurface,
+                    fontSize = 12.sp,
+                    modifier = Modifier.padding(start = 4.dp, bottom = 6.dp)
+                )
+                FgPerfPresetButtons(fgPreset) { newPreset ->
+                    fgPreset = newPreset; applyFg()
+                    // Preset change → full presentation reset, fired from onBionicFgConfigChange.
+                }
+                Text(
+                    "Quality favors image fidelity; Performance favors FPS. Balanced is the default.",
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+                    fontSize = 11.sp,
+                    modifier = Modifier.padding(start = 4.dp, top = 2.dp)
+                )
             }
         }
 
@@ -1356,6 +1422,45 @@ private fun FgModelButtons(selected: Int, onSelect: (Int) -> Unit) {
                         shape = RoundedCornerShape(8.dp)
                     )
                     .clickable { onSelect(model) }
+                    .padding(vertical = 9.dp)
+            ) {
+                Text(
+                    label,
+                    color = if (isSel) Color.Black else accent,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium
+                )
+            }
+        }
+    }
+}
+
+// Quality / Balanced / Performance segmented button row (win-fg perf_preset 0/1/2). Same styling as
+// FgModelButtons; selected = filled accent. Balanced (1) is the default.
+@Composable
+private fun FgPerfPresetButtons(selected: Int, onSelect: (Int) -> Unit) {
+    val accent = MaterialTheme.colorScheme.primary
+    val accentDim = LocalAccentDim.current
+    val options = listOf(0 to "Quality", 1 to "Balanced", 2 to "Performance")
+    val sel = selected.coerceIn(0, 2)
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        options.forEach { (preset, label) ->
+            val isSel = sel == preset
+            Box(
+                contentAlignment = Alignment.Center,
+                modifier = Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(if (isSel) accent else Color.Black)
+                    .border(
+                        width = 1.dp,
+                        color = if (isSel) accent else accentDim,
+                        shape = RoundedCornerShape(8.dp)
+                    )
+                    .clickable { onSelect(preset) }
                     .padding(vertical = 9.dp)
             ) {
                 Text(
@@ -2490,7 +2595,16 @@ private fun HudContent(state: XServerDrawerState) {
     CollapsibleSection("Frame rate & refresh", lead = "always on", initiallyExpanded = true) {
         Text("FPS Limiter", color = accent, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
         Spacer(Modifier.height(4.dp))
-        ToggleRow("Limit FPS", limiterOn) { limiterOn = it; applyLimiter() }
+        val nativeFgLocks by state.nativeFgLocks.collectAsState()
+        // Locked ON while LSFG Native generates - see XServerDrawerState.nativeFgLocks.
+        ToggleRow("Limit FPS", limiterOn, enabled = !nativeFgLocks) { limiterOn = it; applyLimiter() }
+        if (nativeFgLocks) {
+            Text(
+                "Locked on while LSFG Native is generating",
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f),
+                fontSize = 10.sp
+            )
+        }
         if (limiterOn) {
             LabeledSlider(
                 "Max FPS", limitVal.toFloat(), 10f..200f,
@@ -2518,7 +2632,10 @@ private fun HudContent(state: XServerDrawerState) {
         Text("Refresh rate", color = accent, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
         Spacer(Modifier.height(4.dp))
         // Auto (match FPS) == the existing VRR toggle; behavior unchanged.
-        ToggleRow("Auto (match FPS)", matchRefreshOn && vrrSupported, enabled = vrrSupported) {
+        val nativeFgLocksVrr by state.nativeFgLocks.collectAsState()
+        // Locked OFF while LSFG Native generates - see XServerDrawerState.nativeFgLocks.
+        ToggleRow("Auto (match FPS)", matchRefreshOn && vrrSupported && !nativeFgLocksVrr,
+                  enabled = vrrSupported && !nativeFgLocksVrr) {
             matchRefreshOn = it
             state.setMatchRefreshRate(it)
             state.onMatchRefreshChange?.run()
@@ -3154,6 +3271,22 @@ private fun PlayersSection() {
         color = MaterialTheme.colorScheme.onSurfaceVariant
     )
     Spacer(Modifier.height(8.dp))
+
+    // Full landscape popup: the same slot controls in a left rail, plus a live "Controller Test"
+    // picture that lights up as each button/stick/dpad/trigger is pressed (game input is isolated
+    // while it's open). Opens the CONTROLLER_TEST dialog hosted by XServerDialogHost.
+    Button(
+        onClick = { XServerDialogState.show(XServerDialogState.ActiveDialog.CONTROLLER_TEST) },
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(10.dp),
+    ) { Text("Physical Controller Test / Bind") }
+    Spacer(Modifier.height(4.dp))
+    Text(
+        "Test each physical controller, remap its buttons, and confirm every input registers.",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant
+    )
+    Spacer(Modifier.height(10.dp))
 
     if (rows.isEmpty()) {
         Text(

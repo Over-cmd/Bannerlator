@@ -292,6 +292,11 @@ public class ContainerManager {
         if (FileUtils.delete(container.getRootDir())) containers.remove(container);
     }
 
+    /** Desktop .lnk names written by store clients we install on the game's behalf — not games. */
+    private static final java.util.Set<String> VENDOR_CLIENT_LNK = new java.util.HashSet<>(Arrays.asList(
+            "EA", "EA app", "EA Desktop", "EA app Updater", "App Recovery", "EA Error Reporter", "Origin",
+            "Ubisoft Connect", "Uplay"));
+
     public ArrayList<Shortcut> loadShortcuts() {
         ArrayList<Shortcut> shortcuts = new ArrayList<>();
         for (Container container : containers) {
@@ -303,6 +308,10 @@ public class ContainerManager {
                 for (File file : files) {
                     String fileName = file.getName();
                     if (fileName.endsWith(".lnk")) {
+                        // Store-client installers (EA Desktop, Ubisoft Connect) drop their own desktop
+                        // shortcuts via winemenubuilder; those are not games — never auto-import them.
+                        String base = fileName.substring(0, fileName.length() - 4);
+                        if (VENDOR_CLIENT_LNK.contains(base)) continue;
                         String filePath = file.getPath();
                         File desktopFile = new File(filePath.substring(0, filePath.lastIndexOf(".")) + ".desktop");
                         if (!desktopFile.exists()) {
@@ -310,13 +319,61 @@ public class ContainerManager {
                             shortcuts.add(new Shortcut(container, desktopFile));
                         }
                     }
-                    else if (fileName.endsWith(".desktop")) shortcuts.add(new Shortcut(container, file));
+                    else if (fileName.endsWith(".desktop")) {
+                        // winemenubuilder writes its own .desktop entries (no .lnk sibling here — the
+                        // .lnk lives in C:/users/Public/Desktop) when a store client such as EA Desktop
+                        // installs, and it rewrites them on every client start. Those are launchers,
+                        // not games — keep them out of the Games grid.
+                        if (isVendorClientDesktopEntry(file)) continue;
+                        shortcuts.add(new Shortcut(container, file));
+                    }
                 }
             }
         }
 
         shortcuts.sort(Comparator.comparing(a -> a.name));
         return shortcuts;
+    }
+
+    /** Window classes of store-client executables whose winemenubuilder .desktop entries are not games. */
+    private static final java.util.Set<String> VENDOR_CLIENT_WMCLASS = new java.util.HashSet<>(Arrays.asList(
+            "ealauncher.exe", "eadesktop.exe", "eaapp.exe", "eabackgroundservice.exe", "eaapprecovery.exe",
+            "eaerrorreporter.exe", "link2ea.exe", "origin.exe", "originwebhelperservice.exe",
+            "upc.exe", "uplay.exe", "ubisoftconnect.exe", "ubisoftconnectinstaller.exe"));
+
+    /**
+     * True for a Desktop .desktop entry that a store client (EA Desktop / Origin / Ubisoft Connect) dropped
+     * through winemenubuilder rather than one Bannerlator wrote for a game: matched by the vendor launcher
+     * name, by the window class winemenubuilder records, or by an Exec that just re-opens the vendor .lnk.
+     */
+    static boolean isVendorClientDesktopEntry(File desktopFile) {
+        String name = desktopFile.getName();
+        String base = name.substring(0, name.length() - ".desktop".length());
+        if (VENDOR_CLIENT_LNK.contains(base)) return true;
+        String text;
+        try {
+            text = FileUtils.readString(desktopFile);
+        } catch (Exception e) {
+            return false;
+        }
+        if (text == null) return false;
+        if (text.contains("storeSource=") || text.contains("steamAppId=")) return false; // ours
+        for (String line : text.split("\n")) {
+            String l = line.trim();
+            if (l.startsWith("StartupWMClass=")) {
+                if (VENDOR_CLIENT_WMCLASS.contains(l.substring("StartupWMClass=".length()).trim().toLowerCase(java.util.Locale.ROOT))) return true;
+            } else if (l.startsWith("Exec=")) {
+                // .desktop Exec lines escape each backslash ("C:\\\\users\\\\Public\\\\Desktop\\\\EA.lnk"); collapse runs first.
+                String exec = l.toLowerCase(java.util.Locale.ROOT).replaceAll("\\\\+", "\\\\");
+                if (exec.contains("public\\desktop\\ea") || exec.contains("\\electronic arts\\") || exec.contains("\\ea desktop\\")
+                        || exec.contains("\\origin\\origin.exe") || exec.contains("\\ubisoft game launcher\\")) return true;
+            } else if (l.startsWith("Path=")) {
+                String path = l.toLowerCase(java.util.Locale.ROOT);
+                if (path.contains("/electronic arts/ea desktop/") || path.contains("/origin/")
+                        || path.contains("/ubisoft game launcher/")) return true;
+            }
+        }
+        return false;
     }
 
     public int getNextContainerId() {

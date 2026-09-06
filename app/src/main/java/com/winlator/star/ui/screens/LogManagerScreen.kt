@@ -97,9 +97,14 @@ fun LogManagerScreen(onClose: () -> Unit) {
     var wineDebug by remember { mutableStateOf(prefs.getBoolean("enable_wine_debug", false)) }
     var box64Logs by remember { mutableStateOf(prefs.getBoolean("enable_box64_logs", false)) }
     var dxvkLogs by remember { mutableStateOf(prefs.getBoolean("enable_dxvk_logs", true)) }
+    var steamLite by remember { mutableStateOf(prefs.getBoolean("enable_steamlite_logs", false)) }
     var logcat by remember { mutableStateOf(prefs.getBoolean("enable_logcat", true)) }
     var crashReports by remember { mutableStateOf(prefs.getBoolean("enable_crash_reports", true)) }
     var exitAutosave by remember { mutableStateOf(prefs.getBoolean(ExitReasonReporter.PREF_AUTOSAVE, false)) }
+    var rustSteamEngine by remember {
+        mutableStateOf(prefs.getBoolean(com.winlator.star.store.blsteam.BlSteamEngineFlag.PREF_KEY,
+            com.winlator.star.store.blsteam.BlSteamEngineFlag.DEFAULT))
+    }
 
     // Location + channels moved here from the old Settings › Logs section, which this screen
     // replaces. They used to be saved by the Settings "Save" FAB; here every change is written
@@ -249,6 +254,11 @@ fun LogManagerScreen(onClose: () -> Unit) {
                     onInfo = { info = "DXVK & VKD3D" to LogCopy.DXVK }) {
                     dxvkLogs = it; putBool("enable_dxvk_logs", it)
                 }
+                LogToggle("SteamLite (Steam client)", steamLite,
+                    hint = "Only when a game launches through SteamLite",
+                    onInfo = { info = "SteamLite (Steam client)" to LogCopy.STEAMLITE }) {
+                    steamLite = it; putBool("enable_steamlite_logs", it)
+                }
                 LogToggle("Android logcat", logcat,
                     hint = "Bannerlator's own output only",
                     onInfo = { info = "Android logcat" to LogCopy.LOGCAT }) {
@@ -271,6 +281,17 @@ fun LogManagerScreen(onClose: () -> Unit) {
                     enabled = ExitReasonReporter.isSupported(),
                     onInfo = { info = "Exit reasons" to LogCopy.EXIT_REASONS }) {
                     exitAutosave = it; putBool(ExitReasonReporter.PREF_AUTOSAVE, it)
+                }
+                // Developer switch for the native Rust Steam engine (docs/STEAM_RUST_ENGINE_PLAN.md).
+                // Read once per process by SteamRepository.initialize(), so it takes effect on the
+                // next app start. OFF = JavaSteam as today; ON = the full Steam stack (auth, session,
+                // library, downloads, cloud, achievements, social, presence) runs on libblsteam.so and
+                // the engine's steam_engine.txt is folded into the SteamLite log bundle (Phase 3b-4).
+                LogToggle("Native Steam engine (restart required)", rustSteamEngine,
+                    hint = "On by default — the whole Steam session (sign-in, library, downloads, cloud, achievements, friends) runs on the native engine; its log joins the SteamLite bundle. Off = legacy Java engine",
+                    onInfo = { info = "Rust Steam engine" to LogCopy.RUST_ENGINE }) {
+                    rustSteamEngine = it
+                    putBool(com.winlator.star.store.blsteam.BlSteamEngineFlag.PREF_KEY, it)
                 }
 
                 // Outlined rather than a filled button: the design keeps solid accent for switches
@@ -1145,6 +1166,22 @@ private object LogCopy {
         "This is the log to check for black screens, missing textures or a game that refuses a " +
         "graphics feature. Safe to leave on."
 
+    const val STEAMLITE =
+        "Little to no performance cost.\n\n" +
+        "Collects the REAL Steam client's own logs — the ones it writes for itself while a game runs " +
+        "under SteamLite (the online / VAC launch path). That covers your login and network connection, " +
+        "which game it launched, downloads, cloud saves and achievements. Steam writes these small files " +
+        "as it goes, so leaving this on costs you essentially nothing.\n\n" +
+        "It ONLY produces anything when a game is actually launched through SteamLite. A normal launch, " +
+        "or a Goldberg (offline) launch, writes nothing at all — so there is no output to find unless you " +
+        "played online through the real client.\n\n" +
+        "Everything is gathered into a single \"steamlite.txt\" next to that game's other logs, and it " +
+        "opens with a plain-English summary of what ran plus an auto-scan that flags common problems " +
+        "(a VAC-insecure launch, a login taken over by another device, a cloud-save conflict) so you " +
+        "don't have to read the raw logs.\n\n" +
+        "Your Steam account name and auth tokens are scrubbed out as it is written, and your Steam ID is " +
+        "partially masked — but a masked Steam ID may still remain, which is normal and safe to share."
+
     const val LOGCAT =
         "No performance cost.\n\n" +
         "Android's own system log, as it relates to Bannerlator. It is captured on demand — when you " +
@@ -1185,16 +1222,27 @@ private object LogCopy {
         "run's files keep their normal names, so the newest log is always the obvious one.\n\n" +
         "Set it to 0 to keep no history at all."
 
+    const val RUST_ENGINE =
+        "On by default — no performance cost in game.\n\n" +
+        "Runs the whole Steam side of Bannerlator (sign-in, library, downloads, cloud saves, " +
+        "achievements, friends) on the app's native engine. Needs an app restart to take effect.\n\n" +
+        "Turn it off only if something Steam-related misbehaves: that switches back to the legacy " +
+        "Java engine for this release — nothing is lost. While the native engine is on, its own log " +
+        "is added to the SteamLite bundle so a problem can be traced."
+
     fun explainAll(): String = buildString {
         append("Costs performance while on\n\n")
         append("• Wine debug\n$WINE\n\n")
         append("• Box64 / FEXCore\n$BOX64\n\n")
         append("\nSafe to leave on\n\n")
         append("• DXVK & VKD3D\n$DXVK\n\n")
+        append("• SteamLite (Steam client)\n$STEAMLITE\n\n")
         append("• Android logcat\n$LOGCAT\n\n")
         append("• Crash reports\n$CRASH\n\n")
         append("\nOrganisation\n\n")
         append("• Folder for each game\n$PER_GAME\n\n")
-        append("• Keep last runs\n$KEEP_LAST\n")
+        append("• Keep last runs\n$KEEP_LAST\n\n")
+        append("\nDeveloper\n\n")
+        append("• Rust Steam engine\n$RUST_ENGINE\n")
     }
 }

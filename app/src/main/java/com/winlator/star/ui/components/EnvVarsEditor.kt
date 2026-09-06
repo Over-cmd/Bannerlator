@@ -27,6 +27,7 @@ import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.outlined.HelpOutline
 import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -51,11 +52,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.winlator.star.ui.screens.MenuItemDivider
 import com.winlator.star.ui.screens.OutlinedAlertDialog
 import com.winlator.star.ui.screens.SectionBox
+import com.winlator.star.core.StringUtils
+import com.winlator.star.ui.screens.HelpTextDialog
 import com.winlator.star.ui.screens.outlinedMenuCard
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -110,11 +114,13 @@ internal object KnownEnvVars {
         KnownEnvVar("DXVK_HUD", EnvVarType.SELECT_MULTIPLE, listOf(
             "scale=0.5", "scale=0.7", "scale=1.0", "opacity=0.5", "opacity=0.7", "devinfo", "fps", "frametimes",
             "submissions", "drawcalls", "pipelines", "descriptors", "memory", "gpuload", "version", "api", "cs",
-            "compiler", "samplers")),
-        KnownEnvVar("DXVK_CONFIG_FILE", EnvVarType.SELECT, listOf(
-            "/storage/emulated/0/starengine.ini",
-            "/storage/emulated/0/Download/starengine.ini",
-            "/storage/emulated/0/Winlator/starengine.ini")),
+            "compiler", "samplers",
+            // VEGAS-build HUD items (HudVegasItem governor line + HudCommitItem). Registered
+            // inside VEGAS DXVK builds' HudItemSet; vanilla DXVK silently ignores unknown
+            // tokens, so listing them unconditionally is safe.
+            "vegas", "commit")),
+        // NOTE: the old VEGAS_HUD env var was removed — nothing in any shipped VEGAS build
+        // ever read it (verified against cf04e7f source). Its tokens live in DXVK_HUD now.
         KnownEnvVar("MESA_EXTENSION_MAX_YEAR", EnvVarType.NUMBER),
         KnownEnvVar("WRAPPER_MAX_IMAGE_COUNT", EnvVarType.TEXT),
         KnownEnvVar("MESA_GL_VERSION_OVERRIDE", EnvVarType.TEXT),
@@ -136,6 +142,9 @@ internal object KnownEnvVars {
         KnownEnvVar("VKD3D_DEBUG", EnvVarType.SELECT, listOf("none", "err", "fixme", "warn", "trace")),
         // Wine tuning
         KnownEnvVar("WINEFSYNC", EnvVarType.CHECKBOX, listOf("0", "1")),
+        // Our own NtYieldExecution gate (proton-wine fcbe8302). Off by default in the layer; this
+        // is the only way to discover it from inside the app.
+        KnownEnvVar("WINE_FAST_YIELD", EnvVarType.CHECKBOX, listOf("0", "1")),
         KnownEnvVar("WINEDEBUG", EnvVarType.SELECT, listOf("-all", "fixme-all", "+seh", "+relay", "warn+all")),
         KnownEnvVar(DllOverrides.VAR, EnvVarType.TEXT),
         KnownEnvVar("WINE_FULLSCREEN_FSR", EnvVarType.CHECKBOX, listOf("0", "1")),
@@ -150,6 +159,7 @@ internal object KnownEnvVars {
         KnownEnvVar("DXVK_ASYNC", EnvVarType.CHECKBOX, listOf("0", "1")),
         KnownEnvVar("DXVK_GPLASYNCCACHE", EnvVarType.CHECKBOX, listOf("0", "1")),
         KnownEnvVar("DXVK_CONFIG", EnvVarType.TEXT),
+        KnownEnvVar("DXVK_CONFIG_FILE", EnvVarType.TEXT),
         // Wine extras
         KnownEnvVar("WINE_DISABLE_FULLSCREEN_HACK", EnvVarType.CHECKBOX, listOf("0", "1")),
         KnownEnvVar("WINE_X11FORCEGLX", EnvVarType.CHECKBOX, listOf("0", "1")),
@@ -671,6 +681,9 @@ private fun EnvVarRow(
 ) {
     val known = KnownEnvVars.find(row.name)
     val type = known?.type ?: EnvVarType.TEXT
+    val context = LocalContext.current
+    val help = remember(row.name) { envVarHelp(context, row.name) }
+    var showHelp by remember { mutableStateOf(false) }
     Row(
         modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -719,11 +732,31 @@ private fun EnvVarRow(
                 }
             }
         }
+        // "?" only when we actually have something to say — a variable with no help string shows
+        // no button rather than one that does nothing when tapped.
+        if (help != null) {
+            IconButton(onClick = { showHelp = true }) {
+                Icon(
+                    Icons.Outlined.HelpOutline,
+                    contentDescription = "About ${row.name}",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
         IconButton(onClick = onRemove) {
             Icon(Icons.Default.Delete, contentDescription = "Remove ${row.name}")
         }
     }
+    if (showHelp && help != null) HelpTextDialog(help) { showHelp = false }
 }
+
+/**
+ * Per-variable help, looked up by name: env_var_help__&lt;name lowercased&gt;. Resolved by name rather
+ * than resource id because the catalog is data, not code — a variable added to KnownEnvVars picks
+ * its help up automatically once the string exists, and shows no "?" until it does.
+ */
+private fun envVarHelp(context: android.content.Context, name: String): String? =
+    StringUtils.getString(context, "env_var_help__" + name.lowercase(java.util.Locale.ENGLISH))
 
 /**
  * The typed value field shared by SELECT, TEXT and NUMBER rows.
@@ -920,6 +953,10 @@ private fun AddEnvVarPicker(
 ) {
     var nameQuery by remember { mutableStateOf("") }
     var valueQuery by remember { mutableStateOf("") }
+    val pickerContext = LocalContext.current
+    // Help text for the candidate whose "?" was tapped, shown over the picker so the list stays
+    // put behind it — you read what a variable does, dismiss, and carry on choosing.
+    var pickerHelp by remember { mutableStateOf<String?>(null) }
     val rawName = nameQuery.trim().replace(" ", "")
     // TWO boxes — Name and Value — so users never have to type an '='. The Name box still also
     // accepts a pasted "NAME=VALUE" (split on the FIRST '='); otherwise the Value box supplies it.
@@ -1005,8 +1042,26 @@ private fun AddEnvVarPicker(
                     }
                     candidates.forEachIndexed { index, known ->
                         if (index > 0) MenuItemDivider()
-                        TextButton(onClick = { onAdd(combined(known)) }, modifier = Modifier.fillMaxWidth()) {
-                            Text(known, modifier = Modifier.weight(1f))
+                        // "?" here as well as on the added row: this list is where you decide
+                        // WHETHER to add something, so needing to add it blind just to read what
+                        // it does — then delete it again — is the wrong way round.
+                        val candidateHelp = remember(known) { envVarHelp(pickerContext, known) }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            TextButton(
+                                onClick = { onAdd(combined(known)) },
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text(known, modifier = Modifier.weight(1f))
+                            }
+                            if (candidateHelp != null) {
+                                IconButton(onClick = { pickerHelp = candidateHelp }) {
+                                    Icon(
+                                        Icons.Outlined.HelpOutline,
+                                        contentDescription = "About $known",
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                            }
                         }
                     }
                     if (candidates.isEmpty() && !showAddTyped) {
@@ -1024,4 +1079,7 @@ private fun AddEnvVarPicker(
             TextButton(onClick = onDismiss) { Text(stringResource(android.R.string.cancel)) }
         }
     )
+    // Composed AFTER the picker so it draws on top of it — a dialog composed first ends up behind
+    // the one that follows, which would look like the "?" did nothing.
+    pickerHelp?.let { text -> HelpTextDialog(text) { pickerHelp = null } }
 }

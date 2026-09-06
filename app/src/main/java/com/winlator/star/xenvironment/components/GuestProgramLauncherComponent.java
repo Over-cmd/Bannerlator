@@ -7,11 +7,13 @@ import android.content.pm.ApplicationInfo;
 import android.net.ConnectivityManager;
 import android.net.LinkProperties;
 import android.net.Network;
+import android.net.RouteInfo;
 import android.os.Process;
 import android.util.Log;
 
 import androidx.preference.PreferenceManager;
 
+import com.winlator.star.BuildConfig;
 import com.winlator.star.box64.Box64Preset;
 import com.winlator.star.box64.Box64PresetManager;
 import com.winlator.star.container.Container;
@@ -24,6 +26,7 @@ import com.winlator.star.core.FileUtils;
 import com.winlator.star.core.GPUInformation;
 import com.winlator.star.core.KeyValueSet;
 import com.winlator.star.core.ProcessHelper;
+import com.winlator.star.store.SteamLogRedactor;
 import com.winlator.star.core.TarCompressorUtils;
 import com.winlator.star.core.WineInfo;
 import com.winlator.star.core.WinebusRumblePatcher;
@@ -439,6 +442,22 @@ public class GuestProgramLauncherComponent extends EnvironmentComponent {
         }
         envVars.put("ANDROID_RESOLV_DNS", primaryDNS);
         envVars.put("WINE_NEW_NDIS", "1");
+        // Default-route gateway for the layer's WINE_NEW_NDIS route table (eanet layers): the guest's
+        // GetBestRoute()/SIO_ROUTING_INTERFACE_QUERY need a 0.0.0.0/0 entry; the layer falls back to
+        // the subnet .1 when this is absent, so older layers are unaffected.
+        if (activeNetwork != null) {
+            LinkProperties lp = connectivityManager.getLinkProperties(activeNetwork);
+            if (lp != null) {
+                for (RouteInfo r : lp.getRoutes()) {
+                    InetAddress gw = r.getGateway();
+                    if (gw instanceof Inet4Address && !gw.isAnyLocalAddress()
+                            && r.getDestination() != null && r.getDestination().getPrefixLength() == 0) {
+                        envVars.put("WINE_ANDROID_GATEWAY", gw.getHostAddress());
+                        break;
+                    }
+                }
+            }
+        }
 
         String ld_preload = "";
 
@@ -549,6 +568,16 @@ public class GuestProgramLauncherComponent extends EnvironmentComponent {
         File box64File = new File(rootDir, "/usr/bin/box64");
         if (box64File.exists()) {
             FileUtils.chmod(box64File, 0755);
+        }
+
+        // Diagnostic: dump every env var the Wine process actually receives.
+        // Log individually to stay under Android's ~4KB per-message truncation limit.
+        if (BuildConfig.DEBUG) {
+            String[] finalEnv = envVars.toStringArray();
+            Log.d("GuestProgramLauncherComponent", "=== FINAL ENV VARS (" + finalEnv.length + " entries) ===");
+            for (String entry : finalEnv) {
+                Log.d("GuestProgramLauncherComponent", "  " + SteamLogRedactor.redact(entry));
+            }
         }
 
         return ProcessHelper.exec(command, envVars.toStringArray(), rootDir, (status) -> {
