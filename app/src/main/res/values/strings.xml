@@ -1248,7 +1248,7 @@
     <string name="screen_alignment_disabled_hint">No effect in Stretch or Fill (no letterbox bars to move).</string>
     <string name="frame_generation">Frame Generation (AI)</string>
     <string name="frame_generation_off">Off</string>
-    <string name="frame_generation_bionic">win-fg</string>
+    <string name="frame_generation_bionic">Win-FG Native (built in)</string>
     <string name="frame_generation_lsfg">lsfg-vk (Lossless Scaling)</string>
     <string name="frame_generation_lsfg_native">LSFG Native (Lossless Scaling)</string>
     <string name="frame_generation_multiplier">Multiplier</string>
@@ -1436,6 +1436,18 @@ E.g. <b>META</b> for <i>META key</i>, \n
     <string name="pref_summary_requiresTrackpadAndNative">Requires "Touchscreen input mode" to be "Trackpad" and "Display resolution mode" to be not "native"</string>
     <string name="fexcore_config">FEXCore</string>
     <string name="fexcore_preset">FEXCore Preset</string>
+    <!-- Preset action row shown under the preset pickers in Container and game-shortcut settings.
+         Labels sit under the icons there (unlike App Settings, which is icon-only), so they must
+         stay very short - six of them share one row on a phone. -->
+    <string name="preset_action_add">Add</string>
+    <string name="preset_action_edit">Edit</string>
+    <string name="preset_action_duplicate">Copy</string>
+    <string name="preset_action_delete">Delete</string>
+    <string name="preset_action_export">Export</string>
+    <string name="preset_action_import">Import</string>
+    <!-- Marks a preset that carries its own values for this container or game rather than following
+         the shared one. Shown on the closed field and beside the name in the open dropdown. -->
+    <string name="preset_customised_badge">\u270E CUSTOM</string>
     <string name="adrenotools_gpu_drivers">Adrenotools GPU Drivers</string>
     <string name="install_drivers">Install Drivers</string>
     <string name="install_drivers_message">You will now be prompted to pick a driver. These must be the same ones used in other emulators like Yuzu, Dolphin, Citra, etc.</string>
@@ -1511,6 +1523,17 @@ E.g. <b>META</b> for <i>META key</i>, \n
     <string name="active_windows">Active Windows</string>
     <string name="contact_us">Help and Support</string>
     <string name="graphics_driver_show_incompatible">Show incompatible drivers</string>
+
+    <!-- Emulator account id carried in save backups (see EmuAccountIdentity) -->
+    <string name="emu_id_conflict_title">This backup uses a different %1$s account</string>
+    <string name="emu_id_conflict_body">Cracked games name their save folder after the account number they run under, and refuse a save made under a different one. The saves you just restored will only load under the account stored in the backup.</string>
+    <string name="emu_id_conflict_from_backup">In this backup</string>
+    <string name="emu_id_conflict_in_container">In this container now</string>
+    <string name="emu_id_conflict_account">%1$s: %2$s</string>
+    <string name="emu_id_conflict_account_with_folder">%1$s: %2$s (save folder %3$s)</string>
+    <string name="emu_id_conflict_warning">The account is shared by every emulated game in this container. Switching it makes the restored saves load, but any other cracked game here that saved under the current account will stop finding its saves.</string>
+    <string name="emu_id_conflict_apply">Use backup\'s account</string>
+    <string name="emu_id_conflict_keep">Keep current</string>
 
     <!-- Per-game save backup -->
     <string name="save_flow_caution_title">Not foolproof yet — verify before you wipe anything</string>
@@ -1985,6 +2008,19 @@ Pair it with WRAPPER_EMULATE_BCN=0 so the work is not done twice. Unnecessary on
 <b>1</b> : On.<br /><br />
 <b>When to change:</b> Mali devices only, and required for many DX11 and DX12 games there. It does
 nothing on Adreno.
+        ]]></string>
+    <string name="env_var_help__fex_diskcache"><![CDATA[
+        Whether FEX saves the x86 code it has translated to disk so later runs start warm. Translation
+normally happens fresh every launch and is thrown away when the game closes.<br /><br />
+<b>0</b> : Off, translate everything again each run. (default)<br />
+<b>1</b> : On, reuse what was translated before.<br /><br />
+<b>When to change:</b> turn it on for a game that stutters as new areas load, or one with a long
+first-time load. The gain shows on the second and later launches, once the cache has something in
+it. Needs FEXCore 2609 or newer; older builds ignore the variable.<br /><br />
+<b>Risk:</b> upstream has not added any cleanup yet, so the cache has no size limit and never drops
+old entries — it only grows, and grows fastest on games that generate their own code as they run. It
+may also miss that a game has been updated and keep stale entries. The cache lives in the container
+AppData folder; delete it if space runs short or a game misbehaves after an update.
         ]]></string>
     <string name="env_var_help__fd_dev_features"><![CDATA[
         Overrides device feature flags in the freedreno/Turnip driver.<br /><br />

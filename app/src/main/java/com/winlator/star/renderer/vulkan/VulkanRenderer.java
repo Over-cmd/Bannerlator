@@ -123,7 +123,7 @@ public class VulkanRenderer implements WindowManager.OnWindowModificationListene
     private native void nativeSetToon(long handle, boolean enabled);
     private native void nativeSetCrt(long handle, boolean enabled);
     private native void nativeSetNtsc(long handle, boolean enabled);
-    private native void nativeSetColorGrade(long handle, float brightness, float contrast, float gamma);
+    private native void nativeSetColorGrade(long handle, float brightness, float contrast, float gamma, float saturation);
     private native void nativeSetSwapRB(long handle, boolean enabled);
     private native void nativeSetPresentMode(long handle, int mode);
     private native int[] nativeGetSupportedPresentModes(long handle);
@@ -136,6 +136,12 @@ public class VulkanRenderer implements WindowManager.OnWindowModificationListene
     private native void nativeSetLsfgCachePath(long handle, String path);
     private native void nativeSetFrameGenTuning(long handle, float flowScale, float refreshHz);
     private native float[] nativeFrameGenStats(long handle);
+    private native void nativeSetFrameGenEngine(long handle, int kind);
+    private native void nativeSetWinFgTuning(long handle, int model, int perfPreset);
+
+    /** Native frame-gen engine kinds (mirror VulkanRendererContext). */
+    public static final int FG_ENGINE_LSFG  = 0;
+    public static final int FG_ENGINE_WINFG = 1;
 
     private static volatile boolean gpuImageChecked = false;
 
@@ -178,10 +184,12 @@ public class VulkanRenderer implements WindowManager.OnWindowModificationListene
                     nativeSetToon(nativeHandle, pendingToonEnabled);
                     nativeSetCrt(nativeHandle, pendingCrtEnabled);
                     nativeSetNtsc(nativeHandle, pendingNtscEnabled);
-                    nativeSetColorGrade(nativeHandle, pendingColorBrightness, pendingColorContrast, pendingColorGamma);
+                    nativeSetColorGrade(nativeHandle, pendingColorBrightness, pendingColorContrast, pendingColorGamma, pendingColorSaturation);
                     nativeSetSwapRB(nativeHandle, pendingSwapRB);
                     if (pendingLsfgCachePath != null)
                         nativeSetLsfgCachePath(nativeHandle, pendingLsfgCachePath);
+                    nativeSetFrameGenEngine(nativeHandle, pendingFgEngine);
+                    nativeSetWinFgTuning(nativeHandle, pendingFgModel, pendingFgPerfPreset);
                     nativeSetFrameGenTuning(nativeHandle, pendingFgFlowScale, pendingFgRefreshHz);
                     if (pendingFgArmed)
                         nativeSetFrameGenArmed(nativeHandle, true, pendingFgMultiplier);
@@ -848,20 +856,22 @@ public class VulkanRenderer implements WindowManager.OnWindowModificationListene
     }
 
     // Phase 2 composable screen effects (GL EffectComposer parity). Color grade takes
-    // the raw slider values (brightness/contrast -100..100, gamma 0.5..3.0); neutral
-    // (0,0,1) is a no-op. FXAA/Toon/CRT/NTSC are binary. Drawer-only / session-live.
-    public void setScreenEffects(float brightness, float contrast, float gamma,
+    // the raw slider values (brightness/contrast -100..100, gamma 0.5..3.0, saturation
+    // 0..200 percent); neutral (0,0,1,100) is a no-op. FXAA/Toon/CRT/NTSC are binary.
+    // Drawer-only / session-live.
+    public void setScreenEffects(float brightness, float contrast, float gamma, float saturation,
                                  boolean fxaa, boolean toon, boolean crt, boolean ntsc) {
         pendingColorBrightness = brightness;
         pendingColorContrast   = contrast;
         pendingColorGamma      = gamma;
+        pendingColorSaturation = saturation;
         pendingFxaaEnabled = fxaa;
         pendingToonEnabled = toon;
         pendingCrtEnabled  = crt;
         pendingNtscEnabled = ntsc;
         synchronized (lock) {
             if (nativeHandle != 0) {
-                nativeSetColorGrade(nativeHandle, brightness, contrast, gamma);
+                nativeSetColorGrade(nativeHandle, brightness, contrast, gamma, saturation);
                 nativeSetFxaa(nativeHandle, fxaa);
                 nativeSetToon(nativeHandle, toon);
                 nativeSetCrt(nativeHandle, crt);
@@ -949,6 +959,23 @@ public class VulkanRenderer implements WindowManager.OnWindowModificationListene
         }
     }
 
+    /** Which native engine generates: {@link #FG_ENGINE_LSFG} or {@link #FG_ENGINE_WINFG}. */
+    public void setFrameGenEngine(int kind) {
+        pendingFgEngine = kind;
+        synchronized (lock) {
+            if (nativeHandle != 0) nativeSetFrameGenEngine(nativeHandle, kind);
+        }
+    }
+
+    /** win-fg only: interpolation model (3/4) and performance preset (0..2). */
+    public void setWinFgTuning(int model, int perfPreset) {
+        pendingFgModel = model;
+        pendingFgPerfPreset = perfPreset;
+        synchronized (lock) {
+            if (nativeHandle != 0) nativeSetWinFgTuning(nativeHandle, model, perfPreset);
+        }
+    }
+
     /** Human-readable verdict, naming the first gate that failed. */
     public String getLsfgCapsReason() {
         synchronized (lock) {
@@ -1021,6 +1048,7 @@ public class VulkanRenderer implements WindowManager.OnWindowModificationListene
     private float   pendingColorBrightness = 0.0f;  // -100..100 slider; 0 = neutral
     private float   pendingColorContrast   = 0.0f;  // -100..100 slider; 0 = neutral
     private float   pendingColorGamma      = 1.0f;  // 0.5..3.0 slider; 1.0 = neutral
+    private float   pendingColorSaturation = 100.0f;// 0..200 slider; 100 = neutral
     private boolean pendingSwapRB         = false;
     // Native LSFG frame generation. Replayed after a surface reattach, like
     // every other renderer setting, so arming survives a background cycle.
@@ -1029,6 +1057,9 @@ public class VulkanRenderer implements WindowManager.OnWindowModificationListene
     private float   pendingFgFlowScale    = 1.0f;
     private float   pendingFgRefreshHz    = 0.0f;
     private String  pendingLsfgCachePath  = null;
+    private int     pendingFgEngine       = FG_ENGINE_LSFG;
+    private int     pendingFgModel        = 4;
+    private int     pendingFgPerfPreset   = 1;
     public int getFpsLimit() { return fpsLimit; }
     public void setFpsLimit(int limit) {
         this.fpsLimit = limit;

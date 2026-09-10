@@ -127,6 +127,12 @@ object XServerDrawerState {
     val nativeFgLocks: StateFlow<Boolean> = _nativeFgLocks
     fun setNativeFgLocks(v: Boolean) { _nativeFgLocks.value = v }
 
+    // "bionic" (win-fg) is running inside our compositor this session rather than
+    // as a guest layer. Display only: the badge reads "Win-FG Native".
+    private val _winFgNative = MutableStateFlow(false)
+    val winFgNative: StateFlow<Boolean> = _winFgNative
+    fun setWinFgNative(v: Boolean) { _winFgNative.value = v }
+
     private val _presentModeLocked = MutableStateFlow(false)
     val presentModeLocked: StateFlow<Boolean> = _presentModeLocked
     fun setPresentModeLocked(v: Boolean) { _presentModeLocked.value = v }
@@ -181,6 +187,13 @@ object XServerDrawerState {
     // listener so the readout can show what Auto landed on while the manual slider is greyed.
     private val _currentRefreshRate = MutableStateFlow(0)
     val currentRefreshRate: StateFlow<Int> = _currentRefreshRate
+
+    // The refresh rate (Hz) the activity is currently asking the display for: the user's manual
+    // lock, a VRR vote, or the panel's top mode. 0 = not published yet. The frame-gen over-limit
+    // warning checks cap x multiplier against this, because it is the cadence native frame gen
+    // presents at under FIFO.
+    private val _displayTargetHz = MutableStateFlow(0)
+    val displayTargetHz: StateFlow<Int> = _displayTargetHz
 
     // Current fullscreen aspect-ratio mode (#71): Container.FULLSCREEN_OFF/FIT/STRETCH. Shown next
     // to the in-game "Toggle Fullscreen" row so the user sees which mode the cycle landed on.
@@ -459,6 +472,7 @@ object XServerDrawerState {
     fun setManualRefreshRate(v: Int)       { _manualRefreshRate.value = v }
     fun setSupportedRefreshRates(v: List<Int>) { _supportedRefreshRates.value = v }
     fun setCurrentRefreshRate(v: Int)      { _currentRefreshRate.value = v }
+    fun setDisplayTargetHz(v: Int)         { _displayTargetHz.value = v }
 
     fun setFpsExpanded(v: Boolean) { _fpsExpanded.value = v }
     fun setFpsConfig(v: String) { _fpsConfig.value = v }
@@ -566,6 +580,7 @@ object XServerDrawerState {
         _presentMode.value = "fifo"
         _presentModeLocked.value = false
         _nativeFgLocks.value = false
+        _winFgNative.value = false
         _rendererIsVulkan.value = false
         _lsfgPerformanceMode.value = false
         _fpsLimiterEnabled.value = false
@@ -575,6 +590,7 @@ object XServerDrawerState {
         _manualRefreshRate.value = 0
         _supportedRefreshRates.value = emptyList()
         _currentRefreshRate.value = 0
+        _displayTargetHz.value = 0
         _cursorExpanded.value = false
         _swipeButtons.value = true
         _swipeDpad.value = false

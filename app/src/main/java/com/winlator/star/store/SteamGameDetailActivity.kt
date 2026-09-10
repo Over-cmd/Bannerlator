@@ -36,6 +36,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Help
 import com.winlator.star.R
+import com.winlator.star.core.CopyGameToDriveC
 import com.winlator.star.ui.screens.HelpDialog
 import com.winlator.star.ui.screens.MenuItemDivider
 import com.winlator.star.ui.screens.OutlinedAlertDialog
@@ -96,7 +97,9 @@ import com.winlator.star.store.compose.ContainerPickerDialog
 import com.winlator.star.store.compose.openShortcutsScreen
 import com.winlator.star.store.download.DownloadRegistry
 import com.winlator.star.store.download.DownloadsButton
+import com.winlator.star.store.download.MediaTab
 import com.winlator.star.store.download.Store
+import com.winlator.star.store.download.StoreMedia
 import com.winlator.star.store.download.formatDownloadSpeed
 import com.winlator.star.store.download.formatEta
 import com.winlator.star.ui.theme.WinlatorTheme
@@ -231,6 +234,18 @@ class SteamGameDetailActivity : ComponentActivity(), SteamRepository.SteamEventL
     // Removable SD card detected when the download dialog opens (null = none, so the SD option is
     // hidden). Detected off the UI thread in onInstallClicked before the picker is shown.
     private var sdTarget by mutableStateOf<SteamSdInstall.SdTarget?>(null)
+    // ── Storage move (gear → Move to SD card / Move to internal storage) ─────────────────────
+    // The direction on offer for THIS game, recomputed off the UI thread whenever the install state
+    // changes; null hides the gear row (not installed, folder gone, or no card present).
+    private var moveStorageLabel by mutableStateOf<String?>(null)
+    // The built plan, shown in the confirm dialog. Null = no dialog.
+    private var movePlan by mutableStateOf<MoveGameStorage.Plan?>(null)
+    // Live progress while a move runs; null = not running.
+    private var moveProgress by mutableStateOf<MoveGameStorage.Progress?>(null)
+    private var moveGameName by mutableStateOf("")
+    // Set true to ask a running move's copy loop to stop at the next file/buffer boundary.
+    @Volatile private var moveCancelled = false
+
     // Non-null while an uninstall is deleting files → shows the blocking progress spinner.
     private var uninstallingName by mutableStateOf<String?>(null)
     // Non-null briefly after an uninstall → themed auto-dismiss confirmation bar (not a Toast).
@@ -370,6 +385,8 @@ class SteamGameDetailActivity : ComponentActivity(), SteamRepository.SteamEventL
                     onPauseResumeClick = { onPauseResumeClicked() },
                     onCancelDeleteClick = { showCancelDeleteConfirm = true },
                     onLaunchClick = { onLaunchClicked() },
+                    moveStorageLabel = moveStorageLabel,
+                    onMoveStorageClick = { onMoveStorageClicked() },
                 )
 
                 // One-time third-party disclaimer — gates the FIRST cloud action (any game). On accept
@@ -523,6 +540,25 @@ class SteamGameDetailActivity : ComponentActivity(), SteamRepository.SteamEventL
                 }
 
                 uninstallingName?.let { UninstallProgressDialog(it) }
+
+                // Storage move: confirm sheet, then the blocking progress dialog. Both are driven
+                // from activity state so a recomposition (rotation, tab change) can't lose a move
+                // that is already running on its worker thread.
+                movePlan?.let { plan ->
+                    MoveStorageDialog(
+                        plan = plan,
+                        onConfirm = { startMove(plan) },
+                        onDismiss = { movePlan = null },
+                    )
+                }
+                moveProgress?.let { p ->
+                    MoveProgressDialog(
+                        gameName = moveGameName,
+                        progress = p,
+                        onCancel = { moveCancelled = true },
+                    )
+                }
+
                 uninstallResult?.let { UninstallResultBar(it) { uninstallResult = null } }
             }
         }
@@ -964,6 +1000,8 @@ class SteamGameDetailActivity : ComponentActivity(), SteamRepository.SteamEventL
         refreshBranchState(g)
         maybeResolveRealSize()
 
+        refreshMoveStorageOffer(g)
+
         if (g.isInstalled) {
             statusText = "Installed"
             gameStatus = GameStatus.INSTALLED
@@ -1003,6 +1041,74 @@ class SteamGameDetailActivity : ComponentActivity(), SteamRepository.SteamEventL
             cloudContainerReady = false
             cloudContainerLabel = null
         }
+    }
+
+    // ── Storage move ────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Recomputes the gear row's direction for this game off the UI thread
+     * ([MoveGameStorage.offerLabel] hits the database, the filesystem and the volume list). Hidden
+     * entirely while a download is in flight — the installer is writing into the very folder a move
+     * would be copying.
+     */
+    private fun refreshMoveStorageOffer(g: SteamGame) {
+        if (!g.isInstalled || downloadHandle != null) { moveStorageLabel = null; return }
+        Thread {
+            val label = try {
+                MoveGameStorage.offerLabel(this, g.appId)
+            } catch (t: Throwable) {
+                Log.w("MoveGameStorage", "move offer check failed", t); null
+            }
+            runOnUiThread { moveStorageLabel = label }
+        }.apply { isDaemon = true; name = "MoveOfferCheck" }.start()
+    }
+
+    /** Gear → move: build the plan (folder walk + shortcut scan) off the UI thread, then confirm. */
+    private fun onMoveStorageClicked() {
+        val g = game ?: return
+        if (MoveGameStorage.moveInProgress) {
+            uninstallResult = "A move is already running"
+            return
+        }
+        moveGameName = g.name.ifEmpty { "App ${g.appId}" }
+        moveProgress = MoveGameStorage.Progress(MoveGameStorage.Phase.VERIFYING) // "working…" spinner
+        Thread {
+            val result = runCatching { MoveGameStorage.buildPlan(this, g.appId) }
+            runOnUiThread {
+                moveProgress = null
+                result.onSuccess { movePlan = it }.onFailure {
+                    uninstallResult = it.message ?: "Couldn't work out where to move this game"
+                }
+            }
+        }.apply { isDaemon = true; name = "MovePlan" }.start()
+    }
+
+    /** Runs a confirmed plan on a worker thread, reporting progress back to the dialog. */
+    private fun startMove(plan: MoveGameStorage.Plan) {
+        movePlan = null
+        moveCancelled = false
+        moveProgress = MoveGameStorage.Progress(MoveGameStorage.Phase.COPYING, 0L, plan.sizeBytes)
+        Thread {
+            val result = runCatching {
+                MoveGameStorage.execute(this, plan, { moveCancelled }) { p ->
+                    runOnUiThread { moveProgress = p }
+                }
+            }
+            runOnUiThread {
+                moveProgress = null
+                result.onSuccess {
+                    uninstallResult = "${plan.gameName} moved to ${plan.to.label}"
+                }.onFailure { t ->
+                    uninstallResult = when (t) {
+                        is CopyGameToDriveC.CancelledException -> "Move cancelled — nothing was changed"
+                        else -> t.message ?: "The move failed — the game is still where it was"
+                    }
+                }
+                // Repaint from the DB either way: on success the install dir, size and the gear's
+                // direction all changed; on failure this re-asserts the unchanged state.
+                loadGame()
+            }
+        }.apply { isDaemon = true; name = "MoveGameStorage" }.start()
     }
 
     private fun onInstallClicked() {
@@ -1397,6 +1503,8 @@ private enum class DetailTab(val label: String) {
     ACHIEVEMENTS("Achievements"),
     DLC("DLC"),
     CLOUD("Cloud saves"),
+    /** Store screenshots + trailers; only in the strip once the appdetails fetch found any. */
+    MEDIA("Media"),
 }
 
 // ── Achievements/tab mockup palette ─────────────────────────────────────────────────────────────
@@ -1505,6 +1613,10 @@ private fun SteamGameDetailScreen(
     onPauseResumeClick: () -> Unit,
     onCancelDeleteClick: () -> Unit,
     onLaunchClick: () -> Unit,
+    /** Gear → "Move to SD card" / "Move to internal storage". Null while the game isn't movable
+     *  (not installed, folder missing, or no card to move it to) — the row is then hidden. */
+    moveStorageLabel: String?,
+    onMoveStorageClick: () -> Unit,
 ) {
     val context = LocalContext.current
     var selectedTab by remember { mutableStateOf(DetailTab.DETAILS) }
@@ -1529,6 +1641,33 @@ private fun SteamGameDetailScreen(
         }
         achievements = list
         achLoading = false
+    }
+
+    // Media tab — store screenshots + trailers from appdetails, ONE request per page open (cache hits
+    // and misses both count against Steam's rate limit, so the shared StoreMediaCache answers first;
+    // a 429/transport failure is cached for two minutes only). The tab appears once non-empty.
+    var media by remember(appId) { mutableStateOf<StoreMedia?>(null) }
+    var mediaLoading by remember(appId) { mutableStateOf(true) }
+    LaunchedEffect(appId) {
+        mediaLoading = true
+        val id = appId.toString()
+        media = withContext(Dispatchers.IO) {
+            StoreMediaCache.get(context, Store.STEAM, id) ?: run {
+                val fetched = try {
+                    SteamStoreSearch.fetchMedia(appId, SteamRegion.storeCountryCode(context))
+                } catch (_: Throwable) { null }
+                StoreMediaCache.put(context, Store.STEAM, id, fetched ?: StoreMedia.EMPTY, miss = fetched == null)
+                fetched ?: StoreMedia.EMPTY
+            }
+        }
+        mediaLoading = false
+    }
+    val mediaTabVisible = media?.isEmpty == false
+    val detailTabs = remember(mediaTabVisible) {
+        DetailTab.values().filter { it != DetailTab.MEDIA || mediaTabVisible }
+    }
+    LaunchedEffect(mediaTabVisible) {
+        if (!mediaTabVisible && selectedTab == DetailTab.MEDIA) selectedTab = DetailTab.DETAILS
     }
 
     // DLC tab — the FULL owned-DLC catalogue (broader than the depot-bundled `dlcEntries` picker set:
@@ -1759,6 +1898,13 @@ private fun SteamGameDetailScreen(
                     MenuItemDivider()
                     GearMenuItem("🧩", "Manage DLC", enabled = dlcEntries.isNotEmpty(),
                         onClick = { gearMenuExpanded = false; onDlcLineClick() })
+                    // Storage move — only for an installed game that has somewhere to go. Hidden
+                    // (not greyed) otherwise, since "no SD card" isn't a state the user can act on.
+                    if (moveStorageLabel != null) {
+                        MenuItemDivider()
+                        GearMenuItem("📦", moveStorageLabel,
+                            onClick = { gearMenuExpanded = false; onMoveStorageClick() })
+                    }
                     // Goldberg mode moved to the pre-launch launch-method popup (SteamLite vs Goldberg,
                     // see LaunchMethodSheet) — no longer a gear item here.
                     // Installed → Uninstall at the bottom.
@@ -1785,9 +1931,11 @@ private fun SteamGameDetailScreen(
         // Tab strip — Details · Achievements (done/total) · DLC · Cloud saves. Styled like the
         // action buttons and horizontally scrollable, per the mockup.
         SteamDetailTabs(
+            tabs = detailTabs,
             selected = selectedTab,
             achDone = achievements.count { it.unlocked },
             achTotal = achievements.size,
+            mediaCount = media?.count ?: 0,
             onSelect = { selectedTab = it },
         )
 
@@ -1949,6 +2097,14 @@ private fun SteamGameDetailScreen(
                     }
                 }
             }
+
+            // Media = the shared store Media tab (trailers + screenshots, viewer, playback handoff).
+            DetailTab.MEDIA -> MediaTab(
+                media = media,
+                loading = mediaLoading,
+                storeLabel = "Steam",
+                onOpenVideo = { MediaPlayback.openVideo(context, it) },
+            )
 
             // Cloud saves = the existing three-tier manager when it's available (installed + a live
             // Steam session); otherwise a compact status line explaining what's needed.
@@ -2227,9 +2383,11 @@ private fun GearMenuItem(
  */
 @Composable
 private fun SteamDetailTabs(
+    tabs: List<DetailTab>,
     selected: DetailTab,
     achDone: Int,
     achTotal: Int,
+    mediaCount: Int,
     onSelect: (DetailTab) -> Unit,
 ) {
     Row(
@@ -2239,9 +2397,13 @@ private fun SteamDetailTabs(
             .padding(start = 16.dp, end = 16.dp, top = 14.dp, bottom = 6.dp),
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        DetailTab.values().forEach { tab ->
+        tabs.forEach { tab ->
             val isSel = tab == selected
-            val badge = if (tab == DetailTab.ACHIEVEMENTS && achTotal > 0) "$achDone/$achTotal" else null
+            val badge = when {
+                tab == DetailTab.ACHIEVEMENTS && achTotal > 0 -> "$achDone/$achTotal"
+                tab == DetailTab.MEDIA && mediaCount > 0 -> "$mediaCount"
+                else -> null
+            }
             val shape = RoundedCornerShape(9.dp)
             Row(
                 verticalAlignment = Alignment.CenterVertically,

@@ -2,6 +2,8 @@
 
 package com.winlator.star.ui.screens
 
+import com.winlator.star.core.PresetScope
+import com.winlator.star.core.PresetOverrides
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
@@ -238,6 +240,7 @@ import com.winlator.star.core.GameSaveBackup
 import com.winlator.star.core.KeyValueSet
 import com.winlator.star.ui.components.ContainerGlossarySheet
 import com.winlator.star.ui.components.DraggableAddButton
+import com.winlator.star.ui.components.EmuAccountConflictDialog
 import com.winlator.star.ui.theme.DangerRed
 import com.winlator.star.core.LogInventory
 import com.winlator.star.core.LogLocation
@@ -323,6 +326,8 @@ fun ShortcutsScreen(vm: ShortcutsViewModel = viewModel()) {
     // label of the game the restore was launched from (shown in the container picker title).
     var restoreZipUri by remember { mutableStateOf<Uri?>(null) }
     var restoreForName by remember { mutableStateOf("") }
+    // Emulator account ids a restore held back because the container already runs a different one.
+    var emuConflicts by remember { mutableStateOf<List<GameSaveBackup.EmuIdConflict>>(emptyList()) }
     // The shortcut whose "Back up saves" layout-choice dialog is open (Winlator vs GameHub).
     var backupFormatShortcut by remember { mutableStateOf<Shortcut?>(null) }
     var settingsShortcut by remember { mutableStateOf<Shortcut?>(null) }
@@ -1787,9 +1792,21 @@ fun ShortcutsScreen(vm: ShortcutsViewModel = viewModel()) {
                         else "Restore failed: ${r.error ?: "unknown error"}",
                         Toast.LENGTH_LONG,
                     ).show()
+                    emuConflicts = r.emuConflicts
                 }
             },
         )
+    }
+
+    EmuAccountConflictDialog(conflicts = emuConflicts) { applied, _ ->
+        emuConflicts = emptyList()
+        if (applied > 0) {
+            Toast.makeText(
+                context,
+                "Emulator account switched to the backup's — relaunch the game",
+                Toast.LENGTH_LONG,
+            ).show()
+        }
     }
 
     // Save Backup: choose the archive layout before backing up (mirrors the Containers backup menu's
@@ -2892,17 +2909,37 @@ fun ShortcutsScreen(vm: ShortcutsViewModel = viewModel()) {
                 TextButton(enabled = !eaSetupBusy, onClick = {
                     eaSetupBusy = true
                     eaScope.launch {
-                        val exe = withContext(Dispatchers.IO) {
-                            try { WinePath.resolveAndroidPath(s.container, s.path)?.absolutePath } catch (t: Throwable) { null }
+                        // Resolve with the SAME derivation that decided to show this dialog
+                        // (EaSupport.installDirOf): a legacy shortcut written before steamAppId was stamped
+                        // (pre-2026-08 downloads), or a drive-letter path the strict resolver can't map, used
+                        // to dead-end here with a misleading "install folder" toast (reported on NFS Heat, 3.0.7).
+                        val installDir = withContext(Dispatchers.IO) {
+                            runCatching { EaSupport.installDirOf(s) }.getOrNull()
                         }
-                        val appId = steamAppIdOf(s)
+                        val exe = withContext(Dispatchers.IO) {
+                            val resolved = runCatching { WinePath.resolveAndroidPath(s.container, s.path)?.absolutePath }.getOrNull()
+                            // runForShortcut locates the depot from the exe's steam_games/ segment, so prefer a
+                            // path inside the resolved depot when the direct mapping lacks that segment.
+                            resolved?.takeIf { InstallScriptExecutor.locateInstallDir(File(it)) != null }
+                                ?: installDir?.let { File(it, s.path.replace('\\', '/').substringAfterLast('/')).absolutePath }
+                                ?: resolved
+                        }
+                        val appId = withContext(Dispatchers.IO) {
+                            runCatching { EaSupport.resolveSteamAppId(s, installDir) }.getOrDefault(0)
+                        }
                         if (exe != null && appId > 0) {
                             withContext(Dispatchers.IO) {
                                 try { InstallScriptExecutor.runForShortcut(context, s.container, appId, exe, true) }
                                 catch (t: Throwable) { android.util.Log.w("ShortcutsScreen", "EA setup failed", t) }
                             }
                         } else {
-                            Toast.makeText(context, "Couldn't locate the game's install folder", Toast.LENGTH_LONG).show()
+                            android.util.Log.w("ShortcutsScreen", "EA setup: cannot start for '${s.name}' — exe=$exe appId=$appId path='${s.path}' container=${s.container.id}")
+                            Toast.makeText(
+                                context,
+                                if (exe == null) "Couldn't locate the game's install folder (${s.path})"
+                                else "Couldn't work out this game's Steam app id — re-add it from the Steam library",
+                                Toast.LENGTH_LONG,
+                            ).show()
                         }
                         eaSetupBusy = false
                         eaSetupFor = null
@@ -7805,6 +7842,11 @@ internal fun ShortcutSettingsDialogScreen(
                         }
                             2 -> ScEnvVarsTab(envVarsStr, { envVarsStr = it }, gameDir)
                             3 -> ScAdvancedTab(
+            shortcut = shortcut,
+            onPresetListChanged = {
+                box64Presets = Box64PresetManager.getPresets("box64", context)
+                fexCorePresets = FEXCorePresetManager.getPresets(context)
+            },
             isArm64EC = isArm64EC,
             box64Versions = box64Versions,
             selectedBox64Version = selectedBox64Version,
@@ -8084,6 +8126,10 @@ private fun ScEnvVarsTab(
 
 @Composable
 private fun ScAdvancedTab(
+    /** The shortcut being edited — preset edits made here belong to THIS game and are stored on it. */
+    shortcut: Shortcut,
+    /** A preset was added / duplicated / removed / imported, so both lists need re-reading. */
+    onPresetListChanged: () -> Unit,
     isArm64EC: Boolean,
     box64Versions: List<String>,
     selectedBox64Version: String,
@@ -8122,6 +8168,10 @@ private fun ScAdvancedTab(
     onShowBox64DownloadSheet: () -> Unit = {},
     onShowFexCoreDownloadSheet: () -> Unit = {},
 ) {
+    val context = LocalContext.current
+    // Bumped when a preset's values or the preset list change, so the "customised" badges
+    // re-evaluate — that state lives on the Shortcut, which Compose cannot observe by itself.
+    var presetRevision by remember { mutableIntStateOf(0) }
     // Flush legacy CPUListView selection back to the parent (Shortcut extras)
     // before the tab leaves composition, so a tab switch doesn't drop edits.
     DisposableEffect(Unit) {
@@ -8160,11 +8210,36 @@ private fun ScAdvancedTab(
             }
             Spacer(Modifier.height(8.dp))
             val presetNames = box64Presets.map { it.name }
-            LabeledDropdown(
-                label = "$emulatorLabel Preset",
-                options = presetNames,
-                selectedOption = presetNames.getOrElse(selectedBox64PresetIndex) { "" },
-                onSelect = { opt -> onBox64PresetIndexChange(presetNames.indexOf(opt).coerceAtLeast(0)) }
+            val b64Id = box64Presets.getOrNull(selectedBox64PresetIndex)?.id ?: ""
+            val b64Customised = remember(presetRevision, b64Id) {
+                b64Id.isNotEmpty() && PresetOverrides.isCustomised(
+                    context, false, b64Id, PresetScope.SHORTCUT, shortcut.container, shortcut
+                )
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                LabeledDropdown(
+                    label = "$emulatorLabel Preset",
+                    options = presetNames,
+                    selectedOption = presetNames.getOrElse(selectedBox64PresetIndex) { "" },
+                    onSelect = { opt -> onBox64PresetIndexChange(presetNames.indexOf(opt).coerceAtLeast(0)) },
+                    modifier = Modifier.weight(1f)
+                )
+                if (b64Customised) PresetCustomBadge()
+            }
+            // Scoped to this game: the shared preset, its container and every other game stay as
+            // they are. Values ride this dialog's OK, like every other field here.
+            PresetEditorRow(
+                kind = PresetKind.BOX64,
+                selectedPresetId = b64Id,
+                scope = PresetScope.SHORTCUT,
+                container = shortcut.container,
+                shortcut = shortcut,
+                onSelect = { id ->
+                    box64Presets.indexOfFirst { it.id == id }
+                        .takeIf { it >= 0 }?.let(onBox64PresetIndexChange)
+                },
+                onListChanged = { onPresetListChanged(); presetRevision++ },
+                onValuesChanged = { presetRevision++ },
             )
         }
 
@@ -8193,6 +8268,12 @@ private fun ScAdvancedTab(
                 }
                 Spacer(Modifier.height(8.dp))
                 val fexNames = fexCorePresets.map { it.name }
+                val fexId = fexCorePresets.getOrNull(selectedFexPresetIndex)?.id ?: ""
+                val fexCustomised = remember(presetRevision, fexId) {
+                    fexId.isNotEmpty() && PresetOverrides.isCustomised(
+                        context, true, fexId, PresetScope.SHORTCUT, shortcut.container, shortcut
+                    )
+                }
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     LabeledDropdown(
                         label = stringResource(R.string.fexcore_preset),
@@ -8204,7 +8285,21 @@ private fun ScAdvancedTab(
                     IconButton(onClick = { helpRes = R.string.help_fexcore_preset }) {
                         Icon(Icons.Default.Help, contentDescription = "What is this?", modifier = Modifier.size(18.dp))
                     }
+                    if (fexCustomised) PresetCustomBadge()
                 }
+                PresetEditorRow(
+                    kind = PresetKind.FEXCORE,
+                    selectedPresetId = fexId,
+                    scope = PresetScope.SHORTCUT,
+                    container = shortcut.container,
+                    shortcut = shortcut,
+                    onSelect = { id ->
+                        fexCorePresets.indexOfFirst { it.id == id }
+                            .takeIf { it >= 0 }?.let(onFexPresetIndexChange)
+                    },
+                    onListChanged = { onPresetListChanged(); presetRevision++ },
+                    onValuesChanged = { presetRevision++ },
+                )
             }
         }
 
