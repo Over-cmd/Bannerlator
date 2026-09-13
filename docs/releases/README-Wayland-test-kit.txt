@@ -1,8 +1,15 @@
-Bannerlator Wayland test kit  (2026-09-13, phase 3b = pre-release 3)
+Bannerlator Wayland test kit  (2026-09-13, phase 3c = pre-release 4)
 ====================================================================
 
-1. Bannerlator-3.1.2-wayland-pre3-<flavour>.apk   (all three flavours on the GitHub pre-release)
+1. Bannerlator-3.1.2-wayland-pre4-<flavour>.apk   (all three flavours on the GitHub pre-release)
    versionCode 85 like 3.1.1, so you can go back to 3.1.1 or forward to the next stable.
+   New since pre-release 3 (needs the v6 layer below):
+   - The zero-copy toggle SWITCHES LIVE. Flip it in the drawer while the game runs and the game
+     moves onto its own Android display layer (no copy between the game and the screen), flip it
+     back and it returns to the normal path. No relaunch, no black frame, no fps change.
+     The row shows what is really happening ("On: N zero-copy frames in the last 10 s" / "Off").
+   - Effects, scaling and frame generation still pause zero-copy while they are on, live.
+   - A new app on the old v5 layer behaves exactly as before; only app + v6 layer gives the switch.
    New since pre-release 2 (phase 3b, the in-game drawer):
    - Task Manager > Container shows "Display backend: X11/Wayland"; on Wayland the Renderer row reads
      "Vulkan (Wayland compositor)" and Graphics driver names both drivers (compositor + game).
@@ -29,7 +36,7 @@ Bannerlator Wayland test kit  (2026-09-13, phase 3b = pre-release 3)
      Wine's desktop no longer closes a second into a game's startup (32-bit games under FEX).
    - Keyboard layout names now come from xkb data bundled in the Proton (no longer forced to "us").
 
-2. proton-11.0-2.1-arm64ec-wayland-v5.wcp   (installs as Proton-11.0-2.1-arm64ec-5)
+2. proton-11.0-2.1-arm64ec-wayland-v6.wcp   (installs as Proton-11.0-2.1-arm64ec-6)
    Proton 11.0-2 + winewayland + EIGHT Wayland Turnips chosen under "Wayland game driver":
      Bundled                    upstream Mesa 7cda7850, no patches        Adreno 6xx, 730, 740, 750
      Bundled a7xx               Vauzi-17 "710" v3.6 recipe                  Adreno 710, 720, 722
@@ -40,7 +47,8 @@ Bannerlator Wayland test kit  (2026-09-13, phase 3b = pre-release 3)
      Bundled a8xx WHITE         whitebelyash Mainline Turnip v31 recipe
      Bundled a8xx upstream      pure Mesa main @ bbc7792f (2026-09-13), no patches
    Also inside: the zero-copy swapchain patch in every driver, xkeyboard-config data, and the
-   Wine fix restoring the 1 s desktop-close grace. Remove older -1 … -4 entries on the Contents screen.
+   Wine fix restoring the 1 s desktop-close grace, and the drivers that follow the live zero-copy
+   switch. Remove older -1 … -5 entries on the Contents screen.
    All eight load and render on an Adreno 750; none has been run on real 710/720/722 or 830/840 yet.
 
 3. No Turnip zip needed: the compositor uses whatever Android Turnip you pick under
@@ -48,9 +56,9 @@ Bannerlator Wayland test kit  (2026-09-13, phase 3b = pre-release 3)
 
 Setup
 -----
-1. Install the APK for your flavour over 3.1.1 or pre-release 1.
-2. Contents > Proton > Install from file: the v5 wcp.
-3. Container: Proton = Proton-11.0-2.1-arm64ec-5, Display backend = Wayland, Compositor driver =
+1. Install the APK for your flavour over 3.1.1 or an earlier pre-release.
+2. Contents > Proton > Install from file: the v6 wcp.
+3. Container: Proton = Proton-11.0-2.1-arm64ec-6, Display backend = Wayland, Compositor driver =
    an Android Turnip, Wayland game driver = Auto (8xx owners: try the alternatives one by one),
    FEXCore = an installed version. DXVK / VKD3D / components / audio as on X11.
 4. Optional experiments via Env Vars: BANNER_WAYLAND_ZERO_COPY=1 (fullscreen games only),
@@ -66,6 +74,8 @@ Verified on this build (AYANEO Pocket FIT, Adreno 750)
   Notepad: paste from Android, type, copy back; soft keyboard auto-opens.
   Drawer on Wayland: backend row, zero-copy toggle, Look "Retro CRT" applied live over Half-Life 2.
   LSFG Native from the drawer on Half-Life 2 (30 fps game): 60.0 / 90.0 / 120.0 fps shown at 2x / 3x / 4x.
+  Live zero-copy switch on Half-Life 2: off -> on -> off -> on mid-game, every presented frame
+  zero-copy while on, ~1435 game frames per 10 s throughout, picture never black.
 
 Known gaps
 ----------
@@ -73,7 +83,8 @@ Known gaps
   (no change, CPU-bound), GPU busy 79% vs 83%, GPU clock 944 vs 1000 MHz, power 16.3 W vs 16.8 W.
   Zero-copy removes the compositor's GPU work; fps gains need a GPU-bound game or a big panel.
 - Real Adreno 710/720/722 and 830/840 hardware untested: please report which a8xx build works best.
-- The zero-copy toggle applies on the next launch, not live (a live switch is next).
 - bionic-fg stays X11-only; drag-and-drop, image clipboard and window decorations are not on Wayland yet.
+- The live switch is proven on the Adreno 750 only. On a GPU where the compositor cannot import the
+  game's buffers, switching off keeps the old frames on the layer until the game rebuilds.
 
 Logs: Download/Wayland-logs/wayland-*.log (compositor) and Download/bannerlator/<game>/wine_debug.log.
