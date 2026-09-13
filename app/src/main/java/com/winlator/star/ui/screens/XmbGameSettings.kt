@@ -307,7 +307,10 @@ private fun generalRows(xmb: XmbScope, p: XmbPrefs, host: XmbGameHost): List<Xmb
 
     val rendId = p.ex("renderer", c.renderer).lowercase()
     val rend = when (rendId) { "vulkan" -> "Vulkan"; "surfaceflinger" -> "SurfaceFlinger"; else -> "OpenGL" }
-    rows += XmbRow.Choice("renderer", "Renderer", Icons.Filled.DesktopWindows, listOf("OpenGL", "Vulkan", "SurfaceFlinger"), rend,
+    // Display only while disabled on Wayland: the compositor is always Vulkan; `rend` (the stored
+    // X11 choice) is untouched and still drives the Vulkan/SurfaceFlinger sub-rows below.
+    val rendShown = if (waylandGame) "Vulkan (Wayland compositor)" else rend
+    rows += XmbRow.Choice("renderer", "Renderer", Icons.Filled.DesktopWindows, if (waylandGame) listOf(rendShown) else listOf("OpenGL", "Vulkan", "SurfaceFlinger"), rendShown,
         disabledReason = if (waylandGame) "Wayland draws through its own compositor" else null,
         confirm = { v -> if (v == "SurfaceFlinger") XmbConfirm("SurfaceFlinger renderer", "SurfaceFlinger renderer — experimental. Use it for this game?", "Use SurfaceFlinger") else null }) { v ->
         xmb.set(p, "renderer", v.lowercase())

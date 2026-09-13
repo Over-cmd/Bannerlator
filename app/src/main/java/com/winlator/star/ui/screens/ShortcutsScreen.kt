@@ -7300,11 +7300,14 @@ internal fun ShortcutSettingsDialogScreen(
                     // Renderer (host) — per-game override of the container's OpenGL/Vulkan choice.
                     var showSfWarning by remember { mutableStateOf(false) }
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        // Display only while greyed on Wayland: the compositor is always Vulkan; the
+                        // stored X11 choice is kept and returns with the X11 backend.
+                        val rendererShown = if (effectiveWaylandShortcut) "Vulkan (Wayland compositor)" else selectedRenderer
                         DpDrop(
                             dp, "renderer",
                             label = stringResource(R.string.renderer),
-                            options = listOf("OpenGL", "Vulkan", "SurfaceFlinger"),
-                            selected = selectedRenderer,
+                            options = if (effectiveWaylandShortcut) listOf(rendererShown) else listOf("OpenGL", "Vulkan", "SurfaceFlinger"),
+                            selected = rendererShown,
                             onSelect = {
                                 // SurfaceFlinger is experimental and can reboot some devices — require opt-in.
                                 if (it == "SurfaceFlinger" && selectedRenderer != "SurfaceFlinger") showSfWarning = true

@@ -1027,12 +1027,15 @@ private fun TopLevelFields(
         // Renderer — the X11-side compositor stage. Greyed under the Wayland backend, which
         // replaces it with the embedded compositor.
         val rendererEnabled = !viewModel.isWaylandBackend
+        // Display only while greyed: the compositor is always Vulkan, so don't show the stored X11
+        // choice (it is kept untouched and comes back when the backend returns to X11).
+        val rendererShown = if (rendererEnabled) viewModel.selectedRenderer else "Vulkan (Wayland compositor)"
         var showSfWarning by remember { mutableStateOf(false) }
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             LabeledDropdown(
                 label = stringResource(R.string.renderer),
-                options = viewModel.rendererEntries,
-                selectedOption = viewModel.selectedRenderer,
+                options = if (rendererEnabled) viewModel.rendererEntries else listOf(rendererShown),
+                selectedOption = rendererShown,
                 onSelect = {
                     // SurfaceFlinger is experimental and can reboot some devices — require opt-in.
                     if (it == "SurfaceFlinger" && viewModel.selectedRenderer != "SurfaceFlinger") showSfWarning = true
