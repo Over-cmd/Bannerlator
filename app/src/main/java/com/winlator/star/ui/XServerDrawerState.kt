@@ -39,6 +39,12 @@ object XServerDrawerState {
     private val _isRelativeMouseMovement = MutableStateFlow(false)
     val isRelativeMouseMovement: StateFlow<Boolean> = _isRelativeMouseMovement
 
+    // True while the session runs on the embedded Wayland compositor. UI-only gate: Relative Mouse
+    // needs zwp_pointer_constraints_v1 / zwp_relative_pointer_manager_v1, which the compositor
+    // doesn't implement yet, so the drawer greys the chip (the stored value is left alone).
+    private val _isWaylandMode           = MutableStateFlow(false)
+    val isWaylandMode: StateFlow<Boolean> = _isWaylandMode
+
     private val _isMouseDisabled         = MutableStateFlow(false)
     val isMouseDisabled: StateFlow<Boolean> = _isMouseDisabled
 
@@ -157,6 +163,15 @@ object XServerDrawerState {
     private val _lsfgPerformanceMode = MutableStateFlow(false)
     val lsfgPerformanceMode: StateFlow<Boolean> = _lsfgPerformanceMode
 
+    // LSFG Native experimental capture resolution (FeatureFlags.LSFG_NATIVE_EXPERIMENTS_ENABLED): "panel" / "game" /
+    // a bare height. Seeded from the container, tuned live.
+    private val _fgCaptureResolution = MutableStateFlow("panel")
+    val fgCaptureResolution: StateFlow<String> = _fgCaptureResolution
+    // The panel's height in landscape (0 = unknown); the capture chips hide heights outside the
+    // renderer's [panel/4, panel) clamp.
+    private val _fgPanelHeight = MutableStateFlow(0)
+    val fgPanelHeight: StateFlow<Int> = _fgPanelHeight
+
     private val _fpsLimiterEnabled = MutableStateFlow(false)
     val fpsLimiterEnabled: StateFlow<Boolean> = _fpsLimiterEnabled
 
@@ -194,6 +209,25 @@ object XServerDrawerState {
     // presents at under FIFO.
     private val _displayTargetHz = MutableStateFlow(0)
     val displayTargetHz: StateFlow<Int> = _displayTargetHz
+
+    // Native frame gen switched Auto (match FPS) on by itself for this session (the user's saved
+    // setting was off). Drives the "Auto turned on for frame generation" note until the user acts.
+    private val _fgAutoTurnedOn = MutableStateFlow(false)
+    val fgAutoTurnedOn: StateFlow<Boolean> = _fgAutoTurnedOn
+
+    // Whether turning Auto off during frame gen is remembered: true when the game was launched
+    // from a shortcut (the opt-out lives on the shortcut, never the container).
+    private val _fgAutoPerGame = MutableStateFlow(false)
+    val fgAutoPerGame: StateFlow<Boolean> = _fgAutoPerGame
+
+    // Why the selected native frame-gen engine (LSFG Native / Win-FG Native) cannot run in this
+    // session, in plain words with the fix; "" = nothing wrong (or not known yet). The drawer
+    // greys the multiplier buttons out while it is set. The detail line is the renderer's own
+    // technical verdict (e.g. "device Vulkan version below 1.3"), for support threads.
+    private val _fgUnavailableReason = MutableStateFlow("")
+    val fgUnavailableReason: StateFlow<String> = _fgUnavailableReason
+    private val _fgUnavailableDetail = MutableStateFlow("")
+    val fgUnavailableDetail: StateFlow<String> = _fgUnavailableDetail
 
     // Current fullscreen aspect-ratio mode (#71): Container.FULLSCREEN_OFF/FIT/STRETCH. Shown next
     // to the in-game "Toggle Fullscreen" row so the user sees which mode the cycle landed on.
@@ -425,6 +459,7 @@ object XServerDrawerState {
     // Setters called from Java
     fun setIsPaused(v: Boolean)                { _isPaused.value = v }
     fun setIsRelativeMouseMovement(v: Boolean) { _isRelativeMouseMovement.value = v }
+    fun setIsWaylandMode(v: Boolean)           { _isWaylandMode.value = v }
     fun setIsMouseDisabled(v: Boolean)         { _isMouseDisabled.value = v }
     fun setMoveCursorToTouchpoint(v: Boolean)  { _moveCursorToTouchpoint.value = v }
     fun setGestureDragSelect(v: Boolean)          { _gestureDragSelect.value = v }
@@ -465,6 +500,8 @@ object XServerDrawerState {
     fun setFrameGenEngine(v: String)       { _frameGenEngine.value = v }
     fun setFrameGenReadout(v: String)      { _frameGenReadout.value = v }
     fun setLsfgPerformanceMode(v: Boolean) { _lsfgPerformanceMode.value = v }
+    fun setFgCaptureResolution(v: String)  { _fgCaptureResolution.value = v.ifEmpty { "panel" } }
+    fun setFgPanelHeight(v: Int)           { _fgPanelHeight.value = v }
     fun setFpsLimiterEnabled(v: Boolean)   { _fpsLimiterEnabled.value = v }
     fun setFpsLimit(v: Int)                { _fpsLimit.value = v }
     fun setMatchRefreshRate(v: Boolean)    { _matchRefreshRate.value = v }
@@ -473,6 +510,12 @@ object XServerDrawerState {
     fun setSupportedRefreshRates(v: List<Int>) { _supportedRefreshRates.value = v }
     fun setCurrentRefreshRate(v: Int)      { _currentRefreshRate.value = v }
     fun setDisplayTargetHz(v: Int)         { _displayTargetHz.value = v }
+    fun setFgAutoTurnedOn(v: Boolean)      { _fgAutoTurnedOn.value = v }
+    fun setFgAutoPerGame(v: Boolean)       { _fgAutoPerGame.value = v }
+    fun setFgUnavailable(reason: String, detail: String) {
+        _fgUnavailableReason.value = reason
+        _fgUnavailableDetail.value = detail
+    }
 
     fun setFpsExpanded(v: Boolean) { _fpsExpanded.value = v }
     fun setFpsConfig(v: String) { _fpsConfig.value = v }
@@ -560,6 +603,7 @@ object XServerDrawerState {
         _controlsSubTab.value = 0
         _isPaused.value = false
         _isRelativeMouseMovement.value = false
+        _isWaylandMode.value = false
         _isMouseDisabled.value = false
         _moveCursorToTouchpoint.value = false
         _gestureDragSelect.value = true
@@ -583,6 +627,8 @@ object XServerDrawerState {
         _winFgNative.value = false
         _rendererIsVulkan.value = false
         _lsfgPerformanceMode.value = false
+        _fgCaptureResolution.value = "panel"
+        _fgPanelHeight.value = 0
         _fpsLimiterEnabled.value = false
         _fpsLimit.value = 60
         _matchRefreshRate.value = true
@@ -591,6 +637,10 @@ object XServerDrawerState {
         _supportedRefreshRates.value = emptyList()
         _currentRefreshRate.value = 0
         _displayTargetHz.value = 0
+        _fgAutoTurnedOn.value = false
+        _fgAutoPerGame.value = false
+        _fgUnavailableReason.value = ""
+        _fgUnavailableDetail.value = ""
         _cursorExpanded.value = false
         _swipeButtons.value = true
         _swipeDpad.value = false

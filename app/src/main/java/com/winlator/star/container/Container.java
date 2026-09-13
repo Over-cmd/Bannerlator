@@ -33,6 +33,32 @@ public class Container {
     // overlay for an empty element list — so a fresh container starts with the HUD off.
     public static final String DEFAULT_ENV_VARS = "WRAPPER_MAX_IMAGE_COUNT=0 ZINK_DESCRIPTORS=lazy ZINK_DEBUG=compact MESA_SHADER_CACHE_DISABLE=false MESA_SHADER_CACHE_MAX_SIZE=512MB mesa_glthread=true WINEESYNC=1 TU_DEBUG=noconform,sysmem DXVK_HUD=";
     public static final String DEFAULT_SCREEN_SIZE = "1280x720";
+
+    /**
+     * Screen size for a NEW container on this device, chosen to fill the panel's shape instead of
+     * always letterboxing to 16:9. Panels at 16:9 or wider (phones, most handhelds) keep
+     * {@link #DEFAULT_SCREEN_SIZE}: a wider guest desktop only costs pixels and most games are 16:9.
+     * 16:10 and 3:2 panels get 1280x800; 4:3 and squarer ones (Retroid Pocket Nova/Classic/Mini,
+     * foldable inner screens) get 1280x960. Existing containers are never touched.
+     */
+    public static String defaultScreenSizeFor(android.content.Context context) {
+        android.hardware.display.DisplayManager displayManager = (android.hardware.display.DisplayManager)
+                context.getSystemService(android.content.Context.DISPLAY_SERVICE);
+        android.view.Display display = displayManager != null
+                ? displayManager.getDisplay(android.view.Display.DEFAULT_DISPLAY) : null;
+        if (display == null) return DEFAULT_SCREEN_SIZE;
+        android.util.DisplayMetrics metrics = new android.util.DisplayMetrics();
+        display.getRealMetrics(metrics);
+        return defaultScreenSizeForPanel(metrics.widthPixels, metrics.heightPixels);
+    }
+
+    public static String defaultScreenSizeForPanel(int width, int height) {
+        if (width <= 0 || height <= 0) return DEFAULT_SCREEN_SIZE;
+        float ratio = (float) Math.max(width, height) / Math.min(width, height);
+        if (ratio < 1.467f) return "1280x960";  // 4:3 and squarer (cut halfway between 4:3 and 16:10)
+        if (ratio < 1.689f) return "1280x800";  // 16:10 and 3:2 (cut halfway between 16:10 and 16:9)
+        return DEFAULT_SCREEN_SIZE;             // 16:9 and wider
+    }
     public static final String DEFAULT_GRAPHICS_DRIVER = "wrapper";
     /**
      * The graphics wrapper built for non-Adreno parts (Mali, Xclipse, PowerVR) — the WrapperManager
@@ -428,6 +454,29 @@ public class Container {
         catch (JSONException e) {}
     }
 
+    // --- Display backend (per-container), stored in extraData ---
+    // "x11" (default) = the Java X server + libwinlator compositor (winex11.drv).
+    // "wayland" = the embedded Wayland compositor (winewayland.drv). Wayland mode
+    // bypasses the whole Renderer group (the compositor replaces that stage) and
+    // needs a Wayland-capable Proton layer (winewayland.so + the bundled Wayland Turnip; see
+    // WineWaylandSupport). Consumed by the launch path, which falls back to X11 when the
+    // container's layer can't do it.
+    public static final String DISPLAY_BACKEND_X11 = "x11";
+    public static final String DISPLAY_BACKEND_WAYLAND = "wayland";
+
+    public String getDisplayBackend() {
+        return getExtra("displayBackend", DISPLAY_BACKEND_X11);
+    }
+
+    public void setDisplayBackend(String value) {
+        putExtra("displayBackend", DISPLAY_BACKEND_WAYLAND.equals(value)
+                ? DISPLAY_BACKEND_WAYLAND : DISPLAY_BACKEND_X11);
+    }
+
+    public boolean isWaylandBackend() {
+        return DISPLAY_BACKEND_WAYLAND.equals(getDisplayBackend());
+    }
+
     // --- bionic-fg frame generation (per-container), stored in extraData ---
     // The on/off flag is set in the container settings; multiplier & flow scale
     // are tuned live from the in-game side menu (both hot-reload via conf.toml).
@@ -576,6 +625,59 @@ public class Container {
 
     public void setLsfgAutoEnable(boolean autoEnable) {
         putExtra("lsfgAutoEnable", autoEnable ? "1" : "0");
+    }
+
+    // --- LSFG Native experimental knobs (default to today's behaviour; only surfaced and
+    // honoured while FeatureFlags.LSFG_NATIVE_EXPERIMENTS_ENABLED is on) ---
+
+    // Capture resolution the frame-gen chain runs at. Stored as "panel" (default, today's
+    // behaviour), "game" (the height the game really renders at this session: per-game screen
+    // size override and render scale included, resolved by the renderer) or a bare pixel height
+    // ("720"). Both the container editor and the in-game drawer write that one form; the legacy
+    // "WxH" form is still read. Only the HEIGHT matters: the width follows the phone screen's
+    // aspect so nothing is stretched. See fgCaptureHeightFor.
+    public static final String FG_CAPTURE_PANEL = "panel";
+    public static final String FG_CAPTURE_GAME  = "game";
+    /** fgCaptureHeightFor's answer for "game": the renderer substitutes the X screen's height. */
+    public static final int FG_CAPTURE_HEIGHT_GAME = -1;
+
+    public String getFgCaptureResolution() {
+        String v = getExtra("fgCaptureResolution", FG_CAPTURE_PANEL);
+        return v == null || v.isEmpty() ? FG_CAPTURE_PANEL : v;
+    }
+
+    public void setFgCaptureResolution(String value) {
+        putExtra("fgCaptureResolution", value == null || value.isEmpty() ? FG_CAPTURE_PANEL : value);
+    }
+
+    /**
+     * Resolve a capture-resolution value to what the renderer takes: 0 = panel resolution,
+     * {@link #FG_CAPTURE_HEIGHT_GAME} = the game's own height, otherwise a pixel height.
+     * Accepts "720", "1280x720" and "1280x720 (16:9)".
+     */
+    public static int fgCaptureHeightFor(String value) {
+        if (value == null || value.isEmpty() || FG_CAPTURE_PANEL.equals(value)) return 0;
+        if (FG_CAPTURE_GAME.equals(value)) return FG_CAPTURE_HEIGHT_GAME;
+        try {
+            String s = value.trim();
+            int x = s.indexOf('x');
+            if (x >= 0) s = s.substring(x + 1);
+            int sp = s.indexOf(' ');
+            if (sp >= 0) s = s.substring(0, sp);
+            return Math.max(0, Integer.parseInt(s.trim()));
+        } catch (NumberFormatException e) {
+            return 0;
+        }
+    }
+
+    // Vulkan 1.1 compat: let LSFG Native run on a compositor driver that only reports Vulkan 1.1
+    // (e.g. the stock Adreno driver) when it offers the extensions the chain needs. Read at launch.
+    public boolean isLsfgVk11Compat() {
+        return getExtra("lsfgVk11Compat", "0").equals("1");
+    }
+
+    public void setLsfgVk11Compat(boolean on) {
+        putExtra("lsfgVk11Compat", on ? "1" : "0");
     }
 
     // NOTE: the power-user performance toggles (sustainedPerfMode / perfPriorityBoost / preferBigCores)

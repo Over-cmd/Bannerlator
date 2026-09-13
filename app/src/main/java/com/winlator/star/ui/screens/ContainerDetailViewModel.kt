@@ -134,6 +134,26 @@ class ContainerDetailViewModel(app: Application) : AndroidViewModel(app) {
     var rendererSwapRB      by mutableStateOf(false)
     // SurfaceFlinger (ASR) BGRA->RGBA colour correction (GN #1620). Default ON = correct colours.
     var rendererSfCompatMode by mutableStateOf(true)
+
+    // Display backend: "x11" (default) or "wayland". Wayland routes launches through the
+    // embedded compositor (winewayland.drv) and greys out the whole Renderer group above,
+    // which the compositor replaces. See Container.DISPLAY_BACKEND_*.
+    //
+    // displayBackend is the STORED/selected value; isWaylandBackend is the EFFECTIVE one — Wayland
+    // only when the selected Proton layer can actually drive it (WineWaylandSupport). A container
+    // saved as "wayland" whose layer was since removed/replaced therefore edits (and saves) as X11,
+    // and every Wayland-only greying in the editor follows the effective backend.
+    var displayBackend by mutableStateOf(Container.DISPLAY_BACKEND_X11)
+    val isWaylandStored get() = displayBackend == Container.DISPLAY_BACKEND_WAYLAND
+    val isWaylandBackend get() = isWaylandStored && isWineWaylandCapable(selectedWineVersion)
+
+    // Whether the given wine/Proton layer ships winewayland.so + its bundled Wayland Turnip. Same
+    // early-composition caveat as isWineXrandrCapable, but the conservative default is NOT capable:
+    // the bundled main wine never is, and a layer we can't probe must not unlock Wayland.
+    fun isWineWaylandCapable(wineVersion: String): Boolean {
+        if (!::contentsManager.isInitialized || wineVersion.isEmpty()) return false
+        return com.winlator.star.core.WineWaylandSupport.isWaylandCapable(context, contentsManager, wineVersion)
+    }
     // Render scale (supersampling) — stored via the "renderScale" extra (no DB field). "1.0" = Off.
     var renderScale         by mutableStateOf("1.0")
     var autoCloseOnExit     by mutableStateOf(true)
@@ -173,6 +193,51 @@ class ContainerDetailViewModel(app: Application) : AndroidViewModel(app) {
     // from launch instead of off. Only meaningful when frameGenEngine == "lsfg". Default ON (matches
     // GameNative; see loadContainerData) — initial value mirrors that.
     var lsfgAutoEnable by mutableStateOf(true)
+    // LSFG Native experimental knobs (only shown while FeatureFlags.LSFG_NATIVE_EXPERIMENTS_ENABLED). The capture
+    // selection is a UI label: "panel", "game", "custom" or one of screenSizeEntries; it is turned
+    // into the stored "panel" / "game" / bare-height value by resolvedFgCaptureResolution(). Only
+    // the height is ever used (the width follows the panel), so Custom is a single height field
+    // and the stored form is the same one the in-game drawer chips write.
+    var fgCaptureSelection by mutableStateOf(Container.FG_CAPTURE_PANEL)
+    var fgCaptureCustomHeight by mutableStateOf("")
+    var lsfgVk11Compat by mutableStateOf(false)
+
+    fun resolvedFgCaptureResolution(): String = when {
+        fgCaptureSelection == Container.FG_CAPTURE_PANEL -> Container.FG_CAPTURE_PANEL
+        fgCaptureSelection == Container.FG_CAPTURE_GAME  -> Container.FG_CAPTURE_GAME
+        fgCaptureSelection.equals("custom", ignoreCase = true) -> {
+            val h = fgCaptureCustomHeight.trim().toIntOrNull()
+            if (h != null && h > 0) h.toString() else Container.FG_CAPTURE_PANEL
+        }
+        else -> {   // "1280x720 (16:9)" -> 720
+            val h = Container.fgCaptureHeightFor(StringUtils.parseIdentifier(fgCaptureSelection))
+            if (h > 0) h.toString() else Container.FG_CAPTURE_PANEL
+        }
+    }
+
+    /** A stored value ("720", legacy "1280x720", "panel", "game") back to the picker. */
+    private fun seedFgCaptureSelection(stored: String?) {
+        val v = stored ?: Container.FG_CAPTURE_PANEL
+        fgCaptureCustomHeight = ""
+        fgCaptureSelection = when {
+            v == Container.FG_CAPTURE_PANEL || v.isEmpty() -> Container.FG_CAPTURE_PANEL
+            v == Container.FG_CAPTURE_GAME -> Container.FG_CAPTURE_GAME
+            else -> {
+                val h = Container.fgCaptureHeightFor(v)
+                if (h <= 0) Container.FG_CAPTURE_PANEL else {
+                    // The list is matched by height alone: that is all the stored value means.
+                    val match = screenSizeEntries.firstOrNull {
+                        !it.equals("custom", ignoreCase = true)
+                            && Container.fgCaptureHeightFor(StringUtils.parseIdentifier(it)) == h
+                    }
+                    if (match != null) match else {
+                        fgCaptureCustomHeight = h.toString()
+                        screenSizeEntries.firstOrNull { it.equals("custom", ignoreCase = true) } ?: "Custom"
+                    }
+                }
+            }
+        }
+    }
     // NOTE: the power-user performance toggles are intentionally NOT edited here. Their model is
     // global-default (App Settings > Performance, com.winlator.star.perf.PerformanceSettings) +
     // optional per-game override (ShortcutsScreen / in-game drawer) — no container level.
@@ -453,8 +518,9 @@ class ContainerDetailViewModel(app: Application) : AndroidViewModel(app) {
         containerName = if (c != null) c.name else "${context.getString(R.string.container)}-${manager.getNextContainerId()}"
         wineVersionEnabled = !isEditMode
 
-        // Screen size
-        val ssValue = seed?.screenSize ?: Container.DEFAULT_SCREEN_SIZE
+        // Screen size: the real container / saved defaults profile wins; otherwise fit this device's
+        // panel shape (1280x720 on 16:9 and wider, 1280x800 on 16:10, 1280x960 on 4:3).
+        val ssValue = seed?.screenSize ?: Container.defaultScreenSizeFor(context)
         val ssFound = screenSizeEntries.indexOfFirst {
             StringUtils.parseIdentifier(it).equals(ssValue, ignoreCase = true)
         }
@@ -490,6 +556,7 @@ class ContainerDetailViewModel(app: Application) : AndroidViewModel(app) {
         rendererFilterMode       = seed?.getRendererFilterMode() ?: 0
         rendererSwapRB           = seed?.getRendererSwapRB() ?: false
         rendererSfCompatMode     = seed?.getRendererSfCompatMode() ?: true
+        displayBackend           = seed?.getDisplayBackend() ?: Container.DISPLAY_BACKEND_X11
         renderScale              = seed?.getExtra("renderScale", "1.0") ?: "1.0"
         autoCloseOnExit          = (seed?.getExtra("autoCloseOnExit", "1") ?: "1") == "1"
         selectedDXWrapper        = identifierToDisplay(seed?.getDXWrapper() ?: Container.DEFAULT_DXWRAPPER, dxWrapperEntries)
@@ -515,6 +582,8 @@ class ContainerDetailViewModel(app: Application) : AndroidViewModel(app) {
         frameGenModel      = seed?.frameGenModel ?: 0
         lsfgPerformanceMode = seed?.isLsfgPerformanceMode != false   // default ON for new/unset containers
         lsfgAutoEnable      = seed?.isLsfgAutoEnable != false   // default ON for new/unset containers (GameNative parity)
+        seedFgCaptureSelection(seed?.fgCaptureResolution)
+        lsfgVk11Compat      = seed?.isLsfgVk11Compat == true
         fpsLimiterEnabled  = seed?.isFpsLimiterEnabled == true
         matchRefreshRate   = seed?.isMatchRefreshRate != false   // default ON for new/unset containers
         manualRefreshRate  = seed?.manualRefreshRate ?: 0
@@ -759,6 +828,8 @@ class ContainerDetailViewModel(app: Application) : AndroidViewModel(app) {
         val wasArm64 = isArm64EC
         selectedWineVersion = version
         coerceAudioDriverForWine()      // a switch to an unsupported layer drops a stale DirectAudio pick
+        // Wayland is only offered on a layer that ships winewayland + its Wayland Turnip: snap back to X11.
+        if (isWaylandStored && !isWineWaylandCapable(version)) displayBackend = Container.DISPLAY_BACKEND_X11
         refreshWineDependent(version)   // updates isArm64EC + swaps the box64/wowbox64 list
 
         // CREATE mode only: a wine change can FLIP the architecture. applyArch() swapped the box64 list
@@ -938,6 +1009,10 @@ class ContainerDetailViewModel(app: Application) : AndroidViewModel(app) {
             c.setFrameGenModel(frameGenModel)
             c.setLsfgPerformanceMode(lsfgPerformanceMode)
             c.setLsfgAutoEnable(lsfgAutoEnable)
+            if (com.winlator.star.FeatureFlags.LSFG_NATIVE_EXPERIMENTS_ENABLED) {
+                c.setFgCaptureResolution(resolvedFgCaptureResolution())
+                c.setLsfgVk11Compat(lsfgVk11Compat)
+            }
             c.setFpsLimiterEnabled(fpsLimiterEnabled)
             c.setMatchRefreshRate(matchRefreshRate)
             c.setManualRefreshRate(manualRefreshRate)
@@ -970,6 +1045,9 @@ class ContainerDetailViewModel(app: Application) : AndroidViewModel(app) {
             c.setRendererFilterMode(rendererFilterMode)
             c.setRendererSwapRB(rendererSwapRB)
             c.setRendererSfCompatMode(rendererSfCompatMode)
+            // Persist the EFFECTIVE backend: a stored "wayland" on a layer that can no longer drive it
+            // displayed as X11 in the editor, so X11 is what gets saved.
+            c.setDisplayBackend(if (isWaylandBackend) Container.DISPLAY_BACKEND_WAYLAND else Container.DISPLAY_BACKEND_X11)
             c.putExtra("renderScale", if (renderScale == "1.0") null else renderScale)
             c.putExtra("autoCloseOnExit", if (autoCloseOnExit) null else "0")  // default ON
             c.setInputType(inputType)
@@ -1005,6 +1083,10 @@ class ContainerDetailViewModel(app: Application) : AndroidViewModel(app) {
                     created.setFrameGenModel(frameGenModel)
                     created.setLsfgPerformanceMode(lsfgPerformanceMode)
                     created.setLsfgAutoEnable(lsfgAutoEnable)
+                    if (com.winlator.star.FeatureFlags.LSFG_NATIVE_EXPERIMENTS_ENABLED) {
+                        created.setFgCaptureResolution(resolvedFgCaptureResolution())
+                        created.setLsfgVk11Compat(lsfgVk11Compat)
+                    }
                     created.setVibrationMode(vibrationMode)
                     created.setVibrationIntensity(vibrationIntensity)
                     // Player Slots + On-screen mode: a NEW container is SEEDED from the app-drawer global
@@ -1165,6 +1247,10 @@ class ContainerDetailViewModel(app: Application) : AndroidViewModel(app) {
             template.setFrameGenModel(frameGenModel)
             template.setLsfgPerformanceMode(lsfgPerformanceMode)
             template.setLsfgAutoEnable(lsfgAutoEnable)
+            if (com.winlator.star.FeatureFlags.LSFG_NATIVE_EXPERIMENTS_ENABLED) {
+                template.setFgCaptureResolution(resolvedFgCaptureResolution())
+                template.setLsfgVk11Compat(lsfgVk11Compat)
+            }
             template.setVibrationMode(vibrationMode)
             template.setVibrationIntensity(vibrationIntensity)
             template.setControllerSlotOverrides(controllerSlotOverridesJson)
@@ -1226,7 +1312,7 @@ class ContainerDetailViewModel(app: Application) : AndroidViewModel(app) {
                 val wi = w.toInt(); val hi = h.toInt()
                 if (wi % 2 == 0 && hi % 2 == 0) return "${wi}x${hi}"
             }
-            return Container.DEFAULT_SCREEN_SIZE
+            return Container.defaultScreenSizeFor(context)
         }
         return StringUtils.parseIdentifier(selectedScreenSize)
     }

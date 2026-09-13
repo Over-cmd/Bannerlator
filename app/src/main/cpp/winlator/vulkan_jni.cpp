@@ -53,7 +53,7 @@ static void* openAdrenotoolsDriver(const char* driverPath, const char* libraryNa
 extern "C" JNIEXPORT jlong JNICALL
 Java_com_winlator_star_renderer_vulkan_VulkanRenderer_nativeInit(
     JNIEnv* env, jobject, jobject surface, jint w, jint h,
-    jstring jDriverPath, jstring jLibraryName, jstring jNativeLibDir)
+    jstring jDriverPath, jstring jLibraryName, jstring jNativeLibDir, jboolean jLsfgVk11Compat)
 {
     ANativeWindow* win = ANativeWindow_fromSurface(env, surface);
     if (!win) return 0;
@@ -67,7 +67,8 @@ Java_com_winlator_star_renderer_vulkan_VulkanRenderer_nativeInit(
         env->ReleaseStringUTFChars(jLibraryName,  lib);
         env->ReleaseStringUTFChars(jNativeLibDir, nld);
     }
-    try { return reinterpret_cast<jlong>(new VulkanRendererContext(win, w, h, adrenotoolsHandle)); }
+    try { return reinterpret_cast<jlong>(new VulkanRendererContext(win, w, h, adrenotoolsHandle,
+                                                                   jLsfgVk11Compat == JNI_TRUE)); }
     catch (...) {
         ANativeWindow_release(win);
         if (adrenotoolsHandle) dlclose(adrenotoolsHandle);
@@ -249,6 +250,7 @@ Java_com_winlator_star_renderer_vulkan_VulkanRenderer_nativeSetFilterMode(JNIEnv
 
 // Scaling mode enum (see VulkanRendererContext::upscalerMode):
 //   0=none 1=linear 2=nearest 3=sgsr 4=fsr(fill) 5=fsr_fit(letterbox)
+//   6=sharpen 7=nis 8=sgsr_quality
 extern "C" JNIEXPORT void JNICALL
 Java_com_winlator_star_renderer_vulkan_VulkanRenderer_nativeSetUpscaler(JNIEnv*, jobject, jlong handle, jint mode) {
     auto* r = reinterpret_cast<VulkanRendererContext*>(handle);
@@ -381,6 +383,14 @@ Java_com_winlator_star_renderer_vulkan_VulkanRenderer_nativeLsfgCapsReason(JNIEn
     return env->NewStringUTF(r->lsfgCaps().reason);
 }
 
+// Why native frame gen cannot run: -1 unknown yet, 0 fine, 1 driver lacks what the
+// selected engine needs, 2 the engine failed to start. See frameGenProblem().
+extern "C" JNIEXPORT jint JNICALL
+Java_com_winlator_star_renderer_vulkan_VulkanRenderer_nativeFrameGenProblem(JNIEnv*, jobject, jlong handle) {
+    auto* r = reinterpret_cast<VulkanRendererContext*>(handle);
+    return r ? (jint)r->frameGenProblem() : (jint)-1;
+}
+
 // --- Native LSFG frame generation: arming and tuning ------------------------
 extern "C" JNIEXPORT void JNICALL
 Java_com_winlator_star_renderer_vulkan_VulkanRenderer_nativeSetFrameGenArmed(
@@ -402,9 +412,12 @@ Java_com_winlator_star_renderer_vulkan_VulkanRenderer_nativeSetLsfgCachePath(
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_winlator_star_renderer_vulkan_VulkanRenderer_nativeSetFrameGenTuning(
-        JNIEnv*, jobject, jlong handle, jfloat flowScale, jfloat refreshHz) {
+        JNIEnv*, jobject, jlong handle, jfloat flowScale, jfloat refreshHz,
+        jint captureHeight) {
     auto* r = reinterpret_cast<VulkanRendererContext*>(handle);
-    if (r) r->setFrameGenTuning((float)flowScale, (float)refreshHz);
+    // captureHeight: 0 = panel, -1 = the game's own height (resolved natively
+    // from the X screen), otherwise a pixel height.
+    if (r) r->setFrameGenTuning((float)flowScale, (float)refreshHz, (int32_t)captureHeight);
 }
 
 // Which native engine generates (0 = LSFG, 1 = win-fg) and win-fg's own knobs.

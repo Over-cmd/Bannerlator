@@ -78,6 +78,7 @@ import androidx.compose.material.icons.filled.Checklist
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.SwapVert
+import androidx.compose.material.icons.filled.ViewCarousel
 import androidx.compose.material.icons.filled.ViewList
 import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.filled.CloudDownload
@@ -170,6 +171,7 @@ import com.winlator.star.ui.AccountUiBus
 import com.winlator.star.ui.ComponentReturnBus
 import com.winlator.star.ui.EmulatorLabels
 import com.winlator.star.ui.LocalTopBarActions
+import com.winlator.star.ui.LocalTopBarTransparent
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
@@ -342,6 +344,9 @@ fun ShortcutsScreen(vm: ShortcutsViewModel = viewModel()) {
     var gameDetailsShortcut by remember { mutableStateOf<Shortcut?>(null) }
     var propertiesShortcut by remember { mutableStateOf<Shortcut?>(null) }
     var logsShortcut by remember { mutableStateOf<Shortcut?>(null) }
+    // XMB view: a nested menu is open (hides the + button) / its "Manage wrappers" row asked for the dialog.
+    var xmbNested by remember { mutableStateOf(false) }
+    var showWrapperManagerXmb by remember { mutableStateOf(false) }
     // Steam launch-method popup (feature M3): the Steam-origin shortcut whose SteamLite-vs-Goldberg
     // chooser is open (null = closed). A Steam game routes through this before launching UNLESS it
     // already has a remembered choice (launchMode set + launchModeRemembered=="1").
@@ -951,6 +956,13 @@ fun ShortcutsScreen(vm: ShortcutsViewModel = viewModel()) {
     }
 
     val topBarActions = LocalTopBarActions.current
+    // The XMB view draws its own backdrop, so it asks for a see-through top bar (MainActivity only
+    // honours that on the Games route). Dropped when leaving XMB or this screen.
+    val topBarTransparent = LocalTopBarTransparent.current
+    LaunchedEffect(viewMode, shortcuts.isEmpty()) {
+        topBarTransparent.value = viewMode == ShortcutViewMode.XMB && shortcuts.isNotEmpty()
+    }
+    DisposableEffect(Unit) { onDispose { topBarTransparent.value = false } }
     // LaunchedEffect — not SideEffect — so this runs in the same dispatcher queue as
     // MainActivity's route-change clear (which is a LaunchedEffect). Parent enqueues
     // first and runs first (clears); we enqueue second and run after (sets). A
@@ -996,19 +1008,21 @@ fun ShortcutsScreen(vm: ShortcutsViewModel = viewModel()) {
                     tint = androidx.compose.ui.graphics.Color.White,
                 )
             }
-            // One button cycling list → grid → compact grid. The icon shows what you get NEXT,
+            // One button cycling list → grid → compact grid → XMB. The icon shows what you get NEXT,
             // matching how the two-state version behaved.
             IconButton(onClick = { vm.cycleViewMode() }) {
                 Icon(
                     imageVector = when (viewMode) {
                         ShortcutViewMode.LIST -> Icons.Filled.GridView
                         ShortcutViewMode.GRID -> Icons.Filled.Apps
-                        ShortcutViewMode.GRID_COMPACT -> Icons.Filled.ViewList
+                        ShortcutViewMode.GRID_COMPACT -> Icons.Filled.ViewCarousel
+                        ShortcutViewMode.XMB -> Icons.Filled.ViewList
                     },
                     contentDescription = when (viewMode) {
                         ShortcutViewMode.LIST -> "Grid view"
                         ShortcutViewMode.GRID -> "Compact grid view"
-                        ShortcutViewMode.GRID_COMPACT -> "List view"
+                        ShortcutViewMode.GRID_COMPACT -> "XMB view"
+                        ShortcutViewMode.XMB -> "List view"
                     },
                     tint = androidx.compose.ui.graphics.Color.White,
                 )
@@ -1052,6 +1066,38 @@ fun ShortcutsScreen(vm: ShortcutsViewModel = viewModel()) {
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
+    // XMB options column = a card's ⋮ menu, reordered for a D-pad (common first, Remove last). Items with
+    // a `menu` open as nested XMB columns (XmbGameSettings.kt / XmbSettingsPhase2*.kt / XmbGameTools*.kt)
+    // instead of pop-ups; the three that hand off to Android or a full screen keep their handlers.
+    val xmbHost = XmbGameHost(
+        remove = { vm.remove(it, context) },
+        containers = { vm.containers() },
+        openWrapperManager = { showWrapperManagerXmb = true },
+    )
+    val xmbActionsFor: (Shortcut) -> List<XmbAction> = { shortcut ->
+        buildList {
+            add(XmbAction("Settings", Icons.Filled.Settings, "Display, graphics, controller…", menu = { xmbSettingsMenu(it, shortcut, xmbHost) }))
+            add(XmbAction("Game Details", Icons.Filled.Edit, "Name, genres, year, description", menu = { xmbGameDetailsMenu(it, shortcut) }))
+            if (isSteamOriginShortcut(shortcut)) {
+                add(XmbAction("Cloud Saves", Icons.Filled.CloudSync, "Steam Cloud sync — opens its own screen") { launchSaveManager(context, steamAppIdOf(shortcut)) })
+            }
+            if (isCustomShortcut(shortcut)) {
+                add(XmbAction("Back up saves", Icons.Filled.Archive, menu = { xmbBackupSavesMenu(it, shortcut) }))
+                add(XmbAction("Restore saves", Icons.Filled.Unarchive, menu = { xmbRestoreSavesMenu(it, shortcut) }))
+            }
+            add(XmbAction("Community configs", Icons.Filled.Public, "Shared settings for this game", menu = { xmbCommunityConfigsMenu(it, shortcut) }))
+            add(XmbAction("Scrape cover", Icons.Filled.Search, menu = { xmbScrapeCoverMenu(it, shortcut) }))
+            add(XmbAction("View logs", Icons.Filled.Description, menu = { xmbLogsMenu(it, shortcut) }))
+            add(XmbAction("Clone to container", Icons.Filled.ContentCopy, menu = { xmbCloneMenu(it, shortcut, xmbHost) }))
+            add(XmbAction("Copy to Drive C…", Icons.Filled.DriveFileMove, menu = { xmbCopyToDriveCMenu(it, shortcut) }))
+            add(XmbAction("Change executable…", Icons.Filled.SwapHoriz, menu = { xmbChangeExeMenu(it, shortcut) }))
+            add(XmbAction("Add to home screen", Icons.Filled.AddToHomeScreen, "Android's pin prompt") { addToHomeScreen(context, shortcut) })
+            add(XmbAction("Export", Icons.Filled.Upload) { exportShortcut(context, shortcut) })
+            add(XmbAction("Properties", Icons.Filled.Info, "Times played, playtime", menu = { xmbPropertiesMenu(it, shortcut) }))
+            add(XmbAction("Remove", Icons.Filled.Delete, "Asks to confirm first", danger = true, menu = { xmbRemoveMenu(it, shortcut, xmbHost) }))
+        }
+    }
+
     Column(modifier = Modifier.fillMaxSize()) {
         Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
             if (shortcuts.isEmpty()) {
@@ -1062,7 +1108,35 @@ fun ShortcutsScreen(vm: ShortcutsViewModel = viewModel()) {
                 )
             } else {
                 AnimatedContent(targetState = viewMode, label = "layout") { mode ->
-                    if (mode != ShortcutViewMode.LIST) {
+                    if (mode == ShortcutViewMode.XMB) {
+                        ShortcutsXmbView(
+                            shortcuts = shortcuts,
+                            selectionMode = selectionMode,
+                            selectedPaths = selectedPaths,
+                            onToggleSelect = { selectedPaths = selectedPaths.toggle(it.file.path) },
+                            onExitSelection = { selectionMode = false; selectedPaths = emptySet() },
+                            onPlay = { requestLaunch(it) },
+                            actionsFor = xmbActionsFor,
+                            storeBadges = { shortcut ->
+                                ShortcutBadgeOverlay(
+                                    showSteam = remember(shortcut) { isSteamOriginShortcut(shortcut) },
+                                    showEa = remember(shortcut) { EaSupport.isTagged(shortcut) },
+                                    showEpic = remember(shortcut) { shortcut.getExtra("storeSource") == "epic" },
+                                    showEos = rememberEosBadge(shortcut),
+                                    showGog = remember(shortcut) { isGogShortcut(shortcut) },
+                                    showAmazon = remember(shortcut) { isAmazonShortcut(shortcut) },
+                                    showCustom = remember(shortcut) { isCustomOriginShortcut(shortcut) },
+                                )
+                            },
+                            sdBadge = { shortcut ->
+                                if (remember(shortcut) { WinePath.isOnRemovableStorage(shortcut.container, shortcut.path) }) {
+                                    SdCardBadge(Modifier.padding(start = 6.dp))
+                                }
+                            },
+                            onReloadGames = { vm.refresh() },
+                            onNestedChange = { xmbNested = it },
+                        )
+                    } else if (mode != ShortcutViewMode.LIST) {
                         // Compact keeps a CONSTANT tile size across orientation: derive the column
                         // count from the shortest screen edge so portrait resolves to exactly 4 and
                         // landscape flows to more columns of the SAME width (was Fixed(4) → tiles
@@ -1152,8 +1226,9 @@ fun ShortcutsScreen(vm: ShortcutsViewModel = viewModel()) {
                     }
                 }
             }
-            // Long-press and slide along the bottom to move it off a card's buttons.
-            DraggableAddButton(
+            // Long-press and slide along the bottom to move it off a card's buttons. Hidden while an XMB
+            // menu is open (it would sit on top of the menu's rows).
+            if (!(viewMode == ShortcutViewMode.XMB && xmbNested)) DraggableAddButton(
                 prefKey = "games",
                 onClick = { showImportContainerPicker = true },
                 outerPadding = 16.dp,
@@ -2870,6 +2945,7 @@ fun ShortcutsScreen(vm: ShortcutsViewModel = viewModel()) {
     }
 
     // Game Details editor (Edit Game): name + Steam link/search + genres/description/year/metacritic.
+    if (showWrapperManagerXmb) WrapperManagerDialog(onDismiss = { showWrapperManagerXmb = false })
     gameDetailsShortcut?.let { s ->
         GameDetailsSheet(
             shortcut = s,
@@ -4642,7 +4718,7 @@ private fun CommunityDevicePanel(
 
 // Human display name for a config's meta.app_source — the actual project that produced it. BannerHub
 // and BannerHub Lite are distinct apps writing "bannerhub" / "bannerhub_lite"; ours would be "bannerlator".
-private fun communitySourceLabel(appSource: String?): String = when (appSource?.lowercase()?.trim()) {
+internal fun communitySourceLabel(appSource: String?): String = when (appSource?.lowercase()?.trim()) {
     "bannerhub" -> "BannerHub"
     "bannerhub_lite" -> "BannerHub Lite"
     "bannerlator" -> "Bannerlator"
@@ -4654,11 +4730,13 @@ private fun communitySourceLabel(appSource: String?): String = when (appSource?.
 // Turn a translated config into "what it sets" lines in OUR component terms (the same fields the apply
 // engine consumes). Only present fields are listed; Proton/wineVersion is advisory (container-only) so
 // it is surfaced separately, not here.
-private fun configSummaryLines(config: ShortcutConfig): List<Pair<String, String>> {
+internal fun configSummaryLines(config: ShortcutConfig): List<Pair<String, String>> {
     val out = ArrayList<Pair<String, String>>()
     config.dxwrapperConfig["version"]?.takeIf { it.isNotBlank() }?.let { out.add("DXVK" to it) }
     config.dxwrapperConfig["vkd3dVersion"]?.takeIf { it.isNotBlank() }?.let { out.add("VKD3D" to it) }
     config.dxwrapperConfig["async"]?.let { out.add("DXVK async" to if (it == "1") "on" else "off") }
+    config.dxwrapperConfig["anisotropy"]?.takeIf { it.isNotBlank() && it != "0" }?.let { out.add("Anisotropic filtering" to "${it}x") }
+    config.dxwrapperConfig["lodBias"]?.takeIf { it.isNotBlank() && it != "0" }?.let { out.add("Texture sharpness" to it) }
     config.graphicsDriverConfig["version"]?.takeIf { it.isNotBlank() }?.let { out.add("Turnip driver" to it) }
     config.scalars["dxwrapper"]?.takeIf { it.isNotBlank() }?.let { out.add("DX wrapper" to it) }
     config.scalars["emulator"]?.let { emu ->
@@ -5831,6 +5909,8 @@ private class SettingsDpad {
     var menuOnSelect: (String) -> Unit = {}
     val actions = HashMap<String, ControlActions>()
     val rootFocus = FocusRequester()
+    // Previous/next section with wrap-around, published by [DpTabs]; L1/R1 call it from anywhere.
+    var tabStep: ((Int) -> Unit)? = null
 
     fun isFocused(id: String) = focusedId == id
     fun openMenu(id: String, options: List<String>, selected: String, onSelect: (String) -> Unit) {
@@ -5873,6 +5953,10 @@ private fun Modifier.settingsDpad(dp: SettingsDpad, ids: () -> List<String>, onD
                 Key.DirectionRight -> { dp.focusedId?.takeIf { it in order }?.let { dp.actions[it]?.onRight?.invoke() }; true }
                 Key.ButtonA, Key.Enter, Key.DirectionCenter -> { dp.focusedId?.takeIf { it in order }?.let { dp.actions[it]?.activate?.invoke() }; true }
                 Key.ButtonB, Key.Back -> { onDismiss(); true }
+                // Shoulder buttons switch sections from anywhere (the landscape rail is otherwise
+                // only reachable at the very end of the D-pad order).
+                Key.ButtonL1 -> { dp.tabStep?.invoke(-1); true }
+                Key.ButtonR1 -> { dp.tabStep?.invoke(1); true }
                 else -> false
             }
         }
@@ -5969,7 +6053,7 @@ private val ROOT_PERF_LABELS = mapOf(
 )
 
 /** Per-game override value to persist, or null (clear the extra) when it equals the global default. */
-private fun perfExtraOrNull(value: Boolean, global: Boolean): String? =
+internal fun perfExtraOrNull(value: Boolean, global: Boolean): String? =
     if (value == global) null else if (value) "1" else "0"
 
 /** A per-game perf toggle row with an override/inherit indicator and a per-toggle Reset. */
@@ -6033,6 +6117,7 @@ private fun DpTabs(dp: SettingsDpad, id: String, selected: Int, count: Int, onSe
             onLeft = { if (selected > 0) onSelect(selected - 1) },
             onRight = { if (selected < count - 1) onSelect(selected + 1) },
         )
+        dp.tabStep = { step -> if (count > 0) onSelect(((selected + step) % count + count) % count) }
     }
     DpadHighlight(focused = dp.isFocused(id), modifier = Modifier.dpadBringIntoView(dp, id)) { content() }
 }
@@ -6144,6 +6229,27 @@ internal fun ShortcutSettingsDialogScreen(
     var sfCompatMode by remember {
         mutableStateOf(shortcut.getExtra("sfCompatMode",
             if (shortcut.container.getRendererSfCompatMode()) "1" else "0") == "1")
+    }
+
+    // Display backend per-game override: "" = use the container's Display backend, else force
+    // "x11"/"wayland". Absent extra falls back to the container default at launch. When the
+    // effective backend is Wayland the embedded compositor replaces the Renderer group, so the
+    // renderer overrides below are greyed (mirrors the container settings screen).
+    //
+    // Wayland needs the container's Proton layer to ship winewayland.so + its bundled Wayland Turnip
+    // (WineWaylandSupport). On any other layer "Force Wayland" is disabled, a stored "Force Wayland"
+    // displays (and saves) as X11, and "Use container default" resolves to the container's EFFECTIVE
+    // backend — X11 when the container says wayland but its layer can't drive it. Keyed on the wine
+    // version so the cached probe only re-runs when the layer changes.
+    var displayBackendOverride by remember { mutableStateOf(shortcut.getExtra("displayBackend", "")) }
+    val containerWaylandCapable = remember(shortcut.container.wineVersion) {
+        com.winlator.star.core.WineWaylandSupport.isWaylandCapable(context, shortcut.container.wineVersion)
+    }
+    val containerWaylandDefault = shortcut.container.isWaylandBackend && containerWaylandCapable
+    val effectiveWaylandShortcut = when (displayBackendOverride) {
+        Container.DISPLAY_BACKEND_WAYLAND -> containerWaylandCapable
+        Container.DISPLAY_BACKEND_X11 -> false
+        else -> containerWaylandDefault
     }
 
     // Gyro (motion aim) per-game overrides — seeded from the shortcut extra, falling back to the
@@ -6601,6 +6707,11 @@ internal fun ShortcutSettingsDialogScreen(
             putExtra("screenAlignment", screenAlignment.ifEmpty { null })
             putExtra("graphicsDriver", StringUtils.parseIdentifier(selectedGfxDriver))
             putExtra("graphicsDriverConfig", graphicsDriverConfig)
+            // Display backend override: "" clears the extra (use container default) via putExtra(null).
+            // A "Force Wayland" the container's layer can't honour displayed as X11, so X11 is saved.
+            putExtra("displayBackend",
+                if (displayBackendOverride == Container.DISPLAY_BACKEND_WAYLAND && !containerWaylandCapable) Container.DISPLAY_BACKEND_X11
+                else displayBackendOverride.ifEmpty { null })
             putExtra("renderer", StringUtils.parseIdentifier(selectedRenderer))
             putExtra("sfCompatMode", if (sfCompatMode) "1" else "0")
             // Gyro per-game overrides (read by the launch resolver in XServerDisplayActivity).
@@ -6700,10 +6811,11 @@ internal fun ShortcutSettingsDialogScreen(
                 add("name"); add("execArgs"); add("screenSize")
                 if (selectedScreenSize == "Custom") { add("customW"); add("customH") }
                 add("screenAlignment")
-                add("selectIcon"); add("gfxDriver"); add("gfxWrapper"); add("gfxConfig")
+                add("selectIcon"); add("displayBackend"); add("gfxDriver")
+                if (!effectiveWaylandShortcut) { add("gfxWrapper"); add("gfxConfig") } // hidden on Wayland (X11 shims/tuning)
                 add("dxWrapper"); add("dxConfig"); add("renderer")
-                if (selectedRenderer == "SurfaceFlinger") add("sfCompat")
-                if (selectedRenderer == "Vulkan") { add("vkNative"); add("vkColors"); add("vkPresent"); if (vkNative) add("vkBackend"); add("vkDriver") }
+                if (!effectiveWaylandShortcut && selectedRenderer == "SurfaceFlinger") add("sfCompat")
+                if (!effectiveWaylandShortcut && selectedRenderer == "Vulkan") { add("vkNative"); add("vkColors"); add("vkPresent"); if (vkNative) add("vkBackend"); add("vkDriver") }
                 add("renderScale")
                 if (panelRates.isNotEmpty()) add("refresh")
                 add("frameGen"); add("fpsLimiter"); add("audio"); add("emulator")
@@ -6721,6 +6833,13 @@ internal fun ShortcutSettingsDialogScreen(
             }
         }
         add("tabs"); add("cancel"); add("ok")
+    }
+    // After a section switch (L1/R1 or touch) the D-pad cursor may point at a control the new section
+    // doesn't have: move it to that section's first control (index 1, just past the title close).
+    // Untouched for touch users, whose cursor stays null.
+    LaunchedEffect(selectedTab) {
+        val f = dp.focusedId
+        if (f != null && f !in dpadIds) dp.focusedId = dpadIds.getOrNull(1)
     }
     // Seed the root focus so the editor receives D-pad from the first frame (it's its own Dialog window).
     LaunchedEffect(Unit) { runCatching { dp.rootFocus.requestFocus() } }
@@ -6944,13 +7063,19 @@ internal fun ShortcutSettingsDialogScreen(
                     }
 
                     // Screen size
-                    DpDrop(
-                        dp, "screenSize",
-                        label = stringResource(R.string.screen_size),
-                        options = screenSizeEntries,
-                        selected = selectedScreenSize,
-                        onSelect = { selectedScreenSize = it }
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        DpDrop(
+                            dp, "screenSize",
+                            label = stringResource(R.string.screen_size),
+                            options = screenSizeEntries,
+                            selected = selectedScreenSize,
+                            onSelect = { selectedScreenSize = it },
+                            modifier = Modifier.weight(1f)
+                        )
+                        IconButton(onClick = { helpRes = R.string.help_screen_size }) {
+                            Icon(Icons.Default.Help, contentDescription = "What is this?", modifier = Modifier.size(18.dp))
+                        }
+                    }
                     if (selectedScreenSize == "Custom") {
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             DpField(
@@ -6987,13 +7112,24 @@ internal fun ShortcutSettingsDialogScreen(
                             stringResource(R.string.screen_alignment_bottom)
                         )
                         val saIdx = saValues.indexOf(screenAlignment).coerceAtLeast(0)
+                        // Not wired to the Wayland compositor: greyed there, displays "Not used on
+                        // Wayland", stored value untouched (see ContainerDetailScreen).
+                        val saShown = if (effectiveWaylandShortcut) "Not used on Wayland" else saLabels[saIdx]
                         DpDrop(
                             dp, "screenAlignment",
                             label = stringResource(R.string.screen_alignment),
-                            options = saLabels,
-                            selected = saLabels[saIdx],
-                            onSelect = { screenAlignment = saValues[saLabels.indexOf(it)] }
+                            options = if (effectiveWaylandShortcut) listOf(saShown) else saLabels,
+                            selected = saShown,
+                            onSelect = { screenAlignment = saValues[saLabels.indexOf(it)] },
+                            enabled = !effectiveWaylandShortcut
                         )
+                        if (effectiveWaylandShortcut) {
+                        Text(
+                            "Not used on Wayland: the Wayland compositor always scales the whole desktop to the screen; fullscreen modes and alignment are not wired to it yet.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        }
                     }
 
                     // Icon
@@ -7030,24 +7166,113 @@ internal fun ShortcutSettingsDialogScreen(
                         Text("❔  What is all this?")
                     }
 
-                    // Graphics Driver + wrapper manager (cloud)
-                    var showWrapperManager by remember { mutableStateOf(false) }
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    // Display backend override (per-game): default to the container, or force
+                    // X11 / Wayland. Wayland greys the Renderer group below (compositor replaces it)
+                    // and the driver-config button (the game runs on the Proton's bundled Turnip).
+                    run {
+                        val dbLabels = listOf("Use container default", "Force X11", "Force Wayland")
+                        val dbValues = listOf("", Container.DISPLAY_BACKEND_X11, Container.DISPLAY_BACKEND_WAYLAND)
+                        // A stored "Force Wayland" the container's layer can't honour shows as the
+                        // effective backend (Force X11); see containerWaylandCapable above.
+                        val waylandStoredUnusable =
+                            displayBackendOverride == Container.DISPLAY_BACKEND_WAYLAND && !containerWaylandCapable
+                        val dbIdx = if (waylandStoredUnusable) 1
+                                    else dbValues.indexOf(displayBackendOverride).coerceAtLeast(0)
                         DpDrop(
-                            dp, "gfxDriver",
-                            label = stringResource(R.string.graphics_driver),
-                            options = graphicsDriverEntries,
-                            selected = selectedGfxDriver,
-                            onSelect = { selectedGfxDriver = it },
-                            modifier = Modifier.weight(1f),
-                            onRightId = "gfxWrapper"
+                            dp, "displayBackend",
+                            label = "Display backend",
+                            options = dbLabels,
+                            selected = dbLabels[dbIdx],
+                            disabledOptions = if (containerWaylandCapable) emptySet() else setOf(dbLabels[2]),
+                            onSelect = {
+                                val picked = dbValues[dbLabels.indexOf(it)]
+                                displayBackendOverride =
+                                    if (picked == Container.DISPLAY_BACKEND_WAYLAND && !containerWaylandCapable) Container.DISPLAY_BACKEND_X11
+                                    else picked
+                            }
                         )
+                        if (effectiveWaylandShortcut) {
+                            Text(
+                                "Wayland (experimental): renders through the embedded compositor " +
+                                    "(winewayland). Needs " + com.winlator.star.core.WineWaylandSupport.LAYER_HINT +
+                                    ". The game renders on the Turnip bundled with that " +
+                                    "Proton — the graphics-driver picker only affects the compositor. " +
+                                    "DX wrapper (DXVK/VKD3D) settings apply as on X11. Renderer " +
+                                    "options below don't apply.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        } else if (!containerWaylandCapable) {
+                            Text(
+                                "Wayland needs " + com.winlator.star.core.WineWaylandSupport.LAYER_HINT +
+                                    ". The selected layer does not include winewayland and its Wayland Turnip.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            if (waylandStoredUnusable || shortcut.container.isWaylandBackend) {
+                                Text(
+                                    if (waylandStoredUnusable)
+                                        "This game was set to Force Wayland, but the container's Proton layer is not Wayland-capable: it runs on X11 and will be saved as Force X11."
+                                    else
+                                        "The container is set to Wayland, but its Proton layer is not Wayland-capable: the game runs on X11.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.error
+                                )
+                            }
+                        }
+                    }
+
+                    // Graphics Driver + wrapper manager (cloud). Under Wayland the wrapper flavour is
+                    // irrelevant: the compositor loads the installed Turnip named by the "version" key of
+                    // graphicsDriverConfig (XServerDisplayActivity's Wayland resolve → adrenotools), and the
+                    // game renders on the Proton's bundled Wayland Turnip. So the flavour dropdown is swapped
+                    // for a "Compositor driver" picker over the installed Turnip ids that writes ONLY the
+                    // version key back (see withGraphicsDriverVersion); the config button stays live.
+                    var showWrapperManager by remember { mutableStateOf(false) }
+                    val gfxContext = LocalContext.current
+                    var compositorChoices by remember { mutableStateOf<List<String>>(emptyList()) }
+                    LaunchedEffect(effectiveWaylandShortcut) {
+                        if (!effectiveWaylandShortcut) return@LaunchedEffect
+                        compositorChoices = compositorDriverChoices(gfxContext) // same source as the config dialog
+                    }
+                    val compositorVersion = GraphicsDriverConfigDialog.getVersion(graphicsDriverConfig) ?: ""
+                    if (effectiveWaylandShortcut) {
+                        Text(
+                            "Game driver: Wayland Turnip bundled with this Proton",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        if (effectiveWaylandShortcut) {
+                            DpDrop(
+                                dp, "gfxDriver",
+                                label = "Compositor driver",
+                                options = compositorChoices,
+                                selected = if (compositorVersion in compositorChoices) compositorVersion else "",
+                                onSelect = { graphicsDriverConfig = withGraphicsDriverVersion(graphicsDriverConfig, it) },
+                                modifier = Modifier.weight(1f)
+                            )
+                        } else {
+                            DpDrop(
+                                dp, "gfxDriver",
+                                label = stringResource(R.string.graphics_driver),
+                                options = graphicsDriverEntries,
+                                selected = selectedGfxDriver,
+                                onSelect = { selectedGfxDriver = it },
+                                modifier = Modifier.weight(1f),
+                                onRightId = "gfxWrapper"
+                            )
+                        }
                         IconButton(onClick = { helpRes = R.string.help_graphics_driver }) {
                             Icon(Icons.Default.Help, contentDescription = "What is this?", modifier = Modifier.size(18.dp))
                         }
-                        DpButton(dp, "gfxWrapper", onActivate = { showWrapperManager = true }, onLeftId = "gfxDriver") {
-                            IconButton(onClick = { showWrapperManager = true }) {
-                                Icon(Icons.Default.CloudDownload, contentDescription = stringResource(R.string.wrapper_manager_open))
+                        // Wrappers are X11 game-driver shims: nothing on the Wayland path uses them,
+                        // so the manager button is left out there (the "?" stays).
+                        if (!effectiveWaylandShortcut) {
+                            DpButton(dp, "gfxWrapper", onActivate = { showWrapperManager = true }, onLeftId = "gfxDriver") {
+                                IconButton(onClick = { showWrapperManager = true }) {
+                                    Icon(Icons.Default.CloudDownload, contentDescription = stringResource(R.string.wrapper_manager_open))
+                                }
                             }
                         }
                     }
@@ -7055,10 +7280,29 @@ internal fun ShortcutSettingsDialogScreen(
                         showWrapperManager = false
                         wrapperRefreshKey++ // pick up a just-imported/deleted wrapper
                     })
-                    DpButton(dp, "gfxConfig", onActivate = { showGfxConfig = true }, modifier = Modifier.fillMaxWidth()) {
-                        OutlinedButton(onClick = { showGfxConfig = true }, modifier = Modifier.fillMaxWidth()) {
-                            Text("${stringResource(R.string.graphics_driver)}: ${GraphicsDriverConfigDialog.getVersion(graphicsDriverConfig)}")
+                    // Driver configuration is X11 tuning; on Wayland its only live field (the Turnip
+                    // version) is covered by the Compositor driver dropdown, so the button is hidden.
+                    if (!effectiveWaylandShortcut) {
+                        DpButton(dp, "gfxConfig", onActivate = { showGfxConfig = true }, modifier = Modifier.fillMaxWidth()) {
+                            OutlinedButton(onClick = { showGfxConfig = true }, modifier = Modifier.fillMaxWidth()) {
+                                Text("${stringResource(R.string.graphics_driver)}: ${GraphicsDriverConfigDialog.getVersion(graphicsDriverConfig)}")
+                            }
                         }
+                    } else {
+                        // "System"/empty falls back to the system libvulkan, which can't import the
+                        // game's dmabufs (black screen) — mirrors XServerDisplayActivity's resolve. Warn only.
+                        if (compositorVersion.isEmpty() || compositorVersion == "System") {
+                            Text(
+                                """Wayland needs a Turnip driver here. "System" cannot import the game's frames and shows a black screen.""",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        }
+                        Text(
+                            "Used by the Wayland compositor to put frames on screen; the game renders on the Turnip bundled with the Proton.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
 
                     // DX Wrapper
@@ -7107,16 +7351,20 @@ internal fun ShortcutSettingsDialogScreen(
                     // Renderer (host) — per-game override of the container's OpenGL/Vulkan choice.
                     var showSfWarning by remember { mutableStateOf(false) }
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        // Display only while greyed on Wayland: the compositor is always Vulkan; the
+                        // stored X11 choice is kept and returns with the X11 backend.
+                        val rendererShown = if (effectiveWaylandShortcut) "Vulkan (Wayland compositor)" else selectedRenderer
                         DpDrop(
                             dp, "renderer",
                             label = stringResource(R.string.renderer),
-                            options = listOf("OpenGL", "Vulkan", "SurfaceFlinger"),
-                            selected = selectedRenderer,
+                            options = if (effectiveWaylandShortcut) listOf(rendererShown) else listOf("OpenGL", "Vulkan", "SurfaceFlinger"),
+                            selected = rendererShown,
                             onSelect = {
                                 // SurfaceFlinger is experimental and can reboot some devices — require opt-in.
                                 if (it == "SurfaceFlinger" && selectedRenderer != "SurfaceFlinger") showSfWarning = true
                                 else selectedRenderer = it
                             },
+                            enabled = !effectiveWaylandShortcut,
                             modifier = Modifier.weight(1f)
                         )
                         IconButton(onClick = { helpRes = R.string.help_renderer }) {
@@ -7132,7 +7380,7 @@ internal fun ShortcutSettingsDialogScreen(
 
                     // SurfaceFlinger colour correction (ASR-only, GN #1620) — only relevant when this
                     // game runs on the SurfaceFlinger renderer, so surface it under that choice.
-                    if (selectedRenderer == "SurfaceFlinger") {
+                    if (!effectiveWaylandShortcut && selectedRenderer == "SurfaceFlinger") {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Column(Modifier.weight(1f)) {
                                 Text(stringResource(R.string.renderer_sf_compat))
@@ -7150,7 +7398,7 @@ internal fun ShortcutSettingsDialogScreen(
                     }
 
                     // Vulkan renderer per-game overrides — only relevant when this game runs on Vulkan.
-                    if (selectedRenderer == "Vulkan") {
+                    if (!effectiveWaylandShortcut && selectedRenderer == "Vulkan") {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text(stringResource(R.string.renderer_native), Modifier.weight(1f))
                             IconButton(onClick = { helpRes = R.string.help_renderer_native }) {
@@ -7253,17 +7501,28 @@ internal fun ShortcutSettingsDialogScreen(
                     }
 
                     // Render scale (supersampling) — per-game override of the container default.
+                    // Greyed on Wayland (downscale lives in the X11 Vulkan renderer only); displays
+                    // "Not used on Wayland" while the stored value is left untouched.
                     run {
                         val renderScaleValues = listOf("1.0", "1.25", "1.5", "2.0")
                         val renderScaleLabels = listOf("Off", "1.25x", "1.5x", "2x")
                         val rsIdx = renderScaleValues.indexOf(renderScale).coerceAtLeast(0)
+                        val rsShown = if (effectiveWaylandShortcut) "Not used on Wayland" else renderScaleLabels[rsIdx]
                         DpDrop(
                             dp, "renderScale",
                             label = "Render scale (supersampling)",
-                            options = renderScaleLabels,
-                            selected = renderScaleLabels[rsIdx],
-                            onSelect = { renderScale = renderScaleValues[renderScaleLabels.indexOf(it)] }
+                            options = if (effectiveWaylandShortcut) listOf(rsShown) else renderScaleLabels,
+                            selected = rsShown,
+                            onSelect = { renderScale = renderScaleValues[renderScaleLabels.indexOf(it)] },
+                            enabled = !effectiveWaylandShortcut
                         )
+                        if (effectiveWaylandShortcut) {
+                            Text(
+                                "Not used on Wayland: the compositor has no supersampling downscale. The stored value returns on X11.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
                     }
 
                     // In-game refresh rate — single per-game override of the container default. Options:
@@ -7315,13 +7574,16 @@ internal fun ShortcutSettingsDialogScreen(
                         // FG's mailbox/present-mode delivery only exists on the Vulkan host renderer, so
                         // gate the whole dropdown on Vulkan (grey it out otherwise) — combined with the
                         // existing lsfg-DLL option gate. See ContainerDetailScreen for the rationale.
-                        val fgVulkan = selectedRenderer == "Vulkan"
+                        // On Wayland FG is simply not wired to the compositor yet: disabled with that
+                        // reason and displaying it (stored engine untouched). See ContainerDetailScreen.
+                        val fgVulkan = !effectiveWaylandShortcut && selectedRenderer == "Vulkan"
+                        val fgShown = if (effectiveWaylandShortcut) "Not available on Wayland yet" else fgLabels[fgIdx]
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             DpDrop(
                                 dp, "frameGen",
                                 label = stringResource(R.string.frame_generation),
-                                options = fgLabels,
-                                selected = fgLabels[fgIdx],
+                                options = if (effectiveWaylandShortcut) listOf(fgShown) else fgLabels,
+                                selected = fgShown,
                                 onSelect = { frameGenEngine = fgEngines[fgLabels.indexOf(it)] },
                                 enabled = fgVulkan,
                                 disabledOptions = buildSet {
@@ -7336,7 +7598,7 @@ internal fun ShortcutSettingsDialogScreen(
                         }
                         if (!fgVulkan) {
                             Text(
-                                text = stringResource(R.string.frame_generation_requires_vulkan),
+                                text = if (effectiveWaylandShortcut) "Not available on Wayland yet (frame generation has not been wired to the Wayland compositor)" else stringResource(R.string.frame_generation_requires_vulkan),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -7574,16 +7836,27 @@ internal fun ShortcutSettingsDialogScreen(
                     )
                     val fsOverrideIdx = if (fullscreenModeOverride < 0) 0 else (fullscreenModeOverride + 1)
                         .coerceIn(1, fsOverrideLabels.size - 1)
+                    // Not wired to the Wayland compositor: greyed there, displays "Not used on Wayland",
+                    // stored override untouched (see ContainerDetailScreen).
+                    val fsShown = if (effectiveWaylandShortcut) "Not used on Wayland" else fsOverrideLabels[fsOverrideIdx]
                     DpDrop(
                         dp, "fullscreen",
                         label = stringResource(R.string.fullscreen_mode),
-                        options = fsOverrideLabels,
-                        selected = fsOverrideLabels[fsOverrideIdx],
+                        options = if (effectiveWaylandShortcut) listOf(fsShown) else fsOverrideLabels,
+                        selected = fsShown,
                         onSelect = { sel ->
                             val idx = fsOverrideLabels.indexOf(sel)
                             fullscreenModeOverride = if (idx <= 0) -1 else idx - 1
-                        }
+                        },
+                        enabled = !effectiveWaylandShortcut
                     )
+                    if (effectiveWaylandShortcut) {
+                        Text(
+                            "Not used on Wayland: the Wayland compositor always scales the whole desktop to the screen; fullscreen modes and alignment are not wired to it yet.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
 
                     // Close the session when this game exits (per-game override; container default is ON)
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -7899,7 +8172,7 @@ internal fun ShortcutSettingsDialogScreen(
                 // Portrait: the tab strip is pinned across the TOP (mirrors the container editor's
                 // top tab bar via the shared RailTopTabs). Landscape: the shared collapsible left rail
                 // beside the content. Left/Right on the focused "tabs" node still switches tabs for
-                // D-pad/controller users in both orientations.
+                // D-pad/controller users in both orientations, and L1/R1 switch from anywhere.
                 val railState = rememberRailState("shortcut")
                 val railItems = tabTitles.mapIndexed { index, tab ->
                     RailItem(tab, shortcutTabIcon(tab), index == selectedTab) { selectedTab = index }
@@ -7970,7 +8243,8 @@ internal fun ShortcutSettingsDialogScreen(
             graphicsDriver = StringUtils.parseIdentifier(selectedGfxDriver),
             initialConfig = graphicsDriverConfig,
             onConfirm = { graphicsDriverConfig = it; showGfxConfig = false },
-            onDismiss = { showGfxConfig = false }
+            onDismiss = { showGfxConfig = false },
+            waylandCompositorNote = effectiveWaylandShortcut
         )
     }
     val isVegasCfg = StringUtils.parseIdentifier(selectedDxWrapper).contains("vegas")
@@ -8445,7 +8719,7 @@ private fun downloadBitmapOrNull(url: String): Bitmap? = try {
  * sets its cover art — Steam CDN 600x900 portrait, falling back to the landscape header. Writes
  * both customCoverArt and the grid-tile icon PNG (keyed on the current base). Returns the bitmap or null.
  */
-private fun applySteamCover(container: Container, base: String, appId: Int): Bitmap? {
+internal fun applySteamCover(container: Container, base: String, appId: Int): Bitmap? {
     val shortcutFile = File(container.getDesktopDir(), "$base.desktop")
     if (!shortcutFile.isFile) return null
     val bmp = downloadBitmapOrNull(SteamStoreSearch.coverUrl(appId))
@@ -8491,12 +8765,17 @@ private fun Set<String>.toggle(path: String): Set<String> =
 // [preflightDone] = the SteamLite pre-flight already pulled cloud saves; the activity skips its own pull.
 private fun launchShortcutNow(activity: Activity, shortcut: Shortcut, preflightDone: Boolean = false) {
     if (!XrActivity.isEnabled(activity)) {
+        // Effective display backend: per-game override, else the container default. Wayland reuses
+        // XServerDisplayActivity's launch machinery via a guarded wayland_mode flag.
+        val backend = shortcut.getExtra("displayBackend", shortcut.container.displayBackend)
+        val wayland = backend == com.winlator.star.container.Container.DISPLAY_BACKEND_WAYLAND
         val intent = Intent(activity, XServerDisplayActivity::class.java).apply {
             putExtra("container_id", shortcut.container.id)
             putExtra("shortcut_path", shortcut.file.path)
             putExtra("shortcut_name", shortcut.name)
             putExtra("disableXinput", shortcut.getExtra("disableXinput", "0"))
             if (preflightDone) putExtra(SteamSessionManager.EXTRA_PREFLIGHT_DONE, true)
+            if (wayland) putExtra("wayland_mode", true)
         }
         activity.startActivity(intent)
     } else {

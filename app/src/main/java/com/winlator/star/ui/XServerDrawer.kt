@@ -39,6 +39,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.FlipToFront
+import androidx.compose.material.icons.filled.Help
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Memory
@@ -116,6 +117,7 @@ import com.winlator.star.perf.RootManager
 import com.winlator.star.reshade.ReshadeLoadout
 import com.winlator.star.reshade.ReshadeManager
 import com.winlator.star.ui.components.ColorPicker
+import com.winlator.star.ui.screens.HelpDialog
 import com.winlator.star.ui.screens.MenuItemDivider
 import com.winlator.star.ui.screens.WatchdogSection
 import com.winlator.star.ui.screens.outlinedMenuCard
@@ -515,8 +517,8 @@ private fun TvContent(state: XServerDrawerState) {
             color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp,
             modifier = Modifier.padding(top = 4.dp))
     } else {
-        Text("Scaling filter", color = MaterialTheme.colorScheme.onSurface, fontSize = 13.sp,
-            fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 4.dp, bottom = 6.dp))
+        ScalingModeHeader("Scaling filter", MaterialTheme.colorScheme.onSurface,
+            Modifier.padding(top = 4.dp, bottom = 6.dp))
         val initGlUpscalerMode by XServerDialogState.glUpscalerMode.collectAsState()
         var glUpscalerMode by remember(initGlUpscalerMode) { mutableIntStateOf(initGlUpscalerMode) }
         UpscalerModeButtons(glUpscalerMode, true) {
@@ -1050,8 +1052,8 @@ private fun GraphicsContent(state: XServerDrawerState) {
             if (ScreenEffectLooks.LOOKS.getOrNull(selectedLook ?: -1)?.scalingMode != null) selectedLook = null
         }
 
-        Text("Scaling mode", color = glHeaderColor, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
-        Spacer(Modifier.height(8.dp))
+        ScalingModeHeader("Scaling mode", glHeaderColor)
+        Spacer(Modifier.height(2.dp))
         UpscalerModeButtons(glUpscalerMode, glEnabled) {
             glUpscalerMode = it
             XServerDialogState.setGlUpscalerMode(it)
@@ -1059,11 +1061,11 @@ private fun GraphicsContent(state: XServerDrawerState) {
             XServerDialogState.onGlUpscalerApply?.invoke(it)
         }
         // "Sharpness" drives SGSR EdgeSharpness / FSR RCAS / CAS / NIS, for the sharpening modes.
-        if (glUpscalerMode == 3 || glUpscalerMode == 4 || glUpscalerMode == 5 || glUpscalerMode == 6 || glUpscalerMode == 7) {
+        if (glUpscalerMode in 3..8) {
             val initGlUpscaleSharpness by XServerDialogState.glUpscaleSharpness.collectAsState()
             var glUpscaleSharpness by remember(initGlUpscaleSharpness) { mutableIntStateOf(initGlUpscaleSharpness) }
             Spacer(Modifier.height(4.dp))
-            // Continuous for SGSR/FSR (3/4/5); snapped to 5 stops {0,25,50,75,100} for
+            // Continuous for SGSR/FSR/NIS/SGSR HQ (3/4/5/7/8); snapped to 5 stops {0,25,50,75,100} for
             // Sharpen mode (6), where stop 0 = OFF (no CAS pass).
             IntSlider("Sharpness", glUpscaleSharpness, 0..100,
                 onValueChange = { glUpscaleSharpness = it },
@@ -1236,8 +1238,8 @@ private fun GraphicsContent(state: XServerDrawerState) {
             if (ScreenEffectLooks.LOOKS.getOrNull(selectedLook ?: -1)?.scalingMode != null) selectedLook = null
         }
 
-        Text("Scaling mode", color = accent, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
-        Spacer(Modifier.height(8.dp))
+        ScalingModeHeader("Scaling mode", accent)
+        Spacer(Modifier.height(2.dp))
         UpscalerModeButtons(upscalerMode, true) {
             upscalerMode = it
             XServerDialogState.setUpscalerMode(it)
@@ -1246,8 +1248,8 @@ private fun GraphicsContent(state: XServerDrawerState) {
         }
 
         // "Sharpness" controls the REAL upscaler sharpness (RCAS stops / SGSR EdgeSharpness /
-        // NIS sharpness) and only applies to the sharpening scaling modes (SGSR/FSR/FSR-Fit/Sharpen/NIS).
-        if (upscalerMode == 3 || upscalerMode == 4 || upscalerMode == 5 || upscalerMode == 6 || upscalerMode == 7) {
+        // NIS sharpness) and only applies to the sharpening scaling modes (SGSR/FSR/FSR-Fit/Sharpen/NIS/SGSR HQ).
+        if (upscalerMode in 3..8) {
             val initUpscaleSharpness by XServerDialogState.upscaleSharpness.collectAsState()
             var upscaleSharpness by remember(initUpscaleSharpness) { mutableIntStateOf(initUpscaleSharpness) }
             Spacer(Modifier.height(4.dp))
@@ -1404,6 +1406,9 @@ private fun FrameGenSection(state: XServerDrawerState) {
     val liveRate by state.currentRefreshRate.collectAsState()
     val matchRefresh by state.matchRefreshRate.collectAsState()
     val vrrOk by state.vrrSupported.collectAsState()
+    // Set when LSFG Native / Win-FG Native can't run in this session (driver, DLL, renderer).
+    val fgUnavailable by state.fgUnavailableReason.collectAsState()
+    val fgUnavailableDetail by state.fgUnavailableDetail.collectAsState()
 
     // Title on the left, engine badge on the right (green dot = engine actually running this
     // session). Replaces the old standalone "Frame Generation (AI)" header so the engine isn't
@@ -1474,7 +1479,24 @@ private fun FrameGenSection(state: XServerDrawerState) {
             state.onBionicFgConfigChange?.run()
         }
 
-        FgMultiplierButtons(fgMult, engine) { newMult ->
+        if (fgUnavailable.isNotEmpty()) {
+            Text(
+                "⚠ $fgUnavailable",
+                color = MaterialTheme.colorScheme.error,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.padding(start = 4.dp, bottom = 4.dp)
+            )
+            if (fgUnavailableDetail.isNotEmpty()) {
+                Text(
+                    "Driver check: $fgUnavailableDetail",
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+                    fontSize = 10.sp,
+                    modifier = Modifier.padding(start = 4.dp, bottom = 6.dp)
+                )
+            }
+        }
+        FgMultiplierButtons(fgMult, engine, enabled = fgUnavailable.isEmpty()) { newMult ->
             fgMult = newMult; applyFg()
             // Both engines now do the FULL surface-teardown reset with a Resume prompt, driven from
             // onBionicFgConfigChange in the activity (win-fg on an On/Off/multiplier/model/preset
@@ -1546,6 +1568,39 @@ private fun FrameGenSection(state: XServerDrawerState) {
                     modifier = Modifier.padding(start = 4.dp, top = 2.dp)
                 )
             }
+        }
+
+        // LSFG Native experimental capture resolution (FeatureFlags.LSFG_NATIVE_EXPERIMENTS_ENABLED). Live: the
+        // activity's lsfg-native branch of onBionicFgConfigChange reads it from the state,
+        // persists it and pushes it to the renderer with the multiplier/flow.
+        if (engine == "lsfg-native" && com.winlator.star.FeatureFlags.LSFG_NATIVE_EXPERIMENTS_ENABLED) {
+            val capture by state.fgCaptureResolution.collectAsState()
+            val panelHeight by state.fgPanelHeight.collectAsState()
+            Spacer(Modifier.height(10.dp))
+            Text(
+                "Experimental",
+                color = accent,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.padding(start = 4.dp, bottom = 4.dp)
+            )
+            Text(
+                "Capture resolution",
+                color = MaterialTheme.colorScheme.onSurface,
+                fontSize = 12.sp,
+                modifier = Modifier.padding(start = 4.dp, bottom = 6.dp)
+            )
+            FgCaptureChips(capture, panelHeight) { newValue ->
+                state.setFgCaptureResolution(newValue)
+                applyFg()
+            }
+            Text(
+                "Height the frame-gen chain runs at (width follows the screen). Lower = far " +
+                    "cheaper on the GPU, softer picture. Panel = full resolution.",
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+                fontSize = 11.sp,
+                modifier = Modifier.padding(start = 4.dp, top = 2.dp)
+            )
         }
 
         // lsfg-vk only: performance_mode (bionic-fg has no such setting). Toggling rewrites conf.toml
@@ -1748,10 +1803,67 @@ private fun FgModelButtons(selected: Int, onSelect: (Int) -> Unit) {
 }
 
 
+/**
+ * Experimental capture-resolution picker: Panel, Game, then every distinct height from the
+ * container Screen Size list (R.array.screen_size_entries), as scrollable chips. Stored value is
+ * "panel" / "game" / the bare height ("720"), the same form the container editor writes.
+ * Heights the renderer would clamp anyway (below a quarter of the panel, or at/above it) are left
+ * out, so a highlighted chip is always the height really in effect.
+ */
 @Composable
-private fun FgMultiplierButtons(selected: Int, engine: String, onSelect: (Int) -> Unit) {
+private fun FgCaptureChips(selected: String, panelHeight: Int, onSelect: (String) -> Unit) {
     val accent = MaterialTheme.colorScheme.primary
     val accentDim = LocalAccentDim.current
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val heights = remember(panelHeight) {
+        val minH = maxOf(16, panelHeight / 4)
+        context.resources.getStringArray(R.array.screen_size_entries)
+            .filterNot { it.equals("custom", ignoreCase = true) }
+            .map { Container.fgCaptureHeightFor(it.substringBefore(" ")) }
+            .filter { it > 0 && (panelHeight <= 0 || (it >= minH && it < panelHeight)) }
+            .distinct()
+            .sorted()
+    }
+    val options = listOf(Container.FG_CAPTURE_PANEL to "Panel", Container.FG_CAPTURE_GAME to "Game") +
+        heights.map { it.toString() to "${it}p" }
+    val selectedHeight = Container.fgCaptureHeightFor(selected)
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        options.forEach { (value, label) ->
+            val isSel = when (value) {
+                Container.FG_CAPTURE_PANEL, Container.FG_CAPTURE_GAME -> selected == value
+                else -> selected != Container.FG_CAPTURE_PANEL && selected != Container.FG_CAPTURE_GAME
+                    && selectedHeight == value.toInt()
+            }
+            Box(
+                contentAlignment = Alignment.Center,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(if (isSel) accent else Color.Black)
+                    .border(1.dp, if (isSel) accent else accentDim, RoundedCornerShape(8.dp))
+                    .clickable { onSelect(value) }
+                    .padding(horizontal = 12.dp, vertical = 8.dp)
+            ) {
+                Text(
+                    label,
+                    color = if (isSel) Color.Black else accent,
+                    fontSize = 12.sp,
+                    fontWeight = if (isSel) FontWeight.Bold else FontWeight.Medium
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun FgMultiplierButtons(selected: Int, engine: String, enabled: Boolean = true, onSelect: (Int) -> Unit) {
+    val accent = MaterialTheme.colorScheme.primary
+    val accentDim = LocalAccentDim.current
+    val dimmed = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f)
     // win-fg is a simple Off / On toggle for now (On = 2×); selecting On reveals the
     // model + flow-scale controls (gated on multiplier > 0). lsfg-vk keeps 2×/3×/4×.
     val options = if (engine == "bionic")
@@ -1763,8 +1875,9 @@ private fun FgMultiplierButtons(selected: Int, engine: String, onSelect: (Int) -
         horizontalArrangement = Arrangement.spacedBy(6.dp)
     ) {
         options.forEach { (mult, label) ->
-            val isSel = selected == mult
+            val isSel = selected == mult && enabled
             // Unselected: black fill, dark-blue outline. Selected: solid blue fill, black text.
+            // Disabled (the engine can't run here): all dimmed, nothing clickable.
             Box(
                 contentAlignment = Alignment.Center,
                 modifier = Modifier
@@ -1773,15 +1886,15 @@ private fun FgMultiplierButtons(selected: Int, engine: String, onSelect: (Int) -
                     .background(if (isSel) accent else Color.Black)
                     .border(
                         width = 1.dp,
-                        color = if (isSel) accent else accentDim,
+                        color = if (isSel) accent else if (enabled) accentDim else dimmed,
                         shape = RoundedCornerShape(8.dp)
                     )
-                    .clickable { onSelect(mult) }
+                    .clickable(enabled = enabled) { onSelect(mult) }
                     .padding(vertical = 9.dp)
             ) {
                 Text(
                     label,
-                    color = if (isSel) Color.Black else accent,
+                    color = if (isSel) Color.Black else if (enabled) accent else dimmed,
                     fontSize = 13.sp,
                     fontWeight = if (isSel) FontWeight.Bold else FontWeight.Medium
                 )
@@ -2224,9 +2337,10 @@ private fun GradientSlider(
     }
 }
 
-// Scaling-mode picker: 7 options (0=None 1=Linear 2=Nearest 3=SGSR 4=FSR 5=FSR Fit
-// 6=Sharpen) laid out as rows of four segmented chips (same box-chip idiom as
-// FgMultiplierButtons). Grayed out when the active host renderer is not Vulkan.
+// Scaling-mode picker: 9 options (0=None 1=Linear 2=Nearest 3=SGSR 8=SGSR HQ 4=FSR
+// 5=FSR Fit 6=Sharpen 7=NIS) laid out as rows of three segmented chips (same box-chip
+// idiom as FgMultiplierButtons). SGSR HQ sits next to SGSR; its int is 8 because the
+// mode ints are persisted per game and must never be renumbered.
 // Terminal debanding controls (toggle + optional dither-strength slider), shared by the
 // GL and Vulkan graphics blocks. Reads/writes the single _debandEnabled/_debandStrength
 // state and fires onDebandApply; only one renderer block is shown per session, so the
@@ -2396,16 +2510,31 @@ private fun ScreenAlignmentButtons(selected: Int, enabled: Boolean = true, onSel
     }
 }
 
+// Scaling-mode section header with a small "?" that explains every mode (help_scaling_mode).
+// The help stays available while the picker itself is greyed out.
+@Composable
+private fun ScalingModeHeader(title: String, color: Color, modifier: Modifier = Modifier) {
+    var showHelp by remember { mutableStateOf(false) }
+    Row(verticalAlignment = Alignment.CenterVertically, modifier = modifier) {
+        Text(title, color = color, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+        IconButton(onClick = { showHelp = true }, modifier = Modifier.size(28.dp)) {
+            Icon(Icons.Default.Help, contentDescription = "What is this?", tint = color, modifier = Modifier.size(16.dp))
+        }
+    }
+    if (showHelp) HelpDialog(R.string.help_scaling_mode) { showHelp = false }
+}
+
 @Composable
 private fun UpscalerModeButtons(selected: Int, enabled: Boolean, onSelect: (Int) -> Unit) {
     val accent = MaterialTheme.colorScheme.primary
     val accentDim = LocalAccentDim.current
     val options = listOf(
         0 to "None", 1 to "Linear", 2 to "Nearest",
-        3 to "SGSR", 4 to "FSR", 5 to "FSR (Fit)", 6 to "Sharpen", 7 to "NIS"
+        3 to "SGSR", 8 to "SGSR HQ", 4 to "FSR",
+        5 to "FSR (Fit)", 6 to "Sharpen", 7 to "NIS"
     )
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        options.chunked(4).forEach { row ->
+        options.chunked(3).forEach { row ->
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -2444,7 +2573,7 @@ private fun UpscalerModeButtons(selected: Int, enabled: Boolean, onSelect: (Int)
 }
 
 // Per-container rumble target picker (Off/Controller/Device/Both) — same segmented-chip style as
-// UpscalerModeButtons above, just a fixed 4-wide row instead of chunked(4). "Device" = the phone's
+// UpscalerModeButtons above, just a fixed 4-wide row instead of chunked(3). "Device" = the phone's
 // own vibrator (Container.VIBRATION_MODE_DEVICE); "Both" drives the physical controller AND the
 // phone together (Container.VIBRATION_MODE_BOTH).
 @Composable
@@ -2980,9 +3109,12 @@ private fun HudContent(state: XServerDrawerState) {
         Spacer(Modifier.height(14.dp))
         Text("Refresh rate", color = accent, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
         Spacer(Modifier.height(4.dp))
-        // Auto (match FPS) == the existing VRR toggle. It stays usable while native frame gen runs:
-        // then the activity fits the display to Max FPS x multiplier (pickNativeFgRefresh).
+        // Auto (match FPS) == the existing VRR toggle. While native frame gen runs it is the
+        // session's Auto: switched on at start unless this game opted out, and toggling it off
+        // opts this game out (applyNativeFgLocks / onMatchRefreshChange in the activity).
         val nativeFgLocksVrr by state.nativeFgLocks.collectAsState()
+        val fgAutoTurnedOn by state.fgAutoTurnedOn.collectAsState()
+        val fgAutoPerGame by state.fgAutoPerGame.collectAsState()
         ToggleRow("Auto (match FPS)", matchRefreshOn && vrrSupported, enabled = vrrSupported) {
             matchRefreshOn = it
             state.setMatchRefreshRate(it)
@@ -3000,8 +3132,17 @@ private fun HudContent(state: XServerDrawerState) {
             when {
                 !vrrSupported ->
                     "Unavailable — this display has a single refresh rate, so there's nothing to match."
+                matchRefreshOn && nativeFgLocksVrr && fgAutoTurnedOn ->
+                    "Auto was turned on for frame generation — the display follows Max FPS × multiplier. " +
+                        (if (fgAutoPerGame) "Turn it off if you prefer; this game will remember."
+                         else "Turn it off if you prefer (for this session).")
                 matchRefreshOn && nativeFgLocksVrr ->
                     "Auto is on — with frame generation running, the display follows Max FPS × multiplier."
+                nativeFgLocksVrr ->
+                    (if (fgAutoPerGame) "Auto is off for this game while frame generation runs. "
+                     else "Auto is off while frame generation runs. ") +
+                        "Turn it on to fit the screen to Max FPS × multiplier." +
+                        (if (manualRefreshRate > 0) " Display locked to ${manualRefreshRate} Hz." else "")
                 matchRefreshOn ->
                     "Auto is on — the display follows your FPS."
                 manualRefreshRate > 0 ->
@@ -3315,6 +3456,7 @@ private fun ControlsContent(state: XServerDrawerState) {
 
     val moveCursorToTouch by state.moveCursorToTouchpoint.collectAsState()
     val isRelativeMouse by state.isRelativeMouseMovement.collectAsState()
+    val isWaylandSession by state.isWaylandMode.collectAsState()
     val isMouseDisabled by state.isMouseDisabled.collectAsState()
     val initOverlayOpacity by state.overlayOpacity.collectAsState()
     val controlsFollowTheme by state.controlsFollowTheme.collectAsState()
@@ -3468,7 +3610,8 @@ private fun ControlsContent(state: XServerDrawerState) {
                     ToggleChipItem("Cursor to Touch", moveCursorToTouch) {
                         state.onMoveCursorToTouchpoint?.run()
                     },
-                    ToggleChipItem("Relative Mouse", isRelativeMouse) {
+                    // Greyed on Wayland: the compositor has no pointer-constraints protocol yet.
+                    ToggleChipItem("Relative Mouse", isRelativeMouse, enabled = !isWaylandSession) {
                         state.onRelativeMouseMovement?.run()
                     },
                     ToggleChipItem("Disable Mouse", isMouseDisabled) {
@@ -3477,6 +3620,16 @@ private fun ControlsContent(state: XServerDrawerState) {
                 ),
                 perRow = 3
             )
+
+            if (isWaylandSession) {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "Relative Mouse: not available on Wayland yet (pointer constraints not implemented)",
+                    color = LocalAccentDim.current,
+                    fontSize = 11.sp,
+                    lineHeight = 13.sp
+                )
+            }
 
             // Tied directly to the toggle: the gestures only exist in absolute-cursor mode, so the
             // pane appears as part of switching Cursor to Touch on and leaves with it. No cog — one

@@ -122,7 +122,7 @@ import androidx.compose.foundation.layout.ExperimentalLayoutApi
 
 // Serializes all native adrenotools probing (isDriverSupported + enumerateExtensions) off the
 // main thread. Serial = no concurrent AdrenoTools hooks (old SIGSEGV); off-main = no ANR.
-private val graphicsProbeMutex = Mutex()
+internal val graphicsProbeMutex = Mutex()
 
 // ─────────────────────────────────────────────────────────────────────────────
 @Composable
@@ -332,7 +332,8 @@ fun ContainerDetailScreen(
             graphicsDriver = StringUtils.parseIdentifier(viewModel.selectedGraphicsDriver),
             initialConfig = viewModel.graphicsDriverConfig,
             onConfirm = { newConfig -> viewModel.graphicsDriverConfig = newConfig; showGraphicsDriverConfig = false },
-            onDismiss = { showGraphicsDriverConfig = false }
+            onDismiss = { showGraphicsDriverConfig = false },
+            waylandCompositorNote = viewModel.isWaylandBackend
         )
     }
     val isVegasWrapper = StringUtils.parseIdentifier(viewModel.selectedDXWrapper ?: "").contains("vegas")
@@ -811,12 +812,18 @@ private fun TopLevelFields(
         }
 
         // Screen Size
-        LabeledDropdown(
-            label = stringResource(R.string.screen_size),
-            options = viewModel.screenSizeEntries,
-            selectedOption = viewModel.selectedScreenSize,
-            onSelect = { viewModel.selectedScreenSize = it }
-        )
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            LabeledDropdown(
+                label = stringResource(R.string.screen_size),
+                options = viewModel.screenSizeEntries,
+                selectedOption = viewModel.selectedScreenSize,
+                onSelect = { viewModel.selectedScreenSize = it },
+                modifier = Modifier.weight(1f)
+            )
+            IconButton(onClick = { helpRes = R.string.help_screen_size }) {
+                Icon(Icons.Default.Help, contentDescription = "What is this?", modifier = Modifier.size(18.dp))
+            }
+        }
         if (viewModel.selectedScreenSize.equals("custom", ignoreCase = true)) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(
@@ -870,25 +877,136 @@ private fun TopLevelFields(
         }
         Spacer(Modifier.height(8.dp))
 
-        // Graphics Driver + wrapper manager (cloud) + config button
-        var showWrapperManager by remember { mutableStateOf(false) }
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        // Display backend: X11 (Java X server + libwinlator) vs the embedded Wayland
+        // compositor (winewayland.drv). Wayland routes launches through our compositor and
+        // greys out the whole Renderer group below, which the compositor replaces. On Wayland
+        // the game renders on the Turnip bundled with the Proton wcp (winewayland picks it via
+        // VK_ICD_FILENAMES); the Graphics Driver picker only feeds the compositor, and its
+        // config dialog is X11-only. The DX Wrapper (DXVK/VKD3D) applies on both backends.
+        //
+        // Wayland is only selectable on a layer that ships winewayland.so + its bundled Wayland Turnip
+        // (WineWaylandSupport). On any other layer the item is disabled and the dropdown shows the
+        // EFFECTIVE backend (X11) — including for a container saved as "wayland" whose layer was since
+        // removed/replaced, which the save path then persists as X11. Keyed on the wine version so the
+        // cached probe only re-runs when the layer changes.
+        run {
+            val backendLabels = listOf("X11", "Wayland")
+            val backendValues = listOf(Container.DISPLAY_BACKEND_X11, Container.DISPLAY_BACKEND_WAYLAND)
+            val waylandCapable = remember(viewModel.selectedWineVersion) {
+                viewModel.isWineWaylandCapable(viewModel.selectedWineVersion)
+            }
+            val selIdx = if (viewModel.isWaylandBackend) 1 else 0
             LabeledDropdown(
-                label = stringResource(R.string.graphics_driver),
-                options = viewModel.graphicsDriverEntries,
-                selectedOption = viewModel.selectedGraphicsDriver,
-                onSelect = { viewModel.selectedGraphicsDriver = it },
-                modifier = Modifier.weight(1f)
+                label = "Display backend",
+                options = backendLabels,
+                selectedOption = backendLabels[selIdx],
+                disabledOptions = if (waylandCapable) emptySet() else setOf(backendLabels[1]),
+                onSelect = {
+                    val picked = backendValues[backendLabels.indexOf(it)]
+                    viewModel.displayBackend =
+                        if (picked == Container.DISPLAY_BACKEND_WAYLAND && !waylandCapable) Container.DISPLAY_BACKEND_X11
+                        else picked
+                }
             )
+            if (viewModel.isWaylandBackend) {
+                Text(
+                    "Wayland (experimental): games render through the embedded compositor " +
+                        "(winewayland). Needs " + com.winlator.star.core.WineWaylandSupport.LAYER_HINT +
+                        ". Games render on the Turnip bundled with that Proton — the " +
+                        "graphics-driver picker only affects the compositor. DX wrapper " +
+                        "(DXVK/VKD3D) settings apply as on X11. The Renderer options below " +
+                        "don't apply and are disabled.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            } else if (!waylandCapable) {
+                Text(
+                    "Wayland needs " + com.winlator.star.core.WineWaylandSupport.LAYER_HINT +
+                        ". The selected layer does not include winewayland and its Wayland Turnip.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                if (viewModel.isWaylandStored) {
+                    Text(
+                        "This container was saved on Wayland, but its Proton layer is no longer Wayland-capable: it runs on X11 and will be saved as X11.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+
+        // Graphics Driver + wrapper manager (cloud) + config button. Under Wayland the wrapper
+        // flavour is irrelevant: the compositor loads the installed Turnip named by the "version"
+        // key of graphicsDriverConfig (XServerDisplayActivity's Wayland resolve → adrenotools), and
+        // the game renders on the Proton's bundled Wayland Turnip. So on Wayland the flavour
+        // dropdown is replaced by a "Compositor driver" picker over the installed Turnip ids that
+        // writes ONLY the version key back; the config dialog stays reachable for the same key.
+        var showWrapperManager by remember { mutableStateOf(false) }
+        val compositorDriverOnly = viewModel.isWaylandBackend
+        var compositorChoices by remember { mutableStateOf<List<String>>(emptyList()) }
+        LaunchedEffect(compositorDriverOnly) {
+            if (!compositorDriverOnly) return@LaunchedEffect
+            compositorChoices = compositorDriverChoices(context) // same source as the config dialog
+        }
+        val compositorVersion = com.winlator.star.contentdialog.GraphicsDriverConfigDialog
+            .getVersion(viewModel.graphicsDriverConfig) ?: ""
+        if (compositorDriverOnly) {
+            Text(
+                "Game driver: Wayland Turnip bundled with this Proton",
+                style = MaterialTheme.typography.bodySmall
+            )
+        }
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            if (compositorDriverOnly) {
+                LabeledDropdown(
+                    label = "Compositor driver",
+                    options = compositorChoices,
+                    selectedOption = if (compositorVersion in compositorChoices) compositorVersion else "",
+                    onSelect = { viewModel.graphicsDriverConfig = withGraphicsDriverVersion(viewModel.graphicsDriverConfig, it) },
+                    modifier = Modifier.weight(1f)
+                )
+            } else {
+                LabeledDropdown(
+                    label = stringResource(R.string.graphics_driver),
+                    options = viewModel.graphicsDriverEntries,
+                    selectedOption = viewModel.selectedGraphicsDriver,
+                    onSelect = { viewModel.selectedGraphicsDriver = it },
+                    modifier = Modifier.weight(1f)
+                )
+            }
             IconButton(onClick = { helpRes = R.string.help_graphics_driver }) {
                 Icon(Icons.Default.Help, contentDescription = "What is this?", modifier = Modifier.size(18.dp))
             }
-            IconButton(onClick = { showWrapperManager = true }) {
-                Icon(Icons.Default.CloudDownload, contentDescription = stringResource(R.string.wrapper_manager_open))
+            // Wrappers are X11 game-driver shims and driver configuration is X11 tuning (its only
+            // live field, the Turnip version, is the Compositor driver dropdown), so both entry
+            // points are left out of the Wayland layout; the "?" stays.
+            if (!compositorDriverOnly) {
+                IconButton(onClick = { showWrapperManager = true }) {
+                    Icon(Icons.Default.CloudDownload, contentDescription = stringResource(R.string.wrapper_manager_open))
+                }
+                IconButton(onClick = onShowGfxConfig) {
+                    Icon(Icons.Default.Settings, contentDescription = null)
+                }
             }
-            IconButton(onClick = onShowGfxConfig) {
-                Icon(Icons.Default.Settings, contentDescription = null)
+        }
+        if (compositorDriverOnly) {
+            // The compositor imports the game's dmabufs, which only an installed Turnip can do:
+            // an empty/"System" version falls back to the system libvulkan (see
+            // XServerDisplayActivity's Wayland driver resolve) and shows a black screen. Warn only.
+            if (compositorVersion.isEmpty() || compositorVersion == "System") {
+                Text(
+                    """Wayland needs a Turnip driver here. "System" cannot import the game's frames and shows a black screen.""",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error
+                )
             }
+            Text(
+                "Used by the Wayland compositor to put frames on screen; the game renders on the Turnip bundled with the Proton.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
         if (showWrapperManager) WrapperManagerDialog(onDismiss = {
             showWrapperManager = false
@@ -934,24 +1052,30 @@ private fun TopLevelFields(
         }
         Spacer(Modifier.height(8.dp))
 
-        // Renderer
+        // Renderer — the X11-side compositor stage. Greyed under the Wayland backend, which
+        // replaces it with the embedded compositor.
+        val rendererEnabled = !viewModel.isWaylandBackend
+        // Display only while greyed: the compositor is always Vulkan, so don't show the stored X11
+        // choice (it is kept untouched and comes back when the backend returns to X11).
+        val rendererShown = if (rendererEnabled) viewModel.selectedRenderer else "Vulkan (Wayland compositor)"
         var showSfWarning by remember { mutableStateOf(false) }
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             LabeledDropdown(
                 label = stringResource(R.string.renderer),
-                options = viewModel.rendererEntries,
-                selectedOption = viewModel.selectedRenderer,
+                options = if (rendererEnabled) viewModel.rendererEntries else listOf(rendererShown),
+                selectedOption = rendererShown,
                 onSelect = {
                     // SurfaceFlinger is experimental and can reboot some devices — require opt-in.
                     if (it == "SurfaceFlinger" && viewModel.selectedRenderer != "SurfaceFlinger") showSfWarning = true
                     else viewModel.selectedRenderer = it
                 },
+                enabled = rendererEnabled,
                 modifier = Modifier.weight(1f)
             )
             IconButton(onClick = { helpRes = R.string.help_renderer }) {
                 Icon(Icons.Default.Help, contentDescription = "What is this?", modifier = Modifier.size(18.dp))
             }
-            if (viewModel.selectedRenderer == "Vulkan") {
+            if (rendererEnabled && viewModel.selectedRenderer == "Vulkan") {
                 IconButton(onClick = onShowVulkanConfig) {
                     Icon(Icons.Default.Settings, contentDescription = null)
                 }
@@ -967,7 +1091,7 @@ private fun TopLevelFields(
         // choice, only when SurfaceFlinger is selected (mirrors the per-game shortcut editor). The
         // renderer-settings gear only appears for Vulkan, so this toggle would otherwise be
         // unreachable for the very renderer it applies to.
-        if (viewModel.selectedRenderer == "SurfaceFlinger") {
+        if (rendererEnabled && viewModel.selectedRenderer == "SurfaceFlinger") {
             Spacer(Modifier.height(8.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
@@ -992,16 +1116,28 @@ private fun TopLevelFields(
         // Render scale (supersampling) — pre-launch override stored via the "renderScale" extra.
         // The game renders at this multiple of the display res; the Vulkan compositor then does a
         // quality downscale. "1.0" = Off.
+        // Greyed on Wayland (the Lanczos downscale lives in the X11 Vulkan renderer only); the
+        // control then DISPLAYS "Not used on Wayland" — the stored value is left untouched.
         run {
             val renderScaleValues = listOf("1.0", "1.25", "1.5", "2.0")
             val renderScaleLabels = listOf("Off", "1.25x", "1.5x", "2x")
             val rsIdx = renderScaleValues.indexOf(viewModel.renderScale).coerceAtLeast(0)
+            val rsEnabled = !viewModel.isWaylandBackend
+            val rsShown = if (rsEnabled) renderScaleLabels[rsIdx] else "Not used on Wayland"
             LabeledDropdown(
                 label = "Render scale (supersampling)",
-                options = renderScaleLabels,
-                selectedOption = renderScaleLabels[rsIdx],
-                onSelect = { viewModel.renderScale = renderScaleValues[renderScaleLabels.indexOf(it)] }
+                options = if (rsEnabled) renderScaleLabels else listOf(rsShown),
+                selectedOption = rsShown,
+                onSelect = { viewModel.renderScale = renderScaleValues[renderScaleLabels.indexOf(it)] },
+                enabled = rsEnabled
             )
+            if (!rsEnabled) {
+                Text(
+                    "Not used on Wayland: the compositor has no supersampling downscale. The stored value returns on X11.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
         }
         Spacer(Modifier.height(8.dp))
 
@@ -1159,7 +1295,8 @@ private fun TopLevelFields(
         )
         Spacer(Modifier.height(8.dp))
 
-        // Show FPS + config
+        // Show FPS + config — the HUD ticks on both backends (the Wayland compositor feeds the
+        // counter from its own present path), so this is not gated on the display backend.
         Row(verticalAlignment = Alignment.CenterVertically) {
             Switch(
                 checked = viewModel.showFPS,
@@ -1182,13 +1319,26 @@ private fun TopLevelFields(
             stringResource(R.string.fullscreen_mode_fill),
             stringResource(R.string.fullscreen_mode_integer)
         )
+        // Neither fullscreen mode nor alignment is wired to the Wayland compositor (its JNI surface
+        // has no setter for them; it always scales the whole desktop), so both are greyed there and
+        // DISPLAY "Not used on Wayland"; the stored values are untouched.
+        val fsAlignEnabled = !viewModel.isWaylandBackend
         val fsSelIdx = viewModel.fullscreenMode.coerceIn(0, fullscreenModeLabels.size - 1)
+        val fsShown = if (fsAlignEnabled) fullscreenModeLabels[fsSelIdx] else "Not used on Wayland"
         LabeledDropdown(
             label = stringResource(R.string.fullscreen_mode),
-            options = fullscreenModeLabels,
-            selectedOption = fullscreenModeLabels[fsSelIdx],
-            onSelect = { viewModel.fullscreenMode = fullscreenModeLabels.indexOf(it).coerceAtLeast(0) }
+            options = if (fsAlignEnabled) fullscreenModeLabels else listOf(fsShown),
+            selectedOption = fsShown,
+            onSelect = { viewModel.fullscreenMode = fullscreenModeLabels.indexOf(it).coerceAtLeast(0) },
+            enabled = fsAlignEnabled
         )
+        if (!fsAlignEnabled) {
+            Text(
+                "Not used on Wayland: the Wayland compositor always scales the whole desktop to the screen; fullscreen modes and alignment are not wired to it yet.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
         Spacer(Modifier.height(8.dp))
 
         // Screen alignment (#413): Center / Top / Bottom on square-ish foldables. TOP/BOTTOM confine the
@@ -1201,12 +1351,21 @@ private fun TopLevelFields(
             stringResource(R.string.screen_alignment_bottom)
         )
         val alignSelIdx = viewModel.screenAlignment.coerceIn(0, screenAlignmentLabels.size - 1)
+        val alignShown = if (fsAlignEnabled) screenAlignmentLabels[alignSelIdx] else "Not used on Wayland"
         LabeledDropdown(
             label = stringResource(R.string.screen_alignment),
-            options = screenAlignmentLabels,
-            selectedOption = screenAlignmentLabels[alignSelIdx],
-            onSelect = { viewModel.screenAlignment = screenAlignmentLabels.indexOf(it).coerceAtLeast(0) }
+            options = if (fsAlignEnabled) screenAlignmentLabels else listOf(alignShown),
+            selectedOption = alignShown,
+            onSelect = { viewModel.screenAlignment = screenAlignmentLabels.indexOf(it).coerceAtLeast(0) },
+            enabled = fsAlignEnabled
         )
+        if (!fsAlignEnabled) {
+            Text(
+                "Not used on Wayland: the Wayland compositor always scales the whole desktop to the screen; fullscreen modes and alignment are not wired to it yet.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
         Spacer(Modifier.height(8.dp))
 
         // Frame Generation engine: Off / bionic-fg / lsfg-vk (mutually exclusive). lsfg-vk is grayed
@@ -1236,12 +1395,17 @@ private fun TopLevelFields(
         // FG's present-mode/mailbox delivery only exists on the Vulkan host renderer; OpenGL (GLRenderer)
         // and SurfaceFlinger (ASR) have no present-mode control, so FG is unsupported there — gate the
         // whole dropdown on Vulkan and grey it out otherwise (combined with the lsfg-DLL option gate).
-        val fgVulkan = viewModel.selectedRenderer == "Vulkan"
+        // On Wayland the renderer gate is meaningless (the compositor is Vulkan) — FG is simply not
+        // wired to the compositor yet, so it is disabled with that reason and DISPLAYS it; the stored
+        // engine is untouched and comes back with the X11 backend.
+        val fgWayland = viewModel.isWaylandBackend
+        val fgVulkan = !fgWayland && viewModel.selectedRenderer == "Vulkan"
+        val fgShown = if (fgWayland) "Not available on Wayland yet" else fgEngineLabels[fgSelIdx]
         Row(verticalAlignment = Alignment.CenterVertically) {
             LabeledDropdown(
                 label = stringResource(R.string.frame_generation),
-                options = fgEngineLabels,
-                selectedOption = fgEngineLabels[fgSelIdx],
+                options = if (fgWayland) listOf(fgShown) else fgEngineLabels,
+                selectedOption = fgShown,
                 onSelect = { viewModel.frameGenEngine = fgEngines[fgEngineLabels.indexOf(it)] },
                 enabled = fgVulkan,
                 disabledOptions = fgDisabledOpts,
@@ -1253,7 +1417,7 @@ private fun TopLevelFields(
         }
         if (!fgVulkan) {
             Text(
-                text = stringResource(R.string.frame_generation_requires_vulkan),
+                text = if (fgWayland) "Not available on Wayland yet (frame generation has not been wired to the Wayland compositor)" else stringResource(R.string.frame_generation_requires_vulkan),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(start = 52.dp, top = 2.dp, bottom = 4.dp)
@@ -1301,6 +1465,89 @@ private fun TopLevelFields(
         if (viewModel.frameGenEngine == "lsfg-native") {
             Text(
                 text = stringResource(R.string.frame_generation_lsfg_native_hint),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(start = 52.dp, top = 2.dp, bottom = 4.dp)
+            )
+            // Experimental LSFG Native capture resolution, shown while
+            // FeatureFlags.LSFG_NATIVE_EXPERIMENTS_ENABLED is on. (The Vulkan 1.1 compat switch
+            // lives below, outside this engine check: it also serves per-game overrides.)
+            if (com.winlator.star.FeatureFlags.LSFG_NATIVE_EXPERIMENTS_ENABLED) {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    stringResource(R.string.fg_experimental_header),
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.primary
+                )
+                // Capture resolution: Panel / Game / the Screen Size list (+ a Custom height).
+                val capPanel = stringResource(R.string.fg_capture_panel)
+                val capGame  = stringResource(R.string.fg_capture_game)
+                val capOptions = listOf(capPanel, capGame) + viewModel.screenSizeEntries
+                val capSelected = when (viewModel.fgCaptureSelection) {
+                    Container.FG_CAPTURE_PANEL -> capPanel
+                    Container.FG_CAPTURE_GAME  -> capGame
+                    else -> viewModel.fgCaptureSelection
+                }
+                LabeledDropdown(
+                    label = stringResource(R.string.fg_capture_resolution),
+                    options = capOptions,
+                    selectedOption = capSelected,
+                    onSelect = {
+                        viewModel.fgCaptureSelection = when (it) {
+                            capPanel -> Container.FG_CAPTURE_PANEL
+                            capGame  -> Container.FG_CAPTURE_GAME
+                            else     -> it
+                        }
+                    }
+                )
+                if (viewModel.fgCaptureSelection.equals("custom", ignoreCase = true)) {
+                    // Only the height is used (the width follows the panel's aspect).
+                    OutlinedTextField(
+                        value = viewModel.fgCaptureCustomHeight,
+                        onValueChange = { viewModel.fgCaptureCustomHeight = it.filter { ch -> ch.isDigit() } },
+                        label = { Text(stringResource(R.string.height)) },
+                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                            keyboardType = androidx.compose.ui.text.input.KeyboardType.Number),
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+                Text(
+                    text = stringResource(R.string.fg_capture_resolution_hint),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 52.dp, top = 2.dp, bottom = 4.dp)
+                )
+            }
+        }
+        // Vulkan 1.1 compat (experimental, FeatureFlags.LSFG_NATIVE_EXPERIMENTS_ENABLED). Shown
+        // whatever this container's engine is: a per-game shortcut can override the engine to
+        // LSFG Native, and the launch-time notice points here. Applied at device creation, only
+        // in sessions that run LSFG Native, so no drawer control.
+        if (com.winlator.star.FeatureFlags.LSFG_NATIVE_EXPERIMENTS_ENABLED) {
+            if (viewModel.frameGenEngine != "lsfg-native") {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    stringResource(R.string.fg_experimental_header),
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
+            // Same Wayland gate as Frame Generation above (LSFG Native isn't wired to the compositor).
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = if (fgWayland) Modifier.alpha(0.5f) else Modifier
+            ) {
+                Switch(
+                    checked = viewModel.lsfgVk11Compat,
+                    onCheckedChange = { viewModel.lsfgVk11Compat = it },
+                    enabled = !fgWayland
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(stringResource(R.string.lsfg_vk11_compat), modifier = Modifier.weight(1f))
+            }
+            Text(
+                text = if (fgWayland) "Not available on Wayland yet (frame generation has not been wired to the Wayland compositor)" else stringResource(R.string.lsfg_vk11_compat_hint),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(start = 52.dp, top = 2.dp, bottom = 4.dp)
@@ -1652,12 +1899,27 @@ private fun WineConfigTab(
 
         // DirectInput section
         SectionBox(title = "DirectInput") {
+            // Mouse warp needs pointer constraints, which the Wayland compositor doesn't implement yet
+            // (same rule as the in-game Relative Mouse chip): greyed there, displays "Not available",
+            // stored index untouched.
+            val mouseWarpEnabled = !viewModel.isWaylandBackend
+            val mouseWarpShown = if (mouseWarpEnabled)
+                viewModel.mouseWarpEntries.getOrElse(viewModel.selectedMouseWarpIndex) { "" }
+            else "Not available on Wayland yet"
             LabeledDropdown(
                 label = stringResource(R.string.mouse_warp_override),
-                options = viewModel.mouseWarpEntries,
-                selectedOption = viewModel.mouseWarpEntries.getOrElse(viewModel.selectedMouseWarpIndex) { "" },
-                onSelect = { opt -> viewModel.selectedMouseWarpIndex = viewModel.mouseWarpEntries.indexOf(opt).coerceAtLeast(0) }
+                options = if (mouseWarpEnabled) viewModel.mouseWarpEntries else listOf(mouseWarpShown),
+                selectedOption = mouseWarpShown,
+                onSelect = { opt -> viewModel.selectedMouseWarpIndex = viewModel.mouseWarpEntries.indexOf(opt).coerceAtLeast(0) },
+                enabled = mouseWarpEnabled
             )
+            if (!mouseWarpEnabled) {
+                Text(
+                    "Not available on Wayland yet: pointer constraints are not implemented in the Wayland compositor",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
         }
 
         // System section — "Run as administrator" (default ON) toggles UAC in the prefix. Backed by
@@ -2555,12 +2817,55 @@ private fun CompactDropdown(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+/**
+ * Rebuilds a `k=v;k=v` graphicsDriverConfig with ONLY the "version" key replaced (or appended when
+ * absent); every other key/value is kept byte-for-byte. Used by the Wayland "Compositor driver"
+ * pickers, which must not disturb the X11 game-driver options stored alongside.
+ */
+internal fun withGraphicsDriverVersion(config: String, version: String): String {
+    val parts = config.split(";").filter { it.isNotEmpty() }.toMutableList()
+    val idx = parts.indexOfFirst { it.substringBefore("=") == "version" }
+    if (idx >= 0) parts[idx] = "version=$version" else parts.add("version=$version")
+    return parts.joinToString(";")
+}
+
+/**
+ * The bundled (app-shipped) adrenotools driver ids this GPU supports — the config dialog's
+ * "Graphics Driver Version" source with "Show incompatible drivers" unchecked, minus "System".
+ * isDriverSupported is a native probe: off-main and serialized on graphicsProbeMutex, exactly as
+ * the dialog does it. Bundled ids are extracted to contents/adrenotools at image install
+ * (ImageFsInstaller.installDriversFromAssets), so they resolve through the same
+ * AdrenotoolsManager.getDriverPath/getLibraryName as imported ones at launch.
+ */
+internal suspend fun supportedBundledDriverVersions(context: Context): List<String> = withContext(Dispatchers.IO) {
+    val bundled = context.resources.getStringArray(R.array.wrapper_graphics_driver_version_entries)
+        .filter { it != "System" }
+    graphicsProbeMutex.withLock {
+        bundled.filter { runCatching { GPUInformation.isDriverSupported(it, context) }.getOrDefault(false) }
+    }
+}
+
+/** Imported adrenotools driver ids (enumarateInstalledDrivers excludes the bundled ones). */
+internal fun importedDriverVersions(context: Context): List<String> =
+    runCatching { AdrenotoolsManager(context).enumarateInstalledDrivers().toList() }.getOrDefault(emptyList())
+
+/**
+ * What the Wayland "Compositor driver" picker offers: the config dialog's version list
+ * (supported bundled + imported) minus "System" — both edit the same `version` key, so they must
+ * agree.
+ */
+internal suspend fun compositorDriverChoices(context: Context): List<String> =
+    (supportedBundledDriverVersions(context) + importedDriverVersions(context)).distinct()
+
 @Composable
 internal fun GraphicsDriverConfigDialog(
     graphicsDriver: String,
     initialConfig: String,
     onConfirm: (String) -> Unit,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    // Opened from a Wayland container/shortcut: only the Turnip version below is used (it's the
+    // driver the compositor loads); everything else configures the X11 game driver. Note only.
+    waylandCompositorNote: Boolean = false
 ) {
     val context = LocalContext.current
 
@@ -2826,6 +3131,14 @@ internal fun GraphicsDriverConfigDialog(
                     .heightIn(max = maxContentHeight)
                     .verticalScroll(rememberScrollState())
             ) {
+                if (waylandCompositorNote) {
+                    Text(
+                        "Only the Turnip version here applies on Wayland; the other options configure the X11 game driver.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(8.dp))
+                }
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     LabeledDropdown(stringResource(R.string.graphics_driver_vulkan_version), vulkanVersions, vulkanVersion, { vulkanVersion = it }, modifier = Modifier.weight(1f))
                     IconButton(onClick = { helpRes = R.string.help_vulkan_version }) {
@@ -3589,6 +3902,23 @@ internal fun DxvkConfigDialog(
     }
     var asyncEnabled         by remember { mutableStateOf(config.get("async") == "1") }
     var asyncCacheEnabled    by remember { mutableStateOf(config.get("asyncCache") == "1") }
+    // Texture filtering: labels index-aligned with DXVKConfigDialog.ANISOTROPY_VALUES / LOD_BIAS_VALUES.
+    val anisotropyLabels = remember { listOf("Game default", "2x", "4x", "8x", "16x") }
+    val lodBiasLabels = remember {
+        listOf("Game default", "Auto (match scaling mode)", "Sharper (-0.25)", "Sharper (-0.5)",
+               "Sharper (-0.75)", "Sharpest (-1.0)")
+    }
+    var selectedAnisotropy by remember {
+        val i = DXVKConfigDialog.ANISOTROPY_VALUES.indexOf(config.get("anisotropy"))
+        mutableStateOf(anisotropyLabels[if (i >= 0) i else 0])
+    }
+    var selectedLodBias by remember {
+        val i = DXVKConfigDialog.LOD_BIAS_VALUES.indexOf(config.get("lodBias"))
+        mutableStateOf(lodBiasLabels[if (i >= 0) i else 0])
+    }
+    // "?" help for the two texture-filtering rows (opens above this sheet).
+    var textureHelpRes by remember { mutableStateOf<Int?>(null) }
+    textureHelpRes?.let { HelpDialog(it) { textureHelpRes = null } }
 
     // VEGAS knowledge layer: bundled asset or null (null -> unclassified fallback).
     val vegasKnowledge = remember {
@@ -4183,6 +4513,29 @@ internal fun DxvkConfigDialog(
                     Spacer(Modifier.height(8.dp))
                 }
                 LabeledDropdown(stringResource(R.string.frame_rate), framerateEntries, selectedFramerate, { selectedFramerate = it })
+                Spacer(Modifier.height(8.dp))
+                SectionLabel("TEXTURE FILTERING")
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    LabeledDropdown("Anisotropic filtering", anisotropyLabels, selectedAnisotropy, { selectedAnisotropy = it },
+                        modifier = Modifier.weight(1f))
+                    IconButton(onClick = { textureHelpRes = R.string.help_anisotropic_filtering }) {
+                        Icon(Icons.Default.Help, contentDescription = "What is this?", modifier = Modifier.size(18.dp))
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    LabeledDropdown("Texture sharpness", lodBiasLabels, selectedLodBias, { selectedLodBias = it },
+                        modifier = Modifier.weight(1f))
+                    IconButton(onClick = { textureHelpRes = R.string.help_texture_sharpness }) {
+                        Icon(Icons.Default.Help, contentDescription = "What is this?", modifier = Modifier.size(18.dp))
+                    }
+                }
+                Text(
+                    "DirectX 9-11 games only. Applies the next time the game starts.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 4.dp)
+                )
                 Spacer(Modifier.height(8.dp))
                 SectionLabel("API FEATURE LEVEL")
                 LabeledDropdown("", featureLevelEntries, selectedFeatureLevel, { selectedFeatureLevel = it })
@@ -5022,6 +5375,8 @@ internal fun DxvkConfigDialog(
                 cfg.put("framerate", StringUtils.parseNumber(selectedFramerate))
                 cfg.put("async", if (asyncEnabled && dxvkType != DXVKConfigDialog.DXVK_TYPE_NONE) "1" else "0")
                 cfg.put("asyncCache", if (asyncCacheEnabled && dxvkType == DXVKConfigDialog.DXVK_TYPE_GPLASYNC) "1" else "0")
+                cfg.put("anisotropy", DXVKConfigDialog.ANISOTROPY_VALUES[anisotropyLabels.indexOf(selectedAnisotropy).coerceAtLeast(0)])
+                cfg.put("lodBias", DXVKConfigDialog.LOD_BIAS_VALUES[lodBiasLabels.indexOf(selectedLodBias).coerceAtLeast(0)])
                 cfg.put("vkd3dVersion", selectedVkd3d)
                 cfg.put("vkd3dLevel", selectedFeatureLevel)
                 cfg.put("ddrawrapper", StringUtils.parseIdentifier(selectedDdra))

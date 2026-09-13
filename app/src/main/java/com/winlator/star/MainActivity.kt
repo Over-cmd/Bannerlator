@@ -16,6 +16,8 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.app.AppCompatDelegate
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.calculateEndPadding
+import androidx.compose.foundation.layout.calculateStartPadding
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.Image
@@ -49,6 +51,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -60,6 +63,8 @@ import androidx.compose.runtime.setValue
 import com.winlator.star.core.UpdateManager
 import androidx.compose.runtime.rememberCoroutineScope
 import com.winlator.star.ui.LocalTopBarActions
+import com.winlator.star.ui.LocalTopBarOverlayInset
+import com.winlator.star.ui.LocalTopBarTransparent
 import com.winlator.star.ui.topBarActionsState
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -143,6 +148,12 @@ class MainActivity : AppCompatActivity() {
         com.winlator.star.ui.controllertest.ControllerTestBus.active && !controllerTestPaused
     private var controllerTestLastDeviceId = -1
 
+    // Steam Controller support in the at-rest test dialog: SDL runs only while the dialog is open (and
+    // the setting is on), feeding the same snapshot as an Android pad. A Steam Controller has no Android
+    // gamepad device, so without this the test never sees it.
+    private var settingsSteamBackend: com.winlator.star.inputcontrols.SteamControllerBackend? = null
+    private var settingsSteamPads = 0
+
     private val openImageLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
@@ -216,7 +227,9 @@ class MainActivity : AppCompatActivity() {
                     controllerTestController.state.reset()
                     controllerTestController.remappedState.reset()
                     controllerTestGuideDown = false
+                    startSettingsSteamController()
                 } else {
+                    stopSettingsSteamController()
                     com.winlator.star.ui.controllertest.ControllerTestBus.setSnapshot(null)
                 }
             }
@@ -342,8 +355,73 @@ class MainActivity : AppCompatActivity() {
         // Kill any armed win-fg diagnostic-log capture (logcat subprocess) so it can't outlive the app.
         // The game (XServerDisplayActivity) shares this process, so a mid-play capture survives until here.
         WinFgDiag.stopDiagLog(this)
+        stopSettingsSteamController()
         super.onDestroy()
     }
+
+    private fun startSettingsSteamController() {
+        if (settingsSteamBackend != null) return
+        if (!com.winlator.star.ui.components.GlobalControllerPrefs.isSteamControllerEnabled(this)) return
+        val backend = com.winlator.star.inputcontrols.SteamControllerBackend(
+            this, com.winlator.star.inputcontrols.SteamControllerBackend.TRACKPAD_MOUSE_OFF,
+            com.winlator.star.ui.components.GlobalControllerPrefs.getSteamPaddleBindings(this),
+            object : com.winlator.star.inputcontrols.SteamControllerBackend.Listener {
+                override fun onSteamPadConnected(pad: com.winlator.star.inputcontrols.ExternalController) {
+                    settingsSteamPads++
+                }
+
+                override fun onSteamPadDisconnected(pad: com.winlator.star.inputcontrols.ExternalController) {
+                    settingsSteamPads = (settingsSteamPads - 1).coerceAtLeast(0)
+                }
+
+                override fun onSteamPadState(
+                    pad: com.winlator.star.inputcontrols.ExternalController,
+                    guideDown: Boolean,
+                    quickAccessDown: Boolean,
+                    pressedKeyCodes: IntArray,
+                ) {
+                    if (!settingsTestArmed()) return
+                    controllerTestController.state.copy(pad.state)
+                    controllerTestGuideDown = guideDown
+                    controllerTestLastDeviceId = pad.deviceId
+                    val st = controllerTestController.state
+                    com.winlator.star.ui.controllertest.ControllerTestBus.setSnapshot(
+                        com.winlator.star.ui.controllertest.ControllerTestSnapshot(
+                            st.buttons.toInt() and 0xFFFF,
+                            st.dpad[0], st.dpad[1], st.dpad[2], st.dpad[3],
+                            st.thumbLX, st.thumbLY, st.thumbRX, st.thumbRY,
+                            st.triggerL, st.triggerR,
+                            guideDown,
+                            pad.deviceId,
+                            pad.name ?: "Steam Controller",
+                            com.winlator.star.ui.controllertest.PadArt.STEAM.ordinal,
+                            -1,
+                            true,
+                            quickAccessDown
+                        )
+                    )
+                }
+
+                override fun onSteamPadBinding(binding: com.winlator.star.inputcontrols.Binding, down: Boolean) {}
+                override fun onSteamPadMouseMove(dx: Int, dy: Int) {}
+                override fun onSteamPadMouseButton(secondary: Boolean, down: Boolean) {}
+            }
+        )
+        if (backend.start()) settingsSteamBackend = backend
+    }
+
+    private fun stopSettingsSteamController() {
+        val backend = settingsSteamBackend ?: return
+        settingsSteamBackend = null
+        settingsSteamPads = 0
+        backend.stop()
+    }
+
+    /** While SDL owns a Steam Controller in the test dialog, whatever Android still reports for it (its
+     *  keyboard/mouse mode) is the same pad: consume it so it can't navigate the UI or feed the fork. */
+    private fun isSettingsSteamShadowEvent(device: android.view.InputDevice?): Boolean =
+        settingsSteamBackend != null && settingsSteamPads > 0 &&
+            device?.vendorId == com.winlator.star.inputcontrols.SteamControllerBackend.VALVE_VENDOR_ID
 
     override fun onPause() {
         super.onPause()
@@ -368,6 +446,7 @@ class MainActivity : AppCompatActivity() {
     // ONLY the throwaway visualizer snapshot and is CONSUMED so it can't navigate the app UI.
 
     override fun dispatchGenericMotionEvent(event: android.view.MotionEvent): Boolean {
+        if (isSettingsSteamShadowEvent(event.device)) return true
         if (settingsTestArmed() && isControllerTestMotionEvent(event)) {
             controllerTestFeedMotionEvent(event)
             return true
@@ -376,6 +455,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
+        if (isSettingsSteamShadowEvent(event.device)) return true
         if (settingsTestArmed() &&
             com.winlator.star.inputcontrols.ExternalController.isGameController(event.device)) {
             controllerTestFeedKeyEvent(event)
@@ -454,6 +534,11 @@ class MainActivity : AppCompatActivity() {
      *  motors, API 31+) or the single vibrator otherwise. No game / WinHandler here. */
     private fun settingsControllerIdentify() {
         val id = controllerTestLastDeviceId
+        // Steam Controller (SDL, synthetic deviceId): rumble through SDL.
+        if (id <= com.winlator.star.inputcontrols.SteamControllerBackend.DEVICE_ID_BASE) {
+            settingsSteamBackend?.rumble(id, 48000, 32000, 420)
+            return
+        }
         if (id < 0) return
         val device = android.view.InputDevice.getDevice(id) ?: return
         try {
@@ -507,6 +592,7 @@ private fun AppShell(
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val topBarActionsState = remember { topBarActionsState() }
+    val topBarTransparentState = remember { mutableStateOf(false) }
 
     val backstackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = backstackEntry?.destination?.route ?: startRoute
@@ -572,7 +658,13 @@ private fun AppShell(
         else -> Screen.drawerItems.firstOrNull { it.route == currentRoute }?.label ?: "Winlator"
     }
 
-    CompositionLocalProvider(LocalTopBarActions provides topBarActionsState) {
+    // The Games tab's XMB view asks for a see-through top bar; the screen is then laid out under the
+    // bar so its backdrop runs to the top. Games route only, and not while the update banner shows
+    // (it sits between the bar and the screen).
+    val barOverlay = currentRoute == Screen.Games.route && topBarTransparentState.value &&
+        !isFullBleed && !(bannerUpdate != null && !bannerDismissed)
+
+    CompositionLocalProvider(LocalTopBarActions provides topBarActionsState, LocalTopBarTransparent provides topBarTransparentState) {
     ModalNavigationDrawer(
         drawerState = drawerState,
         gesturesEnabled = !currentRoute.startsWith("container_detail") && !isFullBleed,
@@ -629,12 +721,25 @@ private fun AppShell(
                         titleTrailing = if (currentRoute == Screen.Games.route) {
                             { com.winlator.star.store.SteamConnectionPill() }
                         } else null,
+                        transparent = barOverlay,
                         actions = topBarActionsState.value,
                     )
                 }
             },
         ) { innerPadding ->
-            Column(modifier = Modifier.padding(if (isFullBleed) PaddingValues(0.dp) else innerPadding)) {
+            val layoutDir = LocalLayoutDirection.current
+            val contentPadding = when {
+                isFullBleed -> PaddingValues(0.dp)
+                // Drawn under the see-through bar: every inset except the top.
+                barOverlay -> PaddingValues(
+                    start = innerPadding.calculateStartPadding(layoutDir),
+                    end = innerPadding.calculateEndPadding(layoutDir),
+                    bottom = innerPadding.calculateBottomPadding(),
+                )
+                else -> innerPadding
+            }
+            CompositionLocalProvider(LocalTopBarOverlayInset provides if (barOverlay) innerPadding.calculateTopPadding() else 0.dp) {
+            Column(modifier = Modifier.padding(contentPadding)) {
                 val upd = bannerUpdate
                 if (upd != null && !bannerDismissed && !isFullBleed) {
                     UpdateBanner(
@@ -660,6 +765,7 @@ private fun AppShell(
                     com.winlator.star.ui.UnpackProgressPill()
                 }
             }
+            } // end LocalTopBarOverlayInset
         }
     }
     } // end CompositionLocalProvider

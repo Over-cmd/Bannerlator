@@ -106,6 +106,7 @@ import com.winlator.star.core.WineUtils;
 import com.winlator.star.inputcontrols.ControlsProfile;
 import com.winlator.star.inputcontrols.ExternalController;
 import com.winlator.star.inputcontrols.InputControlsManager;
+import com.winlator.star.inputcontrols.SteamControllerBackend;
 import com.winlator.star.inputcontrols.VisualStyle;
 import com.winlator.star.math.Mathf;
 import com.winlator.star.math.XForm;
@@ -239,6 +240,10 @@ public class XServerDisplayActivity extends AppCompatActivity {
     // diagnostic (the folded-in spike) to once per second.
     private boolean controllerTestActive = false;
     private final ExternalController controllerTestController = new ExternalController();
+
+    // Optional Steam Controller support (Input Controls → Device → Steam Controller). Null unless the
+    // setting is on AND SDL came up; when null the input path below is unchanged. Main-thread only.
+    private SteamControllerBackend steamControllerBackend;
     private boolean controllerTestGuideDown = false;
     private long lastControllerTestAxisLogMs = 0L;
 
@@ -334,6 +339,8 @@ public class XServerDisplayActivity extends AppCompatActivity {
     // restores each process exactly (revert philosophy). Populated on toggle ON, cleared on OFF.
     private final java.util.HashMap<Integer, Integer> bigCoreAffinitySnapshot = new java.util.HashMap<>();
     private int frameRatingWindowId = -1;
+    // Wayland mode has no X window to bind the HUD to; the compositor's game window stands in.
+    private static final int WAYLAND_HUD_WINDOW_ID = Integer.MAX_VALUE;
     // Master HUD on/off, parsed from the fps config's `hudEnabled` key (default on). When false, every
     // overlay style stays GONE even while a game window is bound to frameRatingWindowId — the drawer's
     // "Show HUD" master toggle drives this live via onFpsConfigApply.
@@ -1346,6 +1353,13 @@ public class XServerDisplayActivity extends AppCompatActivity {
     private String screenEffectProfile;
 
     private GuestProgramLauncherComponent guestProgramLauncherComponent;
+    // Experimental Wayland display path: when true, run the game through winewayland.drv into
+    // our embedded compositor instead of the X11 server. All branches are guarded by this flag,
+    // so the X11 path is unchanged when it's false. See WAYLAND_RUNTIME.md.
+    private boolean waylandMode = false;
+    private android.view.SurfaceView waylandSurfaceView;
+    private android.widget.ImageView waylandCursorView;
+    private float waylandCursorX = -1f, waylandCursorY = -1f; // touchpad cursor position (view px)
     private EnvVars overrideEnvVars;
 
     private void createNotifcationChannel() {
@@ -1659,6 +1673,14 @@ public class XServerDisplayActivity extends AppCompatActivity {
             boolean fgOn   = s.getFrameGenEnabled().getValue();
             int   mult     = fgOn ? s.getFrameGenMultiplier().getValue() : 0;
             float flow     = s.getFrameGenFlowScale().getValue();
+            // Native frame gen that can't run here stays Off, with the reason. The drawer greys
+            // the buttons out too; this covers a tap that landed before the notice did.
+            String fgProblem = s.getFgUnavailableReason().getValue();
+            if (mult >= 2 && !fgProblem.isEmpty() && nativeFrameGenEngine()) {
+                s.setFrameGenMultiplier(0);
+                Toast.makeText(this, fgProblem, Toast.LENGTH_LONG).show();
+                return;
+            }
             // Route the single in-game multiplier/flow control to whichever engine is running this
             // session (honors a per-game engine override, else the container's engine).
             if (resolvedFrameGenEngine().equals("lsfg-native")) {
@@ -1676,6 +1698,10 @@ public class XServerDisplayActivity extends AppCompatActivity {
                 applyLsfgNative(mult, flow);
                 if (fgOn) container.setFrameGenMultiplier(mult);
                 container.setFrameGenFlowScale(flow);
+                if (com.winlator.star.FeatureFlags.LSFG_NATIVE_EXPERIMENTS_ENABLED) {
+                    // The experimental knob rides the same live path and persists with it.
+                    container.setFgCaptureResolution(s.getFgCaptureResolution().getValue());
+                }
                 container.saveData();
                 // The limiter guard still has to see the >=2 threshold crossing.
                 reapplyFpsLimit();
@@ -1803,6 +1829,23 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // refresh rate live (applyVrr). Independent of frame-gen; works on all 3 host renderers.
         state.onMatchRefreshChange = () -> {
             boolean on = XServerDrawerState.INSTANCE.getMatchRefreshRate().getValue();
+            if (nativeFgLocksHeld) {
+                // Frame gen is running, so this is the frame-gen Auto (applyNativeFgLocks). Off =
+                // opt out for THIS GAME: remembered on the shortcut only, never the container, so
+                // other games made from it keep getting Auto during frame gen. On = clear it.
+                // Launched without a shortcut: the choice lasts for this session only.
+                nativeFgAutoOn = on;
+                XServerDrawerState.INSTANCE.setFgAutoTurnedOn(false);
+                if (shortcut != null) {
+                    if (on) shortcut.removeExtra(FG_AUTO_OPT_OUT);
+                    else shortcut.putExtra(FG_AUTO_OPT_OUT, "1");
+                    shortcut.saveData();
+                }
+                Log.i("XServerDisplayActivity", "native-fg auto " + (on ? "on" : "off")
+                    + (shortcut != null ? " (remembered for this game)" : " (this session only, no shortcut)"));
+                reapplyFpsLimit();
+                return;
+            }
             container.setMatchRefreshRate(on);
             container.saveData();
             // reapplyFpsLimit, not just reapplyVrr: under native frame gen the display
@@ -2016,6 +2059,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
         container = containerManager.getContainerById(getIntent().getIntExtra("container_id", 0));
 
         componentInstallerExe = getIntent().getStringExtra("component_installer_exe");
+        waylandMode = getIntent().getBooleanExtra("wayland_mode", false);
 
         // Log shortcut_path
         String shortcutPath = getIntent().getStringExtra("shortcut_path");
@@ -2082,6 +2126,15 @@ public class XServerDisplayActivity extends AppCompatActivity {
             shortcut = new Shortcut(container, new File(shortcutPath));
         }
 
+        // Display backend: the game's override, else the container's. Resolved here so every launch
+        // path (shortcut list, Games tab, Big Picture, pinned shortcuts, container Run) honours it,
+        // not only the ones that pass wayland_mode.
+        if (!waylandMode) {
+            String backend = shortcut != null ? shortcut.getExtra("displayBackend", "") : "";
+            if (backend.isEmpty()) backend = container.getDisplayBackend();
+            waylandMode = Container.DISPLAY_BACKEND_WAYLAND.equals(backend);
+        }
+
         // In-game Friends tab (drawer): read the friends/chat opt-in once for this launch and start
         // watching for a live source. The RealSteam hint keeps the app-session source from flashing up
         // before maybeStageRealSteam() arms the plan (which confirms or withdraws it); disarmed in onDestroy.
@@ -2123,6 +2176,18 @@ public class XServerDisplayActivity extends AppCompatActivity {
         winFgNativeSession = computeWinFgNativeSession();
         XServerDrawerState.INSTANCE.setWinFgNative(winFgNativeSession);
         XServerDrawerState.INSTANCE.setLsfgPerformanceMode(container.isLsfgPerformanceMode());
+        // LSFG Native experimental capture resolution (FeatureFlags.LSFG_NATIVE_EXPERIMENTS_ENABLED;
+        // with the flag off the seed is always panel, whatever the container stored).
+        XServerDrawerState.INSTANCE.setFgCaptureResolution(
+            com.winlator.star.FeatureFlags.LSFG_NATIVE_EXPERIMENTS_ENABLED ? container.getFgCaptureResolution() : Container.FG_CAPTURE_PANEL);
+        // The panel height in landscape, so the drawer's capture chips can leave out heights the
+        // renderer would clamp anyway (it never runs the chain below a quarter of the panel or
+        // above it).
+        {
+            android.util.DisplayMetrics dm = new android.util.DisplayMetrics();
+            getWindowManager().getDefaultDisplay().getRealMetrics(dm);
+            XServerDrawerState.INSTANCE.setFgPanelHeight(Math.min(dm.widthPixels, dm.heightPixels));
+        }
         XServerDrawerState.INSTANCE.setFpsLimiterEnabled(fpsLimOn);
         XServerDrawerState.INSTANCE.setFpsLimit(resolvedFpsLimiterValue());
         XServerDrawerState.INSTANCE.setMatchRefreshRate(resolvedMatchRefreshRate());
@@ -2207,6 +2272,19 @@ public class XServerDisplayActivity extends AppCompatActivity {
 
         String wineVersion = container.getWineVersion();
         wineInfo = WineInfo.fromIdentifier(this, contentsManager, wineVersion);
+
+        // Wayland gate (the ONE resolver every launch path funnels through — the intent flag, the
+        // shortcut override and the container default were all folded into waylandMode above): the
+        // selected layer must ship winewayland.so AND its bundled Wayland Turnip, else the compositor
+        // start, the registry driver write and the winex11.drv hide below would all run against a
+        // layer that can't drive them. Fall back to X11 and say so.
+        if (waylandMode && !com.winlator.star.core.WineWaylandSupport.isWaylandCapable(wineInfo)) {
+            Log.w("XServerDisplayActivity", "wayland: layer " + wineVersion + " (" + wineInfo.path
+                    + ") lacks winewayland.so and/or lib/libvulkan_freedreno_wayland.so; launching on X11");
+            waylandMode = false;
+            Toast.makeText(this, "Wayland needs the Wayland Proton layer (11.0-2.1 arm64ec); launching on X11.",
+                    Toast.LENGTH_LONG).show();
+        }
 
         imageFs.setWinePath(wineInfo.path);
 
@@ -2545,6 +2623,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
                     // re-enters this runnable, so a live session can't be swept.)
                     sweepStaleWineProcesses();
                     preloaderDialog.step(2, "Preparing Wine & graphics driver…");
+                    setWineDisplayDriver();   // BEFORE setupWineSystemFiles starts the first wineserver
                     setupWineSystemFiles();
                     // Steam install-recipe robustness pass: a steamAppId-tagged game's installScript.vdf
                     // Registry + Copy Files land in this prefix before the game boots (covers shortcuts made
@@ -3028,6 +3107,8 @@ public class XServerDisplayActivity extends AppCompatActivity {
         if (!com.winlator.star.core.LsfgNative.isDllAvailable(this)) {
             Log.w("XServerDisplayActivity",
                 "LSFG Native selected but no Lossless.dll imported (Settings) - leaving frame gen off");
+            lsfgNativeStatus = com.winlator.star.core.LsfgNative.STATUS_NOT_INSTALLED;
+            refreshNativeFgAvailability(true, 0);
             return;
         }
         // Every launch starts with frame generation OFF; the user arms it from the
@@ -3041,14 +3122,33 @@ public class XServerDisplayActivity extends AppCompatActivity {
             final int status = com.winlator.star.core.LsfgNative.ensureCache(
                 XServerDisplayActivity.this, /*preferFp16=*/false);
             runOnUiThread(() -> {
+                lsfgNativeStatus = status;
                 if (status != com.winlator.star.core.LsfgNative.STATUS_OK) {
                     Log.e("XServerDisplayActivity", "LSFG Native unavailable: "
                         + com.winlator.star.core.LsfgNative.explain(status));
+                    refreshNativeFgAvailability(true, 0);
                     return;
                 }
                 applyLsfgNative(launchMult, flow);
+                refreshNativeFgAvailability(true, NATIVE_FG_CHECK_TRIES);
             });
         }, "lsfg-native-cache").start();
+    }
+
+    /**
+     * The experimental tuning that rides along with flow scale: the capture height
+     * (0 = panel, -1 = the game's own height, which the renderer resolves from the X screen it
+     * was created with - shortcut screen-size override and render scale included). It comes
+     * from the drawer state, which is seeded from the container and only ever non-default
+     * while FeatureFlags.LSFG_NATIVE_EXPERIMENTS_ENABLED is on.
+     */
+    private void pushNativeFgTuning(com.winlator.star.renderer.vulkan.VulkanRenderer vkr,
+                                    float flowScale) {
+        XServerDrawerState s = XServerDrawerState.INSTANCE;
+        int captureHeight = 0;
+        if (com.winlator.star.FeatureFlags.LSFG_NATIVE_EXPERIMENTS_ENABLED)
+            captureHeight = Container.fgCaptureHeightFor(s.getFgCaptureResolution().getValue());
+        vkr.setFrameGenTuning(flowScale, currentDisplayRefreshHz(), captureHeight);
     }
 
     /** Point the renderer at the cache and arm it at `multiplier` (0 = off). */
@@ -3060,10 +3160,11 @@ public class XServerDisplayActivity extends AppCompatActivity {
             return;
         }
         Log.i("XServerDisplayActivity", "applyLsfgNative: multiplier=" + multiplier
-            + " flow=" + flowScale + " refresh=" + currentDisplayRefreshHz());
+            + " flow=" + flowScale + " refresh=" + currentDisplayRefreshHz()
+            + " capture=" + XServerDrawerState.INSTANCE.getFgCaptureResolution().getValue());
         vkr.setLsfgCachePath(
             com.winlator.star.core.LsfgNative.cacheFile(this).getAbsolutePath());
-        vkr.setFrameGenTuning(flowScale, currentDisplayRefreshHz());
+        pushNativeFgTuning(vkr, flowScale);
         vkr.setFrameGenArmed(multiplier >= 2, multiplier);
         // Present mode has to follow the armed state: fifo while multiplying,
         // back to the user's choice when off.
@@ -3080,6 +3181,109 @@ public class XServerDisplayActivity extends AppCompatActivity {
     private void prepareWinFgNative() {
         applyWinFgNative(0, container.getFrameGenFlowScale(),
             resolvedFrameGenModel(), resolvedFrameGenPerfPreset());
+        refreshNativeFgAvailability(true, NATIVE_FG_CHECK_TRIES);
+    }
+
+    // ── Native frame gen that cannot run: say so instead of failing silently ──
+    // A community report (Adreno 710): LSFG Native did nothing because the Renderer
+    // Driver was the stock "System" driver (Vulkan 1.1); it needs 1.3. The chain ran
+    // in no frame, the drawer still offered 2x/3x/4x, and only logcat knew why.
+
+    // LsfgNative.ensureCache result for this session; -1 = not checked yet.
+    private int lsfgNativeStatus = -1;
+    // One launch-time notice per session; the drawer keeps showing the reason.
+    private boolean nativeFgProblemAnnounced = false;
+    // The renderer and its swapchain come up after launch prep; retry this many
+    // times, 1.5 s apart, before giving up on a verdict (the drawer then stays quiet).
+    private static final int NATIVE_FG_CHECK_TRIES = 10;
+    private final android.os.Handler fgCheckHandler =
+        new android.os.Handler(android.os.Looper.getMainLooper());
+
+    /**
+     * Why the selected native frame-gen engine cannot run in this session, in plain
+     * words with the fix. "" = nothing wrong; null = not known yet (the renderer or its
+     * swapchain is still coming up).
+     */
+    private String nativeFgProblemReason() {
+        final String engine = resolvedFrameGenEngine();
+        final boolean lsfg = "lsfg-native".equals(engine);
+        final boolean winfg = "bionic".equals(engine) && winFgNativeSession;
+        if (!lsfg && !winfg) return "";
+        final String name = lsfg ? "LSFG Native" : "Win-FG Native";
+        if (lsfg && lsfgNativeStatus > com.winlator.star.core.LsfgNative.STATUS_OK)
+            return "LSFG Native can't start: "
+                + com.winlator.star.core.LsfgNative.explain(lsfgNativeStatus) + ".";
+        if (!"vulkan".equalsIgnoreCase(resolvedRenderer()))
+            return getString(R.string.frame_generation_requires_vulkan)
+                + " Change Renderer in this container's settings, then relaunch the game.";
+        com.winlator.star.renderer.vulkan.VulkanRenderer vkr = vulkanRendererOrNull();
+        if (vkr == null) return null;
+        switch (vkr.getFrameGenProblem()) {
+            case com.winlator.star.renderer.vulkan.VulkanRenderer.FG_PROBLEM_DRIVER: {
+                String caps = vkr.getLsfgCapsReason();
+                boolean version = caps != null && caps.contains("Vulkan version below");
+                // The experimental compat switch is the other way out for LSFG Native on a
+                // Vulkan 1.1/1.2 driver; name it only while it is off and actually offered.
+                boolean offerCompat = lsfg && version
+                    && com.winlator.star.FeatureFlags.LSFG_NATIVE_EXPERIMENTS_ENABLED
+                    && container != null && !container.isLsfgVk11Compat();
+                return name + " can't run on this Renderer Driver: "
+                    + (version ? "it needs Vulkan 1.3, which this driver doesn't provide."
+                               : "this driver is missing a feature it needs.")
+                    + " In this container's settings, set Renderer Driver to a Turnip driver,"
+                    + (offerCompat
+                        ? " or turn on \"" + getString(R.string.lsfg_vk11_compat) + "\","
+                        : "")
+                    + " then relaunch the game.";
+            }
+            case com.winlator.star.renderer.vulkan.VulkanRenderer.FG_PROBLEM_START_FAILED:
+                return name + " couldn't start on this Renderer Driver. In this container's"
+                    + " settings, try a Turnip driver under Renderer Driver, then relaunch the game.";
+            case com.winlator.star.renderer.vulkan.VulkanRenderer.FG_PROBLEM_NONE:
+                return "";
+            default:
+                return null;
+        }
+    }
+
+    /** Work out whether native frame gen can run and publish it; retries while unknown. */
+    private void refreshNativeFgAvailability(boolean announce, int triesLeft) {
+        String reason = nativeFgProblemReason();
+        if (reason == null) {
+            if (triesLeft > 0)
+                fgCheckHandler.postDelayed(() -> refreshNativeFgAvailability(announce, triesLeft - 1), 1500);
+            return;
+        }
+        setNativeFgProblem(reason, announce);
+    }
+
+    private void setNativeFgProblem(String reason, boolean announce) {
+        com.winlator.star.renderer.vulkan.VulkanRenderer vkr = vulkanRendererOrNull();
+        String detail = (!reason.isEmpty() && vkr != null
+                && vkr.getFrameGenProblem() == com.winlator.star.renderer.vulkan.VulkanRenderer.FG_PROBLEM_DRIVER)
+            ? vkr.getLsfgCapsReason() : "";
+        XServerDrawerState.INSTANCE.setFgUnavailable(reason, detail);
+        if (reason.isEmpty()) return;
+        Log.w("XServerDisplayActivity", "native frame gen unavailable: " + reason
+            + (detail.isEmpty() ? "" : " [" + detail + "]"));
+        if (announce && !nativeFgProblemAnnounced) {
+            nativeFgProblemAnnounced = true;
+            Toast.makeText(this, reason, Toast.LENGTH_LONG).show();
+        }
+    }
+
+    /** The armed engine stopped or never started generating: publish why and go back to Off,
+     *  so the drawer and the HUD stop claiming frame gen is running. */
+    private void onNativeFgFailed() {
+        String reason = nativeFgProblemReason();
+        if (reason == null || reason.isEmpty())
+            reason = "Frame generation couldn't start on this device.";
+        setNativeFgProblem(reason, true);
+        XServerDrawerState s = XServerDrawerState.INSTANCE;
+        s.setFrameGenMultiplier(0);
+        float flow = s.getFrameGenFlowScale().getValue();
+        if ("lsfg-native".equals(resolvedFrameGenEngine())) applyLsfgNative(0, flow);
+        else applyWinFgNative(0, flow, resolvedFrameGenModel(), resolvedFrameGenPerfPreset());
     }
 
     /** Win-FG Native is Performance-only; see applyWinFgNative. 2 = Performance. */
@@ -3105,7 +3309,9 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // chips were being tried. Pinned here rather than only hiding the UI, so a
         // container or shortcut still carrying an older value cannot reinstate it.
         vkr.setWinFgTuning(model, WINFG_PERF_PRESET);
-        vkr.setFrameGenTuning(flowScale, currentDisplayRefreshHz());
+        // Capture height 0: Win-FG shares the composite ring with LSFG Native but has no
+        // capture-resolution control, so it always runs at panel resolution.
+        vkr.setFrameGenTuning(flowScale, currentDisplayRefreshHz(), 0);
         vkr.setFrameGenArmed(multiplier >= 2, multiplier);
         // Identical follow-through to LSFG Native: fifo while multiplying, the
         // limiter/VRR locks, and the base->shown readout.
@@ -3131,6 +3337,16 @@ public class XServerDisplayActivity extends AppCompatActivity {
         lsfgStatsTick = new Runnable() {
             @Override public void run() {
                 com.winlator.star.renderer.vulkan.VulkanRenderer vkr = vulkanRendererOrNull();
+                // Armed but the engine can't generate here (driver lacks what it needs, or
+                // it failed to start): stop pretending, say why, and go back to Off.
+                if (vkr != null && nativeFgLocksHeld) {
+                    int p = vkr.getFrameGenProblem();
+                    if (p == com.winlator.star.renderer.vulkan.VulkanRenderer.FG_PROBLEM_DRIVER
+                            || p == com.winlator.star.renderer.vulkan.VulkanRenderer.FG_PROBLEM_START_FAILED) {
+                        onNativeFgFailed();
+                        return;
+                    }
+                }
                 float[] st = (vkr != null) ? vkr.getFrameGenStats() : null;
                 if (st != null && st.length >= 5) {
                     // st[1] is what is actually planned for this frame. st[0] is
@@ -3201,10 +3417,13 @@ public class XServerDisplayActivity extends AppCompatActivity {
      * uncapped guest times the multiplier overruns the panel and FIFO stalls the
      * compositor. If no cap was set, 30 is used: it is the case this was proven on.
      *
-     * Auto refresh (VRR) used to be locked OFF here too. It is now left to the
-     * user: with Auto on, applyVrr fits the display to cap x multiplier (see
-     * pickNativeFgRefresh), switching only when the cap, multiplier or frame gen
-     * changes - never following the live frame rate.
+     * Auto refresh (VRR) used to be locked OFF here too. Now it is switched ON
+     * for the frame-gen session instead, whatever the saved setting says, so
+     * applyVrr fits the display to cap x multiplier (pickNativeFgRefresh). The
+     * user can turn it off during frame gen; that opt-out is remembered on the
+     * game's SHORTCUT only (FG_AUTO_OPT_OUT), never the container, so other games
+     * made from the same container keep getting it. When frame gen stops, Auto
+     * goes back to the saved setting.
      */
     private void applyNativeFgLocks(boolean lock) {
         XServerDrawerState s = XServerDrawerState.INSTANCE;
@@ -3213,22 +3432,51 @@ public class XServerDisplayActivity extends AppCompatActivity {
             nativeFgSavedLimit        = s.getFpsLimit().getValue();
             nativeFgLocksHeld = true;
 
+            boolean savedAuto = resolvedMatchRefreshRate();
+            boolean canMatch = com.winlator.star.widget.XServerView.isDisplayVrrCapable(
+                getWindowManager().getDefaultDisplay());
+            nativeFgAutoOn = canMatch && !fgAutoOptedOut();
+            s.setMatchRefreshRate(nativeFgAutoOn);
+            s.setFgAutoTurnedOn(nativeFgAutoOn && !savedAuto);
+            s.setFgAutoPerGame(shortcut != null);
+
             int cap = nativeFgSavedLimit > 0 ? nativeFgSavedLimit : 30;
             s.setFpsLimiterEnabled(true);
             s.setFpsLimit(cap);
             s.setNativeFgLocks(true);
             Log.i("XServerDisplayActivity", "native-fg locks ON: limiter=" + cap
-                + " (was limiter=" + (nativeFgSavedLimiterOn ? nativeFgSavedLimit : 0) + ")");
+                + " (was limiter=" + (nativeFgSavedLimiterOn ? nativeFgSavedLimit : 0) + ")"
+                + " auto=" + nativeFgAutoOn + " (saved=" + savedAuto + " optOut=" + fgAutoOptedOut()
+                + " canMatch=" + canMatch + ")");
             applyFpsLimit(cap);
         } else if (!lock && nativeFgLocksHeld) {
             nativeFgLocksHeld = false;
+            nativeFgAutoOn = false;
             s.setNativeFgLocks(false);
+            s.setFgAutoTurnedOn(false);
+            s.setMatchRefreshRate(resolvedMatchRefreshRate());
             s.setFpsLimiterEnabled(nativeFgSavedLimiterOn);
             s.setFpsLimit(nativeFgSavedLimit);
             Log.i("XServerDisplayActivity", "native-fg locks OFF: restored limiter="
-                + (nativeFgSavedLimiterOn ? nativeFgSavedLimit : 0));
+                + (nativeFgSavedLimiterOn ? nativeFgSavedLimit : 0) + " auto=" + resolvedMatchRefreshRate());
             applyFpsLimit(nativeFgSavedLimiterOn && nativeFgSavedLimit > 0 ? nativeFgSavedLimit : 0);
         }
+    }
+
+    // Auto (match FPS) for the current native frame-gen session (see applyNativeFgLocks).
+    private boolean nativeFgAutoOn = false;
+
+    /** Shortcut extra: the user turned Auto off during frame gen for this game. */
+    private static final String FG_AUTO_OPT_OUT = "fgAutoRefreshOptOut";
+
+    private boolean fgAutoOptedOut() {
+        return shortcut != null && "1".equals(shortcut.getExtra(FG_AUTO_OPT_OUT, "0"));
+    }
+
+    /** Auto (match FPS) as it applies right now: the frame-gen session's value while native
+     *  frame gen holds its locks, the saved container/shortcut setting otherwise. */
+    private boolean autoRefreshActive() {
+        return nativeFgLocksHeld ? nativeFgAutoOn : resolvedMatchRefreshRate();
     }
 
     /** Extra room below an exact display fit - see pacedLimitWithSlack. */
@@ -3263,7 +3511,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
     private float nativeFgDisplayRate(int cap, int mult) {
         float[] rates = displayRatesPrecise();
         float top = rates.length > 0 ? rates[rates.length - 1] : pickHighestRefreshRate();
-        if (container != null && resolvedMatchRefreshRate()) {
+        if (container != null && autoRefreshActive()) {
             float r = pickNativeFgRefresh(cap * mult);
             return r > 0f ? r : top;
         }
@@ -4463,6 +4711,9 @@ public class XServerDisplayActivity extends AppCompatActivity {
                 if (midiHandler != null) midiHandler.stop();
                 // Unregister sensor listener to avoid memory leaks
                 if (environment != null) environment.stopEnvironmentComponents();
+                // Release the Steam Controller (SDL closes it, so it drops back to its own
+                // keyboard/mouse mode) before WinHandler tears the slots down.
+                stopSteamControllerSupport();
                 if (winHandler != null) winHandler.stop();
                 if (wineRequestHandler != null) wineRequestHandler.stop();
                 /* Gracefully terminate all running wine processes */
@@ -5998,6 +6249,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
             inGameControlsEditor.dispose();
             inGameControlsEditor = null;
         }
+        waylandVsyncRunning = false;
         super.onDestroy();
         // Power-user perf: stop the thermal watchdog and revert any privileged sysfs writes on game
         // exit (no-op unless a root toggle wrote something this session).
@@ -6035,6 +6287,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
         }
         try { if (castSession != null) { castSession.close(); castSession = null; } } catch (Exception ignored) {}
         try { if (castHttp != null) { castHttp.stop(); castHttp = null; } } catch (Exception ignored) {}
+        stopSteamControllerSupport();
         // Controller-status toast: drop the listener + any pending debounced toast so a late callback
         // can't run against a tearing-down activity.
         if (winHandler != null) winHandler.setControllerAssignmentListener(null);
@@ -6395,6 +6648,262 @@ public class XServerDisplayActivity extends AppCompatActivity {
         }
     }
 
+    // Bring up the embedded Wayland compositor into a full-screen SurfaceView. The socket is created
+    // under the imagefs /tmp (XDG_RUNTIME_DIR = rootDir/tmp) so the guest — which sees the imagefs as
+    // its root — finds it at /tmp/wayland-0 (matching the guest env in GuestProgramLauncherComponent).
+    private void startWaylandCompositor(FrameLayout rootView) {
+        // Wayland has no XServer onUpdateWindowContent hook to dismiss the launch overlay, so
+        // dismiss on the compositor's FIRST presented client frame instead (mirrors the X11 grace
+        // delay so the boot steps are briefly visible). Fires on the compositor thread -> marshal
+        // to UI. Guard with winStarted so it runs exactly once.
+        com.winlator.star.wayland.WaylandCompositor.setFirstFrameListener(() -> runOnUiThread(() -> {
+            if (winStarted) return;
+            winStarted = true;
+            cancelLaunchTimers();
+            new android.os.Handler(getMainLooper()).postDelayed(
+                    preloaderDialog::closeOnUiThread, LAUNCH_OVERLAY_GRACE_MS);
+        }));
+        // Performance HUD: X11 shows it when a window gets _MESA_DRV and counts X presents. Here the
+        // compositor reports the window presenting GPU frames, then each of its frames.
+        com.winlator.star.wayland.WaylandCompositor.setGameListener(new com.winlator.star.wayland.WaylandCompositor.GameListener() {
+            @Override public void onGameSurface(String window, String gpuName) {
+                if (window == null) {
+                    frameRatingWindowId = -1;
+                    fpsCounter.reset();
+                    runOnUiThread(() -> {
+                        if (frameRating != null) { frameRating.setVisibility(View.GONE); frameRating.reset(); }
+                        if (frameRatingHorizontal != null) { frameRatingHorizontal.setVisibility(View.GONE); frameRatingHorizontal.reset(); }
+                        if (perfHud != null) perfHud.setVisibility(View.GONE);
+                        if (gameNativeHud != null) gameNativeHud.setVisibility(View.GONE);
+                        if (fusionHud != null) fusionHud.setVisibility(View.GONE);
+                    });
+                    return;
+                }
+                Log.d("XServerDisplayActivity", "wayland: HUD follows " + window);
+                frameRatingWindowId = WAYLAND_HUD_WINDOW_ID;
+                if (gpuName != null && !gpuName.isEmpty())
+                    hudGpuName = com.winlator.star.core.GPUInformation.extractModelName(gpuName);
+                runOnUiThread(() -> {
+                    if (hudGpuName != null) {
+                        if (frameRating != null) frameRating.setGpuName(hudGpuName);
+                        if (perfHud != null) perfHud.setGpuModel(hudGpuName);
+                        if (gameNativeHud != null) gameNativeHud.setGpuModel(hudGpuName);
+                        if (fusionHud != null) fusionHud.setGpuModel(hudGpuName);
+                    }
+                    // Respect the master toggle, like the _MESA_DRV binding does.
+                    if (!hudCounterEnabled) return;
+                    if (perfHud != null) perfHud.setVisibility(View.VISIBLE);
+                    if (gameNativeHud != null) gameNativeHud.setVisibility(View.VISIBLE);
+                    if (fusionHud != null) fusionHud.setVisibility(View.VISIBLE);
+                    if (fpsHudHorizontal) {
+                        if (frameRatingHorizontal != null) frameRatingHorizontal.setVisibility(View.VISIBLE);
+                    } else {
+                        if (frameRating != null) frameRating.setVisibility(View.VISIBLE);
+                    }
+                });
+            }
+            @Override public void onGameFrame() {
+                if (frameRatingWindowId == -1 || !hudCounterEnabled) return;
+                fpsCounter.tick();
+                if (frameRating != null) frameRating.update();
+                if (frameRatingHorizontal != null) frameRatingHorizontal.update();
+                if (perfHud != null) perfHud.update();
+            }
+        });
+
+        // On-screen controls, a mouse and keys mapped to controller buttons all inject into the X
+        // server, which has no client in wayland mode: hand that input to the compositor too.
+        if (xServer != null) xServer.setInputSink(new com.winlator.star.xserver.XServer.InputSink() {
+            @Override public void onPointerMove(int x, int y) {
+                com.winlator.star.wayland.WaylandCompositor.nativeSendSceneInput(2, x, y);
+                runOnUiThread(() -> {
+                    if (waylandSurfaceView == null || waylandCursorView == null) return;
+                    int vw = waylandSurfaceView.getWidth(), vh = waylandSurfaceView.getHeight();
+                    if (vw <= 0 || vh <= 0) return;
+                    waylandCursorX = (float) x * vw / xServer.screenInfo.width;
+                    waylandCursorY = (float) y * vh / xServer.screenInfo.height;
+                    waylandCursorView.setX(waylandCursorX);
+                    waylandCursorView.setY(waylandCursorY);
+                    if (waylandCursorView.getVisibility() != View.VISIBLE)
+                        waylandCursorView.setVisibility(View.VISIBLE);
+                });
+            }
+            @Override public void onPointerButton(com.winlator.star.xserver.Pointer.Button button, boolean pressed) {
+                switch (button) {
+                    case BUTTON_LEFT: com.winlator.star.wayland.WaylandCompositor.nativeSendSceneInput(3, 0x110, pressed ? 1 : 0); break;
+                    case BUTTON_RIGHT: com.winlator.star.wayland.WaylandCompositor.nativeSendSceneInput(3, 0x111, pressed ? 1 : 0); break;
+                    case BUTTON_MIDDLE: com.winlator.star.wayland.WaylandCompositor.nativeSendSceneInput(3, 0x112, pressed ? 1 : 0); break;
+                    case BUTTON_SCROLL_UP: if (pressed) com.winlator.star.wayland.WaylandCompositor.nativeSendSceneInput(4, -1, 0); break;
+                    case BUTTON_SCROLL_DOWN: if (pressed) com.winlator.star.wayland.WaylandCompositor.nativeSendSceneInput(4, 1, 0); break;
+                    default: break;
+                }
+            }
+            @Override public void onKey(int evdev, boolean pressed) {
+                if (evdev > 0) com.winlator.star.wayland.WaylandCompositor.nativeSendKey(evdev, pressed ? 1 : 0);
+            }
+        });
+        // Advertise the panel's real refresh rate (X11 offers it through RandR; games pick their
+        // saved 144 Hz mode from Wine's mode list, which Wine derives from the Wayland output).
+        try {
+            com.winlator.star.wayland.WaylandCompositor.nativeSetOutputRefreshRate(currentDisplayRefreshHz());
+            // And the container's screen size: on X11 the X server's screen is the container size, so
+            // Wine lists display modes up to it; a 1920x1080 output listed modes above the desktop.
+            if (xServer != null)
+                com.winlator.star.wayland.WaylandCompositor.nativeSetOutputSize(
+                        xServer.screenInfo.width, xServer.screenInfo.height);
+        } catch (Throwable t) {
+            Log.w("XServerDisplayActivity", "wayland: refresh rate unavailable", t);
+        }
+        waylandSurfaceView = new android.view.SurfaceView(this);
+        waylandSurfaceView.setLayoutParams(new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        // Touch -> wl_pointer. Map view pixels to the compositor's 1920x1080 output space (we blit
+        // the guest surface fullscreen, so that IS the guest coordinate space). action 0=down/1=move/2=up.
+        // Touchpad-style cursor: a visible on-screen pointer that moves RELATIVE to finger drag
+        // (from wherever it is, not jumping to the touch point), with tap = left-click. The cursor is
+        // an Android overlay view (waylandCursorView); we keep it in sync with the wl_pointer.motion
+        // we send, so the guest's pointer and the visible arrow always match.
+        waylandCursorView = new android.widget.ImageView(this);
+        waylandCursorView.setImageBitmap(makeArrowCursorBitmap());
+        waylandCursorView.setLayoutParams(new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT));
+        waylandCursorView.setVisibility(View.GONE);
+        final float[] last = {0f, 0f};
+        final float[] moved = {0f};
+        final float SENS = 1.4f;
+        waylandSurfaceView.setOnTouchListener((v, ev) -> {
+            int vw = v.getWidth(), vh = v.getHeight();
+            if (vw <= 0 || vh <= 0) return true;
+            if (waylandCursorX < 0) { waylandCursorX = vw / 2f; waylandCursorY = vh / 2f; }
+            switch (ev.getActionMasked()) {
+                case android.view.MotionEvent.ACTION_DOWN:
+                    last[0] = ev.getX(); last[1] = ev.getY(); moved[0] = 0f;
+                    break;
+                case android.view.MotionEvent.ACTION_MOVE: {
+                    float dx = (ev.getX() - last[0]) * SENS, dy = (ev.getY() - last[1]) * SENS;
+                    last[0] = ev.getX(); last[1] = ev.getY();
+                    moved[0] += Math.abs(dx) + Math.abs(dy);
+                    waylandCursorX = Math.max(0f, Math.min(vw, waylandCursorX + dx));
+                    waylandCursorY = Math.max(0f, Math.min(vh, waylandCursorY + dy));
+                    updateWaylandCursor(vw, vh, 1); // motion
+                    break;
+                }
+                case android.view.MotionEvent.ACTION_UP:
+                case android.view.MotionEvent.ACTION_CANCEL:
+                    if (moved[0] < 14f) { // a tap (not a drag) -> left click at the cursor
+                        updateWaylandCursor(vw, vh, 0); // button press
+                        updateWaylandCursor(vw, vh, 2); // button release
+                    }
+                    break;
+            }
+            return true;
+        });
+        // Dedicated runtime dir for the wayland socket. NOT imagefs/tmp — setupXEnvironment does
+        // FileUtils.clear(imagefs/tmp), which races the compositor's async socket creation and
+        // deletes wayland-0. filesDir/.wayland-rt is app-private, never cleared, and reachable by
+        // the guest (full /data paths, no chroot). GuestProgramLauncherComponent uses the same path.
+        File waylandRtDir = new File(getFilesDir(), ".wayland-rt");
+        waylandRtDir.mkdirs();
+        // Extract the xkb keymap so the compositor can send it to wl_keyboard clients (guest needs
+        // it to interpret our evdev key codes). Same dir as the socket = the compositor's XDG_RUNTIME_DIR.
+        try { FileUtils.copy(this, "wayland/keymap.xkb", new File(waylandRtDir, "keymap.xkb")); }
+        catch (Exception e) { Log.e("XServerDisplayActivity", "wayland: keymap extract failed", e); }
+        final String xdgRuntimeDir = waylandRtDir.getPath();
+        // Resolve the Turnip driver (adrenotools) so the compositor can import dmabufs — honoring a
+        // per-game shortcut override exactly like the guest does (the guest's ADRENOTOOLS_DRIVER_PATH
+        // is set from the same resolved value). Using container.getGraphicsDriverConfig() unconditionally
+        // grabbed the wrong driver on a shortcut launch (empty libraryName -> adrenotools load fails ->
+        // system libvulkan -> no dmabuf exts -> vkCreateDevice fails -> black screen).
+        String driverPath = null, libraryName = null;
+        try {
+            String gdc = (shortcut != null)
+                    ? shortcut.getExtra("graphicsDriverConfig", container.getGraphicsDriverConfig())
+                    : container.getGraphicsDriverConfig();
+            String driverId = com.winlator.star.contentdialog.GraphicsDriverConfigDialog.getVersion(gdc);
+            if (driverId != null && !driverId.isEmpty() && !driverId.equals("System")) {
+                com.winlator.star.contents.AdrenotoolsManager atm =
+                        new com.winlator.star.contents.AdrenotoolsManager(this);
+                driverPath = atm.getDriverPath(driverId);
+                libraryName = atm.getLibraryName(driverId);
+            }
+        } catch (Exception e) {
+            Log.e("XServerDisplayActivity", "wayland: driver resolve failed", e);
+        }
+        final String fDriverPath = driverPath, fLibraryName = libraryName;
+        final String nativeLibDir = getApplicationInfo().nativeLibraryDir;
+        waylandSurfaceView.getHolder().addCallback(new android.view.SurfaceHolder.Callback() {
+            boolean started = false;
+            @Override public void surfaceCreated(android.view.SurfaceHolder h) {
+                if (!started) {
+                    started = true;
+                    com.winlator.star.wayland.WaylandCompositor.nativeStartWithSurface(
+                            h.getSurface(), xdgRuntimeDir, fDriverPath, fLibraryName, nativeLibDir);
+                    startWaylandVsync();
+                } else {
+                    com.winlator.star.wayland.WaylandCompositor.nativeSetSurface(h.getSurface());
+                }
+            }
+            @Override public void surfaceChanged(android.view.SurfaceHolder h, int f, int w, int ht) {}
+            @Override public void surfaceDestroyed(android.view.SurfaceHolder h) {
+                com.winlator.star.wayland.WaylandCompositor.nativeSetSurface(null);
+            }
+        });
+        rootView.addView(waylandSurfaceView);
+        rootView.addView(waylandCursorView); // the overlay pointer, on top of the compositor surface
+    }
+
+    /** Move the overlay pointer to the current touchpad position and send the guest a wl_pointer
+     *  event mapped to the 1920x1080 output space. action: 0=press, 1=motion, 2=release. */
+    // The compositor draws once per screen refresh: feed it the Choreographer's vsync ticks for as
+    // long as this activity lives (the tick is a cheap JNI call; the compositor ignores it while
+    // it has nothing new to draw or no window).
+    private boolean waylandVsyncRunning = false;
+    private final android.view.Choreographer.FrameCallback waylandVsyncCallback = new android.view.Choreographer.FrameCallback() {
+        @Override public void doFrame(long frameTimeNanos) {
+            if (!waylandVsyncRunning) return;
+            com.winlator.star.wayland.WaylandCompositor.nativeVsync(frameTimeNanos);
+            android.view.Choreographer.getInstance().postFrameCallback(this);
+        }
+    };
+
+    private void startWaylandVsync() {
+        if (waylandVsyncRunning) return;
+        waylandVsyncRunning = true;
+        android.view.Choreographer.getInstance().postFrameCallback(waylandVsyncCallback);
+    }
+
+    private void updateWaylandCursor(int vw, int vh, int action) {
+        if (waylandCursorView != null) {
+            waylandCursorView.setX(waylandCursorX);
+            waylandCursorView.setY(waylandCursorY);
+            if (waylandCursorView.getVisibility() != View.VISIBLE)
+                waylandCursorView.setVisibility(View.VISIBLE);
+        }
+        int ox = (int) (waylandCursorX / vw * 1920f);
+        int oy = (int) (waylandCursorY / vh * 1080f);
+        com.winlator.star.wayland.WaylandCompositor.nativeSendPointer(action, ox, oy);
+    }
+
+    /** A small classic arrow cursor bitmap (white fill, dark outline) drawn in code. */
+    private android.graphics.Bitmap makeArrowCursorBitmap() {
+        int w = 22, h = 34;
+        android.graphics.Bitmap bmp = android.graphics.Bitmap.createBitmap(w, h,
+                android.graphics.Bitmap.Config.ARGB_8888);
+        android.graphics.Canvas cv = new android.graphics.Canvas(bmp);
+        android.graphics.Path p = new android.graphics.Path();
+        p.moveTo(1, 1); p.lineTo(1, 25); p.lineTo(7, 19); p.lineTo(11, 28);
+        p.lineTo(15, 26); p.lineTo(11, 17); p.lineTo(19, 17); p.close();
+        android.graphics.Paint paint = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        paint.setStyle(android.graphics.Paint.Style.FILL);
+        paint.setColor(0xFFFFFFFF);
+        cv.drawPath(p, paint);
+        paint.setStyle(android.graphics.Paint.Style.STROKE);
+        paint.setStrokeWidth(1.5f);
+        paint.setColor(0xFF202020);
+        cv.drawPath(p, paint);
+        return bmp;
+    }
+
     private void setupXEnvironment() throws PackageManager.NameNotFoundException {
 
         // Set environment variables
@@ -6540,6 +7049,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
             }
             guestProgramLauncherComponent.setContainer(this.container);
             guestProgramLauncherComponent.setWineInfo(this.wineInfo);
+            guestProgramLauncherComponent.setWaylandMode(waylandMode);
 
             // Real-Steam (VAC) launch (feature M3) — STAGE + build the plan BEFORE getWineStartCommand()
             // below reads realSteamPlan to rewrite the launch target. ONLY for a genuine-Steam shortcut
@@ -6790,12 +7300,15 @@ public class XServerDisplayActivity extends AppCompatActivity {
                         UnixSocketConfig.createSocket(rootPath, UnixSocketConfig.SYSVSHM_SERVER_PATH)
                 )
         );
-        environment.addComponent(
-                new XServerComponent(
-                        xServer,
-                        UnixSocketConfig.createSocket(rootPath, UnixSocketConfig.XSERVER_PATH)
-                )
-        );
+        // In wayland mode the embedded compositor is the display server, so don't run the X server.
+        if (!waylandMode) {
+            environment.addComponent(
+                    new XServerComponent(
+                            xServer,
+                            UnixSocketConfig.createSocket(rootPath, UnixSocketConfig.XSERVER_PATH)
+                    )
+            );
+        }
 
         // Audio driver logic. Reseed the launching engine's EPHEMERAL runtime prefs from the resolved
         // per-scope config (engine-scoped BANNER_AUDIO_<ENG>_* env, shortcut-over-container, else engine
@@ -6939,8 +7452,21 @@ public class XServerDisplayActivity extends AppCompatActivity {
         preloaderDialog.enterGuest("Waiting for " + preloaderGameName + " to render…");
         runOnUiThread(this::startLaunchTimers);
 
+        // Wayland: the launch overlay must ALWAYS clear so the guest is visible — the compositor
+        // present path (first-frame hook) may not fire for a shm-only desktop, and the guest must
+        // never be hidden behind a stuck spinner. Force-close it 2s after guest boot, unconditionally.
+        if (waylandMode) {
+            new android.os.Handler(getMainLooper()).postDelayed(() -> {
+                if (!winStarted) { winStarted = true; cancelLaunchTimers(); }
+                preloaderDialog.closeOnUiThread();
+            }, 2000L);
+        }
+
         // Start the WinHandler (writes events to the file)
         winHandler.start();
+        // Steam Controller support (no-op unless the setting is on) — after WinHandler so pads that
+        // are already paired seat straight into its slots.
+        runOnUiThread(this::startSteamControllerSupport);
 
         // If this session was launched to run a component installer, watch for it to finish and
         // auto-close the container (see componentInstallerExe / installerWatchRunnable).
@@ -6968,6 +7494,9 @@ public class XServerDisplayActivity extends AppCompatActivity {
 
     private void setupUI() {
         FrameLayout rootView = findViewById(R.id.FLXServerDisplay);
+        // Seeded here (after the container + backend are resolved, and after the drawer's reset()
+        // in onCreate) so the drawer can grey Wayland-unsupported controls such as Relative Mouse.
+        XServerDrawerState.INSTANCE.setIsWaylandMode(waylandMode);
         xServerView = new XServerView(this, xServer);
         String rendererType = container != null ? resolvedRenderer() : "vulkan";
         // Native Rendering now routes to the hardened SurfaceFlinger (ASR) renderer instead of the
@@ -7033,6 +7562,15 @@ public class XServerDisplayActivity extends AppCompatActivity {
         if (useVulkan && renderer instanceof com.winlator.star.renderer.vulkan.VulkanRenderer) {
             com.winlator.star.renderer.vulkan.VulkanRenderer vkRenderer =
                 (com.winlator.star.renderer.vulkan.VulkanRenderer) renderer;
+            // Experimental (FeatureFlags.LSFG_NATIVE_EXPERIMENTS_ENABLED): let the LSFG probe accept
+            // a Vulkan 1.1/1.2 compositor driver via extensions. Must precede nativeInit like the
+            // driver info below. Only for a session that will run LSFG Native (per-game engine
+            // override included): the switch changes device creation, so a container whose
+            // engine is Off or Win-FG must get the same device as before.
+            vkRenderer.setLsfgVk11Compat(
+                com.winlator.star.FeatureFlags.LSFG_NATIVE_EXPERIMENTS_ENABLED
+                    && container.isLsfgVk11Compat()
+                    && "lsfg-native".equals(resolvedFrameGenEngine()));
             // Compositor (present-layer) Vulkan driver. "system"/empty => leave driverPath null so
             // nativeInit falls back to the system libvulkan (the safe default). An installed Turnip =>
             // point the compositor at it. Vulkan-renderer only (SurfaceFlinger/OpenGL composite through
@@ -7170,10 +7708,16 @@ public class XServerDisplayActivity extends AppCompatActivity {
 
         if (shortcut != null) {
             renderer.setUnviewableWMClasses("explorer.exe");
+            // Wayland: the compositor skips explorer's windows the same way.
+            if (waylandMode) com.winlator.star.wayland.WaylandCompositor.nativeSetHideShell(true);
         }
 
         xServer.setRenderer(renderer);
         rootView.addView(xServerView);
+
+        // Wayland mode: overlay the embedded compositor's SurfaceView on top of the (idle) X view,
+        // and start the compositor rendering into it. winewayland.drv connects to its socket.
+        if (waylandMode) startWaylandCompositor(rootView);
 
         // Version A: watch for an external (TV) display and reparent the game onto it, using the
         // handheld as the controller. The listener updates the in-game TV tab + raises Compose toasts.
@@ -7403,6 +7947,12 @@ public class XServerDisplayActivity extends AppCompatActivity {
 
         inputControlsView.setVisualStyle(VisualStyle.GAMEHUB);
 
+        // Wayland mode: touchpadView and inputControlsView stay above the compositor surface, exactly
+        // like on X11. Their input goes to the X server, whose input sink forwards it to the compositor,
+        // so touch gets the full X11 gesture set (tap, hold-drag, two-finger right click, scroll) and
+        // the on-screen controls and HUD stay visible (a SurfaceView brought to the front punches
+        // through the views below it). Only the overlay pointer goes on top.
+        if (waylandMode && waylandCursorView != null) waylandCursorView.bringToFront();
 
         startTouchscreenTimeout();
 
@@ -7528,7 +8078,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
         }
     }
 
-    // Scaling/upscaler mode (0-7: None/Linear/Nearest/SGSR/FSR/FSR-Fit/Sharpen/NIS) persistence.
+    // Scaling/upscaler mode (0-8: None/Linear/Nearest/SGSR/FSR/FSR-Fit/Sharpen/NIS/SGSR HQ) persistence.
     // In-game picks are remembered PER GAME (shortcut override, else container) so the drawer's
     // "Scaling mode" picker is sticky across relaunch — matching the fullscreen-mode behavior.
     private void persistScalingMode(int mode) {
@@ -7549,10 +8099,24 @@ public class XServerDisplayActivity extends AppCompatActivity {
         if (sm != null && !sm.isEmpty()) {
             try {
                 int m = Integer.parseInt(sm);
-                if (m >= 0 && m <= 7) return m;
+                if (m >= 0 && m <= 8) return m;
             } catch (NumberFormatException ignored) {}
         }
         return container != null && container.getRendererFilterMode() == 2 ? 2 : 1;
+    }
+
+    // Texture sharpness "Auto" (dxwrapperConfig lodBias=auto): the mip LOD bias that matches the scaling
+    // mode this game starts with. Only the spatial upscalers count (3 SGSR, 4 FSR, 5 FSR-Fit, 7 NIS,
+    // 8 SGSR HQ); Sharpen/Linear/Nearest/None give 0. DXVK reads it once at device creation, so a
+    // scaling mode changed later in the drawer applies from the next launch.
+    private float autoTextureLodBias() {
+        int mode = resolveScalingMode();
+        boolean spatial = mode == 3 || mode == 4 || mode == 5 || mode == 7 || mode == 8;
+        if (!spatial || xServer == null) return 0f;
+        android.util.DisplayMetrics dm = new android.util.DisplayMetrics();
+        getWindowManager().getDefaultDisplay().getRealMetrics(dm);
+        return DXVKConfigDialog.autoLodBias(xServer.screenInfo.width, xServer.screenInfo.height,
+                dm.widthPixels, dm.heightPixels);
     }
 
     // --- Generic drawer graphics quick-settings persistence (per game) -------------------------
@@ -7769,7 +8333,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
             // it's a no-op (and no repeated toast) when native is already off — important because
             // onVulkanScreenEffectsApply fires continuously during slider drags.
             ds.onUpscalerApply = (mode) -> {
-                if (mode >= 3) disableNativeRenderingForPreset(); // 3=SGSR 4=FSR 5=FSR-Fit 6=Sharpen
+                if (mode >= 3) disableNativeRenderingForPreset(); // 3=SGSR 4=FSR 5=FSR-Fit 6=Sharpen 7=NIS 8=SGSR HQ
                 vkr.setUpscaler(mode);
                 persistScalingMode(mode);   // remember the pick per game (#scaling-persist)
             };
@@ -8227,7 +8791,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
             // GL native (direct scanout) bypasses — so engaging one turns Native Rendering off.
             // Guarded inside disableNativeRenderingForPreset(), so this no-ops when native is already
             // off (and the drawer greys these controls out while native is on, so it rarely fires).
-            if (mode >= 3) disableNativeRenderingForPreset(); // 3=SGSR 4=FSR 5=FSR-Fit 6=Sharpen 7=NIS
+            if (mode >= 3) disableNativeRenderingForPreset(); // 3=SGSR 4=FSR 5=FSR-Fit 6=Sharpen 7=NIS 8=SGSR HQ
             // None/Linear/spatial/sharpen -> linear base sampler; Nearest -> point.
             glRenderer.setFilterMode(mode == 2 ? 2 : 1);
             glRenderer.getEffectComposer().setUpscaler(mode); // keeps the current sharpness
@@ -8718,7 +9282,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
 
     // Original logic for DXWrapper and environment variables
     if (dxwrapper.contains("dxvk")) {
-        DXVKConfigDialog.setEnvVars(this, dxwrapperConfig, envVars, dxvkLogDir());
+        DXVKConfigDialog.setEnvVars(this, dxwrapperConfig, envVars, dxvkLogDir(), autoTextureLodBias());
         String version = dxwrapperConfig.get("version");
         if (version != null && version.equals("1.11.1-sarek")) {
             Log.d("GraphicsDriverExtraction", "Disabling Wrapper PATCH_OPCONSTCOMP SPIR-V pass");
@@ -8726,7 +9290,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
         }
     }
     else if (dxwrapper.contains("vegas")) {
-        DXVKConfigDialog.setEnvVars(this, dxwrapperConfig, envVars, dxvkLogDir());
+        DXVKConfigDialog.setEnvVars(this, dxwrapperConfig, envVars, dxvkLogDir(), autoTextureLodBias());
     }
     else {
         WineD3DConfigDialog.setEnvVars(this, dxwrapperConfig, envVars);
@@ -9105,6 +9669,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
             super.dispatchGenericMotionEvent(event);
             return true;
         }
+        if (isSteamControllerShadowEvent(event.getDevice())) return true;
         // Controller-test isolation: while the Players popup is open, a game-controller AXIS event
         // drives ONLY the throwaway visualizer snapshot and is swallowed here — it never reaches
         // winHandler / touchpadView / the guest. Strictly gated on controllerTestActive so the normal
@@ -9151,6 +9716,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
             super.dispatchKeyEvent(event);
             return true;
         }
+        if (isSteamControllerShadowEvent(event.getDevice())) return true;
 
         // Controller-test isolation: while the Players popup is open, a game-controller BUTTON event
         // drives ONLY the throwaway visualizer snapshot and is swallowed here (before the drawer-open
@@ -9159,6 +9725,30 @@ public class XServerDisplayActivity extends AppCompatActivity {
         if (controllerTestActive && ExternalController.isGameController(event.getDevice())) {
             controllerTestFeedKeyEvent(event);
             return true;
+        }
+
+        // Wayland mode: route keyboard keys to wl_keyboard (the guest) instead of the X server.
+        // Game controller buttons stay on the normal path below (WinHandler -> XInput, drawer
+        // hotkeys), exactly like X11; only the sticks arrive as motion events, so sending the
+        // buttons to wl_keyboard left pads with working sticks and dead A/B/X/Y.
+        // Leave system keys (back/volume/home) to Android so the device still behaves normally.
+        if (waylandMode && !ExternalController.isGameController(event.getDevice())) {
+            int kc = event.getKeyCode();
+            boolean systemKey = kc == KeyEvent.KEYCODE_BACK || kc == KeyEvent.KEYCODE_HOME
+                    || kc == KeyEvent.KEYCODE_VOLUME_UP || kc == KeyEvent.KEYCODE_VOLUME_DOWN
+                    || kc == KeyEvent.KEYCODE_VOLUME_MUTE || kc == KeyEvent.KEYCODE_BUTTON_MODE;
+            if (!systemKey) {
+                int evdev = androidKeyToEvdev(kc);
+                if (evdev <= 0 && event.getScanCode() > 0) evdev = event.getScanCode();
+                if (evdev > 0) {
+                    if (event.getAction() == KeyEvent.ACTION_DOWN)
+                        com.winlator.star.wayland.WaylandCompositor.nativeSendKey(evdev, 1);
+                    else if (event.getAction() == KeyEvent.ACTION_UP)
+                        com.winlator.star.wayland.WaylandCompositor.nativeSendKey(evdev, 0);
+                    return true;
+                }
+            }
+            return super.dispatchKeyEvent(event);
         }
 
         // Handle the PlayStation or Xbox Home button to open the drawer
@@ -9174,8 +9764,162 @@ public class XServerDisplayActivity extends AppCompatActivity {
                 (!ExternalController.isGameController(event.getDevice()) && super.dispatchKeyEvent(event));
     }
 
+    /** Map an Android KeyEvent keyCode to a Linux evdev keycode (for wl_keyboard in wayland mode).
+     *  Returns -1 if unmapped (caller falls back to KeyEvent.getScanCode() for HW keyboards). */
+    private static int androidKeyToEvdev(int kc) {
+        switch (kc) {
+            // Letters (evdev order is NOT alphabetical)
+            case KeyEvent.KEYCODE_A: return 30; case KeyEvent.KEYCODE_B: return 48;
+            case KeyEvent.KEYCODE_C: return 46; case KeyEvent.KEYCODE_D: return 32;
+            case KeyEvent.KEYCODE_E: return 18; case KeyEvent.KEYCODE_F: return 33;
+            case KeyEvent.KEYCODE_G: return 34; case KeyEvent.KEYCODE_H: return 35;
+            case KeyEvent.KEYCODE_I: return 23; case KeyEvent.KEYCODE_J: return 36;
+            case KeyEvent.KEYCODE_K: return 37; case KeyEvent.KEYCODE_L: return 38;
+            case KeyEvent.KEYCODE_M: return 50; case KeyEvent.KEYCODE_N: return 49;
+            case KeyEvent.KEYCODE_O: return 24; case KeyEvent.KEYCODE_P: return 25;
+            case KeyEvent.KEYCODE_Q: return 16; case KeyEvent.KEYCODE_R: return 19;
+            case KeyEvent.KEYCODE_S: return 31; case KeyEvent.KEYCODE_T: return 20;
+            case KeyEvent.KEYCODE_U: return 22; case KeyEvent.KEYCODE_V: return 47;
+            case KeyEvent.KEYCODE_W: return 17; case KeyEvent.KEYCODE_X: return 45;
+            case KeyEvent.KEYCODE_Y: return 21; case KeyEvent.KEYCODE_Z: return 44;
+            // Digit row
+            case KeyEvent.KEYCODE_1: return 2;  case KeyEvent.KEYCODE_2: return 3;
+            case KeyEvent.KEYCODE_3: return 4;  case KeyEvent.KEYCODE_4: return 5;
+            case KeyEvent.KEYCODE_5: return 6;  case KeyEvent.KEYCODE_6: return 7;
+            case KeyEvent.KEYCODE_7: return 8;  case KeyEvent.KEYCODE_8: return 9;
+            case KeyEvent.KEYCODE_9: return 10; case KeyEvent.KEYCODE_0: return 11;
+            // Whitespace / edit
+            case KeyEvent.KEYCODE_ENTER: return 28; case KeyEvent.KEYCODE_NUMPAD_ENTER: return 28;
+            case KeyEvent.KEYCODE_SPACE: return 57; case KeyEvent.KEYCODE_TAB: return 15;
+            case KeyEvent.KEYCODE_DEL: return 14; /* backspace */
+            case KeyEvent.KEYCODE_FORWARD_DEL: return 111; case KeyEvent.KEYCODE_ESCAPE: return 1;
+            // Modifiers
+            case KeyEvent.KEYCODE_SHIFT_LEFT: return 42; case KeyEvent.KEYCODE_SHIFT_RIGHT: return 54;
+            case KeyEvent.KEYCODE_CTRL_LEFT: return 29; case KeyEvent.KEYCODE_CTRL_RIGHT: return 97;
+            case KeyEvent.KEYCODE_ALT_LEFT: return 56; case KeyEvent.KEYCODE_ALT_RIGHT: return 100;
+            case KeyEvent.KEYCODE_CAPS_LOCK: return 58;
+            // Arrows / nav
+            case KeyEvent.KEYCODE_DPAD_UP: return 103; case KeyEvent.KEYCODE_DPAD_DOWN: return 108;
+            case KeyEvent.KEYCODE_DPAD_LEFT: return 105; case KeyEvent.KEYCODE_DPAD_RIGHT: return 106;
+            case KeyEvent.KEYCODE_MOVE_HOME: return 102; case KeyEvent.KEYCODE_MOVE_END: return 107;
+            case KeyEvent.KEYCODE_PAGE_UP: return 104; case KeyEvent.KEYCODE_PAGE_DOWN: return 109;
+            case KeyEvent.KEYCODE_INSERT: return 110;
+            // Punctuation
+            case KeyEvent.KEYCODE_GRAVE: return 41; case KeyEvent.KEYCODE_MINUS: return 12;
+            case KeyEvent.KEYCODE_EQUALS: return 13; case KeyEvent.KEYCODE_LEFT_BRACKET: return 26;
+            case KeyEvent.KEYCODE_RIGHT_BRACKET: return 27; case KeyEvent.KEYCODE_BACKSLASH: return 43;
+            case KeyEvent.KEYCODE_SEMICOLON: return 39; case KeyEvent.KEYCODE_APOSTROPHE: return 40;
+            case KeyEvent.KEYCODE_SLASH: return 53; case KeyEvent.KEYCODE_COMMA: return 51;
+            case KeyEvent.KEYCODE_PERIOD: return 52;
+            // Function row
+            case KeyEvent.KEYCODE_F1: return 59; case KeyEvent.KEYCODE_F2: return 60;
+            case KeyEvent.KEYCODE_F3: return 61; case KeyEvent.KEYCODE_F4: return 62;
+            case KeyEvent.KEYCODE_F5: return 63; case KeyEvent.KEYCODE_F6: return 64;
+            case KeyEvent.KEYCODE_F7: return 65; case KeyEvent.KEYCODE_F8: return 66;
+            case KeyEvent.KEYCODE_F9: return 67; case KeyEvent.KEYCODE_F10: return 68;
+            case KeyEvent.KEYCODE_F11: return 87; case KeyEvent.KEYCODE_F12: return 88;
+            default: return -1;
+        }
+    }
+
     public InputControlsView getInputControlsView() {
         return inputControlsView;
+    }
+
+    // ---- Steam Controller support (SDL3 HIDAPI, see SteamControllerBackend) ----
+
+    /** Starts SDL for this session when Input Controls → Device → Steam Controller is on. Off (the
+     *  default) = never loaded. SDL pads join WinHandler's slots like hot-plugged pads; their state
+     *  follows the same routing as a physical pad (visualizer only while the Players test is open,
+     *  nothing while the in-game controls editor is open). Main thread. */
+    private void startSteamControllerSupport() {
+        if (steamControllerBackend != null || winHandler == null || isFinishing()) return;
+        if (!com.winlator.star.ui.components.GlobalControllerPrefs.isSteamControllerEnabled(this)) return;
+        int trackpadMode = com.winlator.star.ui.components.GlobalControllerPrefs.getSteamTrackpadMouseMode(this);
+        com.winlator.star.inputcontrols.Binding[] paddles =
+                com.winlator.star.ui.components.GlobalControllerPrefs.getSteamPaddleBindings(this);
+        SteamControllerBackend backend = new SteamControllerBackend(this, trackpadMode, paddles, new SteamControllerBackend.Listener() {
+            @Override
+            public void onSteamPadConnected(ExternalController pad) {
+                if (winHandler != null) winHandler.onSdlPadConnected(pad);
+            }
+
+            @Override
+            public void onSteamPadDisconnected(ExternalController pad) {
+                if (inputControlsView != null) inputControlsView.onSteamPadDisconnected(pad);
+                if (winHandler != null) winHandler.onSdlPadDisconnected(pad);
+            }
+
+            @Override
+            public void onSteamPadState(ExternalController pad, boolean guideDown, boolean quickAccessDown, int[] pressedKeyCodes) {
+                if (inGameControlsEditor != null) return;
+                if (controllerTestActive) {
+                    controllerTestController.state.copy(pad.state);
+                    controllerTestGuideDown = guideDown;
+                    controllerTestPublishSteamPad(pad, quickAccessDown);
+                    return;
+                }
+                // The profile's Default / Any Controller bindings, like an unconfigured Android pad;
+                // raw state when there are none.
+                if (inputControlsView != null && inputControlsView.onSteamPadState(pad, pressedKeyCodes)) return;
+                if (winHandler != null) winHandler.sendGamepadState(pad);
+            }
+
+            @Override
+            public void onSteamPadBinding(com.winlator.star.inputcontrols.Binding binding, boolean down) {
+                // Back button mapped to a key / mouse button. Always deliver a release so nothing sticks.
+                if (down && (inGameControlsEditor != null || controllerTestActive)) return;
+                if (inputControlsView != null) inputControlsView.handleInputEvent(binding, down);
+            }
+
+            @Override
+            public void onSteamPadMouseMove(int dx, int dy) {
+                if (inGameControlsEditor != null || controllerTestActive) return;
+                if (winHandler != null) winHandler.steamPadMouseMove(dx, dy);
+            }
+
+            @Override
+            public void onSteamPadMouseButton(boolean secondary, boolean down) {
+                // Always deliver a release so a click held while a panel opens can't stick.
+                if (down && (inGameControlsEditor != null || controllerTestActive)) return;
+                if (winHandler != null) winHandler.steamPadMouseButton(secondary, down);
+            }
+        });
+        if (!backend.start()) return;
+        steamControllerBackend = backend;
+        winHandler.setSteamControllerBackend(backend);
+    }
+
+    private void stopSteamControllerSupport() {
+        if (steamControllerBackend == null) return;
+        if (winHandler != null) winHandler.setSteamControllerBackend(null);
+        steamControllerBackend.stop();
+        steamControllerBackend = null;
+    }
+
+    /** While SDL owns a Steam Controller, whatever Android still reports for it (its keyboard/mouse
+     *  "lizard mode", or a HID gamepad collection) is the same physical pad: swallow it so it can't
+     *  type, click or take a second player slot. Valve devices pass through untouched otherwise. */
+    private boolean isSteamControllerShadowEvent(android.view.InputDevice device) {
+        return steamControllerBackend != null && winHandler != null && winHandler.hasSdlPads()
+                && device != null && device.getVendorId() == SteamControllerBackend.VALVE_VENDOR_ID;
+    }
+
+    /** controllerTestPublishSnapshot for a Steam Controller read through SDL (no InputDevice). */
+    private void controllerTestPublishSteamPad(ExternalController pad, boolean quickAccess) {
+        com.winlator.star.inputcontrols.GamepadState st = controllerTestController.state;
+        XServerDialogState.INSTANCE.setControllerTestSnapshot(new com.winlator.star.ui.controllertest.ControllerTestSnapshot(
+                st.buttons & 0xFFFF,
+                st.dpad[0], st.dpad[1], st.dpad[2], st.dpad[3],
+                st.thumbLX, st.thumbLY, st.thumbRX, st.thumbRY,
+                st.triggerL, st.triggerR,
+                controllerTestGuideDown,
+                pad.getDeviceId(),
+                pad.getName() != null ? pad.getName() : "Steam Controller",
+                com.winlator.star.ui.controllertest.PadArt.STEAM.ordinal(),
+                -1,
+                true,
+                quickAccess));
     }
 
     // ---- Controller-test panel input fork (gated on controllerTestActive; see field docs) ----
@@ -10505,6 +11249,8 @@ return true;
             HostRenderer r = xServerView.getRenderer();
             if (r != null) r.setFpsLimit(fps);
         }
+        // Wayland: the compositor paces buffer returns instead of the Present extension.
+        if (waylandMode) com.winlator.star.wayland.WaylandCompositor.nativeSetFpsLimit(Math.round(paced));
         // VRR / refresh-rate matching: vote the panel cadence to match the displayed FPS.
         applyVrr(vrrCap);
     }
@@ -10533,12 +11279,15 @@ return true;
         // action, never a chase of the live frame rate. Nothing at or above the
         // wanted rate -> no vote, the panel stays at its max, and the drawer warns.
         final boolean nativeFgGenerating = nativeFrameGenEngine() && frameGenMultipliesDisplay();
-        if (container != null && resolvedMatchRefreshRate() && nativeFgGenerating) {
+        // Under native frame gen this is the session's Auto (on unless this game opted out),
+        // otherwise the saved setting - see applyNativeFgLocks.
+        final boolean autoOn = autoRefreshActive();
+        if (container != null && autoOn && nativeFgGenerating) {
             int mult = XServerDrawerState.INSTANCE.getFrameGenMultiplier().getValue();
             vrrRate = cap > 0 ? pickNativeFgRefresh(cap * mult) : 0.0f;
             Log.i("XServerDisplayActivity", "native-fg vrr: " + cap + " x " + mult + " = " + (cap * mult)
                 + " -> display " + (vrrRate > 0f ? vrrRate + " Hz" : "top rate (nothing at or above)"));
-        } else if (container != null && resolvedMatchRefreshRate()) {
+        } else if (container != null && autoOn) {
             // Auto (match FPS): vote the panel cadence to follow the displayed FPS while capping.
             if (cap > 0) {
                 if (frameGenMultipliesDisplay()) {
@@ -10822,6 +11571,44 @@ return true;
         pill.bringToFront();
     }
 
+    // Force the Wine graphics driver via the prefix registry. Wayland selects winewayland.drv
+    // (into our compositor); otherwise we only restore x11 if a prior wayland launch had set it,
+    // so normal X11 prefixes are left untouched.
+    private void setWineDisplayDriver() {
+        File userRegFile = new File(imageFs.getRootDir(), ImageFs.WINEPREFIX + "/user.reg");
+        try (WineRegistryEditor reg = new WineRegistryEditor(userRegFile)) {
+            if (waylandMode) {
+                reg.setStringValue("Software\\Wine\\Drivers", "Graphics", "wayland");
+            } else {
+                String cur = reg.getStringValue("Software\\Wine\\Drivers", "Graphics", "");
+                if ("wayland".equals(cur))
+                    reg.setStringValue("Software\\Wine\\Drivers", "Graphics", "x11");
+            }
+        }
+        // Winlator patches winex11.drv so its init succeeds even with no X server, so it always
+        // wins Wine's driver selection. To force winewayland, hide winex11.drv in wayland mode so
+        // explorer's LoadLibrary fails and it falls through to wayland. Self-healing: any X11-mode
+        // launch restores it, so a crash mid-wayland can never permanently break the X11 path.
+        try {
+            com.winlator.star.contents.ContentProfile profile =
+                    contentsManager.getProfileByEntryName(container.getWineVersion());
+            if (profile != null) {
+                File libDir = new File(ContentsManager.getInstallDir(this, profile), profile.wineLibPath);
+                for (String arch : new String[]{"aarch64-windows", "i386-windows"}) {
+                    File drv = new File(libDir, "wine/" + arch + "/winex11.drv");
+                    File bak = new File(libDir, "wine/" + arch + "/winex11.drv.bak");
+                    if (waylandMode) {
+                        if (drv.exists() && !bak.exists()) drv.renameTo(bak);
+                    } else {
+                        if (bak.exists() && !drv.exists()) bak.renameTo(drv);
+                    }
+                }
+            }
+        } catch (Exception e) {
+            Log.e("XServerDisplayActivity", "wayland: winex11 hide/restore failed", e);
+        }
+    }
+
     private void applyGeneralPatches(Container container) {
         File rootDir = imageFs.getRootDir();
         TarCompressorUtils.extract(TarCompressorUtils.Type.ZSTD, this, "container_pattern_common.tzst", rootDir);
@@ -11082,6 +11869,7 @@ return true;
         fusionHud.applyConfig(fpsConfigString);
         if (hudEngineShort != null) fusionHud.setEngineLabel(hudEngineShort);
         if (hudGpuName != null) fusionHud.setGpuModel(hudGpuName);
+        fusionHud.setDisplayServer(waylandMode ? "Wayland" : "X11");
         // Mega stack-layer versions: Proton/Wine, the graphics-driver wrapper package, and DX wrapper.
         if (wineInfo != null) fusionHud.setWineVersion(wineInfo.toString());
         fusionHud.setGraphicsWrapper(friendlyGraphicsWrapper());
