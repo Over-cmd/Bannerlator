@@ -53,7 +53,9 @@ Verified on this build (AYANEO Pocket FIT, Adreno 750)
 
 Known gaps
 ----------
-- Frame rate is still not ahead of X11 on synthetic tests (the cap hides the zero-copy gain here).
+- Measured on the Pocket FIT, Half-Life 2 uncapped, 2x60 s each: zero-copy 185 fps vs 187 fps copy path
+  (no change, CPU-bound), GPU busy 79% vs 83%, GPU clock 944 vs 1000 MHz, power 16.3 W vs 16.8 W.
+  Zero-copy removes the compositor's GPU work; fps gains need a GPU-bound game or a big panel.
 - Real Adreno 710/720/722 and 830/840 hardware untested: please report which a8xx build works best.
 - Frame generation, drag-and-drop, image clipboard, window decorations: not on Wayland yet.
 
