@@ -39,11 +39,11 @@ public final class WaylandTextInput implements WaylandCompositor.TextInputListen
 
         public SurfaceInputView(Context context) { super(context); }
 
-        @Override public boolean onCheckIsTextEditor() { return owner != null && owner.textActive; }
+        @Override public boolean onCheckIsTextEditor() { return owner != null && owner.textMode(); }
 
         @Override
         public InputConnection onCreateInputConnection(EditorInfo outAttrs) {
-            if (owner == null || !owner.textActive) return null; // key-event mode, as on X11
+            if (owner == null || !owner.textMode()) return null; // key-event mode, as on X11
             outAttrs.inputType = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS;
             outAttrs.imeOptions = EditorInfo.IME_ACTION_NONE | EditorInfo.IME_FLAG_NO_FULLSCREEN
                     | EditorInfo.IME_FLAG_NO_EXTRACT_UI;
@@ -68,9 +68,16 @@ public final class WaylandTextInput implements WaylandCompositor.TextInputListen
         this.view = view;
         this.imm = (InputMethodManager) activity.getSystemService(Context.INPUT_METHOD_SERVICE);
         view.owner = this;
-        view.setFocusable(true);
-        view.setFocusableInTouchMode(true);
+        // Not focusable until we need the IME: a focused SurfaceView would take joystick/D-pad
+        // motion away from InputControlsView (the framework focus-routes motion events).
+        view.setFocusable(false);
+        view.setFocusableInTouchMode(false);
     }
+
+    /** IME text mode: only once a program has both enabled text input AND placed a caret. Without
+     *  the caret (winewayland enables for every focused window) the keyboard stays in key mode, so
+     *  a game gets key events, not IME strings. */
+    boolean textMode() { return textActive && caretKnown; }
 
     public void start() { WaylandCompositor.setTextInputListener(this); }
 
@@ -80,7 +87,8 @@ public final class WaylandTextInput implements WaylandCompositor.TextInputListen
     public void onUserToggledKeyboard() {
         userForced = !userForced;
         autoShown = false;
-        if (userForced && textActive && !view.hasFocus()) takeFocus();
+        if (userForced && textMode() && !view.hasFocus()) takeFocus();
+        else if (!userForced && !autoShown) giveFocusBack();
     }
 
     private boolean hardwareKeyboardPresent() {
@@ -92,10 +100,14 @@ public final class WaylandTextInput implements WaylandCompositor.TextInputListen
     private void takeFocus() {
         View cur = activity.getCurrentFocus();
         if (cur != view) focusBefore = cur;
+        view.setFocusable(true);
+        view.setFocusableInTouchMode(true);
         view.requestFocus();
     }
 
     private void giveFocusBack() {
+        view.setFocusable(false);
+        view.setFocusableInTouchMode(false);
         if (focusBefore != null && focusBefore.isAttachedToWindow()) focusBefore.requestFocus();
         focusBefore = null;
     }
@@ -103,21 +115,26 @@ public final class WaylandTextInput implements WaylandCompositor.TextInputListen
     @Override
     public void onTextInput(boolean enabled, String program, int x, int y, int w, int h) {
         main.post(() -> {
-            boolean wasActive = textActive;
+            boolean wasTextMode = textMode();
             textActive = enabled;
             caretKnown = enabled && w > 0 && h > 0;
-            if (textActive != wasActive && imm != null) imm.restartInput(view);
-            if (textActive && caretKnown && !autoShown && !userForced && !hardwareKeyboardPresent()) {
-                takeFocus();
-                if (imm != null && imm.showSoftInput(view, 0)) autoShown = true;
-                Log.i(TAG, "keyboard shown for " + program);
-            } else if (!textActive && autoShown) {
-                if (imm != null) imm.hideSoftInputFromWindow(view.getWindowToken(), 0);
-                autoShown = false;
-                giveFocusBack();
-                Log.i(TAG, "keyboard hidden");
-            } else if (!textActive && view.hasFocus() && !userForced) {
-                giveFocusBack();
+            if (textMode() && !wasTextMode) {
+                if (!autoShown && !userForced && !hardwareKeyboardPresent()) {
+                    takeFocus();
+                    if (imm != null && imm.showSoftInput(view, 0)) autoShown = true;
+                    Log.i(TAG, "keyboard shown for " + program);
+                } else if (userForced) {
+                    takeFocus();                       /* the user's keyboard switches to text mode */
+                }
+                if (imm != null) imm.restartInput(view);
+            } else if (!textMode() && wasTextMode) {
+                if (autoShown) {
+                    if (imm != null) imm.hideSoftInputFromWindow(view.getWindowToken(), 0);
+                    autoShown = false;
+                    Log.i(TAG, "keyboard hidden");
+                }
+                giveFocusBack();                       /* back to key mode for whoever had focus */
+                if (imm != null) imm.restartInput(view);
             }
         });
     }
