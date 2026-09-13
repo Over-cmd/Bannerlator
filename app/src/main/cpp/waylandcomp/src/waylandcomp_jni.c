@@ -22,6 +22,7 @@ extern void banner_wayland_vsync(int64_t frame_time_ns);
 extern volatile int g_fps_limit;
 extern volatile int g_hide_shell;
 extern volatile int g_zero_copy;
+extern volatile unsigned g_zero_copy_last;
 extern volatile int g_ubwc;
 extern volatile int g_output_refresh_mhz;
 extern volatile int g_output_w, g_output_h;
@@ -250,6 +251,12 @@ JNIEXPORT void JNICALL
 Java_com_winlator_star_wayland_WaylandCompositor_nativeSetZeroCopy(JNIEnv *env, jclass clazz, jboolean on) {
     g_zero_copy = on ? 1 : 0;
     __android_log_print(ANDROID_LOG_INFO, TAG, "zero-copy layer mode %s", on ? "on" : "off");
+}
+
+/* Zero-copy frames in the last completed 10 s stats window (on_stats_timer), for the drawer's live line. */
+JNIEXPORT jint JNICALL
+Java_com_winlator_star_wayland_WaylandCompositor_nativeZeroCopyFrames(JNIEnv *env, jclass clazz) {
+    return (jint)g_zero_copy_last;
 }
 
 /* Compressed (UBWC) game buffers: advertise DRM_FORMAT_MOD_QCOM_COMPRESSED on zwp_linux_dmabuf_v1 when

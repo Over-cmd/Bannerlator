@@ -2348,12 +2348,15 @@ void banner_inject_key(uint32_t evdev, int pressed) { key_event(evdev, pressed);
 /* ------------------------------------------------------------------ 10 s summary */
 
 static struct wl_event_source *g_stats_timer;
+/* The last window's zero-copy count, kept for the app (WaylandCompositor.nativeZeroCopyFrames). */
+volatile unsigned g_zero_copy_last;
 
 static int on_stats_timer(void *data) {
     int windows = 0;
     struct surface *s;
     wl_list_for_each(s, &g_toplevels, toplevel_link) windows++;
     unsigned zero_copy = g_zero_copy ? ahb_swapchain_stats_take() : 0;
+    g_zero_copy_last = zero_copy;
     if (g_stat_frames || g_stat_dmabuf || g_stat_shm) {
         char extra[48] = "";
         if (g_zero_copy) snprintf(extra, sizeof(extra), " | %u zero-copy frames", zero_copy);
