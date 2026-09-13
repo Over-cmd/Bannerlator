@@ -192,7 +192,12 @@ private fun generalRows(xmb: XmbScope, p: XmbPrefs, host: XmbGameHost): List<Xmb
     val waylandGame = if (dbOverride.isEmpty()) c.isWaylandBackend else dbOverride == Container.DISPLAY_BACKEND_WAYLAND
     rows += XmbRow.Choice("displayBackend", "Display backend", Icons.Filled.DesktopWindows, dbLabels,
         dbLabels[dbValues.indexOf(dbOverride).coerceAtLeast(0)],
-        subtitle = if (waylandGame) "Runs through the Wayland compositor" else "Runs on the X11 server",
+        // Same help text as the container editor's backend row.
+        subtitle = if (waylandGame) "Wayland (experimental): games render through the embedded compositor (winewayland). " +
+            "Needs a Wayland-capable Proton (11.0-2-arm64ec-90 or newer). Games render on the Turnip bundled with that Proton — " +
+            "the Compositor driver only affects the compositor. DX wrapper (DXVK/VKD3D) settings apply as on X11. " +
+            "The Renderer options below don't apply and are disabled."
+        else "Runs on the X11 server",
         confirm = { v -> if (v == dbLabels[2]) XmbConfirm("Wayland", "Wayland is experimental. Run this game on Wayland?", "Use Wayland") else null }) { v ->
         xmb.set(p, "displayBackend", dbValues[dbLabels.indexOf(v)].ifEmpty { null })
     }
