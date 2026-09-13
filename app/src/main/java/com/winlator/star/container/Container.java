@@ -491,6 +491,8 @@ public class Container {
     public static final String WAYLAND_GAME_DRIVER_BUNDLED_A8XX = "bundled-a8xx";
     public static final String WAYLAND_GAME_DRIVER_BUNDLED_A8XX_PERF = "bundled-a8xx-perf"; // WinNative Performance tuning (PWR_MAX)
     public static final String WAYLAND_GAME_DRIVER_BUNDLED_A8XX_GEN8 = "bundled-a8xx-gen8"; // our own gen8 Android recipe, rebuilt for Wayland
+    public static final String WAYLAND_GAME_DRIVER_BUNDLED_A8XX_SMXZ = "bundled-a8xx-smxz"; // StevenMXZ Gen8 recipe, rebuilt for Wayland
+    public static final String WAYLAND_GAME_DRIVER_BUNDLED_A8XX_WHITE = "bundled-a8xx-white"; // whitebelyash Mainline recipe, rebuilt for Wayland
     public static final String WAYLAND_GAME_DRIVER_IMPORTED_PREFIX = "imported:";
 
     public String getWaylandGameDriver() {

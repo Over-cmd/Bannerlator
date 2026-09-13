@@ -16,7 +16,7 @@ import java.util.List;
  * picker) never reaches the game; the Proton layer bundles three Wayland Turnip variants and
  * honours two env vars, which this class emits:
  * <ul>
- *   <li>{@link #ENV_VARIANT} {@code = a7xx | a8xx | a8xx-perf | a8xx-gen8} — pick a bundled variant; unset (or any other
+ *   <li>{@link #ENV_VARIANT} {@code = a7xx | a8xx | a8xx-perf | a8xx-gen8 | a8xx-smxz | a8xx-white} — pick a bundled variant; unset (or any other
  *       value) = the plain bundled driver. plain covers Adreno 6xx + 730/740/750; a7xx covers
  *       710/720/722; a8xx covers 830/840.</li>
  *   <li>{@link #ENV_ICD} {@code = /abs/path/icd.json} — an IMPORTED Wayland-built driver
@@ -41,6 +41,8 @@ public final class WaylandGameDriver {
     public static final String VARIANT_A8XX = "a8xx";
     public static final String VARIANT_A8XX_PERF = "a8xx-perf"; // WinNative "Performance" tuning: KGSL PWR_MAX held
     public static final String VARIANT_A8XX_GEN8 = "a8xx-gen8"; // Banners-Turnip gen8 recipe (a8xx_gen8.patch + shared_mem)
+    public static final String VARIANT_A8XX_SMXZ = "a8xx-smxz"; // StevenMXZ Gen8 recipe
+    public static final String VARIANT_A8XX_WHITE = "a8xx-white"; // whitebelyash Mainline recipe
 
     /** Shared editor help text (container, shortcut and XMB editors show the same line). */
     public static final String HELP_TEXT =
@@ -135,6 +137,8 @@ public final class WaylandGameDriver {
             case Container.WAYLAND_GAME_DRIVER_BUNDLED_A8XX: return new Resolution(choice, VARIANT_A8XX, null);
             case Container.WAYLAND_GAME_DRIVER_BUNDLED_A8XX_PERF: return new Resolution(choice, VARIANT_A8XX_PERF, null);
             case Container.WAYLAND_GAME_DRIVER_BUNDLED_A8XX_GEN8: return new Resolution(choice, VARIANT_A8XX_GEN8, null);
+            case Container.WAYLAND_GAME_DRIVER_BUNDLED_A8XX_SMXZ: return new Resolution(choice, VARIANT_A8XX_SMXZ, null);
+            case Container.WAYLAND_GAME_DRIVER_BUNDLED_A8XX_WHITE: return new Resolution(choice, VARIANT_A8XX_WHITE, null);
             case Container.WAYLAND_GAME_DRIVER_AUTO:         break;
             default:
                 Log.w(TAG, "unknown waylandGameDriver '" + choice + "'; treating as auto");
@@ -167,6 +171,8 @@ public final class WaylandGameDriver {
         if (VARIANT_A8XX.equals(variant)) return "Bundled a8xx (Adreno 830/840, WinNative Balanced)";
         if (VARIANT_A8XX_PERF.equals(variant)) return "Bundled a8xx Performance (Adreno 830/840, WinNative PWR_MAX)";
         if (VARIANT_A8XX_GEN8.equals(variant)) return "Bundled a8xx gen8 (Adreno 830/840, Banners-Turnip gen8 recipe)";
+        if (VARIANT_A8XX_SMXZ.equals(variant)) return "Bundled a8xx SMXZ (Adreno 830/840, StevenMXZ Gen8 V36 recipe)";
+        if (VARIANT_A8XX_WHITE.equals(variant)) return "Bundled a8xx WHITE (Adreno 830/840, whitebelyash Mainline v31 recipe)";
         return "Bundled (Adreno 6xx / 730–750)";
     }
 
@@ -176,10 +182,12 @@ public final class WaylandGameDriver {
         if (VARIANT_A8XX.equals(variant)) return "Bundled a8xx";
         if (VARIANT_A8XX_PERF.equals(variant)) return "Bundled a8xx Performance";
         if (VARIANT_A8XX_GEN8.equals(variant)) return "Bundled a8xx gen8";
+        if (VARIANT_A8XX_SMXZ.equals(variant)) return "Bundled a8xx SMXZ";
+        if (VARIANT_A8XX_WHITE.equals(variant)) return "Bundled a8xx WHITE";
         return "Bundled";
     }
 
-    /** Stored values in editor order: auto, the five bundled variants, then each imported driver. */
+    /** Stored values in editor order: auto, the seven bundled variants, then each imported driver. */
     public static List<String> optionValues(Context context) {
         ArrayList<String> values = new ArrayList<>();
         values.add(Container.WAYLAND_GAME_DRIVER_AUTO);
@@ -188,6 +196,8 @@ public final class WaylandGameDriver {
         values.add(Container.WAYLAND_GAME_DRIVER_BUNDLED_A8XX);
         values.add(Container.WAYLAND_GAME_DRIVER_BUNDLED_A8XX_PERF);
         values.add(Container.WAYLAND_GAME_DRIVER_BUNDLED_A8XX_GEN8);
+        values.add(Container.WAYLAND_GAME_DRIVER_BUNDLED_A8XX_SMXZ);
+        values.add(Container.WAYLAND_GAME_DRIVER_BUNDLED_A8XX_WHITE);
         for (String id : new WaylandGameDriverManager(context).enumerateInstalledDrivers())
             values.add(Container.WAYLAND_GAME_DRIVER_IMPORTED_PREFIX + id);
         return values;
@@ -207,6 +217,8 @@ public final class WaylandGameDriver {
             case Container.WAYLAND_GAME_DRIVER_BUNDLED_A8XX: return variantLabel(VARIANT_A8XX);
             case Container.WAYLAND_GAME_DRIVER_BUNDLED_A8XX_PERF: return variantLabel(VARIANT_A8XX_PERF);
             case Container.WAYLAND_GAME_DRIVER_BUNDLED_A8XX_GEN8: return variantLabel(VARIANT_A8XX_GEN8);
+            case Container.WAYLAND_GAME_DRIVER_BUNDLED_A8XX_SMXZ: return variantLabel(VARIANT_A8XX_SMXZ);
+            case Container.WAYLAND_GAME_DRIVER_BUNDLED_A8XX_WHITE: return variantLabel(VARIANT_A8XX_WHITE);
         }
         if (isImported(value)) {
             String id = importedId(value);
