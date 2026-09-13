@@ -11689,10 +11689,34 @@ return true;
         try (WineRegistryEditor reg = new WineRegistryEditor(userRegFile)) {
             if (waylandMode) {
                 reg.setStringValue("Software\\Wine\\Drivers", "Graphics", "wayland");
+                // Every process of the session is born on the "shell" desktop - explorer's own threads
+                // included. Without this explorer starts on "Default" and SetThreadDesktop moves only
+                // its main thread to "shell"; the winewayland event thread, clipboard and systray
+                // threads stay behind on "Default". The server's desktop-close heuristic
+                // (remove_desktop_user: users == top-window owner's running_threads) then holds by
+                // coincidence while a game's startup threads come and go - and this Proton base
+                // defaults the close timeout to ZERO (server/winstation.c close_timeout_val; upstream
+                // Wine waits 1 s), so explorer got WM_CLOSE and the desktop vanished ~0.25 s after it
+                // was created (Half-Life 2: 32-bit under FEX, thread churn at startup; the 64-bit AIO
+                // test attached before any churn and survived). With all of explorer's threads on
+                // "shell" the equality means exactly "no other process is attached" - winhandler.exe
+                // and the game hold the desktop for the whole session. The size entry is what
+                // explorer's get_default_desktop_size("shell") reads, so an explorer win32u spawns for
+                // this desktop (stale-prefix wineboot dialog) creates it at the container size too.
+                // Wine reads Software\Wine\Explorer\Desktop in win32u's winstation_init for every
+                // process that gets no explicit desktop.
+                reg.setStringValue("Software\\Wine\\Explorer", "Desktop", "shell");
+                reg.setStringValue("Software\\Wine\\Explorer\\Desktops", "shell", String.valueOf(xServer.screenInfo));
             } else {
                 String cur = reg.getStringValue("Software\\Wine\\Drivers", "Graphics", "");
                 if ("wayland".equals(cur))
                     reg.setStringValue("Software\\Wine\\Drivers", "Graphics", "x11");
+                // Self-healing like Graphics: an X11 launch drops the Wayland desktop seeding so the
+                // X11 path stays exactly as it was (explorer /desktop=shell,WxH on the command line).
+                if ("shell".equals(reg.getStringValue("Software\\Wine\\Explorer", "Desktop", ""))) {
+                    reg.removeValue("Software\\Wine\\Explorer", "Desktop");
+                    reg.removeValue("Software\\Wine\\Explorer\\Desktops", "shell");
+                }
             }
         }
         // Winlator patches winex11.drv so its init succeeds even with no X server, so it always
