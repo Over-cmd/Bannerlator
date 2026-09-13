@@ -134,6 +134,41 @@ small interface in `src/banner_ext.h` (compositor.c only gained hook calls + acc
   pipe), drained on the compositor thread. Glue for the three protocols is pre-generated with
   wayland-scanner 1.24.0 from `protocols/`.
 
+## Compressed (UBWC) game buffers (feat/wayland-ubwc)
+- `zwp_linux_dmabuf_v1` used to advertise `LINEAR` (+`INVALID`) only, so Turnip's Wayland WSI in the
+  game allocated linear swapchain images and DXVK/VKD3D resolved every frame from their tiled/UBWC
+  render targets into that linear copy, before the compositor's own blit. Now `bind_dmabuf` builds
+  its table at the first bind from the renderer's driver (`vkp_dmabuf_modifiers`):
+  `vkGetPhysicalDeviceFormatProperties2` + `VkDrmFormatModifierPropertiesListEXT` per fourcc
+  (AR24/XR24/AB24/XB24), each modifier confirmed with `vkGetPhysicalDeviceImageFormatProperties2`
+  for a dma-buf-backed `TRANSFER_SRC` image. Only `DRM_FORMAT_MOD_LINEAR` (0) and
+  `DRM_FORMAT_MOD_QCOM_COMPRESSED` (`0x0500000000000001`, UBWC, single memory plane on Adreno) are
+  ever advertised; anything else the driver reports goes to logcat as "not advertised".
+- Mesa's WSI hands every advertised+supported modifier to `vkCreateImage` as a modifier *list* and
+  Turnip picks `QCOM_COMPRESSED` whenever it is in the list (`tu_image.cc`), so with the
+  advertisement the game's swapchain is UBWC. The `wl_buffer` then arrives with that modifier and
+  the pixel-plane pitch/offset from the game's `vkGetImageSubresourceLayout(MEMORY_PLANE_0)`;
+  `vkp_image_import_dmabuf` creates the compositor's image with the explicit modifier and that one
+  plane layout (`VkImageDrmFormatModifierExplicitCreateInfoEXT`), which Turnip validates
+  (`INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT` if the pitch does not fit its `fdl6` alignment). The
+  swapchain blit (`vkp_render`) and the layer-mode blit (`vkp_blit_image`) read it like any other
+  source; nothing CPU-side ever touches a dma-buf. Layer mode still blits into its own gralloc pool.
+- **A/B switch:** `BANNER_WAYLAND_UBWC=0` (or `false`/`off`) in the container's/shortcut's
+  environment variables → `nativeSetUbwc(false)` → linear-only advertisement, exactly the old
+  behaviour. Default on. The driver is still queried, so the log shows what it could have done.
+- Log tag `dmabuf`: `formats: AR24 linear+qcom_compressed, XR24 …, AB24 …, XB24 …` at the first
+  bind (with ` (BANNER_WAYLAND_UBWC=0: qcom_compressed not advertised)` when off, or a second line
+  `the compositor's driver (…) reports no importable qcom_compressed layout: game swapchains stay
+  linear` when the adrenotools Turnip lacks it). Per window, the existing `vulkan` line now names
+  the modifier: `… is presenting GPU frames through Wayland: 1920x1080, format XB24, qcom_compressed
+  (zero-copy)` vs `… linear (zero-copy)`. Import failures are `error` lines naming the stage,
+  modifier, size, pitch and VkResult (`dmabuf: vkCreateImage(qcom_compressed, …) -> …`).
+- Caveat: both sides must agree on the UBWC encoding for the GPU. The game runs the wcp's Wayland
+  Turnip, the compositor the user's adrenotools Turnip; the layout code (`fdl6`) is the same, but a
+  very different Mesa version on one side is the first suspect if a compressed frame imports fine
+  yet looks scrambled — `=0` is the workaround, and the `gpu` line names both the GPU and the
+  compositor's driver.
+
 ## Zero-copy window layers (spike, `BANNER_WAYLAND_ZERO_COPY=1`)
 Research + host-side prototype in `ZERO_COPY_SPIKE.md`: why a dma-buf can't become an
 `AHardwareBuffer` (the game's buffers are DMA-heap allocations, not gralloc's), why the interop
