@@ -235,7 +235,11 @@ private fun generalRows(xmb: XmbScope, p: XmbPrefs, host: XmbGameHost): List<Xmb
     val rsValues = listOf("1.0", "1.25", "1.5", "2.0")
     val rsLabels = listOf("Off", "1.25x", "1.5x", "2x")
     val rs = p.ex("renderScale", c.getExtra("renderScale", "1.0") ?: "1.0")
-    rows += XmbRow.Choice("renderScale", "Render scale", Icons.Filled.AspectRatio, rsLabels, rsLabels[rsValues.indexOf(rs).coerceAtLeast(0)], subtitle = "Supersampling") { v ->
+    // Greyed on Wayland (the downscale lives in the X11 Vulkan renderer only) and then DISPLAYS
+    // "Not used on Wayland"; the stored value is left untouched.
+    val rsShown = if (waylandGame) "Not used on Wayland" else rsLabels[rsValues.indexOf(rs).coerceAtLeast(0)]
+    rows += XmbRow.Choice("renderScale", "Render scale", Icons.Filled.AspectRatio, if (waylandGame) listOf(rsShown) else rsLabels, rsShown, subtitle = "Supersampling",
+        disabledReason = if (waylandGame) "Not used on Wayland: the compositor has no supersampling downscale" else null) { v ->
         val nv = rsValues[rsLabels.indexOf(v)]
         xmb.set(p, "renderScale", if (nv == "1.0") null else nv)
     }
@@ -315,12 +319,14 @@ private fun generalRows(xmb: XmbScope, p: XmbPrefs, host: XmbGameHost): List<Xmb
         confirm = { v -> if (v == "SurfaceFlinger") XmbConfirm("SurfaceFlinger renderer", "SurfaceFlinger renderer — experimental. Use it for this game?", "Use SurfaceFlinger") else null }) { v ->
         xmb.set(p, "renderer", v.lowercase())
     }
-    if (rend == "SurfaceFlinger") {
+    // Renderer sub-options are X11-only; hidden on Wayland like the container/shortcut editors do
+    // (their stored values are untouched and come back with the X11 backend).
+    if (!waylandGame && rend == "SurfaceFlinger") {
         rows += XmbRow.Toggle("sfCompat", "Correct SurfaceFlinger colours", Icons.Filled.Image,
             p.ex("sfCompatMode", if (c.getRendererSfCompatMode()) "1" else "0") == "1",
             subtitle = "Fixes swapped red/blue (BGRA→RGBA)") { xmb.set(p, "sfCompatMode", if (it) "1" else "0") }
     }
-    if (rend == "Vulkan") {
+    if (!waylandGame && rend == "Vulkan") {
         val native = p.ex("native", if (c.isRendererNative()) "true" else "false") == "true"
         rows += XmbRow.Toggle("vkNative", "Native renderer", Icons.Filled.DesktopWindows, native) { xmb.set(p, "native", if (it) "true" else "false") }
         val swap = p.ex("swapRB", if (c.getRendererSwapRB()) "true" else "false") == "true"

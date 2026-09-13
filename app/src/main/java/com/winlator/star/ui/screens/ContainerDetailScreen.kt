@@ -1088,17 +1088,28 @@ private fun TopLevelFields(
         // Render scale (supersampling) — pre-launch override stored via the "renderScale" extra.
         // The game renders at this multiple of the display res; the Vulkan compositor then does a
         // quality downscale. "1.0" = Off.
+        // Greyed on Wayland (the Lanczos downscale lives in the X11 Vulkan renderer only); the
+        // control then DISPLAYS "Not used on Wayland" — the stored value is left untouched.
         run {
             val renderScaleValues = listOf("1.0", "1.25", "1.5", "2.0")
             val renderScaleLabels = listOf("Off", "1.25x", "1.5x", "2x")
             val rsIdx = renderScaleValues.indexOf(viewModel.renderScale).coerceAtLeast(0)
+            val rsEnabled = !viewModel.isWaylandBackend
+            val rsShown = if (rsEnabled) renderScaleLabels[rsIdx] else "Not used on Wayland"
             LabeledDropdown(
                 label = "Render scale (supersampling)",
-                options = renderScaleLabels,
-                selectedOption = renderScaleLabels[rsIdx],
+                options = if (rsEnabled) renderScaleLabels else listOf(rsShown),
+                selectedOption = rsShown,
                 onSelect = { viewModel.renderScale = renderScaleValues[renderScaleLabels.indexOf(it)] },
-                enabled = !viewModel.isWaylandBackend
+                enabled = rsEnabled
             )
+            if (!rsEnabled) {
+                Text(
+                    "Not used on Wayland: the compositor has no supersampling downscale. The stored value returns on X11.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
         }
         Spacer(Modifier.height(8.dp))
 

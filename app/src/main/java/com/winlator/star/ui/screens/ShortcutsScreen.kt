@@ -7450,18 +7450,28 @@ internal fun ShortcutSettingsDialogScreen(
                     }
 
                     // Render scale (supersampling) — per-game override of the container default.
+                    // Greyed on Wayland (downscale lives in the X11 Vulkan renderer only); displays
+                    // "Not used on Wayland" while the stored value is left untouched.
                     run {
                         val renderScaleValues = listOf("1.0", "1.25", "1.5", "2.0")
                         val renderScaleLabels = listOf("Off", "1.25x", "1.5x", "2x")
                         val rsIdx = renderScaleValues.indexOf(renderScale).coerceAtLeast(0)
+                        val rsShown = if (effectiveWaylandShortcut) "Not used on Wayland" else renderScaleLabels[rsIdx]
                         DpDrop(
                             dp, "renderScale",
                             label = "Render scale (supersampling)",
-                            options = renderScaleLabels,
-                            selected = renderScaleLabels[rsIdx],
+                            options = if (effectiveWaylandShortcut) listOf(rsShown) else renderScaleLabels,
+                            selected = rsShown,
                             onSelect = { renderScale = renderScaleValues[renderScaleLabels.indexOf(it)] },
                             enabled = !effectiveWaylandShortcut
                         )
+                        if (effectiveWaylandShortcut) {
+                            Text(
+                                "Not used on Wayland: the compositor has no supersampling downscale. The stored value returns on X11.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
                     }
 
                     // In-game refresh rate — single per-game override of the container default. Options:
