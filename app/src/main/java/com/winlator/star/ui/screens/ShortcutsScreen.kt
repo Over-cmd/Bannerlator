@@ -6798,7 +6798,8 @@ internal fun ShortcutSettingsDialogScreen(
                 add("name"); add("execArgs"); add("screenSize")
                 if (selectedScreenSize == "Custom") { add("customW"); add("customH") }
                 add("screenAlignment")
-                add("selectIcon"); add("displayBackend"); add("gfxDriver"); add("gfxWrapper"); add("gfxConfig")
+                add("selectIcon"); add("displayBackend"); add("gfxDriver"); add("gfxWrapper")
+                if (!effectiveWaylandShortcut) add("gfxConfig") // hidden on Wayland (X11 tuning)
                 add("dxWrapper"); add("dxConfig"); add("renderer")
                 if (!effectiveWaylandShortcut && selectedRenderer == "SurfaceFlinger") add("sfCompat")
                 if (!effectiveWaylandShortcut && selectedRenderer == "Vulkan") { add("vkNative"); add("vkColors"); add("vkPresent"); if (vkNative) add("vkBackend"); add("vkDriver") }
@@ -7177,22 +7178,25 @@ internal fun ShortcutSettingsDialogScreen(
                     // version key back (see withGraphicsDriverVersion); the config button stays live.
                     var showWrapperManager by remember { mutableStateOf(false) }
                     val gfxContext = LocalContext.current
-                    var installedTurnips by remember { mutableStateOf<List<String>>(emptyList()) }
+                    var compositorChoices by remember { mutableStateOf<List<String>>(emptyList()) }
                     LaunchedEffect(effectiveWaylandShortcut) {
                         if (!effectiveWaylandShortcut) return@LaunchedEffect
-                        installedTurnips = withContext(Dispatchers.IO) {
-                            runCatching { AdrenotoolsManager(gfxContext).enumarateInstalledDrivers().toList() }
-                                .getOrDefault(emptyList())
-                        }
+                        compositorChoices = compositorDriverChoices(gfxContext) // same source as the config dialog
                     }
                     val compositorVersion = GraphicsDriverConfigDialog.getVersion(graphicsDriverConfig) ?: ""
+                    if (effectiveWaylandShortcut) {
+                        Text(
+                            "Game driver: Wayland Turnip bundled with this Proton",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                         if (effectiveWaylandShortcut) {
                             DpDrop(
                                 dp, "gfxDriver",
                                 label = "Compositor driver",
-                                options = installedTurnips,
-                                selected = if (compositorVersion in installedTurnips) compositorVersion else "",
+                                options = compositorChoices,
+                                selected = if (compositorVersion in compositorChoices) compositorVersion else "",
                                 onSelect = { graphicsDriverConfig = withGraphicsDriverVersion(graphicsDriverConfig, it) },
                                 modifier = Modifier.weight(1f),
                                 onRightId = "gfxWrapper"
@@ -7221,28 +7225,15 @@ internal fun ShortcutSettingsDialogScreen(
                         showWrapperManager = false
                         wrapperRefreshKey++ // pick up a just-imported/deleted wrapper
                     })
-                    if (effectiveWaylandShortcut) {
-                        Text(
-                            "Used by the Wayland compositor to put frames on screen; the game renders on the Turnip bundled with the Proton.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Text(
-                            "Game driver: Wayland Turnip bundled with this Proton",
-                            style = MaterialTheme.typography.bodySmall
-                        )
-                    }
-                    DpButton(dp, "gfxConfig", onActivate = { showGfxConfig = true }, modifier = Modifier.fillMaxWidth()) {
-                        OutlinedButton(onClick = { showGfxConfig = true }, modifier = Modifier.fillMaxWidth()) {
-                            Text("${stringResource(R.string.graphics_driver)}: ${GraphicsDriverConfigDialog.getVersion(graphicsDriverConfig)}")
+                    // Driver configuration is X11 tuning; on Wayland its only live field (the Turnip
+                    // version) is covered by the Compositor driver dropdown, so the button is hidden.
+                    if (!effectiveWaylandShortcut) {
+                        DpButton(dp, "gfxConfig", onActivate = { showGfxConfig = true }, modifier = Modifier.fillMaxWidth()) {
+                            OutlinedButton(onClick = { showGfxConfig = true }, modifier = Modifier.fillMaxWidth()) {
+                                Text("${stringResource(R.string.graphics_driver)}: ${GraphicsDriverConfigDialog.getVersion(graphicsDriverConfig)}")
+                            }
                         }
-                    }
-                    if (effectiveWaylandShortcut) {
-                        Text(
-                            "Only the Turnip version here applies on Wayland; the other options configure the X11 game driver.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                    } else {
                         // "System"/empty falls back to the system libvulkan, which can't import the
                         // game's dmabufs (black screen) — mirrors XServerDisplayActivity's resolve. Warn only.
                         if (compositorVersion.isEmpty() || compositorVersion == "System") {
@@ -7252,6 +7243,11 @@ internal fun ShortcutSettingsDialogScreen(
                                 color = MaterialTheme.colorScheme.error
                             )
                         }
+                        Text(
+                            "Used by the Wayland compositor to put frames on screen; the game renders on the Turnip bundled with the Proton.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
 
                     // DX Wrapper

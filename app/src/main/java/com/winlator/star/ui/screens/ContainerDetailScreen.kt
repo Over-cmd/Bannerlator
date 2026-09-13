@@ -916,22 +916,25 @@ private fun TopLevelFields(
         // writes ONLY the version key back; the config dialog stays reachable for the same key.
         var showWrapperManager by remember { mutableStateOf(false) }
         val compositorDriverOnly = viewModel.isWaylandBackend
-        var installedTurnips by remember { mutableStateOf<List<String>>(emptyList()) }
+        var compositorChoices by remember { mutableStateOf<List<String>>(emptyList()) }
         LaunchedEffect(compositorDriverOnly) {
             if (!compositorDriverOnly) return@LaunchedEffect
-            installedTurnips = withContext(Dispatchers.IO) {
-                runCatching { AdrenotoolsManager(context).enumarateInstalledDrivers().toList() }
-                    .getOrDefault(emptyList())
-            }
+            compositorChoices = compositorDriverChoices(context) // same source as the config dialog
         }
         val compositorVersion = com.winlator.star.contentdialog.GraphicsDriverConfigDialog
             .getVersion(viewModel.graphicsDriverConfig) ?: ""
+        if (compositorDriverOnly) {
+            Text(
+                "Game driver: Wayland Turnip bundled with this Proton",
+                style = MaterialTheme.typography.bodySmall
+            )
+        }
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             if (compositorDriverOnly) {
                 LabeledDropdown(
                     label = "Compositor driver",
-                    options = installedTurnips,
-                    selectedOption = if (compositorVersion in installedTurnips) compositorVersion else "",
+                    options = compositorChoices,
+                    selectedOption = if (compositorVersion in compositorChoices) compositorVersion else "",
                     onSelect = { viewModel.graphicsDriverConfig = withGraphicsDriverVersion(viewModel.graphicsDriverConfig, it) },
                     modifier = Modifier.weight(1f)
                 )
@@ -950,25 +953,15 @@ private fun TopLevelFields(
             IconButton(onClick = { showWrapperManager = true }) {
                 Icon(Icons.Default.CloudDownload, contentDescription = stringResource(R.string.wrapper_manager_open))
             }
-            IconButton(onClick = onShowGfxConfig) {
-                Icon(Icons.Default.Settings, contentDescription = null)
+            // Driver configuration is X11 tuning; on Wayland its only live field (the Turnip
+            // version) is covered by the Compositor driver dropdown, so the gear is hidden there.
+            if (!compositorDriverOnly) {
+                IconButton(onClick = onShowGfxConfig) {
+                    Icon(Icons.Default.Settings, contentDescription = null)
+                }
             }
         }
         if (compositorDriverOnly) {
-            Text(
-                "Used by the Wayland compositor to put frames on screen; the game renders on the Turnip bundled with the Proton.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Text(
-                "Game driver: Wayland Turnip bundled with this Proton",
-                style = MaterialTheme.typography.bodySmall
-            )
-            Text(
-                "Only the Turnip version here applies on Wayland; the other options configure the X11 game driver.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
             // The compositor imports the game's dmabufs, which only an installed Turnip can do:
             // an empty/"System" version falls back to the system libvulkan (see
             // XServerDisplayActivity's Wayland driver resolve) and shows a black screen. Warn only.
@@ -979,6 +972,11 @@ private fun TopLevelFields(
                     color = MaterialTheme.colorScheme.error
                 )
             }
+            Text(
+                "Used by the Wayland compositor to put frames on screen; the game renders on the Turnip bundled with the Proton.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
         if (showWrapperManager) WrapperManagerDialog(onDismiss = {
             showWrapperManager = false
@@ -2753,6 +2751,34 @@ internal fun withGraphicsDriverVersion(config: String, version: String): String 
     if (idx >= 0) parts[idx] = "version=$version" else parts.add("version=$version")
     return parts.joinToString(";")
 }
+
+/**
+ * The bundled (app-shipped) adrenotools driver ids this GPU supports — the config dialog's
+ * "Graphics Driver Version" source with "Show incompatible drivers" unchecked, minus "System".
+ * isDriverSupported is a native probe: off-main and serialized on graphicsProbeMutex, exactly as
+ * the dialog does it. Bundled ids are extracted to contents/adrenotools at image install
+ * (ImageFsInstaller.installDriversFromAssets), so they resolve through the same
+ * AdrenotoolsManager.getDriverPath/getLibraryName as imported ones at launch.
+ */
+internal suspend fun supportedBundledDriverVersions(context: Context): List<String> = withContext(Dispatchers.IO) {
+    val bundled = context.resources.getStringArray(R.array.wrapper_graphics_driver_version_entries)
+        .filter { it != "System" }
+    graphicsProbeMutex.withLock {
+        bundled.filter { runCatching { GPUInformation.isDriverSupported(it, context) }.getOrDefault(false) }
+    }
+}
+
+/** Imported adrenotools driver ids (enumarateInstalledDrivers excludes the bundled ones). */
+internal fun importedDriverVersions(context: Context): List<String> =
+    runCatching { AdrenotoolsManager(context).enumarateInstalledDrivers().toList() }.getOrDefault(emptyList())
+
+/**
+ * What the Wayland "Compositor driver" picker offers: the config dialog's version list
+ * (supported bundled + imported) minus "System" — both edit the same `version` key, so they must
+ * agree.
+ */
+internal suspend fun compositorDriverChoices(context: Context): List<String> =
+    (supportedBundledDriverVersions(context) + importedDriverVersions(context)).distinct()
 
 @Composable
 internal fun GraphicsDriverConfigDialog(

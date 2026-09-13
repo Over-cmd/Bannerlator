@@ -47,7 +47,6 @@ import com.winlator.star.R
 import com.winlator.star.container.Container
 import com.winlator.star.container.GameDetails
 import com.winlator.star.container.Shortcut
-import com.winlator.star.contents.AdrenotoolsManager
 import com.winlator.star.contents.ContentsManager
 import com.winlator.star.contents.WrapperManager
 import com.winlator.star.core.DirectAudioSupport
@@ -141,6 +140,12 @@ internal fun xmbSettingsMenu(xmb: XmbScope, shortcut: Shortcut, host: XmbGameHos
 
 internal fun xmbGeneralMenu(xmb: XmbScope, p: XmbPrefs, host: XmbGameHost): XmbMenu =
     XmbMenu("General", Icons.Filled.Settings) { generalRows(this, p, host) }
+
+// Supported bundled driver ids for the Wayland "Compositor driver" row. The probe behind it is
+// native + serialized, and XMB rebuilds its rows on every set/refresh, so it runs once per process:
+// the first build launches it and refreshes when done; imported ids are re-read on every build.
+private var xmbBundledDriverVersions: List<String>? = null
+private var xmbBundledDriverVersionsLoading = false
 
 private fun generalRows(xmb: XmbScope, p: XmbPrefs, host: XmbGameHost): List<XmbRow> {
     val s = p.shortcut
@@ -275,12 +280,21 @@ private fun generalRows(xmb: XmbScope, p: XmbPrefs, host: XmbGameHost): List<Xmb
     if (waylandGame) {
         val gdc = p.ex("graphicsDriverConfig", c.getGraphicsDriverConfig())
         val compositorVersion = com.winlator.star.contentdialog.GraphicsDriverConfigDialog.getVersion(gdc) ?: ""
-        val turnips = runCatching { AdrenotoolsManager(p.context).enumarateInstalledDrivers().toList() }.getOrDefault(emptyList())
+        // Same source as the config dialog's "Graphics Driver Version" (minus "System").
+        if (xmbBundledDriverVersions == null && !xmbBundledDriverVersionsLoading) {
+            xmbBundledDriverVersionsLoading = true
+            xmb.scope.launch {
+                xmbBundledDriverVersions = supportedBundledDriverVersions(p.context)
+                xmbBundledDriverVersionsLoading = false
+                xmb.refresh()
+            }
+        }
+        val turnips = ((xmbBundledDriverVersions ?: emptyList()) + importedDriverVersions(p.context)).distinct()
+        rows += XmbRow.Info("gfxGameDriver", "Game driver", Icons.Filled.Memory, "Wayland Turnip bundled with this Proton")
         rows += XmbRow.Choice("gfxDriver", "Compositor driver", Icons.Filled.Memory, turnips, if (compositorVersion in turnips) compositorVersion else "",
             subtitle = "Used by the Wayland compositor to put frames on screen; the game renders on the Turnip bundled with the Proton.") { v ->
             xmb.set(p, "graphicsDriverConfig", withGraphicsDriverVersion(gdc, v))
         }
-        rows += XmbRow.Info("gfxGameDriver", "Game driver", Icons.Filled.Memory, "Wayland Turnip bundled with this Proton")
         // "System"/empty falls back to the system libvulkan, which can't import the game's dmabufs
         // (black screen) — mirrors XServerDisplayActivity's Wayland driver resolve. Warn only.
         if (compositorVersion.isEmpty() || compositorVersion == "System") {
@@ -292,8 +306,10 @@ private fun generalRows(xmb: XmbScope, p: XmbPrefs, host: XmbGameHost): List<Xmb
             xmb.set(p, "graphicsDriver", StringUtils.parseIdentifier(v))
         }
     }
-    rows += XmbRow.Link("gfxConfig", "Driver configuration", Icons.Filled.Tune,
-        subtitle = if (waylandGame) "Only the Turnip version here applies on Wayland; the other options configure the X11 game driver." else "Vulkan version, BCn, present modes…") { xmbDriverConfigMenu(xmb, s) }
+    // Driver configuration is X11 tuning; on Wayland its only live field (the Turnip version) is
+    // covered by the Compositor driver row above, so the link is left out of the Wayland layout.
+    if (!waylandGame) rows += XmbRow.Link("gfxConfig", "Driver configuration", Icons.Filled.Tune,
+        subtitle = "Vulkan version, BCn, present modes…") { xmbDriverConfigMenu(xmb, s) }
     rows += XmbRow.External("wrappers", "Manage wrappers", Icons.Filled.Cloud, subtitle = "Import or remove wrapper drivers") { host.openWrapperManager() }
     val dxEntries = p.arr(R.array.dxwrapper_entries)
     val dxId = p.ex("dxwrapper", c.getDXWrapper())
