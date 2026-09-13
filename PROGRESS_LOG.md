@@ -76,6 +76,14 @@
 > - User go after the r4 test ("focus works now, merge it to main for now and we will test it more later").
 > - What lands: the 4th Games-tab layout **XMB** (games across, the game's options down; see-through top bar; landscape hides the status and nav bars) with every game option built into nested XMB columns — Settings (all five sections + driver / DX config, Performance, Player slots, audio), Game Details, Properties, Clone, Remove, logs, community configs, scrape cover, Copy to Drive C, save backup/restore, change executable. Per-game settings editor also gets L1/R1 section switching in the pop-up (List/Grid views).
 > - Code identical to r4 (CI-green run 34658836305, commit `189f8a63`); main only added a PROGRESS_LOG entry since the branch point. No versionCode change. Device status: r1–r4 tested by the user; broader testing to follow.
+## 2026-09-11 — 🔬🎞️ **GameHub frame-gen teardown (firmware 1.4.2 → 1.4.9) and how it compares with bionic-fg / win-fg**
+> - GameHub 1.4.8 deleted its old LSFG-derived engine (`libGameScopeVK.so`) and shipped a new learned engine, "GSFG", in `libGameScopeV2.so`. 1.4.8 was 2× only. 1.4.9 retrained it about 3–4× smaller, with 2–6× and a startup auto-tuner. GSFG is not an LSFG copy or derivative.
+> - Measured against our engines (shader-level sha1):
+>   - bionic-fg: 64 of its 70 unique shaders are byte-identical to GameHub's old engine; 0 frame-gen shaders are shared with GSFG.
+>   - win-fg (`libwin_fg.so` `00e3806f`, 10 classical, weight-free shaders): shares 0 with either engine.
+>   - Our IFNet-lite experiment is the closest in kind, but 6–30× bigger and about 50× more compute.
+> - Clean-room: GSFG's recovered design must not feed into win-fg.
+> - Report: https://claude.ai/code/artifact/d6e39eb3-5555-496a-8fda-835168b8517f · `/sdcard/Download/gsfg-teardown-report.html`. Static analysis only, not device-tested.
 
 ## 2026-09-11 — 🧭 **CHECKPOINT: v7 pre-release out; XP for the other layers discussed**
 > - State: [`build-bionic-layers-20260911-xp`](https://github.com/The412Banner/proton-wine/releases/tag/build-bionic-layers-20260911-xp) is a pre-release (v6 stays Latest and the catalog default); all seven parent branches carry the XP work. Promotion (Latest + catalog + app release-notes news) waits on testers and will be published server-side, not from the phone.
