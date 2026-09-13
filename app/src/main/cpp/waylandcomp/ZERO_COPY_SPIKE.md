@@ -294,3 +294,15 @@ unchanged. Off by default: with the variable unset no new code runs.
 
 Not zero-copy yet — it is the receive side. The copy disappears when step 5 lands and
 `sc_layer_present` is handed the game's own `AHardwareBuffer` instead of a pool slot.
+
+## 7. Step 5 implemented (feat/wayland-zero-copy-wsi + banners-turnip-wayland `banner_ahb_wsi.py`)
+
+Option (a′) as recommended, with one deviation forced by the build: the Wayland Turnip is a
+`platforms=wayland` build with Android detection off, so `VK_ANDROID_external_memory_android_hardware_buffer`
+/ `vk_android.c` do not exist in it. The WSI therefore allocates the `AHardwareBuffer` itself
+(`libnativewindow.so` dlopen'd), sniffs the gralloc handle for UBWC exactly like `u_gralloc_fallback.c`,
+and imports `native_handle->data[0]` as a dma-buf with an explicit modifier + pitch — the same path
+this compositor's pool uses (`vkp_image_import_dmabuf`) — after a test `vkCreateImage` proves the
+driver accepts that layout (linear retry otherwise). Fences: implicit via the dma-buf in both
+directions (§3's option 1, proven by the probe; the compositor imports SurfaceFlinger's release
+fence back into the dma-buf before `wl_buffer.release`). Details in `WAYLAND_RUNTIME.md`.
