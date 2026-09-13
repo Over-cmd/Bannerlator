@@ -16,9 +16,13 @@
 void vk_present_set_driver(const char *driver_path, const char *library_name,
                            const char *native_lib_dir);
 
-// Set/replace the output window (from Surface via ANativeWindow_fromSurface).
-// NULL tears the swapchain down (surface destroyed); images and the device survive.
+// Set/replace the output window (from Surface via ANativeWindow_fromSurface; the backend
+// owns the reference from then on). NULL = the surface is gone. Callable from any thread
+// and never blocks: the request is applied by the compositor thread (vkp_render /
+// vkp_apply_window_request), which tears the old swapchain down and releases the old window.
 void vk_present_set_window(ANativeWindow *window);
+/* Compositor thread: apply a pending window change now. Returns 1 if the window changed. */
+int vkp_apply_window_request(void);
 
 struct vkp_image;
 
@@ -48,8 +52,10 @@ const char *vkp_gpu_name(void);
 
 // 0 if the renderer can create images (device up), -1 otherwise.
 int vkp_ready(void);
-/* Whether an output window is attached; without one vkp_render() draws nothing. */
+/* Whether an output window is attached (or requested); without one vkp_render() draws nothing. */
 int vkp_has_window(void);
+/* 1 once the Vulkan device was lost: nothing is presented any more (the session must restart). */
+int vkp_device_lost(void);
 
 // Clear to black, blit the draws in order (first = bottom) and present.
 // Returns 0 on success, -1 if nothing could be presented (no window yet, etc.).

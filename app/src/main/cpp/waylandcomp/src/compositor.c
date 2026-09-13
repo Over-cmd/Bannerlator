@@ -1382,7 +1382,8 @@ static void pace_without_output(void) {
 
 static int on_frame_timer(void *data) {
     pace_without_output();
-    if (!vkp_has_window() && g_frame_timer) wl_event_source_timer_update(g_frame_timer, 16);
+    if (vkp_has_window()) schedule_render(); /* it is back: draw the current scene */
+    else if (g_frame_timer) wl_event_source_timer_update(g_frame_timer, 16);
     return 0;
 }
 
@@ -1461,6 +1462,9 @@ static void on_vsync(int64_t frame_time_ns) {
     }
     g_last_vsync_ns = now;
     (void)frame_time_ns;
+    /* The app's surface may have been replaced or taken away since the last frame: apply that now
+     * (the app never waits for us), and redraw the scene onto a new one. */
+    if (vkp_apply_window_request()) g_dirty = 1;
     if (g_dirty) render_scene();
 }
 
