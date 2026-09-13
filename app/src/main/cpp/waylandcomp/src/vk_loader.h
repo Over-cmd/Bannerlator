@@ -28,7 +28,15 @@
     X(ResetCommandBuffer) X(BeginCommandBuffer) X(CmdPipelineBarrier) X(CmdBlitImage) \
     X(EndCommandBuffer) X(ResetFences) X(QueueSubmit) X(QueuePresentKHR) X(WaitForFences) \
     X(QueueWaitIdle) X(GetMemoryFdPropertiesKHR) \
-    X(GetImageSubresourceLayout) X(MapMemory) X(UnmapMemory) X(CmdClearColorImage)
+    X(GetImageSubresourceLayout) X(MapMemory) X(UnmapMemory) X(CmdClearColorImage) \
+    /* screen-effect chain (effects_chain.c): graphics pipelines over full-screen quads */ \
+    X(CreateShaderModule) X(DestroyShaderModule) X(CreatePipelineLayout) X(DestroyPipelineLayout) \
+    X(CreateGraphicsPipelines) X(DestroyPipeline) X(CreateRenderPass) X(DestroyRenderPass) \
+    X(CreateFramebuffer) X(DestroyFramebuffer) X(CreateImageView) X(DestroyImageView) \
+    X(CreateSampler) X(DestroySampler) X(CreateDescriptorSetLayout) X(DestroyDescriptorSetLayout) \
+    X(CreateDescriptorPool) X(DestroyDescriptorPool) X(AllocateDescriptorSets) X(FreeDescriptorSets) \
+    X(UpdateDescriptorSets) X(CmdBeginRenderPass) X(CmdEndRenderPass) X(CmdBindPipeline) \
+    X(CmdBindDescriptorSets) X(CmdPushConstants) X(CmdDraw) X(CmdSetViewport) X(CmdSetScissor)
 
 struct vk_api {
 #define X(n) PFN_vk##n n;

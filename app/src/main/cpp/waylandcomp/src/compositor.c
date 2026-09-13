@@ -44,6 +44,7 @@
 #include "pointer-constraints-unstable-v1-server-protocol.h"
 #include "relative-pointer-unstable-v1-server-protocol.h"
 #include "vk_present.h"
+#include "effects_chain.h"
 #include "banner_ext.h"
 
 #define WLOGI(...) __android_log_print(ANDROID_LOG_INFO, "BannerWayland", __VA_ARGS__)
@@ -265,6 +266,8 @@ volatile int g_hide_shell;
  * fullscreen window is shown on its own Android layer (sc_layer.c) instead of being blitted into the
  * screen swapchain. Set from the app before the compositor starts; read per frame. */
 volatile int g_zero_copy;
+static int g_zero_copy_paused;        /* effects hold the layer path off (render_scene) */
+static int g_zero_copy_fx_skip_said;
 
 /* Compressed (UBWC) game buffers: zwp_linux_dmabuf_v1 advertises DRM_FORMAT_MOD_QCOM_COMPRESSED next
  * to LINEAR for every format the renderer's own driver can import that way, so Turnip's Wayland WSI
@@ -1529,9 +1532,24 @@ static void render_scene(void) {
     }
 
     int rendered;
-    int li = g_zero_copy ? layer_candidate(&dl, w, h) : -1;
+    /* Screen effects run in the compositor pass (effects_chain.c), which the layer path bypasses:
+     * while any is on, a fullscreen game goes through the copy path instead, and the layer resumes
+     * once every effect is off again. Said once per transition. */
+    const int fx_on = vkp_effects_active();
+    const int layer_ok = g_zero_copy && !fx_on;
+    if (g_zero_copy && fx_on != g_zero_copy_paused) {
+        g_zero_copy_paused = fx_on;
+        banner_log("effects", fx_on ? "zero-copy paused: screen effects need the compositor pass"
+                                    : "zero-copy resumed: screen effects are off");
+    }
+    int li = layer_ok ? layer_candidate(&dl, w, h) : -1;
     struct surface *ls = li >= 0 ? surface_for_image(dl.d[li].img) : NULL;
+    /* A frame this renderer could not import can only be shown on the layer, effects or not. */
     if (li < 0 && g_zero_copy) ls = ahb_layer_only_candidate(w, h);
+    if (ls && fx_on && li < 0 && !g_zero_copy_fx_skip_said) {
+        g_zero_copy_fx_skip_said = 1;
+        banner_log("effects", "the game's frames cannot be imported by the compositor: shown zero-copy, effects skipped");
+    }
     if (li >= 0 || ls) {
         /* Layer mode: the fullscreen window goes to its own Android layer; whatever is under it is
          * hidden by it, so the screen surface only needs to be black. The frame goes on the layer
@@ -1608,6 +1626,8 @@ static void on_vsync(int64_t frame_time_ns) {
     /* The app's surface may have been replaced or taken away since the last frame: apply that now
      * (the app never waits for us), and redraw the scene onto a new one. */
     if (vkp_apply_window_request()) g_dirty = 1;
+    /* A screen-effect setting changed (JNI, any thread): redraw so it shows on a static scene too. */
+    if (vkp_effects_sync()) g_dirty = 1;
     if (g_dirty) render_scene();
 }
 

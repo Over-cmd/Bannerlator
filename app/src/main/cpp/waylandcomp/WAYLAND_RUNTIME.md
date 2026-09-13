@@ -213,3 +213,48 @@ Option (a') of `ZERO_COPY_SPIKE.md`, both halves:
   stride S px)`, `zero-copy: presenting "<title>" (<exe>) without a copy`; the 10 s `stats` line ends
   with `| N zero-copy frames`. Guest side (Mesa log, stderr of the game): `banner-ahb: WxH swapchain
   (N images) on gralloc buffers: UBWC|linear, stride S px` or the reason it stayed on standard buffers.
+
+## Screen effects (feat/wayland-effects, `src/effects_chain.c`)
+The X11 renderer's screen-effect chain, run by the compositor between the composited scene and the
+output. Same SPIR-V as the X11 Vulkan renderer (`winlator/*_frag.h`, made by `winlator/gen_shaders.sh`
+and committed — the NDK build compiles no GLSL, so there is no build-time shader tooling), same
+push-constant layouts, uniform ranges and pass order, so a saved preset looks the same on both backends.
+
+**Present-pass hook order (`vk_present.c`, `vkp_render`):**
+```
+scene  (every draw blitted 1:1 into a scene-sized R8G8B8A8 image; effects path only)
+  -> vkp_effects_run()     effects_chain.c: scaling -> effects (below)      [this branch]
+  -> vkp_framegen_run()    frame generation (feat/wayland-framegen), inserted right after
+  -> update_map / blit     Fullscreen Mode + Screen Alignment map the result onto the swapchain
+  -> present
+```
+Effects operate on the scene; the mapping operates on the output — the chain's result stands for
+the whole scene and goes through the same `draw_to_blit` as a plain frame. With every effect off
+`vkp_effects_active()` is 0 and the frame takes the old path unchanged (draws blitted straight
+through the mapping); only the blit filter follows the scaling mode (Nearest = `VK_FILTER_NEAREST`).
+
+**Pass order (locked to the X11 Vulkan renderer, `VulkanRendererContext::recordUpscalePasses`):**
+scaling → FXAA → Toon → Colour (brightness/contrast/gamma/saturation) → CAS → HDR → NTSC → CRT →
+Debanding (terminal dither). Scaling modes: 0 None / 1 Linear / 2 Nearest = a filtered resize;
+3 SGSR, 8 SGSR HQ, 7 NIS = one pass; 4 FSR / 5 FSR Fit = EASU → RCAS (fill vs fit is the Fullscreen
+Mode's business here, both run the same pair); 6 Sharpen = RCAS 1:1 (nearest scale + sharpen, as X11).
+Render scale is "Not used on Wayland": the scaling modes resize the scene to its **mapped output size**
+(3/4/5/7/8 only when that is larger than the scene, the X11 "render below display" gate; 6 always).
+Every later pass runs at that resolution, ping-ponging between two targets (+ one EASU mid target).
+
+**Settings** (`WaylandCompositor.nativeSetUpscaler / nativeSetUpscaleSharpness / nativeSetCas /
+nativeSetHdr / nativeSetDeband / nativeSetScreenEffects / nativeSetLookName`, 1:1 with
+`VulkanRenderer`'s): any thread; the compositor thread snapshots them per frame, redraws even a
+static scene, and writes one `effects` line per change:
+`effects  scaling=SGSR HQ 75%, CAS on 55%, Look="Game Clarity", colour b=+2 c=+12 g=1.00 s=108%`
+(`effects  all off: scaling=Linear (plain blit)` when nothing is on). The chain's Vulkan objects are
+built on the first active frame (`effects  chain ready: 13 passes … on <GPU>`; a driver that refuses
+them logs an `error` and effects stay off for the session). The app wires the drawer's Vulkan
+post-chain block (`XServerDialogState.on*Apply`) to these in `XServerDisplayActivity.initWaylandEffects`
+and remembers the same per-game keys as the Vulkan path (#382).
+
+**Zero-copy interplay:** the layer path (`sc_layer.c` / `ahb_swapchain.c`) bypasses the compositor
+pass, so while any effect is on a fullscreen game is presented through the copy path instead
+(`effects  zero-copy paused: screen effects need the compositor pass`) and the layer resumes once all
+are off (`effects  zero-copy resumed: screen effects are off`). A frame this renderer could not import
+(layer-only candidate) still goes on the layer, effects skipped, said once.
