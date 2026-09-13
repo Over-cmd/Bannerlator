@@ -56,6 +56,18 @@ static pthread_mutex_t g_req_lock = PTHREAD_MUTEX_INITIALIZER;
 static ANativeWindow *g_req_window;
 static int g_req_pending;
 
+/* Scale mode + alignment (app values, see vk_present.h); written from any thread, read per frame. */
+static volatile int g_mode = VKP_MODE_STRETCH, g_align = VKP_ALIGN_CENTER;
+
+/* The scene -> output mapping of the last frame (compositor thread): scene pixel (x,y) lands at
+ * output (off_x + x * kx, off_y + y * ky), clipped to the region rectangle. */
+static struct {
+    int scene_w, scene_h, out_w, out_h, mode, align;
+    float kx, ky, off_x, off_y;
+    int rx, ry, rw, rh;                     /* region the picture may occupy */
+    int valid;
+} g_map;
+
 /* A failed swapchain creation is retried no sooner than this (the window may be mid-teardown),
  * and the failure is logged once per streak instead of every frame. */
 static int64_t g_swap_retry_at_ns;
@@ -63,7 +75,6 @@ static int g_swap_fail_logged;
 
 /* Implemented in waylandcomp_jni.c — notifies Java (dismiss launch overlay). */
 extern void banner_on_first_frame(void);
-
 
 static char g_gpu_name[VK_MAX_PHYSICAL_DEVICE_NAME_SIZE];
 const char *vkp_gpu_name(void) { return g_gpu_name; }
@@ -154,6 +165,91 @@ int vkp_has_window(void) {
 
 int vkp_device_lost(void) { return g_dev_state == -2; }
 
+void vk_present_set_scale_mode(int mode, int alignment) {
+    if (mode < VKP_MODE_OFF || mode > VKP_MODE_INTEGER) mode = VKP_MODE_FIT;
+    if (alignment < VKP_ALIGN_CENTER || alignment > VKP_ALIGN_BOTTOM) alignment = VKP_ALIGN_CENTER;
+    g_mode = mode;
+    g_align = alignment;
+}
+
+static const char *mode_name(int m) {
+    switch (m) {
+    case VKP_MODE_OFF: return "off (letterbox)";
+    case VKP_MODE_FIT: return "fit";
+    case VKP_MODE_STRETCH: return "stretch";
+    case VKP_MODE_FILL: return "fill";
+    case VKP_MODE_INTEGER: return "integer";
+    default: return "?";
+    }
+}
+static const char *align_name(int a) {
+    switch (a) {
+    case VKP_ALIGN_TOP: return "top";
+    case VKP_ALIGN_BOTTOM: return "bottom";
+    default: return "center";
+    }
+}
+
+/* Mirror of ViewTransformation.update(outer = output, inner = scene, mode, alignment) — keep the
+ * arithmetic identical: the app maps touch input through that class with the same inputs, so any
+ * difference here puts the pointer beside what it is pointing at. OFF and FIT are both an
+ * aspect-preserving letterbox (OFF only differs in the app's fullscreen gates); TOP/BOTTOM confine
+ * the picture to the top/bottom half of the output (the app's handheld split, #413). */
+static void update_map(int scene_w, int scene_h) {
+    int mode = g_mode, align = g_align;
+    int W = (int)g_extent.width, H = (int)g_extent.height;
+    if (g_map.valid && g_map.scene_w == scene_w && g_map.scene_h == scene_h && g_map.out_w == W &&
+        g_map.out_h == H && g_map.mode == mode && g_map.align == align)
+        return;
+    g_map.scene_w = scene_w; g_map.scene_h = scene_h; g_map.out_w = W; g_map.out_h = H;
+    g_map.mode = mode; g_map.align = align;
+
+    int half = H / 2;
+    switch (align) {
+    case VKP_ALIGN_TOP:    g_map.rx = 0; g_map.ry = 0;    g_map.rw = W; g_map.rh = half; break;
+    case VKP_ALIGN_BOTTOM: g_map.rx = 0; g_map.ry = half; g_map.rw = W; g_map.rh = H - half; break;
+    default:               g_map.rx = 0; g_map.ry = 0;    g_map.rw = W; g_map.rh = H; break;
+    }
+    float sx = (float)g_map.rw / scene_w, sy = (float)g_map.rh / scene_h;
+    if (mode == VKP_MODE_STRETCH) {
+        g_map.kx = sx; g_map.ky = sy;
+        g_map.off_x = (float)g_map.rx; g_map.off_y = (float)g_map.ry;
+    } else {
+        float aspect;
+        if (mode == VKP_MODE_FILL) aspect = sx > sy ? sx : sy;
+        else if (mode == VKP_MODE_INTEGER) {
+            float m = sx < sy ? sx : sy;
+            aspect = (float)(int)m; /* floor for m >= 1 */
+            if (aspect < 1.0f) aspect = 1.0f;
+        } else aspect = sx < sy ? sx : sy;
+        g_map.kx = g_map.ky = aspect;
+        /* Same integer truncation as ViewTransformation's viewOffsetX/Y. */
+        g_map.off_x = (float)(g_map.rx + (int)((g_map.rw - scene_w * aspect) * 0.5f));
+        g_map.off_y = (float)(g_map.ry + (int)((g_map.rh - scene_h * aspect) * 0.5f));
+    }
+    g_map.valid = 1;
+    banner_log("screen", "%s, %s: %dx%d scene shown %dx%d at %d,%d on the %dx%d output",
+               mode_name(mode), align_name(align), scene_w, scene_h,
+               (int)(scene_w * g_map.kx + 0.5f), (int)(scene_h * g_map.ky + 0.5f),
+               (int)g_map.off_x, (int)g_map.off_y, W, H);
+}
+
+void vkp_output_to_scene(double ox, double oy, double *sx, double *sy) {
+    if (!g_map.valid || g_map.kx <= 0 || g_map.ky <= 0) {
+        /* No frame yet: the plain stretch the app's overlay pointer also assumes. */
+        int W = (int)g_extent.width, H = (int)g_extent.height;
+        *sx = W > 0 && g_map.scene_w > 0 ? ox * g_map.scene_w / W : ox;
+        *sy = H > 0 && g_map.scene_h > 0 ? oy * g_map.scene_h / H : oy;
+        return;
+    }
+    *sx = (ox - g_map.off_x) / g_map.kx;
+    *sy = (oy - g_map.off_y) / g_map.ky;
+}
+
+void vkp_output_size(int *w, int *h) {
+    *w = (int)g_extent.width;
+    *h = (int)g_extent.height;
+}
 
 static int has_ext(VkExtensionProperties *e, uint32_t n, const char *name) {
     for (uint32_t i = 0; i < n; i++)
@@ -460,19 +556,24 @@ void vkp_image_destroy(struct vkp_image *img) {
     free(img);
 }
 
-/* Map a draw into swapchain pixels, clipping the destination to the window and
- * trimming the source to match. Returns 0 if nothing is left to draw. */
-static int draw_to_blit(const struct vkp_draw *d, float kx, float ky, VkImageBlit *blit) {
-    float x0 = d->dx * kx, y0 = d->dy * ky;
-    float x1 = (d->dx + d->dw) * kx, y1 = (d->dy + d->dh) * ky;
+/* Map a draw into swapchain pixels through the scale mode, clipping the destination to the
+ * picture's region (the whole output, or its half on TOP/BOTTOM; FILL's overflow is cut here)
+ * and trimming the source to match. Returns 0 if nothing is left to draw. */
+static int draw_to_blit(const struct vkp_draw *d, VkImageBlit *blit) {
+    float kx = g_map.kx, ky = g_map.ky;
+    float x0 = g_map.off_x + d->dx * kx, y0 = g_map.off_y + d->dy * ky;
+    float x1 = g_map.off_x + (d->dx + d->dw) * kx, y1 = g_map.off_y + (d->dy + d->dh) * ky;
     float sx0 = d->sx, sy0 = d->sy, sx1 = d->sx + d->sw, sy1 = d->sy + d->sh;
-    float W = (float)g_extent.width, H = (float)g_extent.height;
+    float L = (float)g_map.rx, T = (float)g_map.ry;
+    float R = (float)(g_map.rx + g_map.rw), B = (float)(g_map.ry + g_map.rh);
+    if (R > (float)g_extent.width) R = (float)g_extent.width;
+    if (B > (float)g_extent.height) B = (float)g_extent.height;
 
     if (x1 <= x0 || y1 <= y0 || sx1 <= sx0 || sy1 <= sy0) return 0;
-    if (x0 < 0) { sx0 += (0 - x0) / (x1 - x0) * (sx1 - sx0); x0 = 0; }
-    if (y0 < 0) { sy0 += (0 - y0) / (y1 - y0) * (sy1 - sy0); y0 = 0; }
-    if (x1 > W) { sx1 -= (x1 - W) / (x1 - x0) * (sx1 - sx0); x1 = W; }
-    if (y1 > H) { sy1 -= (y1 - H) / (y1 - y0) * (sy1 - sy0); y1 = H; }
+    if (x0 < L) { sx0 += (L - x0) / (x1 - x0) * (sx1 - sx0); x0 = L; }
+    if (y0 < T) { sy0 += (T - y0) / (y1 - y0) * (sy1 - sy0); y0 = T; }
+    if (x1 > R) { sx1 -= (x1 - R) / (x1 - x0) * (sx1 - sx0); x1 = R; }
+    if (y1 > B) { sy1 -= (y1 - B) / (y1 - y0) * (sy1 - sy0); y1 = B; }
 
     int ix0 = (int)(x0 + 0.5f), iy0 = (int)(y0 + 0.5f), ix1 = (int)(x1 + 0.5f), iy1 = (int)(y1 + 0.5f);
     int isx0 = (int)sx0, isy0 = (int)sy0, isx1 = (int)(sx1 + 0.5f), isy1 = (int)(sy1 + 0.5f);
@@ -547,6 +648,8 @@ int vkp_render(int scene_w, int scene_h, const struct vkp_draw *draws, int n) {
         destroy_swapchain(); /* anything else: start over next frame */
         return -1;
     }
+    update_map(scene_w, scene_h);
+
     g_vk.ResetCommandBuffer(g_cmd, 0);
     VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
                                    .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
@@ -598,11 +701,10 @@ int vkp_render(int scene_w, int scene_h, const struct vkp_draw *draws, int n) {
                                 0, 1, &mb, 0, NULL, 0, NULL);
     }
 
-    float kx = (float)g_extent.width / scene_w, ky = (float)g_extent.height / scene_h;
     int drawn = 0;
     for (int i = 0; i < n; i++) {
         VkImageBlit blit;
-        if (!draws[i].img || !draw_to_blit(&draws[i], kx, ky, &blit)) continue;
+        if (!draws[i].img || !draw_to_blit(&draws[i], &blit)) continue;
         g_vk.CmdBlitImage(g_cmd, draws[i].img->image,
                           draws[i].img->dmabuf ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL : VK_IMAGE_LAYOUT_GENERAL,
                           g_images[img], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);

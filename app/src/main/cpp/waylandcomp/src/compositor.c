@@ -2048,12 +2048,25 @@ static void pointer_button(uint32_t button, int pressed) {
     pointer_input(0, 0, 1, button, pressed);
 }
 
-/* Java touch events arrive in INPUT_SPACE over the whole output: action 0=press, 1=move, 2=release. */
+/* Java touch events arrive in INPUT_SPACE over the whole output: action 0=press, 1=move, 2=release.
+ * Output pixels go through the inverse of the scale mode's mapping (letterbox bars, FILL crop, a
+ * TOP/BOTTOM half), so the touch lands on the scene pixel that is drawn under the finger. */
 static void deliver_pointer(const struct input_msg *m) {
-    int w, h;
+    int w, h, ow, oh;
+    double x, y;
     scene_size(&w, &h);
-    pointer_event((double)m->p2 * w / INPUT_SPACE_W, (double)m->p3 * h / INPUT_SPACE_H,
-                  m->p1 == 1 ? 0 : BTN_LEFT, m->p1 == 0);
+    vkp_output_size(&ow, &oh);
+    if (ow > 0 && oh > 0) {
+        vkp_output_to_scene((double)m->p2 * ow / INPUT_SPACE_W, (double)m->p3 * oh / INPUT_SPACE_H, &x, &y);
+    } else {
+        x = (double)m->p2 * w / INPUT_SPACE_W;
+        y = (double)m->p3 * h / INPUT_SPACE_H;
+    }
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    if (x > w - 1) x = w - 1;
+    if (y > h - 1) y = h - 1;
+    pointer_event(x, y, m->p1 == 1 ? 0 : BTN_LEFT, m->p1 == 0);
 }
 
 static void key_event(uint32_t evdev, int pressed);

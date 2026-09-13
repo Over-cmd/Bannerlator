@@ -6745,8 +6745,9 @@ public class XServerDisplayActivity extends AppCompatActivity {
                     if (waylandSurfaceView == null || waylandCursorView == null) return;
                     int vw = waylandSurfaceView.getWidth(), vh = waylandSurfaceView.getHeight();
                     if (vw <= 0 || vh <= 0) return;
-                    waylandCursorX = (float) x * vw / xServer.screenInfo.width;
-                    waylandCursorY = (float) y * vh / xServer.screenInfo.height;
+                    float[] pos = waylandSceneToView(x, y, vw, vh);
+                    waylandCursorX = pos[0];
+                    waylandCursorY = pos[1];
                     waylandCursorView.setX(waylandCursorX);
                     waylandCursorView.setY(waylandCursorY);
                     if (waylandCursorView.getVisibility() != View.VISIBLE)
@@ -6875,6 +6876,22 @@ public class XServerDisplayActivity extends AppCompatActivity {
         });
         rootView.addView(waylandSurfaceView);
         rootView.addView(waylandCursorView); // the overlay pointer, on top of the compositor surface
+    }
+
+    /** Scene (virtual desktop) pixel -> view pixel through the fullscreen mode + alignment, with the
+     *  same ViewTransformation the touch map and the compositor use, so the overlay arrow sits on the
+     *  desktop pixel the compositor draws there (letterbox bars, FILL crop, TOP/BOTTOM half). */
+    private float[] waylandSceneToView(int x, int y, int vw, int vh) {
+        int sw = xServer.screenInfo.width, sh = xServer.screenInfo.height;
+        HostRenderer r = xServer.getRenderer();
+        int mode = r != null ? r.getFullscreenMode() : Container.FULLSCREEN_FIT;
+        int align = r != null ? r.getScreenAlignment() : Container.ALIGN_CENTER;
+        com.winlator.star.renderer.ViewTransformation vt = new com.winlator.star.renderer.ViewTransformation();
+        vt.update(vw, vh, sw, sh, mode, align);
+        if (mode != Container.FULLSCREEN_STRETCH)
+            return new float[]{vt.viewOffsetX + x * vt.aspect, vt.viewOffsetY + y * vt.aspect};
+        return new float[]{vt.regionOffsetX + (float) x * vt.regionWidth / sw,
+                           vt.regionOffsetY + (float) y * vt.regionHeight / sh};
     }
 
     /** Move the overlay pointer to the current touchpad position and send the guest a wl_pointer
@@ -8029,6 +8046,9 @@ public class XServerDisplayActivity extends AppCompatActivity {
         renderer.setScreenAlignment(screenAlignment);
         XServerDrawerState.INSTANCE.setScreenAlignment(screenAlignment);
         inputControlsView.setScreenAlignment(screenAlignment); // #413: size the OSC overlay to its half (TOP/BOTTOM)
+        // Wayland: the compositor fits the desktop with the same mode + alignment (the X renderer above
+        // is idle there, but the touch map still reads the mode from it, so both stay in step).
+        if (waylandMode) com.winlator.star.wayland.WaylandCompositor.nativeSetScaleMode(fullscreenMode, screenAlignment);
         // touchpadView.toggleFullscreen() just re-runs updateXform (it does NOT change the mode), so it
         // also picks up a non-center alignment. CENTER keeps the original OFF-only condition unchanged.
         if (fullscreenMode != Container.FULLSCREEN_OFF || screenAlignment != Container.ALIGN_CENTER) touchpadView.toggleFullscreen();
@@ -8073,6 +8093,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
         HostRenderer r = xServerView.getRenderer();
         r.setFullscreenMode(mode);
         touchpadView.toggleFullscreen();          // recompute touch->guest map for the new mode
+        if (waylandMode) com.winlator.star.wayland.WaylandCompositor.nativeSetScaleMode(mode, r.getScreenAlignment());
         XServerDrawerState.INSTANCE.setFullscreenMode(mode);
         if (shortcut != null) {
             shortcut.putExtra("fullscreenMode", String.valueOf(mode));
@@ -8091,6 +8112,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
         HostRenderer r = xServerView.getRenderer();
         r.setScreenAlignment(alignment);
         touchpadView.toggleFullscreen();          // recompute touch->guest map for the new alignment
+        if (waylandMode) com.winlator.star.wayland.WaylandCompositor.nativeSetScaleMode(r.getFullscreenMode(), alignment);
         XServerDrawerState.INSTANCE.setScreenAlignment(alignment);
         // #413: live-resize the OSC overlay to own its half (TOP/BOTTOM), or full screen (CENTER restores).
         if (inputControlsView != null) inputControlsView.setScreenAlignment(alignment);
