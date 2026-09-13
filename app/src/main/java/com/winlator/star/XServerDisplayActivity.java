@@ -1360,6 +1360,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
     private android.view.SurfaceView waylandSurfaceView;
     private android.widget.ImageView waylandCursorView;
     private float waylandCursorX = -1f, waylandCursorY = -1f; // touchpad cursor position (view px)
+    private volatile boolean waylandPointerLocked; // a program holds a pointer lock in the compositor
     private EnvVars overrideEnvVars;
 
     private void createNotifcationChannel() {
@@ -2761,7 +2762,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
     }
 
     private void ensurePointerCapture(String reason) {
-        if ((!isRelativeMouseMovement && !cursorLock) || touchpadView == null || inGameControlsEditor != null) return;
+        if ((!isRelativeMouseMovement && !cursorLock && !waylandPointerLocked) || touchpadView == null || inGameControlsEditor != null) return;
 
         final int[] tries = {0};
         Runnable attempt = new Runnable() {
@@ -6410,7 +6411,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
 
-        if (hasFocus && (cursorLock || isRelativeMouseMovement) && inGameControlsEditor == null) {
+        if (hasFocus && (cursorLock || isRelativeMouseMovement || waylandPointerLocked) && inGameControlsEditor == null) {
             touchpadView.requestPointerCapture();
             pointerCaptureRequested = true;
             touchpadView.setOnCapturedPointerListener(new View.OnCapturedPointerListener() {
@@ -6711,6 +6712,30 @@ public class XServerDisplayActivity extends AppCompatActivity {
             }
         });
 
+        // Relative-mode mouse input (Relative Mouse chip, captured mouse, stick-as-mouse) goes to the
+        // compositor as deltas instead of the guest-side mouse_event: a program's pointer lock gets it
+        // as relative motion; unlocked, the compositor moves its pointer by the delta.
+        if (winHandler != null) winHandler.setWaylandMouseRouting(true);
+        // Pointer lock (zwp_pointer_constraints_v1): while a program holds one the input path
+        // delivers deltas exactly like Relative Mouse (and captures a physical mouse); when it
+        // ends, the X pointer (the absolute input's source) is re-synced to where the compositor's
+        // pointer ended up (a SetCursorPos warp, typically), so absolute input resumes from there.
+        com.winlator.star.wayland.WaylandCompositor.setPointerLockListener((locked, x, y) -> runOnUiThread(() -> {
+            if (xServer == null) return;
+            waylandPointerLocked = locked;
+            xServer.setExternalRelativeMode(locked);
+            if (locked) {
+                if (waylandCursorView != null) waylandCursorView.setVisibility(View.GONE);
+                ensurePointerCapture("wayland-pointer-lock");
+            } else {
+                xServer.injectPointerMove(x, y);
+                if (!isRelativeMouseMovement && !cursorLock && touchpadView != null && pointerCaptureRequested) {
+                    touchpadView.releasePointerCapture();
+                    touchpadView.setOnCapturedPointerListener(null);
+                    pointerCaptureRequested = false;
+                }
+            }
+        }));
         // On-screen controls, a mouse and keys mapped to controller buttons all inject into the X
         // server, which has no client in wayland mode: hand that input to the compositor too.
         if (xServer != null) xServer.setInputSink(new com.winlator.star.xserver.XServer.InputSink() {
