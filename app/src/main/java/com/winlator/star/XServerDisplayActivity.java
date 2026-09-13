@@ -1357,6 +1357,18 @@ public class XServerDisplayActivity extends AppCompatActivity {
     // our embedded compositor instead of the X11 server. All branches are guarded by this flag,
     // so the X11 path is unchanged when it's false. See WAYLAND_RUNTIME.md.
     private boolean waylandMode = false;
+    // HUD metric sampling for wayland mode (see startWaylandCompositor): its own thread, never the
+    // compositor's. update() self-throttles to 500 ms and posts the view refresh to the UI thread.
+    private android.os.HandlerThread waylandHudThread;
+    private volatile android.os.Handler waylandHudSampler;
+    private final java.util.concurrent.atomic.AtomicBoolean waylandHudSampleQueued = new java.util.concurrent.atomic.AtomicBoolean(false);
+    private final Runnable waylandHudSample = () -> {
+        waylandHudSampleQueued.set(false);
+        if (frameRatingWindowId == -1 || !hudCounterEnabled) return;
+        if (frameRating != null) frameRating.update();
+        if (frameRatingHorizontal != null) frameRatingHorizontal.update();
+        if (perfHud != null) perfHud.update();
+    };
     private android.view.SurfaceView waylandSurfaceView;
     private android.widget.ImageView waylandCursorView;
     private float waylandCursorX = -1f, waylandCursorY = -1f; // touchpad cursor position (view px)
@@ -6251,6 +6263,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
             inGameControlsEditor = null;
         }
         waylandVsyncRunning = false;
+        if (waylandHudThread != null) { waylandHudThread.quitSafely(); waylandHudThread = null; waylandHudSampler = null; }
         super.onDestroy();
         // Power-user perf: stop the thermal watchdog and revert any privileged sysfs writes on game
         // exit (no-op unless a root toggle wrote something this session).
@@ -6704,13 +6717,21 @@ public class XServerDisplayActivity extends AppCompatActivity {
                 });
             }
             @Override public void onGameFrame() {
+                // Compositor (Wayland dispatch) thread: every client is stalled while this runs, so it
+                // only counts the frame. The HUD's own refresh (FrameRating/PerfHudView.update: sysfs
+                // temperature/GPU-load reads and BatteryManager binder calls, every 500 ms) runs on the
+                // sampler thread; one job is queued at a time, so a fast game can't pile them up.
                 if (frameRatingWindowId == -1 || !hudCounterEnabled) return;
                 fpsCounter.tick();
-                if (frameRating != null) frameRating.update();
-                if (frameRatingHorizontal != null) frameRatingHorizontal.update();
-                if (perfHud != null) perfHud.update();
+                android.os.Handler h = waylandHudSampler;
+                if (h != null && waylandHudSampleQueued.compareAndSet(false, true)) h.post(waylandHudSample);
             }
         });
+        if (waylandHudThread == null) {
+            waylandHudThread = new android.os.HandlerThread("wayland-hud-sampler");
+            waylandHudThread.start();
+            waylandHudSampler = new android.os.Handler(waylandHudThread.getLooper());
+        }
 
         // Relative-mode mouse input (Relative Mouse chip, captured mouse, stick-as-mouse) goes to the
         // compositor as deltas instead of the guest-side mouse_event: a program's pointer lock gets it
