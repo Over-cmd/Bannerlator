@@ -6235,11 +6235,21 @@ internal fun ShortcutSettingsDialogScreen(
     // "x11"/"wayland". Absent extra falls back to the container default at launch. When the
     // effective backend is Wayland the embedded compositor replaces the Renderer group, so the
     // renderer overrides below are greyed (mirrors the container settings screen).
+    //
+    // Wayland needs the container's Proton layer to ship winewayland.so + its bundled Wayland Turnip
+    // (WineWaylandSupport). On any other layer "Force Wayland" is disabled, a stored "Force Wayland"
+    // displays (and saves) as X11, and "Use container default" resolves to the container's EFFECTIVE
+    // backend — X11 when the container says wayland but its layer can't drive it. Keyed on the wine
+    // version so the cached probe only re-runs when the layer changes.
     var displayBackendOverride by remember { mutableStateOf(shortcut.getExtra("displayBackend", "")) }
+    val containerWaylandCapable = remember(shortcut.container.wineVersion) {
+        com.winlator.star.core.WineWaylandSupport.isWaylandCapable(context, shortcut.container.wineVersion)
+    }
+    val containerWaylandDefault = shortcut.container.isWaylandBackend && containerWaylandCapable
     val effectiveWaylandShortcut = when (displayBackendOverride) {
-        Container.DISPLAY_BACKEND_WAYLAND -> true
+        Container.DISPLAY_BACKEND_WAYLAND -> containerWaylandCapable
         Container.DISPLAY_BACKEND_X11 -> false
-        else -> shortcut.container.isWaylandBackend
+        else -> containerWaylandDefault
     }
 
     // Gyro (motion aim) per-game overrides — seeded from the shortcut extra, falling back to the
@@ -6698,7 +6708,10 @@ internal fun ShortcutSettingsDialogScreen(
             putExtra("graphicsDriver", StringUtils.parseIdentifier(selectedGfxDriver))
             putExtra("graphicsDriverConfig", graphicsDriverConfig)
             // Display backend override: "" clears the extra (use container default) via putExtra(null).
-            putExtra("displayBackend", displayBackendOverride.ifEmpty { null })
+            // A "Force Wayland" the container's layer can't honour displayed as X11, so X11 is saved.
+            putExtra("displayBackend",
+                if (displayBackendOverride == Container.DISPLAY_BACKEND_WAYLAND && !containerWaylandCapable) Container.DISPLAY_BACKEND_X11
+                else displayBackendOverride.ifEmpty { null })
             putExtra("renderer", StringUtils.parseIdentifier(selectedRenderer))
             putExtra("sfCompatMode", if (sfCompatMode) "1" else "0")
             // Gyro per-game overrides (read by the launch resolver in XServerDisplayActivity).
@@ -7159,25 +7172,53 @@ internal fun ShortcutSettingsDialogScreen(
                     run {
                         val dbLabels = listOf("Use container default", "Force X11", "Force Wayland")
                         val dbValues = listOf("", Container.DISPLAY_BACKEND_X11, Container.DISPLAY_BACKEND_WAYLAND)
-                        val dbIdx = dbValues.indexOf(displayBackendOverride).coerceAtLeast(0)
+                        // A stored "Force Wayland" the container's layer can't honour shows as the
+                        // effective backend (Force X11); see containerWaylandCapable above.
+                        val waylandStoredUnusable =
+                            displayBackendOverride == Container.DISPLAY_BACKEND_WAYLAND && !containerWaylandCapable
+                        val dbIdx = if (waylandStoredUnusable) 1
+                                    else dbValues.indexOf(displayBackendOverride).coerceAtLeast(0)
                         DpDrop(
                             dp, "displayBackend",
                             label = "Display backend",
                             options = dbLabels,
                             selected = dbLabels[dbIdx],
-                            onSelect = { displayBackendOverride = dbValues[dbLabels.indexOf(it)] }
+                            disabledOptions = if (containerWaylandCapable) emptySet() else setOf(dbLabels[2]),
+                            onSelect = {
+                                val picked = dbValues[dbLabels.indexOf(it)]
+                                displayBackendOverride =
+                                    if (picked == Container.DISPLAY_BACKEND_WAYLAND && !containerWaylandCapable) Container.DISPLAY_BACKEND_X11
+                                    else picked
+                            }
                         )
                         if (effectiveWaylandShortcut) {
                             Text(
                                 "Wayland (experimental): renders through the embedded compositor " +
-                                    "(winewayland). Needs a Wayland-capable Proton (11.0-2-arm64ec-90 " +
-                                    "or newer). The game renders on the Turnip bundled with that " +
+                                    "(winewayland). Needs " + com.winlator.star.core.WineWaylandSupport.LAYER_HINT +
+                                    ". The game renders on the Turnip bundled with that " +
                                     "Proton — the graphics-driver picker only affects the compositor. " +
                                     "DX wrapper (DXVK/VKD3D) settings apply as on X11. Renderer " +
                                     "options below don't apply.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
+                        } else if (!containerWaylandCapable) {
+                            Text(
+                                "Wayland needs " + com.winlator.star.core.WineWaylandSupport.LAYER_HINT +
+                                    ". The selected layer does not include winewayland and its Wayland Turnip.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            if (waylandStoredUnusable || shortcut.container.isWaylandBackend) {
+                                Text(
+                                    if (waylandStoredUnusable)
+                                        "This game was set to Force Wayland, but the container's Proton layer is not Wayland-capable: it runs on X11 and will be saved as Force X11."
+                                    else
+                                        "The container is set to Wayland, but its Proton layer is not Wayland-capable: the game runs on X11.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.error
+                                )
+                            }
                         }
                     }
 
