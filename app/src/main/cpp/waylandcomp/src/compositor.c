@@ -197,7 +197,8 @@ struct surface {
 
     /* Current content. */
     struct vkp_image *shm_img;              /* our copy of the last wl_shm buffer */
-    struct wl_resource *dmabuf;             /* current dmabuf buffer, held until replaced */
+    struct wl_resource *dmabuf;             /* current dmabuf wl_buffer (NULL once the client destroyed it) */
+    struct dmabuf_buffer *dmabuf_buf;       /* its imported image, kept until replaced or the surface goes */
     struct wl_listener dmabuf_destroy;
     int buf_w, buf_h, has_content;
     int src_set, dst_set;
@@ -392,7 +393,20 @@ struct dmabuf_buffer {
     uint64_t modifier;
     struct vkp_image *img;                  /* imported once, reused for every frame */
     int import_failed;
+    /* One reference for the wl_buffer resource, one per surface showing the buffer. Mesa destroys
+     * a swapchain's wl_buffers the moment the game rebuilds its swapchain, i.e. while the last
+     * committed one is still what is on screen: the import (and the dma-buf memory it pins) stays
+     * until the surface commits something newer, so the picture never blinks to black. */
+    int refs;
 };
+
+static void dmabuf_buffer_unref(struct dmabuf_buffer *b) {
+    if (!b || --b->refs > 0) return;
+    vkp_image_destroy(b->img);
+    for (int i = 0; i < b->n_planes; i++)
+        if (b->fd[i] >= 0) close(b->fd[i]);
+    free(b);
+}
 
 static void dbuf_buffer_destroy_req(struct wl_client *c, struct wl_resource *r) {
     wl_resource_destroy(r);
@@ -470,20 +484,26 @@ static void unmap_toplevel(struct surface *s) {
     wl_list_init(&s->toplevel_link);
 }
 
-static void drop_dmabuf(struct surface *s, int release) {
-    if (!s->dmabuf) return;
-    wl_list_remove(&s->dmabuf_destroy.link);
-    if (release) release_buffer(s, s->dmabuf);
-    s->dmabuf = NULL;
+/* Let go of the surface's dmabuf content. paced = 1: the buffer was replaced, give it back on the
+ * limiter's cadence; paced = 0: the surface is going away, give it back at once (a buffer of a
+ * destroyed surface is not shown again and must not sit unreleased with the client). */
+static void drop_dmabuf(struct surface *s, int paced) {
+    if (s->dmabuf) {
+        wl_list_remove(&s->dmabuf_destroy.link);
+        if (paced) release_buffer(s, s->dmabuf);
+        else wl_buffer_send_release(s->dmabuf);
+        s->dmabuf = NULL;
+    }
+    dmabuf_buffer_unref(s->dmabuf_buf);
+    s->dmabuf_buf = NULL;
 }
 
+/* The client destroyed the wl_buffer we are showing (a swapchain rebuild): keep showing its
+ * image (s->dmabuf_buf holds it) until the next commit replaces it; only the resource is gone. */
 static void on_dmabuf_destroyed(struct wl_listener *l, void *data) {
     struct surface *s = wl_container_of(l, s, dmabuf_destroy);
     wl_list_remove(&s->dmabuf_destroy.link);
     s->dmabuf = NULL;
-    s->has_content = 0;
-    if (s->role == ROLE_TOPLEVEL) unmap_toplevel(s);
-    schedule_render();
 }
 
 static void on_pending_buffer_destroyed(struct wl_listener *l, void *data) {
@@ -534,9 +554,11 @@ extern void banner_on_game_surface(const char *window, const char *gpu); /* wind
 extern void banner_on_game_frame(void);
 
 static void take_dmabuf(struct surface *s, struct dmabuf_buffer *b, struct wl_resource *buffer) {
-    if (s->dmabuf != buffer) {
+    if (s->dmabuf != buffer || s->dmabuf_buf != b) {
         drop_dmabuf(s, 1);
         s->dmabuf = buffer;
+        s->dmabuf_buf = b;
+        b->refs++;
         s->dmabuf_destroy.notify = on_dmabuf_destroyed;
         wl_resource_add_destroy_listener(buffer, &s->dmabuf_destroy);
     }
@@ -1141,12 +1163,7 @@ static void bind_desktop(struct wl_client *c, void *data, uint32_t ver, uint32_t
 /* ------------------------------------------------------------ zwp_linux_dmabuf_v1 */
 
 static void dbuf_buffer_resource_destroy(struct wl_resource *r) {
-    struct dmabuf_buffer *b = wl_resource_get_user_data(r);
-    if (!b) return;
-    vkp_image_destroy(b->img);
-    for (int i = 0; i < b->n_planes; i++)
-        if (b->fd[i] >= 0) close(b->fd[i]);
-    free(b);
+    dmabuf_buffer_unref(wl_resource_get_user_data(r));
 }
 
 static void params_destroy(struct wl_client *c, struct wl_resource *r) { wl_resource_destroy(r); }
@@ -1167,6 +1184,7 @@ static struct wl_resource *params_do_create(struct wl_client *c, struct wl_resou
     struct dmabuf_buffer *b = calloc(1, sizeof(*b));
     if (!b) return NULL;
     b->n_planes = p->n_planes;
+    b->refs = 1; /* the wl_buffer resource's */
     b->width = w; b->height = h; b->format = format;
     b->modifier = p->modifier[0];
     for (int i = 0; i < MAX_PLANES; i++) b->fd[i] = -1;
@@ -1261,8 +1279,7 @@ struct draw_list { struct vkp_draw *d; int n, cap; };
 static struct vkp_image *surface_image(struct surface *s) {
     if (!s->has_content) return NULL;
     if (s->shm_img) return s->shm_img;
-    struct dmabuf_buffer *b = get_dmabuf(s->dmabuf);
-    return b ? b->img : NULL;
+    return s->dmabuf_buf ? s->dmabuf_buf->img : NULL;
 }
 
 static void add_surface(struct draw_list *dl, struct surface *s, int ox, int oy) {
