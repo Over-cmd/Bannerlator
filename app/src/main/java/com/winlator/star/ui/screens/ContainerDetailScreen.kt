@@ -948,6 +948,18 @@ private fun TopLevelFields(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+            // The compositor imports the game's dmabufs, which only an installed Turnip can do:
+            // an empty/"System" version falls back to the system libvulkan (see
+            // XServerDisplayActivity's Wayland driver resolve) and shows a black screen. Warn only.
+            val compositorVersion = com.winlator.star.contentdialog.GraphicsDriverConfigDialog
+                .getVersion(viewModel.graphicsDriverConfig)
+            if (compositorVersion.isNullOrEmpty() || compositorVersion == "System") {
+                Text(
+                    """Wayland needs a Turnip driver here. "System" cannot import the game's frames and shows a black screen.""",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error
+                )
+            }
         }
         if (showWrapperManager) WrapperManagerDialog(onDismiss = {
             showWrapperManager = false

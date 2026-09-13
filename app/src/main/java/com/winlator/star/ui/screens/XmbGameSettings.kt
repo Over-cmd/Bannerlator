@@ -268,7 +268,17 @@ private fun generalRows(xmb: XmbScope, p: XmbPrefs, host: XmbGameHost): List<Xmb
         subtitle = if (waylandGame) "Used by the Wayland compositor to put frames on screen; the game renders on the Turnip bundled with the Proton" else null) { v ->
         xmb.set(p, "graphicsDriver", StringUtils.parseIdentifier(v))
     }
-    if (waylandGame) rows += XmbRow.Info("gfxGameDriver", "Game driver", Icons.Filled.Memory, "Wayland Turnip bundled with this Proton")
+    if (waylandGame) {
+        rows += XmbRow.Info("gfxGameDriver", "Game driver", Icons.Filled.Memory, "Wayland Turnip bundled with this Proton")
+        // "System"/empty falls back to the system libvulkan, which can't import the game's dmabufs
+        // (black screen) — mirrors XServerDisplayActivity's Wayland driver resolve. Warn only.
+        val compositorVersion = com.winlator.star.contentdialog.GraphicsDriverConfigDialog
+            .getVersion(p.ex("graphicsDriverConfig", c.getGraphicsDriverConfig()))
+        if (compositorVersion.isNullOrEmpty() || compositorVersion == "System") {
+            rows += XmbRow.Info("gfxSystemWarn", "Compositor driver is \"System\"", Icons.Filled.Info,
+                subtitle = """Wayland needs a Turnip driver here. "System" cannot import the game's frames and shows a black screen.""")
+        }
+    }
     rows += XmbRow.Link("gfxConfig", "Driver configuration", Icons.Filled.Tune,
         subtitle = "Vulkan version, BCn, present modes…",
         disabledReason = if (waylandGame) "Configures the X11 game driver; Wayland games use the Proton's bundled Turnip" else null) { xmbDriverConfigMenu(xmb, s) }

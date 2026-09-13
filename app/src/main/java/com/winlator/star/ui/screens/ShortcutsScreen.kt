@@ -7224,6 +7224,16 @@ internal fun ShortcutSettingsDialogScreen(
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
+                        // "System"/empty falls back to the system libvulkan, which can't import the
+                        // game's dmabufs (black screen) — mirrors XServerDisplayActivity's resolve. Warn only.
+                        val compositorVersion = GraphicsDriverConfigDialog.getVersion(graphicsDriverConfig)
+                        if (compositorVersion.isNullOrEmpty() || compositorVersion == "System") {
+                            Text(
+                                """Wayland needs a Turnip driver here. "System" cannot import the game's frames and shows a black screen.""",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        }
                     }
 
                     // DX Wrapper
