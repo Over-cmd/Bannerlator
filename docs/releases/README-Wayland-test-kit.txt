@@ -1,8 +1,22 @@
-Bannerlator Wayland test kit  (2026-09-13, phase 3 = pre-release 2)
+Bannerlator Wayland test kit  (2026-09-13, phase 3b = pre-release 3)
 ====================================================================
 
-1. Bannerlator-3.1.2-wayland-pre2-<flavour>.apk   (all three flavours on the GitHub pre-release)
+1. Bannerlator-3.1.2-wayland-pre3-<flavour>.apk   (all three flavours on the GitHub pre-release)
    versionCode 85 like 3.1.1, so you can go back to 3.1.1 or forward to the next stable.
+   New since pre-release 2 (phase 3b, the in-game drawer):
+   - Task Manager > Container shows "Display backend: X11/Wayland"; on Wayland the Renderer row reads
+     "Vulkan (Wayland compositor)" and Graphics driver names both drivers (compositor + game).
+   - Graphics tab: Native Rendering is greyed on Wayland (it is X11's direct scanout); a "Zero-copy
+     presentation" toggle sits under it (saves to the shortcut/container, applies on the next launch,
+     shows the live zero-copy frame count).
+   - Screen effects WORK on Wayland now, live from the drawer like X11: Scaling modes (Linear,
+     Nearest, SGSR, SGSR HQ, FSR, FSR Fit, Sharpen, NIS), CAS, HDR, Debanding, Looks, brightness/
+     contrast/gamma/saturation, FXAA, CRT, Toon, NTSC (13-pass Vulkan chain in the compositor).
+   - Frame generation WORKS on Wayland: LSFG Native and Win-FG Native, armed from the drawer as on
+     X11 (the launch never auto-arms; bionic-fg stays X11-only). Proven: Half-Life 2 at 30 fps shown
+     at 60 / 90 / 120 fps with LSFG Native 2x / 3x / 4x.
+   - Effects or frame generation on => the session uses the copy path (zero-copy pauses, the log says so).
+   - HUD fps no longer reads 0.0 when zero-copy frames bypass the compositor (tester report).
    New since pre-release 1:
    - Eight Wayland game drivers built into the Proton (see 2). Auto picks by GPU; the a8xx
      alternatives are for Adreno 830/840 owners to compare.
@@ -50,6 +64,8 @@ Verified on this build (AYANEO Pocket FIT, Adreno 750)
   Zero-copy on: 1239 of 1240 presented frames without a copy, picture correct, same 144 fps cap.
   First launch with a stale prefix: 1280x720, no resize.
   Notepad: paste from Android, type, copy back; soft keyboard auto-opens.
+  Drawer on Wayland: backend row, zero-copy toggle, Look "Retro CRT" applied live over Half-Life 2.
+  LSFG Native from the drawer on Half-Life 2 (30 fps game): 60.0 / 90.0 / 120.0 fps shown at 2x / 3x / 4x.
 
 Known gaps
 ----------
@@ -57,6 +73,7 @@ Known gaps
   (no change, CPU-bound), GPU busy 79% vs 83%, GPU clock 944 vs 1000 MHz, power 16.3 W vs 16.8 W.
   Zero-copy removes the compositor's GPU work; fps gains need a GPU-bound game or a big panel.
 - Real Adreno 710/720/722 and 830/840 hardware untested: please report which a8xx build works best.
-- Frame generation, drag-and-drop, image clipboard, window decorations: not on Wayland yet.
+- The zero-copy toggle applies on the next launch, not live (a live switch is next).
+- bionic-fg stays X11-only; drag-and-drop, image clipboard and window decorations are not on Wayland yet.
 
 Logs: Download/Wayland-logs/wayland-*.log (compositor) and Download/bannerlator/<game>/wine_debug.log.

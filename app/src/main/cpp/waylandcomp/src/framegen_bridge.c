@@ -287,10 +287,18 @@ static int ensure_engine(int kind) {
     return 1;
 }
 
+static int g_logged_mult;
 static void log_arm_transition(int armed, int kind, int mult) {
-    if (armed == g_was_armed) return;
+    if (armed == g_was_armed) {
+        if (armed && mult != g_logged_mult) {
+            g_logged_mult = mult;
+            FGLOG("%s multiplier changed to x%d (%d interpolated frames per game frame)", fge_engine_name(kind), mult, mult - 1);
+        }
+        return;
+    }
     g_was_armed = armed;
     if (armed) {
+        g_logged_mult = mult;
         float flow, hz;
         pthread_mutex_lock(&g_lock); flow = g_flow; hz = g_refresh_hz; pthread_mutex_unlock(&g_lock);
         FGLOG("%s x%d armed (flow scale %.2f, panel %.0f Hz): real frames are presented one slot late "
