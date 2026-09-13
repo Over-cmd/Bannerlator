@@ -61,6 +61,83 @@ public final class WaylandCompositor {
         if (l != null) l.onGameFrame();
     }
 
+    /** Pointer lock (zwp_pointer_constraints_v1) state, for the app's input path. */
+    public interface PointerLockListener {
+        /** A program locked the pointer ({@code locked}): the app must feed the compositor deltas
+         *  (scene input type 6) instead of absolute positions. When the lock ends, {@code x,y} is
+         *  where the pointer now is (scene = virtual-desktop coordinates) for the app to re-sync
+         *  its own pointer to. Compositor thread. */
+        void onPointerLock(boolean locked, int x, int y);
+    }
+
+    private static volatile PointerLockListener pointerLockListener;
+
+    public static void setPointerLockListener(PointerLockListener l) { pointerLockListener = l; }
+
+    /** Invoked from native (banner_on_pointer_lock). */
+    @SuppressWarnings("unused")
+    static void onPointerLock(boolean locked, int x, int y) {
+        PointerLockListener l = pointerLockListener;
+        if (l != null) l.onPointerLock(locked, x, y);
+    }
+
+    /** Clipboard text a program in the guest copied (wl_data_device / zwlr_data_control). */
+    public interface ClipboardListener {
+        /** {@code text} is what the guest put on its clipboard. Compositor thread. */
+        void onGuestClipboardText(String text);
+    }
+
+    private static volatile ClipboardListener clipboardListener;
+
+    public static void setClipboardListener(ClipboardListener l) { clipboardListener = l; }
+
+    /** Invoked from native (banner_on_clipboard_text) with UTF-8 bytes. */
+    @SuppressWarnings("unused")
+    static void onClipboardText(byte[] utf8) {
+        ClipboardListener l = clipboardListener;
+        if (l != null && utf8 != null) l.onGuestClipboardText(new String(utf8, java.nio.charset.StandardCharsets.UTF_8));
+    }
+
+    /** Text input (zwp_text_input_v3) state: a program accepts IME text, or stopped. */
+    public interface TextInputListener {
+        /** {@code enabled}: {@code program} (its exe name) accepts IME text; {@code x,y,w,h} is its caret
+         *  rectangle in scene (virtual desktop) pixels, all 0 until the program positions one. Compositor
+         *  thread. */
+        void onTextInput(boolean enabled, String program, int x, int y, int w, int h);
+    }
+
+    private static volatile TextInputListener textInputListener;
+
+    public static void setTextInputListener(TextInputListener l) { textInputListener = l; }
+
+    /** Invoked from native (banner_on_text_input). */
+    @SuppressWarnings("unused")
+    static void onTextInput(boolean enabled, String program, int x, int y, int w, int h) {
+        TextInputListener l = textInputListener;
+        if (l != null) l.onTextInput(enabled, program, x, y, w, h);
+    }
+
+    private static byte[] utf8(String s) {
+        return s == null ? new byte[0] : s.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+    }
+
+    /** Android's clipboard text becomes the guest's selection ({@code null}/empty clears it). Any thread. */
+    public static void setClipboardText(String text) { nativeSetClipboardText(utf8(text)); }
+
+    /** Commit soft-keyboard text to the program accepting text input. Any thread. */
+    public static void textInputCommit(String text) { if (text != null && !text.isEmpty()) nativeTextInputCommit(utf8(text)); }
+
+    /** Composing (pre-edit) text with the caret at character index {@code cursor} (-1 = end); empty clears. */
+    public static void textInputPreedit(String text, int cursor) { nativeTextInputPreedit(utf8(text), cursor, cursor); }
+
+    /** The IME deleted {@code before} characters before and {@code after} after the caret. */
+    public static void textInputDelete(int before, int after) { nativeTextInputDelete(before, after); }
+
+    private static native void nativeSetClipboardText(byte[] utf8);
+    private static native void nativeTextInputCommit(byte[] utf8);
+    private static native void nativeTextInputPreedit(byte[] utf8, int cursorBegin, int cursorEnd);
+    private static native void nativeTextInputDelete(int before, int after);
+
     /** Start the compositor headless (no output window) — bring-up tests only. */
     public static native void nativeStart(String xdgRuntimeDir);
 
@@ -95,9 +172,76 @@ public final class WaylandCompositor {
      *  Set before the compositor starts. */
     public static native void nativeSetOutputRefreshRate(float hz);
 
+    /** Show a single fullscreen window on its own Android layer (SurfaceControl) instead of blitting
+     *  it into the compositor's swapchain. BANNER_WAYLAND_ZERO_COPY=1 in the container's environment
+     *  variables is the launch default; see waylandcomp/ZERO_COPY_SPIKE.md.
+     *
+     *  Live and thread-safe: before the compositor starts this is the initial state, and afterwards
+     *  the call is marshalled onto the compositor thread, which flips the state, tells every bound
+     *  game over banner_ahb_v1.mode to rebuild its swapchain for it, and redraws. The switch is one
+     *  frame's worth of latency; the picture never goes black, because the old swapchain's buffers
+     *  keep being shown until the game has replaced them. */
+    public static native void nativeSetZeroCopy(boolean on);
+
+    /** Zero-copy frames the compositor presented in its LAST completed 10 s stats window (the
+     *  "| N zero-copy frames" figure of its session-log stats line); 0 while zero-copy is off or
+     *  before the first window closes. Read-only, any thread — the in-game drawer polls it. */
+    public static native int nativeZeroCopyFrames();
+
+    /** Milliseconds since the compositor last put a game frame on the display layer without a copy;
+     *  -1 if it never has this session. Unlike nativeZeroCopyFrames this updates on every such frame
+     *  rather than once per 10 s window, so the drawer can tell "switching..." from "running" within
+     *  a frame or two of the live toggle. Read-only, any thread. */
+    public static native int nativeZeroCopyLastFrameAgeMs();
+
+    /** Compressed (UBWC) game buffers: the compositor advertises DRM_FORMAT_MOD_QCOM_COMPRESSED next to
+     *  LINEAR on zwp_linux_dmabuf_v1 for every format its driver can import that way, so the game's
+     *  Turnip allocates compressed swapchain images instead of resolving every frame to a linear copy.
+     *  Default on; BANNER_WAYLAND_UBWC=0 in the container's environment variables turns it off (A/B).
+     *  Set before the compositor starts. */
+    public static native void nativeSetUbwc(boolean on);
+
     /** The container's screen size, advertised as the Wayland output's mode so Wine's display-mode
      *  list stops at the desktop size, as the X server's does on X11. Set before the compositor starts. */
     public static native void nativeSetOutputSize(int width, int height);
+
+    /** Fullscreen mode ({@code Container.FULLSCREEN_OFF/FIT/STRETCH/FILL/INTEGER}) and screen alignment
+     *  ({@code Container.ALIGN_CENTER/TOP/BOTTOM}): how the compositor fits the desktop onto the screen,
+     *  with the same arithmetic as {@code ViewTransformation} (which maps touch input), so the picture and
+     *  the pointer agree. OFF and FIT both letterbox. Callable any time; the next frame uses it. */
+    public static native void nativeSetScaleMode(int fullscreenMode, int screenAlignment);
+
+    // ---- Screen effects: the X11 Vulkan renderer's post chain, run by the compositor between the
+    // composited scene and the output blit (waylandcomp/src/effects_chain.c). Same modes, ranges and
+    // pass order as VulkanRenderer's setters, so a saved preset looks the same on both backends.
+    // Callable any time from any thread; the compositor applies them on its next frame and writes
+    // one `effects` line to the session log per change. While any effect is on, a zero-copy
+    // (layer-mode) game is presented through the compositor pass instead.
+
+    /** Scaling mode: 0=None 1=Linear 2=Nearest 3=SGSR 4=FSR 5=FSR Fit 6=Sharpen 7=NIS 8=SGSR HQ.
+     *  Resizes the scene to its mapped output size (there is no render scale on Wayland). */
+    public static native void nativeSetUpscaler(int mode);
+
+    /** The upscaler's own sharpness slider 0..100 (RCAS lobe scale, SGSR edge 0.5..4.5, NIS). */
+    public static native void nativeSetUpscaleSharpness(int sharpness);
+
+    /** AMD CAS sharpen toggle + level 0..100 (0 = the pass is off). */
+    public static native void nativeSetCas(boolean enabled, int sharpness);
+
+    /** Fake-HDR toggle. */
+    public static native void nativeSetHdr(boolean enabled);
+
+    /** Terminal debanding toggle + strength 0..200 (100 = 1 LSB). */
+    public static native void nativeSetDeband(boolean enabled, int strength);
+
+    /** Colour grade in the drawer's slider units (brightness/contrast -100..100, gamma 0.5..3.0,
+     *  saturation 0..200 percent; 0/0/1/100 = neutral, pass off) plus the FXAA / Toon / CRT / NTSC
+     *  toggles — the same signature as {@code VulkanRenderer.setScreenEffects}. */
+    public static native void nativeSetScreenEffects(float brightness, float contrast, float gamma, float saturation,
+                                                     boolean fxaa, boolean toon, boolean crt, boolean ntsc);
+
+    /** The Look the controls currently match ({@code null} = Custom); only named in the log line. */
+    public static native void nativeSetLookName(String name);
 
     /** The in-game FPS limiter: frames per second, 0 = unlimited. Paces when replaced buffers go
      *  back to the game, like the X11 IdleNotify pacer, so the game itself slows to the cap. */
@@ -107,4 +251,46 @@ public final class WaylandCompositor {
      *  3 = evdev button a (BTN_LEFT=0x110…) pressed (b=1) or released (b=0); 4 = a wheel steps,
      *  negative = up. */
     public static native void nativeSendSceneInput(int type, int a, int b);
+
+    // ── Frame generation (waylandcomp/src/framegen_bridge.c) ─────────────────────────────────
+    // LSFG Native and Win-FG Native run inside the compositor's Turnip device, the same engines
+    // the X11 VulkanRenderer hosts. Every setter only stores a value; the compositor thread applies
+    // it on its next frame, so they are safe from any thread and before the compositor starts.
+    // bionic-fg (the guest-side win-fg layer) is X11-only and has no Wayland counterpart.
+    public static final int FG_ENGINE_LSFG = 0, FG_ENGINE_WINFG = 1;
+
+    /** Which native engine generates: {@link #FG_ENGINE_LSFG} or {@link #FG_ENGINE_WINFG}. */
+    public static native void nativeSetFrameGenEngine(int kind);
+
+    /** Arm (multiplier 2..4: one real frame plus multiplier-1 interpolated ones per game frame) or
+     *  disarm. Generated frames are presented ahead of the real frame on consecutive vblanks. */
+    public static native void nativeSetFrameGenArmed(boolean armed, int multiplier);
+
+    /** LSFG Native: the SPIR-V cache built from the user's Lossless.dll ({@code LsfgNative.cacheFile}). */
+    public static native void nativeSetLsfgCachePath(String path);
+
+    /** Flow scale (0.25-1.0) and the panel's real refresh rate (the pacer never generates above it). */
+    public static native void nativeSetFrameGenTuning(float flowScale, float refreshHz);
+
+    /** Win-FG Native only: interpolation model (3/4) and performance preset (0..2). */
+    public static native void nativeSetWinFgTuning(int model, int perfPreset);
+
+    /** Same codes as {@code VulkanRenderer.getFrameGenProblem()}: -1 not known yet (the compositor's
+     *  device is not up), 0 fine, 1 the driver lacks what the selected engine needs
+     *  ({@link #nativeFrameGenCapsReason()} says what), 2 the engine failed to start. */
+    public static native int nativeFrameGenProblem();
+    public static native String nativeFrameGenCapsReason();
+
+    /** Same shape as {@code VulkanRenderer.getFrameGenStats()}: {generations trusted, generations
+     *  planned, real fps, presented fps (generated frames included), thermal (-1 = none),
+     *  GPU ms per generated frame (-1 = unknown)}. */
+    public static native float[] nativeFrameGenStats();
+
+    /** Relative pointer motion by dx,dy scene pixels (the Relative Mouse / captured-mouse path):
+     *  while a program holds a pointer lock this is what it receives as relative_motion; otherwise
+     *  the compositor moves its pointer by the delta. */
+    public static void sendPointerDelta(int dx, int dy) {
+        if (dx == 0 && dy == 0) return;
+        nativeSendSceneInput(6, dx * 256, dy * 256);
+    }
 }

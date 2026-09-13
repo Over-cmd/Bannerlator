@@ -46,6 +46,8 @@ int vk_loader_open(const char *driver_path, const char *library_name,
     return g_vk.CreateInstance ? 0 : -1;
 }
 
+PFN_vkGetInstanceProcAddr vk_loader_gipa(void) { return g_gip; }
+
 void vk_loader_load_instance(VkInstance instance) {
 #define X(n) g_vk.n = (PFN_vk##n)g_gip(instance, "vk" #n);
     VK_INSTANCE_FUNCS(X)

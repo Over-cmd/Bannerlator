@@ -36,10 +36,17 @@
 
 #include "xdg-shell-server-protocol.h"
 #include "linux-dmabuf-v1-server-protocol.h"
+#include "sc_layer.h"
+#include "ahb_swapchain.h"
 #include "viewporter-server-protocol.h"
 #include "banner-desktop-v1-server-protocol.h"
 #include "presentation-time-server-protocol.h"
+#include "pointer-constraints-unstable-v1-server-protocol.h"
+#include "relative-pointer-unstable-v1-server-protocol.h"
 #include "vk_present.h"
+#include "framegen_bridge.h"
+#include "effects_chain.h"
+#include "banner_ext.h"
 
 #define WLOGI(...) __android_log_print(ANDROID_LOG_INFO, "BannerWayland", __VA_ARGS__)
 #define WLOGE(...) __android_log_print(ANDROID_LOG_ERROR, "BannerWayland", __VA_ARGS__)
@@ -195,7 +202,8 @@ struct surface {
 
     /* Current content. */
     struct vkp_image *shm_img;              /* our copy of the last wl_shm buffer */
-    struct wl_resource *dmabuf;             /* current dmabuf buffer, held until replaced */
+    struct wl_resource *dmabuf;             /* current dmabuf wl_buffer (NULL once the client destroyed it) */
+    struct dmabuf_buffer *dmabuf_buf;       /* its imported image, kept until replaced or the surface goes */
     struct wl_listener dmabuf_destroy;
     int buf_w, buf_h, has_content;
     int src_set, dst_set;
@@ -204,7 +212,8 @@ struct surface {
     struct wl_list frames;                  /* frame callbacks for the next redraw */
     struct wl_list feedback;                /* presentation feedback for the current content */
     int drawn;                              /* part of the last rendered scene */
-    int64_t next_release_ns;                /* FPS limiter: when this surface's next buffer goes back */
+    int64_t next_release_ns;                /* FPS limiter: when this surface's last buffer goes back */
+    int releases_pending;                   /* FPS limiter: buffers of this surface still to be released */
 
     enum surface_role role;
     struct wl_resource *xdg_surface, *xdg_toplevel;
@@ -254,6 +263,20 @@ volatile int g_fps_limit;
  * the X11 renderer's unviewable "explorer.exe". They still exist for input routing. */
 volatile int g_hide_shell;
 
+/* Experimental layer mode (BANNER_WAYLAND_ZERO_COPY=1 in the container's environment): a single
+ * fullscreen window is shown on its own Android layer (sc_layer.c) instead of being blitted into the
+ * screen swapchain. Set from the app before the compositor starts; read per frame. */
+volatile int g_zero_copy;
+static int g_zero_copy_paused;        /* effects hold the layer path off (render_scene) */
+static int g_zero_copy_fx_skip_said;
+
+/* Compressed (UBWC) game buffers: zwp_linux_dmabuf_v1 advertises DRM_FORMAT_MOD_QCOM_COMPRESSED next
+ * to LINEAR for every format the renderer's own driver can import that way, so Turnip's Wayland WSI
+ * in the game allocates UBWC swapchain images instead of resolving each frame to a linear copy.
+ * BANNER_WAYLAND_UBWC=0 in the container's environment turns the advertisement off (A/B switch). Set
+ * from the app before the compositor starts; read at every zwp_linux_dmabuf_v1 bind. */
+volatile int g_ubwc = 1;
+
 /* The panel's refresh rate in mHz, from the app; wl_output advertises it so Wine's display modes
  * carry the real rate (games pick their saved 144 Hz mode, as on X11). 0 = 60 Hz. */
 volatile int g_output_refresh_mhz;
@@ -264,6 +287,7 @@ volatile int g_output_w, g_output_h;
 struct pending_release {
     struct wl_resource *buffer;
     struct wl_listener destroy;
+    struct surface *surface;                /* NULL once the surface is gone */
     int64_t at_ns;
     struct wl_list link;
 };
@@ -284,9 +308,17 @@ static int64_t now_ns(void) {
 /* ------------------------------------------------------------------ buffer release pacing */
 
 static void pending_release_free(struct pending_release *pr) {
+    if (pr->surface && pr->surface->releases_pending > 0) pr->surface->releases_pending--;
     wl_list_remove(&pr->destroy.link);
     wl_list_remove(&pr->link);
     free(pr);
+}
+
+/* A surface is going away: its queued releases still go out on time, they just stop counting. */
+static void pending_releases_forget_surface(struct surface *s) {
+    struct pending_release *pr;
+    wl_list_for_each(pr, &g_pending_releases, link)
+        if (pr->surface == s) pr->surface = NULL;
 }
 
 static void on_pending_release_buffer_destroyed(struct wl_listener *l, void *data) {
@@ -321,20 +353,34 @@ static int on_release_timer(int fd, uint32_t mask, void *data) {
     return 0;
 }
 
-/* Give a replaced buffer back to its client: now, or on the limiter's cadence. */
+/* Give a replaced buffer back to its client: now, or on the limiter's cadence.
+ *
+ * Each release takes the next slot of a per-surface cadence (one slot per interval), so a game
+ * gets one buffer back per interval however fast it commits. The schedule is kept honest at both
+ * ends: a slot in the past is brought to now (the game was slower than the cap, no catch-up burst
+ * is owed), and it never runs further ahead than the releases actually queued — with p releases
+ * still pending the new one lands at most (p + 1) intervals out, nothing pending means at most
+ * one interval. Without that bound the schedule kept slots that were consumed but never
+ * delivered (a swapchain rebuild destroys buffers with queued releases) or that a coarser earlier
+ * limit had spaced out, and the game's first frames after that waited on empty slots. */
 static void release_buffer(struct surface *s, struct wl_resource *buffer) {
     int limit = g_fps_limit;
     if (limit <= 0 || g_release_timer_fd < 0) { wl_buffer_send_release(buffer); return; }
     int64_t interval = 1000000000LL / limit, now = now_ns();
-    if (s->next_release_ns <= now - interval) s->next_release_ns = now + interval;
-    else s->next_release_ns += interval;
+    int64_t at = s->next_release_ns + interval;
+    int64_t latest = now + interval * (int64_t)(s->releases_pending + 1);
+    if (at < now) at = now;
+    if (at > latest) at = latest;
+    s->next_release_ns = at;
     struct pending_release *pr = calloc(1, sizeof(*pr));
     if (!pr) { wl_buffer_send_release(buffer); return; }
     pr->buffer = buffer;
-    pr->at_ns = s->next_release_ns;
+    pr->surface = s;
+    pr->at_ns = at;
     pr->destroy.notify = on_pending_release_buffer_destroyed;
     wl_resource_add_destroy_listener(buffer, &pr->destroy);
     wl_list_insert(g_pending_releases.prev, &pr->link);
+    s->releases_pending++;
     arm_release_timer();
 }
 
@@ -350,9 +396,19 @@ static struct seat_keyboard g_kbs[MAX_PTRS];
 static int g_nkbs;
 static struct surface *g_grab;              /* no-desktop fallback: surface holding the button */
 static struct surface *g_key_target;        /* no-desktop fallback: last clicked surface */
+static struct surface *g_ime_click;         /* last clicked program window: where text input goes */
 static int g_input_pipe[2] = {-1, -1};
 /* type 0 = pointer (p1=action 0down/1move/2up, p2=x, p3=y); type 1 = key (p1=evdev, p2=state 1down/0up) */
 struct input_msg { int type; int p1; int p2; int p3; };
+
+/* Pointer constraints (zwp_pointer_constraints_v1) and relative pointers
+ * (zwp_relative_pointer_manager_v1); see the "pointer constraints" section. */
+struct surface;
+static void constraints_surface_gone(struct surface *s);
+static void constraints_surface_commit(struct surface *s);
+static void constraints_pointer_gone(struct wl_resource *pointer);
+static void relative_pointers_pointer_gone(struct wl_resource *pointer);
+static void constraints_focus_entered(struct wl_resource *target, struct wl_client *client);
 
 /* ------------------------------------------------------------------ dmabuf buffers */
 
@@ -362,8 +418,8 @@ struct input_msg { int type; int p1; int p2; int p3; };
 #define DRM_XRGB8888 FOURCC('X', 'R', '2', '4')
 #define DRM_ABGR8888 FOURCC('A', 'B', '2', '4')
 #define DRM_XBGR8888 FOURCC('X', 'B', '2', '4')
-#define MOD_LINEAR 0ULL
-#define MOD_INVALID 0x00ffffffffffffffULL
+#define MOD_LINEAR VKP_MOD_LINEAR
+#define MOD_INVALID VKP_MOD_INVALID
 #define MAX_PLANES 4
 
 struct dmabuf_params {
@@ -381,7 +437,21 @@ struct dmabuf_buffer {
     uint64_t modifier;
     struct vkp_image *img;                  /* imported once, reused for every frame */
     int import_failed;
+    /* One reference for the wl_buffer resource, one per surface showing the buffer. Mesa destroys
+     * a swapchain's wl_buffers the moment the game rebuilds its swapchain, i.e. while the last
+     * committed one is still what is on screen: the import (and the dma-buf memory it pins) stays
+     * until the surface commits something newer, so the picture never blinks to black. */
+    int refs;
+    void *ahb_state;                        /* zero-copy: ahb_swapchain.c's record (the game's AHardwareBuffer) */
 };
+
+static void dmabuf_buffer_unref(struct dmabuf_buffer *b) {
+    if (!b || --b->refs > 0) return;
+    vkp_image_destroy(b->img);
+    for (int i = 0; i < b->n_planes; i++)
+        if (b->fd[i] >= 0) close(b->fd[i]);
+    free(b);
+}
 
 static void dbuf_buffer_destroy_req(struct wl_client *c, struct wl_resource *r) {
     wl_resource_destroy(r);
@@ -457,22 +527,34 @@ static void unmap_toplevel(struct surface *s) {
     }
     wl_list_remove(&s->toplevel_link);
     wl_list_init(&s->toplevel_link);
+    if (g_ime_click == s) g_ime_click = NULL;
+    banner_text_input_refocus();
 }
 
-static void drop_dmabuf(struct surface *s, int release) {
-    if (!s->dmabuf) return;
-    wl_list_remove(&s->dmabuf_destroy.link);
-    if (release) release_buffer(s, s->dmabuf);
-    s->dmabuf = NULL;
+/* Let go of the surface's dmabuf content. paced = 1: the buffer was replaced, give it back on the
+ * limiter's cadence; paced = 0: the surface is going away, give it back at once (a buffer of a
+ * destroyed surface is not shown again and must not sit unreleased with the client). */
+static void drop_dmabuf(struct surface *s, int paced) {
+    if (s->dmabuf) {
+        wl_list_remove(&s->dmabuf_destroy.link);
+        /* A buffer on the zero-copy layer is the display's until SurfaceFlinger says otherwise:
+         * ahb_swapchain.c releases it then. */
+        if (!ahb_swapchain_defer_release(s->dmabuf_buf, s->dmabuf, s, paced)) {
+            if (paced) release_buffer(s, s->dmabuf);
+            else wl_buffer_send_release(s->dmabuf);
+        }
+        s->dmabuf = NULL;
+    }
+    dmabuf_buffer_unref(s->dmabuf_buf);
+    s->dmabuf_buf = NULL;
 }
 
+/* The client destroyed the wl_buffer we are showing (a swapchain rebuild): keep showing its
+ * image (s->dmabuf_buf holds it) until the next commit replaces it; only the resource is gone. */
 static void on_dmabuf_destroyed(struct wl_listener *l, void *data) {
     struct surface *s = wl_container_of(l, s, dmabuf_destroy);
     wl_list_remove(&s->dmabuf_destroy.link);
     s->dmabuf = NULL;
-    s->has_content = 0;
-    if (s->role == ROLE_TOPLEVEL) unmap_toplevel(s);
-    schedule_render();
 }
 
 static void on_pending_buffer_destroyed(struct wl_listener *l, void *data) {
@@ -523,15 +605,18 @@ extern void banner_on_game_surface(const char *window, const char *gpu); /* wind
 extern void banner_on_game_frame(void);
 
 static void take_dmabuf(struct surface *s, struct dmabuf_buffer *b, struct wl_resource *buffer) {
-    if (s->dmabuf != buffer) {
+    if (s->dmabuf != buffer || s->dmabuf_buf != b) {
         drop_dmabuf(s, 1);
         s->dmabuf = buffer;
+        s->dmabuf_buf = b;
+        b->refs++;
         s->dmabuf_destroy.notify = on_dmabuf_destroyed;
         wl_resource_add_destroy_listener(buffer, &s->dmabuf_destroy);
     }
     if (!b->img && !b->import_failed && b->n_planes >= 1) {
         b->img = vkp_image_from_dmabuf(b->fd[0], b->format, b->modifier, b->width, b->height,
                                        b->stride[0], b->offset[0]);
+        if (b->img && g_zero_copy) sc_layer_probe_dmabuf_fd(b->fd[0]);
         if (!b->img) {
             b->import_failed = 1;
             WLOGE("dmabuf import failed (%dx%d fmt=0x%08x mod=0x%llx)", b->width, b->height,
@@ -551,17 +636,36 @@ static void take_dmabuf(struct surface *s, struct dmabuf_buffer *b, struct wl_re
             banner_log("vulkan", "%s is presenting GPU frames through Wayland: %dx%d, format %c%c%c%c, %s (zero-copy)",
                        name, b->width, b->height, b->format & 0xff, (b->format >> 8) & 0xff,
                        (b->format >> 16) & 0xff, (b->format >> 24) & 0xff,
-                       b->modifier == MOD_LINEAR ? "linear" : "tiled");
+                       vkp_modifier_name(b->modifier));
+        else if (ahb_swapchain_has_ahb(b))
+            banner_log("vulkan", "%s is presenting GPU frames through Wayland: %dx%d on its own display layer only "
+                       "(gralloc buffers the compositor cannot import for the copy path)",
+                       name, b->width, b->height);
         else
             banner_log("error", "could not import GPU frames from %s (%dx%d, modifier %#llx)",
                        name, b->width, b->height, (unsigned long long)b->modifier);
-        if (b->img) {
+        /* The HUD follows the window whether its frames are copied or go straight to the layer:
+         * a zero-copy frame the compositor never imported is still a presented game frame. */
+        if (b->img || ahb_swapchain_has_ahb(b)) {
             g_hud_surface = s;
             banner_on_game_surface(name, vkp_gpu_name());
         }
     }
-    if (s == g_hud_surface && b->img) banner_on_game_frame();
+    if (s == g_hud_surface && (b->img || ahb_swapchain_has_ahb(b))) banner_on_game_frame();
 }
+
+/* ---- hooks for ahb_swapchain.c (zero-copy layers) */
+struct dmabuf_buffer *banner_dmabuf_from_resource(struct wl_resource *buffer) { return get_dmabuf(buffer); }
+int banner_dmabuf_fd(const struct dmabuf_buffer *b) { return b && b->n_planes > 0 ? b->fd[0] : -1; }
+void banner_dmabuf_size(const struct dmabuf_buffer *b, int *w, int *h) { *w = b->width; *h = b->height; }
+void **banner_dmabuf_ahb_slot(struct dmabuf_buffer *b) { return &b->ahb_state; }
+void banner_dmabuf_ref(struct dmabuf_buffer *b) { b->refs++; }
+void banner_dmabuf_unref(struct dmabuf_buffer *b) { dmabuf_buffer_unref(b); }
+void banner_release_buffer(struct surface *s, struct wl_resource *buffer, int paced) {
+    if (paced && s) release_buffer(s, buffer);
+    else wl_buffer_send_release(buffer);
+}
+void banner_surface_describe(const struct surface *s, char *out, size_t size) { describe(s, out, size); }
 
 /* ------------------------------------------------------------------ wl_surface */
 
@@ -704,6 +808,7 @@ static void surface_commit(struct wl_client *c, struct wl_resource *r) {
     wl_list_init(&s->pending_frames);
     wl_list_insert_list(s->feedback.prev, &s->pending_feedback);
     wl_list_init(&s->pending_feedback);
+    constraints_surface_commit(s);
 
     if (s->role == ROLE_TOPLEVEL && s->xdg_toplevel) {
         if (s->has_content) map_toplevel(s);
@@ -748,8 +853,11 @@ static void surface_resource_destroy(struct wl_resource *r) {
     for (int i = 0; i < g_nkbs; i++) if (g_kbs[i].focus == r) g_kbs[i].focus = NULL;
     if (g_grab == s) g_grab = NULL;
     if (g_key_target == s) g_key_target = NULL;
+    if (g_ime_click == s) g_ime_click = NULL;
+    banner_text_input_surface_gone(r);
     if (g_desktop == s) { g_desktop = NULL; banner_log("desktop", "the desktop closed"); }
     if (g_hud_surface == s) { g_hud_surface = NULL; banner_on_game_surface(NULL, NULL); }
+    constraints_surface_gone(s);
 
     unmap_toplevel(s);
     detach_from_parent(s);
@@ -759,7 +867,9 @@ static void surface_resource_destroy(struct wl_resource *r) {
         child->parent = NULL;
     }
     if (s->pending_buffer) wl_list_remove(&s->pending_buffer_destroy.link);
+    pending_releases_forget_surface(s);
     drop_dmabuf(s, 0);
+    ahb_swapchain_surface_gone(s);
     vkp_image_destroy(s->shm_img);
     wl_resource_for_each_safe(cb, cbtmp, &s->pending_frames) wl_resource_destroy(cb);
     wl_resource_for_each_safe(cb, cbtmp, &s->frames) wl_resource_destroy(cb);
@@ -777,11 +887,25 @@ static void surface_resource_destroy(struct wl_resource *r) {
 
 /* ------------------------------------------------------------------ wl_region */
 
+/* A region is kept as the bounding box of its rectangles: enough for pointer confinement,
+ * where winewayland sends one rectangle (the ClipCursor area). Subtractions are ignored. */
+struct region { int set; int x, y, w, h; };
+
 static void region_destroy(struct wl_client *c, struct wl_resource *r) { wl_resource_destroy(r); }
 static void region_add(struct wl_client *c, struct wl_resource *r,
-                       int32_t x, int32_t y, int32_t w, int32_t h) {}
+                       int32_t x, int32_t y, int32_t w, int32_t h) {
+    struct region *rg = wl_resource_get_user_data(r);
+    if (!rg || w <= 0 || h <= 0) return;
+    if (!rg->set) { rg->x = x; rg->y = y; rg->w = w; rg->h = h; rg->set = 1; return; }
+    int x2 = rg->x + rg->w > x + w ? rg->x + rg->w : x + w;
+    int y2 = rg->y + rg->h > y + h ? rg->y + rg->h : y + h;
+    if (x < rg->x) rg->x = x;
+    if (y < rg->y) rg->y = y;
+    rg->w = x2 - rg->x; rg->h = y2 - rg->y;
+}
 static void region_subtract(struct wl_client *c, struct wl_resource *r,
                             int32_t x, int32_t y, int32_t w, int32_t h) {}
+static void region_resource_destroy(struct wl_resource *r) { free(wl_resource_get_user_data(r)); }
 static const struct wl_region_interface region_impl = {
     .destroy = region_destroy,
     .add = region_add,
@@ -809,7 +933,8 @@ static void compositor_create_surface(struct wl_client *c, struct wl_resource *r
 static void compositor_create_region(struct wl_client *c, struct wl_resource *r, uint32_t id) {
     struct wl_resource *reg = wl_resource_create(c, &wl_region_interface, 1, id);
     if (!reg) { wl_client_post_no_memory(c); return; }
-    wl_resource_set_implementation(reg, &region_impl, NULL, NULL);
+    wl_resource_set_implementation(reg, &region_impl, calloc(1, sizeof(struct region)),
+                                   region_resource_destroy);
 }
 static const struct wl_compositor_interface compositor_impl = {
     .create_surface = compositor_create_surface,
@@ -1113,12 +1238,7 @@ static void bind_desktop(struct wl_client *c, void *data, uint32_t ver, uint32_t
 /* ------------------------------------------------------------ zwp_linux_dmabuf_v1 */
 
 static void dbuf_buffer_resource_destroy(struct wl_resource *r) {
-    struct dmabuf_buffer *b = wl_resource_get_user_data(r);
-    if (!b) return;
-    vkp_image_destroy(b->img);
-    for (int i = 0; i < b->n_planes; i++)
-        if (b->fd[i] >= 0) close(b->fd[i]);
-    free(b);
+    dmabuf_buffer_unref(wl_resource_get_user_data(r));
 }
 
 static void params_destroy(struct wl_client *c, struct wl_resource *r) { wl_resource_destroy(r); }
@@ -1139,6 +1259,7 @@ static struct wl_resource *params_do_create(struct wl_client *c, struct wl_resou
     struct dmabuf_buffer *b = calloc(1, sizeof(*b));
     if (!b) return NULL;
     b->n_planes = p->n_planes;
+    b->refs = 1; /* the wl_buffer resource's */
     b->width = w; b->height = h; b->format = format;
     b->modifier = p->modifier[0];
     for (int i = 0; i < MAX_PLANES; i++) b->fd[i] = -1;
@@ -1196,17 +1317,59 @@ static const struct zwp_linux_dmabuf_v1_interface dmabuf_impl = {
     .destroy = dmabuf_destroy,
     .create_params = dmabuf_create_params,
 };
+/* The advertised format/modifier table, built at the first bind from what the renderer's driver
+ * can import (vkp_dmabuf_modifiers). INVALID is always offered too (Mesa drops it; other clients
+ * may use it for the implicit path). Without a renderer the list is LINEAR + INVALID, as before. */
+#define DMABUF_NFMT 4
+#define DMABUF_NMOD 4
+static struct { uint32_t fmt; uint64_t mods[DMABUF_NMOD]; int n; } g_dmabuf_fmts[DMABUF_NFMT] = {
+    {DRM_ARGB8888}, {DRM_XRGB8888}, {DRM_ABGR8888}, {DRM_XBGR8888}};
+static int g_dmabuf_fmts_ready;
+
+static void dmabuf_build_formats(void) {
+    char line[256];
+    int pos = 0, compressed = 0;
+    g_dmabuf_fmts_ready = 1;
+    for (int f = 0; f < DMABUF_NFMT; f++) {
+        uint64_t got[DMABUF_NMOD];
+        int n = vkp_dmabuf_modifiers(g_dmabuf_fmts[f].fmt, got, DMABUF_NMOD), k = 0;
+        /* LINEAR first: it is the layout every client and the shm fallback agree on, and the one
+         * we advertised before this table existed. */
+        g_dmabuf_fmts[f].mods[k++] = MOD_LINEAR;
+        for (int i = 0; i < n && k < DMABUF_NMOD - 1; i++) {
+            if (got[i] == MOD_LINEAR) continue;
+            if (got[i] == VKP_MOD_QCOM_COMPRESSED && !g_ubwc) continue;
+            g_dmabuf_fmts[f].mods[k++] = got[i];
+            if (got[i] == VKP_MOD_QCOM_COMPRESSED) compressed++;
+        }
+        g_dmabuf_fmts[f].mods[k++] = MOD_INVALID;
+        g_dmabuf_fmts[f].n = k;
+        uint32_t fmt = g_dmabuf_fmts[f].fmt;
+        pos += snprintf(line + pos, sizeof(line) - (size_t)pos, "%s%c%c%c%c", f ? ", " : "",
+                        fmt & 0xff, (fmt >> 8) & 0xff, (fmt >> 16) & 0xff, (fmt >> 24) & 0xff);
+        for (int i = 0; i < k - 1 && pos < (int)sizeof(line); i++)
+            pos += snprintf(line + pos, sizeof(line) - (size_t)pos, "%s%s", i ? "+" : " ",
+                            vkp_modifier_name(g_dmabuf_fmts[f].mods[i]));
+        if (pos >= (int)sizeof(line)) pos = (int)sizeof(line) - 1;
+    }
+    banner_log("dmabuf", "formats: %s%s", line,
+               !g_ubwc ? " (BANNER_WAYLAND_UBWC=0: qcom_compressed not advertised)" : "");
+    if (g_ubwc && !compressed)
+        banner_log("dmabuf", "the compositor's driver (%s) reports no importable qcom_compressed layout: "
+                   "game swapchains stay linear", vkp_gpu_name());
+}
+
 static void bind_dmabuf(struct wl_client *c, void *data, uint32_t ver, uint32_t id) {
     struct wl_resource *r = wl_resource_create(c, &zwp_linux_dmabuf_v1_interface, ver, id);
     wl_resource_set_implementation(r, &dmabuf_impl, NULL, NULL);
-    uint32_t fmts[] = {DRM_ARGB8888, DRM_XRGB8888, DRM_ABGR8888, DRM_XBGR8888};
-    uint64_t mods[] = {MOD_LINEAR, MOD_INVALID};
-    for (unsigned f = 0; f < 4; f++) {
-        zwp_linux_dmabuf_v1_send_format(r, fmts[f]);
+    if (!g_dmabuf_fmts_ready) dmabuf_build_formats();
+    for (int f = 0; f < DMABUF_NFMT; f++) {
+        zwp_linux_dmabuf_v1_send_format(r, g_dmabuf_fmts[f].fmt);
         if (ver >= 3)
-            for (unsigned m = 0; m < 2; m++)
-                zwp_linux_dmabuf_v1_send_modifier(r, fmts[f], (uint32_t)(mods[m] >> 32),
-                                                  (uint32_t)(mods[m] & 0xffffffff));
+            for (int m = 0; m < g_dmabuf_fmts[f].n; m++)
+                zwp_linux_dmabuf_v1_send_modifier(r, g_dmabuf_fmts[f].fmt,
+                                                  (uint32_t)(g_dmabuf_fmts[f].mods[m] >> 32),
+                                                  (uint32_t)(g_dmabuf_fmts[f].mods[m] & 0xffffffff));
     }
 }
 
@@ -1233,8 +1396,7 @@ struct draw_list { struct vkp_draw *d; int n, cap; };
 static struct vkp_image *surface_image(struct surface *s) {
     if (!s->has_content) return NULL;
     if (s->shm_img) return s->shm_img;
-    struct dmabuf_buffer *b = get_dmabuf(s->dmabuf);
-    return b ? b->img : NULL;
+    return s->dmabuf_buf ? s->dmabuf_buf->img : NULL;
 }
 
 static void add_surface(struct draw_list *dl, struct surface *s, int ox, int oy) {
@@ -1312,8 +1474,46 @@ static void pace_without_output(void) {
 
 static int on_frame_timer(void *data) {
     pace_without_output();
-    if (!vkp_has_window() && g_frame_timer) wl_event_source_timer_update(g_frame_timer, 16);
+    if (vkp_has_window()) schedule_render(); /* it is back: draw the current scene */
+    else if (g_frame_timer) wl_event_source_timer_update(g_frame_timer, 16);
     return 0;
+}
+
+/* Layer mode: the index of a draw that is the topmost one and shows a whole client GPU frame
+ * over the whole scene (one fullscreen game, nothing above it), or -1. */
+static int layer_candidate(const struct draw_list *dl, int scene_w, int scene_h) {
+    if (dl->n <= 0) return -1;
+    const struct vkp_draw *d = &dl->d[dl->n - 1];
+    if (!vkp_image_is_dmabuf(d->img)) return -1;
+    if (d->dx != 0 || d->dy != 0 || d->dw != scene_w || d->dh != scene_h) return -1;
+    if (d->sx != 0 || d->sy != 0 || (int)d->sw != vkp_image_width(d->img) ||
+        (int)d->sh != vkp_image_height(d->img)) return -1;
+    return dl->n - 1;
+}
+
+/* Zero-copy: the surface whose current GPU frame `img` is (layer_candidate found the draw). */
+static struct surface *surface_for_image(const struct vkp_image *img) {
+    struct surface *s;
+    wl_list_for_each(s, &g_surfaces, link)
+        if (s->dmabuf_buf && s->dmabuf_buf->img == img) return s;
+    return NULL;
+}
+
+/* Zero-copy: the topmost window whose frame is one of the game's AHardwareBuffers that this
+ * renderer could NOT import (so it has no draw), covering the whole scene at 0,0 with nothing of
+ * its own above it: it can only be shown on the layer. NULL otherwise. */
+static struct surface *ahb_layer_only_candidate(int scene_w, int scene_h) {
+    struct surface *s;
+    int w, h;
+    if (wl_list_empty(&g_toplevels)) return NULL;
+    s = wl_container_of(g_toplevels.prev, s, toplevel_link);
+    if (!s->dmabuf_buf || s->dmabuf_buf->img || !ahb_swapchain_has_ahb(s->dmabuf_buf)) return NULL;
+    if ((g_desktop && !s->placed) || s->x != 0 || s->y != 0 || s->src_set || s->dst_set) return NULL;
+    if (!wl_list_empty(&s->children)) return NULL;
+    if (g_hide_shell && !strcmp(client_name(wl_resource_get_client(s->resource)), "explorer.exe")) return NULL;
+    surface_size(s, &w, &h);
+    if (w != scene_w || h != scene_h || s->buf_w != scene_w || s->buf_h != scene_h) return NULL;
+    return s;
 }
 
 static void render_scene(void) {
@@ -1337,7 +1537,54 @@ static void render_scene(void) {
         add_tree(&dl, s, s->placed ? s->x : 0, s->placed ? s->y : 0, 0);
     }
 
-    if (vkp_render(w, h, dl.d, dl.n) == 0) {
+    int rendered;
+    /* Screen effects (effects_chain.c) and frame generation (framegen_bridge.c) both run in the
+     * compositor pass, which the layer path bypasses: while either is on, a fullscreen game goes
+     * through the copy path instead, and the layer resumes once both are off again. Said once per
+     * transition, by whichever needs the pass. */
+    const int fx_on = vkp_effects_active();
+    const int framegen = vkp_framegen_active();
+    const int pass_on = fx_on || framegen;
+    const int layer_ok = g_zero_copy && !pass_on;
+    if (g_zero_copy && pass_on != g_zero_copy_paused) {
+        g_zero_copy_paused = pass_on;
+        if (framegen)
+            banner_log("framegen", "zero-copy paused: frame generation needs the compositor pass");
+        else if (fx_on)
+            banner_log("effects", "zero-copy paused: screen effects need the compositor pass");
+        else
+            banner_log("effects", "zero-copy resumed: screen effects and frame generation are off");
+    }
+    int li = layer_ok ? layer_candidate(&dl, w, h) : -1;
+    struct surface *ls = li >= 0 ? surface_for_image(dl.d[li].img) : NULL;
+    /* A frame this renderer could not import can only be shown on the layer, effects or not. */
+    if (li < 0) ls = ahb_layer_only_candidate(w, h);
+    if (ls && pass_on && li < 0 && !g_zero_copy_fx_skip_said) {
+        g_zero_copy_fx_skip_said = 1;
+        banner_log(framegen ? "framegen" : "effects",
+                   "the game's frames cannot be imported by the compositor: shown zero-copy, %s skipped",
+                   framegen ? "frame generation" : "effects");
+    }
+    if (li >= 0 || ls) {
+        /* Layer mode: the fullscreen window goes to its own Android layer; whatever is under it is
+         * hidden by it, so the screen surface only needs to be black. The frame goes on the layer
+         * as is when it is one of the game's own AHardwareBuffers (zero-copy, ahb_swapchain.c),
+         * else through one blit into the pool. If the layer can't take the frame, draw it the
+         * usual way. */
+        rendered = vkp_render(w, h, NULL, 0) == 0;
+        if (rendered) {
+            int r = -1;
+            if (ls && ls->dmabuf_buf && ahb_swapchain_has_ahb(ls->dmabuf_buf))
+                r = ahb_swapchain_present(ls->dmabuf_buf, ls, w, h);
+            if (r != 0 && li >= 0) r = sc_layer_present(dl.d[li].img, w, h);
+            if (r == 0) { if (ls) ls->drawn = 1; }
+            else rendered = vkp_render(w, h, dl.d, dl.n) == 0;
+        }
+    } else {
+        sc_layer_hide();
+        rendered = vkp_render(w, h, dl.d, dl.n) == 0;
+    }
+    if (rendered) {
         int64_t t = now_ns();
         g_stat_frames++;
         /* A surface outside the scene (role-less, not placed yet, a hidden helper window such
@@ -1391,6 +1638,11 @@ static void on_vsync(int64_t frame_time_ns) {
     }
     g_last_vsync_ns = now;
     (void)frame_time_ns;
+    /* The app's surface may have been replaced or taken away since the last frame: apply that now
+     * (the app never waits for us), and redraw the scene onto a new one. */
+    if (vkp_apply_window_request()) g_dirty = 1;
+    /* A screen-effect setting changed (JNI, any thread): redraw so it shows on a static scene too. */
+    if (vkp_effects_sync()) g_dirty = 1;
     if (g_dirty) render_scene();
 }
 
@@ -1410,6 +1662,8 @@ static const struct wl_pointer_interface pointer_impl = {
     .set_cursor = pointer_set_cursor, .release = pointer_release,
 };
 static void pointer_res_destroy(struct wl_resource *r) {
+    constraints_pointer_gone(r);
+    relative_pointers_pointer_gone(r);
     for (int i = 0; i < g_nptrs; i++)
         if (g_ptrs[i].ptr == r) { g_ptrs[i] = g_ptrs[--g_nptrs]; break; }
 }
@@ -1502,6 +1756,7 @@ static void pointer_focus(struct wl_resource *target, wl_fixed_t fx, wl_fixed_t 
     if (sp && sp->focus != target) {
         sp->focus = target;
         wl_pointer_send_enter(sp->ptr, wl_display_next_serial(g_display), target, fx, fy);
+        constraints_focus_entered(target, client);
     }
 }
 
@@ -1521,61 +1776,494 @@ static void keyboard_focus(struct wl_resource *target) {
     /* Baseline modifiers = none; Shift/Ctrl arrive as their own key events. */
     wl_keyboard_send_modifiers(sk->kb, wl_display_next_serial(g_display), 0, 0, 0, 0);
     wl_array_release(&keys);
+    banner_clipboard_keyboard_focus(wl_resource_get_client(target)); /* wl_data_device selection follows focus */
 }
+
+/* ------------------------------------------------------------------ pointer constraints
+ * zwp_pointer_constraints_v1 and zwp_relative_pointer_manager_v1: what winewayland uses for
+ * SetCursorPos, ClipCursor and hidden-cursor (mouse-look) games.
+ *
+ * A lock freezes the pointer where it is: no wl_pointer.motion is sent while it holds, and
+ * every input delta (a relative event from the app, or the difference between absolute
+ * positions) reaches the locking program as zwp_relative_pointer_v1.relative_motion. A confine
+ * clamps the pointer to the surface (and the program's region inside it). Relative motion is
+ * also sent while unlocked, to any program holding a relative pointer.
+ *
+ * Input normally goes to the desktop surface; while a constraint holds, pointer focus moves
+ * to the constrained surface, so the constraining program receives the events itself
+ * (winewayland only enables relative motion for a window its pointer has entered). One
+ * constraint holds at a time; a newer request ends the older one. A lock's cursor position
+ * hint is applied on the surface's commit and is where the pointer ends up when the lock
+ * ends (winewayland's SetCursorPos: lock, hint, commit, unlock). */
+
+struct constraint {
+    struct wl_list link;                    /* g_constraints */
+    struct wl_resource *resource;           /* zwp_locked_pointer_v1 or zwp_confined_pointer_v1 */
+    struct wl_resource *pointer;            /* the program's wl_pointer; NULL once released */
+    struct surface *surface;                /* NULL once the surface is gone */
+    int is_lock;
+    uint32_t lifetime;
+    int active;
+    int defunct;                            /* a oneshot that ended, or surface/pointer gone */
+    struct region region, pending_region;   /* confine area, surface-local; unset = whole surface */
+    int pending_region_set;
+    int hint_set, pending_hint_set;         /* lock: cursor position hint, surface-local */
+    double hint_x, hint_y, pending_hint_x, pending_hint_y;
+};
+static struct wl_list g_constraints;
+static struct constraint *g_active_constraint;
+
+struct relative_pointer {
+    struct wl_list link;                    /* g_relative_pointers */
+    struct wl_resource *resource;
+    struct wl_resource *pointer;            /* the program's wl_pointer; NULL once released */
+};
+static struct wl_list g_relative_pointers;
 
 /* Last pointer position in scene coordinates (buttons and scrolls from the app's X-server
  * input path arrive without one). */
 static double g_ptr_x, g_ptr_y;
+/* Last absolute input position: absolute input becomes deltas while the pointer is locked. */
+static double g_raw_x, g_raw_y;
+static int g_raw_valid;
 
-/* One pointer event at scene coordinates: motion, then an optional button change
- * (button 0 = none). */
-static void pointer_event(double x, double y, uint32_t button, int pressed) {
-    struct surface *target;
+/* JNI: the app switches its touch/mouse path to deltas while a lock holds and re-syncs its
+ * pointer to x,y when it ends. */
+extern void banner_on_pointer_lock(int locked, int x, int y);
 
-    g_ptr_x = x; g_ptr_y = y;
+static void sync_lock_notify(void) {
+    static int last;
+    int locked = g_active_constraint && g_active_constraint->is_lock;
+    if (locked == last) return;
+    last = locked;
+    banner_on_pointer_lock(locked, (int)g_ptr_x, (int)g_ptr_y);
+}
 
-    if (g_desktop) {
-        target = g_desktop;
+static void constraint_describe(const struct constraint *k, char *out, size_t size) {
+    if (k->surface) describe(k->surface, out, size);
+    else snprintf(out, size, "a closed window");
+}
+
+/* Scene position of the constrained surface. */
+static void constraint_origin(const struct constraint *k, int *x, int *y) {
+    *x = *y = 0;
+    if (k->surface && k->surface != g_desktop && k->surface->placed) { *x = k->surface->x; *y = k->surface->y; }
+}
+
+/* Keep x,y (scene coordinates) inside the confine area. */
+static void confine_clamp(const struct constraint *k, double *x, double *y) {
+    int ox, oy, w, h, rx = 0, ry = 0, rw, rh;
+    if (!k->surface) return;
+    constraint_origin(k, &ox, &oy);
+    surface_size(k->surface, &w, &h);
+    rw = w; rh = h;
+    if (k->region.set) {
+        int x2 = rx + rw < k->region.x + k->region.w ? rx + rw : k->region.x + k->region.w;
+        int y2 = ry + rh < k->region.y + k->region.h ? ry + rh : k->region.y + k->region.h;
+        if (k->region.x > rx) rx = k->region.x;
+        if (k->region.y > ry) ry = k->region.y;
+        rw = x2 - rx; rh = y2 - ry;
+    }
+    if (rw <= 0 || rh <= 0) return;
+    if (*x < ox + rx) *x = ox + rx;
+    if (*x > ox + rx + rw - 1) *x = ox + rx + rw - 1;
+    if (*y < oy + ry) *y = oy + ry;
+    if (*y > oy + ry + rh - 1) *y = oy + ry + rh - 1;
+}
+
+static void constraint_send_state(struct constraint *k, int on) {
+    if (k->is_lock) {
+        if (on) zwp_locked_pointer_v1_send_locked(k->resource);
+        else zwp_locked_pointer_v1_send_unlocked(k->resource);
     } else {
-        target = g_grab ? g_grab : toplevel_at(x, y);
-        if (button && pressed) { g_grab = target; g_key_target = target; }
-        if (button && !pressed) g_grab = NULL;
+        if (on) zwp_confined_pointer_v1_send_confined(k->resource);
+        else zwp_confined_pointer_v1_send_unconfined(k->resource);
+    }
+}
+
+/* A constraint stops holding. tell_client = 0 when its resource is being destroyed. */
+static void constraint_end(struct constraint *k, int tell_client, const char *why) {
+    char name[160];
+    if (!k->active) return;
+    k->active = 0;
+    if (g_active_constraint == k) g_active_constraint = NULL;
+    if (k->lifetime == ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_ONESHOT) k->defunct = 1;
+    if (k->is_lock && k->hint_set && k->surface) {
+        int ox, oy;
+        constraint_origin(k, &ox, &oy);
+        g_ptr_x = ox + k->hint_x;
+        g_ptr_y = oy + k->hint_y;
+    }
+    g_raw_valid = 0;
+    if (tell_client) constraint_send_state(k, 0);
+    constraint_describe(k, name, sizeof(name));
+    banner_log("pointer", "%s: %s (%s), pointer at %d,%d", k->is_lock ? "unlocked" : "unconfined",
+               name, why, (int)g_ptr_x, (int)g_ptr_y);
+    sync_lock_notify();
+}
+
+static void constraint_activate(struct constraint *k) {
+    char name[160];
+    int ox, oy;
+    if (k->active || k->defunct || !k->surface || !k->pointer) return;
+    if (g_active_constraint && g_active_constraint != k)
+        constraint_end(g_active_constraint, 1, "replaced by a newer request");
+    k->active = 1;
+    g_active_constraint = k;
+    if (!k->is_lock) confine_clamp(k, &g_ptr_x, &g_ptr_y);
+    /* Pointer focus follows the constraint: the program gets the events itself. */
+    constraint_origin(k, &ox, &oy);
+    pointer_focus(k->surface->resource, wl_fixed_from_double(g_ptr_x - ox), wl_fixed_from_double(g_ptr_y - oy));
+    constraint_send_state(k, 1);
+    constraint_describe(k, name, sizeof(name));
+    if (k->is_lock)
+        banner_log("pointer", "locked: %s (%s), pointer frozen at %d,%d", name,
+                   k->lifetime == ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_ONESHOT ? "oneshot" : "persistent",
+                   (int)g_ptr_x, (int)g_ptr_y);
+    else if (k->region.set)
+        banner_log("pointer", "confined: %s (%s) to %dx%d at %d,%d of the window", name,
+                   k->lifetime == ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_ONESHOT ? "oneshot" : "persistent",
+                   k->region.w, k->region.h, k->region.x, k->region.y);
+    else
+        banner_log("pointer", "confined: %s (%s) to the whole window", name,
+                   k->lifetime == ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_ONESHOT ? "oneshot" : "persistent");
+    sync_lock_notify();
+    wl_display_flush_clients(g_display);
+}
+
+/* Pointer focus entered target: a persistent constraint waiting on it takes hold again. */
+static void constraints_focus_entered(struct wl_resource *target, struct wl_client *client) {
+    struct constraint *k;
+    if (g_active_constraint) return;
+    wl_list_for_each(k, &g_constraints, link) {
+        if (k->active || k->defunct || !k->surface || !k->pointer) continue;
+        if (k->surface->resource != target || wl_resource_get_client(k->pointer) != client) continue;
+        constraint_activate(k);
+        return;
+    }
+}
+
+static void constraints_surface_gone(struct surface *s) {
+    struct constraint *k;
+    wl_list_for_each(k, &g_constraints, link) {
+        if (k->surface != s) continue;
+        constraint_end(k, 1, "window closed");
+        k->surface = NULL;
+        k->defunct = 1;
+    }
+}
+
+static void constraints_pointer_gone(struct wl_resource *pointer) {
+    struct constraint *k;
+    wl_list_for_each(k, &g_constraints, link) {
+        if (k->pointer != pointer) continue;
+        constraint_end(k, 1, "pointer released");
+        k->pointer = NULL;
+        k->defunct = 1;
+    }
+}
+
+/* Double-buffered state (position hint, confine region) applies on the surface's commit. */
+static void constraints_surface_commit(struct surface *s) {
+    struct constraint *k;
+    wl_list_for_each(k, &g_constraints, link) {
+        if (k->surface != s) continue;
+        if (k->pending_hint_set) {
+            k->hint_set = 1;
+            k->hint_x = k->pending_hint_x;
+            k->hint_y = k->pending_hint_y;
+            k->pending_hint_set = 0;
+            if (k->active && k->is_lock) {
+                int ox, oy;
+                constraint_origin(k, &ox, &oy);
+                g_ptr_x = ox + k->hint_x;
+                g_ptr_y = oy + k->hint_y;
+                if (log_budget())
+                    banner_log("pointer", "position hint: pointer moved to %d,%d", (int)g_ptr_x, (int)g_ptr_y);
+            }
+        }
+        if (k->pending_region_set) {
+            k->region = k->pending_region;
+            k->pending_region_set = 0;
+            if (k->active && !k->is_lock) confine_clamp(k, &g_ptr_x, &g_ptr_y);
+        }
+    }
+}
+
+static void constraint_resource_destroy(struct wl_resource *r) {
+    struct constraint *k = wl_resource_get_user_data(r);
+    if (!k) return;
+    constraint_end(k, 0, "released by the program");
+    wl_list_remove(&k->link);
+    free(k);
+}
+
+static void constraint_destroy_req(struct wl_client *c, struct wl_resource *r) { wl_resource_destroy(r); }
+static void locked_pointer_set_cursor_position_hint(struct wl_client *c, struct wl_resource *r,
+                                                    wl_fixed_t x, wl_fixed_t y) {
+    struct constraint *k = wl_resource_get_user_data(r);
+    if (!k) return;
+    k->pending_hint_set = 1;
+    k->pending_hint_x = wl_fixed_to_double(x);
+    k->pending_hint_y = wl_fixed_to_double(y);
+}
+static void locked_pointer_set_region(struct wl_client *c, struct wl_resource *r, struct wl_resource *region) {
+    /* A lock's region only says where it may take hold; a lock here takes hold anywhere. */
+}
+static const struct zwp_locked_pointer_v1_interface locked_pointer_impl = {
+    .destroy = constraint_destroy_req,
+    .set_cursor_position_hint = locked_pointer_set_cursor_position_hint,
+    .set_region = locked_pointer_set_region,
+};
+static void confined_pointer_set_region(struct wl_client *c, struct wl_resource *r, struct wl_resource *region) {
+    struct constraint *k = wl_resource_get_user_data(r);
+    struct region *rg = region ? wl_resource_get_user_data(region) : NULL;
+    if (!k) return;
+    k->pending_region_set = 1;
+    if (rg) k->pending_region = *rg;
+    else memset(&k->pending_region, 0, sizeof(k->pending_region));
+}
+static const struct zwp_confined_pointer_v1_interface confined_pointer_impl = {
+    .destroy = constraint_destroy_req,
+    .set_region = confined_pointer_set_region,
+};
+
+static void constraint_create(struct wl_client *c, struct wl_resource *r, uint32_t id,
+                              struct wl_resource *surface_res, struct wl_resource *pointer_res,
+                              struct wl_resource *region_res, uint32_t lifetime, int is_lock) {
+    struct surface *s = wl_resource_get_user_data(surface_res);
+    struct constraint *k;
+    struct wl_resource *res;
+    char name[160];
+
+    wl_list_for_each(k, &g_constraints, link) {
+        if (k->defunct || k->surface != s || k->pointer != pointer_res) continue;
+        wl_resource_post_error(r, ZWP_POINTER_CONSTRAINTS_V1_ERROR_ALREADY_CONSTRAINED,
+                               "the surface already has a pointer constraint for this pointer");
+        return;
+    }
+    res = wl_resource_create(c, is_lock ? &zwp_locked_pointer_v1_interface : &zwp_confined_pointer_v1_interface,
+                             wl_resource_get_version(r), id);
+    if (!res || !(k = calloc(1, sizeof(*k)))) { wl_client_post_no_memory(c); return; }
+    k->resource = res;
+    k->pointer = pointer_res;
+    k->surface = s;
+    k->is_lock = is_lock;
+    k->lifetime = lifetime == ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_PERSISTENT
+                  ? ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_PERSISTENT : ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_ONESHOT;
+    if (!is_lock && region_res) {
+        struct region *rg = wl_resource_get_user_data(region_res);
+        if (rg) k->region = *rg;
+    }
+    wl_resource_set_implementation(res, is_lock ? (const void *)&locked_pointer_impl : (const void *)&confined_pointer_impl,
+                                   k, constraint_resource_destroy);
+    wl_list_insert(g_constraints.prev, &k->link);
+    if (!s) { k->defunct = 1; return; }
+    constraint_describe(k, name, sizeof(name));
+    banner_log("pointer", "%s requested by %s for %s", is_lock ? "lock" : "confine", client_name(c), name);
+    constraint_activate(k);
+}
+
+static void pointer_constraints_destroy(struct wl_client *c, struct wl_resource *r) { wl_resource_destroy(r); }
+static void pointer_constraints_lock_pointer(struct wl_client *c, struct wl_resource *r, uint32_t id,
+                                             struct wl_resource *surface, struct wl_resource *pointer,
+                                             struct wl_resource *region, uint32_t lifetime) {
+    constraint_create(c, r, id, surface, pointer, region, lifetime, 1);
+}
+static void pointer_constraints_confine_pointer(struct wl_client *c, struct wl_resource *r, uint32_t id,
+                                                struct wl_resource *surface, struct wl_resource *pointer,
+                                                struct wl_resource *region, uint32_t lifetime) {
+    constraint_create(c, r, id, surface, pointer, region, lifetime, 0);
+}
+static const struct zwp_pointer_constraints_v1_interface pointer_constraints_impl = {
+    .destroy = pointer_constraints_destroy,
+    .lock_pointer = pointer_constraints_lock_pointer,
+    .confine_pointer = pointer_constraints_confine_pointer,
+};
+static void bind_pointer_constraints(struct wl_client *c, void *data, uint32_t ver, uint32_t id) {
+    struct wl_resource *r = wl_resource_create(c, &zwp_pointer_constraints_v1_interface, ver, id);
+    if (!r) { wl_client_post_no_memory(c); return; }
+    wl_resource_set_implementation(r, &pointer_constraints_impl, NULL, NULL);
+}
+
+/* --- relative pointers --- */
+
+static void relative_pointer_resource_destroy(struct wl_resource *r) {
+    struct relative_pointer *rp = wl_resource_get_user_data(r);
+    if (!rp) return;
+    banner_log("pointer", "relative pointer released by %s", client_name(wl_resource_get_client(r)));
+    wl_list_remove(&rp->link);
+    free(rp);
+}
+static void relative_pointer_destroy_req(struct wl_client *c, struct wl_resource *r) { wl_resource_destroy(r); }
+static const struct zwp_relative_pointer_v1_interface relative_pointer_impl = {
+    .destroy = relative_pointer_destroy_req,
+};
+
+static void relative_pointer_manager_destroy(struct wl_client *c, struct wl_resource *r) { wl_resource_destroy(r); }
+static void relative_pointer_manager_get(struct wl_client *c, struct wl_resource *r, uint32_t id,
+                                         struct wl_resource *pointer) {
+    struct wl_resource *res = wl_resource_create(c, &zwp_relative_pointer_v1_interface, wl_resource_get_version(r), id);
+    struct relative_pointer *rp;
+    if (!res || !(rp = calloc(1, sizeof(*rp)))) { wl_client_post_no_memory(c); return; }
+    rp->resource = res;
+    rp->pointer = pointer;
+    wl_resource_set_implementation(res, &relative_pointer_impl, rp, relative_pointer_resource_destroy);
+    wl_list_insert(g_relative_pointers.prev, &rp->link);
+    banner_log("pointer", "relative pointer created for %s (motion arrives as deltas)", client_name(c));
+}
+static const struct zwp_relative_pointer_manager_v1_interface relative_pointer_manager_impl = {
+    .destroy = relative_pointer_manager_destroy,
+    .get_relative_pointer = relative_pointer_manager_get,
+};
+static void bind_relative_pointer_manager(struct wl_client *c, void *data, uint32_t ver, uint32_t id) {
+    struct wl_resource *r = wl_resource_create(c, &zwp_relative_pointer_manager_v1_interface, ver, id);
+    if (!r) { wl_client_post_no_memory(c); return; }
+    wl_resource_set_implementation(r, &relative_pointer_manager_impl, NULL, NULL);
+}
+
+static void relative_pointers_pointer_gone(struct wl_resource *pointer) {
+    struct relative_pointer *rp;
+    wl_list_for_each(rp, &g_relative_pointers, link)
+        if (rp->pointer == pointer) rp->pointer = NULL;
+}
+
+/* relative_motion to every relative pointer of the program owning the focus (winewayland wants
+ * it whenever it holds one, locked or not). Returns whether any was sent. */
+static int send_relative_motion(struct wl_client *client, double dx, double dy) {
+    struct relative_pointer *rp;
+    struct timespec ts;
+    uint64_t ut;
+    int sent = 0;
+    if (dx == 0 && dy == 0) return 0;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    ut = (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000;
+    wl_list_for_each(rp, &g_relative_pointers, link) {
+        if (!rp->pointer || wl_resource_get_client(rp->pointer) != client) continue;
+        zwp_relative_pointer_v1_send_relative_motion(rp->resource, (uint32_t)(ut >> 32), (uint32_t)ut,
+                                                     wl_fixed_from_double(dx), wl_fixed_from_double(dy),
+                                                     wl_fixed_from_double(dx), wl_fixed_from_double(dy));
+        sent = 1;
+    }
+    return sent;
+}
+
+/* ------------------------------------------------------------------ pointer events */
+
+/* One pointer event: a motion, then an optional button change (button 0 = none). Absolute
+ * x,y are scene coordinates; with `relative` they are a delta. While a lock holds the pointer
+ * stays put and the delta (or the change between absolute positions) becomes relative motion
+ * for the locking program; a confine keeps the pointer inside its area. */
+static void pointer_input(double x, double y, int relative, uint32_t button, int pressed) {
+    struct surface *target;
+    struct constraint *k = g_active_constraint;
+    double dx, dy;
+
+    if (relative) {
+        dx = x; dy = y;
+    } else {
+        dx = g_raw_valid ? x - g_raw_x : 0;
+        dy = g_raw_valid ? y - g_raw_y : 0;
+        g_raw_x = x; g_raw_y = y; g_raw_valid = 1;
+    }
+
+    if (k && k->is_lock) {
+        target = k->surface;
+    } else {
+        if (relative) {
+            int w, h;
+            scene_size(&w, &h);
+            x = g_ptr_x + dx; y = g_ptr_y + dy;
+            if (x < 0) x = 0;
+            if (y < 0) y = 0;
+            if (x > w - 1) x = w - 1;
+            if (y > h - 1) y = h - 1;
+        }
+        if (k) confine_clamp(k, &x, &y);
+        g_ptr_x = x; g_ptr_y = y;
+        if (k) {
+            target = k->surface;
+        } else if (g_desktop) {
+            target = g_desktop;
+        } else {
+            target = g_grab ? g_grab : toplevel_at(x, y);
+            if (button && pressed) { g_grab = target; g_key_target = target; }
+            if (button && !pressed) g_grab = NULL;
+        }
     }
     if (!target) return;
 
-    struct seat_pointer *sp = pointer_for(wl_resource_get_client(target->resource));
+    struct wl_client *client = wl_resource_get_client(target->resource);
+    struct seat_pointer *sp = pointer_for(client);
     if (!sp) return;
     int tx = 0, ty = 0;
     if (target != g_desktop && target->placed) { tx = target->x; ty = target->y; }
-    wl_fixed_t fx = wl_fixed_from_double(x - tx), fy = wl_fixed_from_double(y - ty);
+    wl_fixed_t fx = wl_fixed_from_double(g_ptr_x - tx), fy = wl_fixed_from_double(g_ptr_y - ty);
     uint32_t t = now_ms();
 
     pointer_focus(target->resource, fx, fy);
-    wl_pointer_send_motion(sp->ptr, t, fx, fy);
+    if (!(k && k->is_lock)) wl_pointer_send_motion(sp->ptr, t, fx, fy);
+    send_relative_motion(client, dx, dy);
     if (button)
         wl_pointer_send_button(sp->ptr, wl_display_next_serial(g_display), t, button,
                                pressed ? WL_POINTER_BUTTON_STATE_PRESSED : WL_POINTER_BUTTON_STATE_RELEASED);
     if (wl_resource_get_version(sp->ptr) >= WL_POINTER_FRAME_SINCE_VERSION)
         wl_pointer_send_frame(sp->ptr);
+    /* A click lands text input (the soft keyboard's IME text) on the window under the pointer:
+     * that's where Wine's focus goes, and winewayland routes IME updates per process. */
+    if (button && pressed && !(k && k->is_lock)) {
+        struct surface *clicked = toplevel_at(g_ptr_x, g_ptr_y);
+        if (clicked) g_ime_click = clicked;
+        banner_text_input_refocus();
+    }
     wl_display_flush_clients(g_display);
 }
 
-/* Java touch events arrive in INPUT_SPACE over the whole output: action 0=press, 1=move, 2=release. */
+/* Absolute motion to scene x,y, then an optional button change. */
+static void pointer_event(double x, double y, uint32_t button, int pressed) {
+    pointer_input(x, y, 0, button, pressed);
+}
+
+/* A delta from the app's relative input path (Relative Mouse, captured mouse, stick-as-mouse). */
+static void pointer_delta(double dx, double dy) {
+    pointer_input(dx, dy, 1, 0, 0);
+}
+
+/* A button change at the current pointer position. */
+static void pointer_button(uint32_t button, int pressed) {
+    pointer_input(0, 0, 1, button, pressed);
+}
+
+/* Java touch events arrive in INPUT_SPACE over the whole output: action 0=press, 1=move, 2=release.
+ * Output pixels go through the inverse of the scale mode's mapping (letterbox bars, FILL crop, a
+ * TOP/BOTTOM half), so the touch lands on the scene pixel that is drawn under the finger. */
 static void deliver_pointer(const struct input_msg *m) {
-    int w, h;
+    int w, h, ow, oh;
+    double x, y;
     scene_size(&w, &h);
-    pointer_event((double)m->p2 * w / INPUT_SPACE_W, (double)m->p3 * h / INPUT_SPACE_H,
-                  m->p1 == 1 ? 0 : BTN_LEFT, m->p1 == 0);
+    vkp_output_size(&ow, &oh);
+    if (ow <= 0 || oh <= 0 ||
+        !vkp_output_to_scene((double)m->p2 * ow / INPUT_SPACE_W, (double)m->p3 * oh / INPUT_SPACE_H, &x, &y)) {
+        x = (double)m->p2 * w / INPUT_SPACE_W; /* nothing drawn yet: plain stretch */
+        y = (double)m->p3 * h / INPUT_SPACE_H;
+    }
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    if (x > w - 1) x = w - 1;
+    if (y > h - 1) y = h - 1;
+    pointer_event(x, y, m->p1 == 1 ? 0 : BTN_LEFT, m->p1 == 0);
 }
 
 static void key_event(uint32_t evdev, int pressed);
+struct wl_resource *banner_ime_target(void);
 static void deliver_key(const struct input_msg *m) {
     key_event((uint32_t)m->p1, m->p2);
 }
 
 /* Vertical wheel steps (negative = up) at the current pointer position. */
 static void scroll_event(int steps) {
-    struct surface *target = g_desktop ? g_desktop : (g_grab ? g_grab : toplevel_at(g_ptr_x, g_ptr_y));
+    struct surface *target = g_active_constraint ? g_active_constraint->surface
+                           : g_desktop ? g_desktop : (g_grab ? g_grab : toplevel_at(g_ptr_x, g_ptr_y));
     if (!target || !steps) return;
     struct seat_pointer *sp = pointer_for(wl_resource_get_client(target->resource));
     if (!sp) return;
@@ -1592,7 +2280,16 @@ static void scroll_event(int steps) {
 }
 
 static void key_event(uint32_t evdev, int pressed) {
-    struct surface *target = g_desktop ? g_desktop : g_key_target;
+    /* Keys go to the program window the user last clicked (else the topmost non-shell window),
+     * never to Wine's desktop surface: winewayland hands each key to the hwnd of the surface that
+     * holds keyboard focus, and a key handed to explorer's desktop hwnd is queued to explorer's
+     * thread, not to the foreground program (X11 delivers keys to the focused app window, so
+     * this mirrors it). The desktop itself is the last resort. */
+    struct surface *target = NULL;
+    struct wl_resource *ime = banner_ime_target();
+    if (ime) target = wl_resource_get_user_data(ime);
+    if (!target && g_key_target && g_key_target->mapped && g_key_target != g_desktop) target = g_key_target;
+    if (!target) target = g_desktop;
     if (!target) {
         struct surface *s;
         wl_list_for_each_reverse(s, &g_toplevels, toplevel_link) { target = s; break; }
@@ -1613,9 +2310,10 @@ static int on_input_readable(int fd, uint32_t mask, void *data) {
         switch (m.type) {
         case 1: deliver_key(&m); break;
         case 2: pointer_event(m.p1, m.p2, 0, 0); break;          /* scene motion */
-        case 3: pointer_event(g_ptr_x, g_ptr_y, m.p1, m.p2); break; /* button at pointer */
+        case 3: pointer_button(m.p1, m.p2); break;               /* button at pointer */
         case 4: scroll_event(m.p1); break;
         case 5: on_vsync(((int64_t)m.p1 << 32) | (uint32_t)m.p2); break;
+        case 6: pointer_delta(m.p1 / 256.0, m.p2 / 256.0); break; /* relative motion, 1/256 px */
         default: deliver_pointer(&m); break;
         }
     }
@@ -1648,7 +2346,8 @@ void banner_wayland_vsync(int64_t frame_time_ns) {
 }
 
 /* Called from JNI with the app's X-server input (on-screen controls, mouse): type 2 = motion
- * to scene x,y; 3 = evdev button a pressed/released (b); 4 = a wheel steps (negative = up). */
+ * to scene x,y; 3 = evdev button a pressed/released (b); 4 = a wheel steps (negative = up);
+ * 6 = relative motion by a,b in 1/256 pixel (the app's Relative Mouse / captured-mouse path). */
 void banner_wayland_send_scene_input(int type, int a, int b) {
     if (g_input_pipe[1] < 0) return;
     struct input_msg m = { type, a, b, 0 };
@@ -1656,17 +2355,55 @@ void banner_wayland_send_scene_input(int type, int a, int b) {
     (void)n;
 }
 
+/* ------------------------------------------------------------------ extension module hooks
+ * What wl_clipboard.c / wl_text_input.c need from the scene (see banner_ext.h). */
+
+const char *banner_client_name(struct wl_client *client) { return client_name(client); }
+struct wl_display *banner_get_display(void) { return g_display; }
+void banner_request_redraw(void) { schedule_render(); }
+
+/* The surface text input follows: the last clicked mapped program window, else the topmost
+ * mapped window not owned by the desktop's process (explorer). NULL when there is none. */
+struct wl_resource *banner_ime_target(void) {
+    struct surface *s;
+    if (g_ime_click && g_ime_click->mapped) return g_ime_click->resource;
+    struct wl_client *shell = g_desktop ? wl_resource_get_client(g_desktop->resource) : NULL;
+    wl_list_for_each_reverse(s, &g_toplevels, toplevel_link)
+        if (!shell || wl_resource_get_client(s->resource) != shell) return s->resource;
+    return NULL;
+}
+
+void banner_surface_scene_origin(struct wl_resource *surface, int *x, int *y) {
+    struct surface *s = surface ? wl_resource_get_user_data(surface) : NULL;
+    *x = 0; *y = 0;
+    if (s && s->placed) { *x = s->x; *y = s->y; }
+}
+
+void banner_inject_key(uint32_t evdev, int pressed) { key_event(evdev, pressed); }
+
 /* ------------------------------------------------------------------ 10 s summary */
 
 static struct wl_event_source *g_stats_timer;
+/* The last window's zero-copy count, kept for the app (WaylandCompositor.nativeZeroCopyFrames). */
+volatile unsigned g_zero_copy_last;
 
 static int on_stats_timer(void *data) {
     int windows = 0;
     struct surface *s;
     wl_list_for_each(s, &g_toplevels, toplevel_link) windows++;
-    if (g_stat_frames || g_stat_dmabuf || g_stat_shm)
-        banner_log("stats", "last 10 s: %u frames on screen (%.1f fps) | %u GPU frames from games | %u window redraws | %d windows open",
-                   g_stat_frames, g_stat_frames / 10.0, g_stat_dmabuf, g_stat_shm, windows);
+    unsigned zero_copy = ahb_swapchain_stats_take();
+    g_zero_copy_last = zero_copy;
+    /* Interpolated frames the compositor added (framegen_bridge.c). They are on screen, so they
+     * count there; they are NOT GPU frames from games and never inflate that number. */
+    unsigned generated = vkp_framegen_stats_take();
+    if (g_stat_frames || g_stat_dmabuf || g_stat_shm || generated) {
+        char extra[96] = "";
+        int off = 0;
+        if (g_zero_copy || zero_copy) off += snprintf(extra + off, sizeof(extra) - (size_t)off, " | %u zero-copy frames", zero_copy);
+        if (generated) snprintf(extra + off, sizeof(extra) - (size_t)off, " | %u generated frames", generated);
+        banner_log("stats", "last 10 s: %u frames on screen (%.1f fps) | %u GPU frames from games | %u window redraws | %d windows open%s",
+                   g_stat_frames + generated, (g_stat_frames + generated) / 10.0, g_stat_dmabuf, g_stat_shm, windows, extra);
+    }
     g_stat_frames = g_stat_dmabuf = g_stat_shm = 0;
     wl_event_source_timer_update(g_stats_timer, 10000);
     return 0;
@@ -1675,7 +2412,8 @@ static int on_stats_timer(void *data) {
 /* ------------------------------------------------------------------ test input
  * $XDG_RUNTIME_DIR/test-input is a FIFO for scripted testing from a root shell, in scene
  * (desktop) coordinates: "move X Y", "click X Y", "rclick X Y", "dclick X Y", "down X Y",
- * "up X Y", "rdown X Y", "rup X Y", "key CODE" (evdev), "keydown CODE", "keyup CODE".
+ * "up X Y", "rdown X Y", "rup X Y", "rel DX DY" (relative motion, like the app's Relative
+ * Mouse path), "key CODE" (evdev), "keydown CODE", "keyup CODE".
  * It lives in the app's private directory, so only the app and root can reach it. */
 
 static char g_test_buf[512];
@@ -1697,6 +2435,7 @@ static void test_input_line(const char *line) {
     }
     if (n < 3) return;
     if (!strcmp(cmd, "move")) pointer_event(x, y, 0, 0);
+    else if (!strcmp(cmd, "rel")) pointer_delta(x, y);
     else if (!strcmp(cmd, "down")) pointer_event(x, y, BTN_LEFT, 1);
     else if (!strcmp(cmd, "up")) pointer_event(x, y, BTN_LEFT, 0);
     else if (!strcmp(cmd, "rdown")) pointer_event(x, y, BTN_RIGHT, 1);
@@ -1753,6 +2492,8 @@ static struct wl_listener g_client_created = { .notify = on_client_created };
 int banner_wayland_run(void) {
     wl_list_init(&g_surfaces);
     wl_list_init(&g_toplevels);
+    wl_list_init(&g_constraints);
+    wl_list_init(&g_relative_pointers);
     open_session_log();
 
     /* Bring the GPU up before any client can connect: loading Turnip the first time
@@ -1793,6 +2534,12 @@ int banner_wayland_run(void) {
     wl_global_create(display, &wl_seat_interface, 5, NULL, bind_seat);
     wl_global_create(display, &banner_desktop_v1_interface, 1, NULL, bind_desktop);
     wl_global_create(display, &wp_presentation_interface, 2, NULL, bind_presentation);
+    wl_global_create(display, &zwp_pointer_constraints_v1_interface, 1, NULL, bind_pointer_constraints);
+    wl_global_create(display, &zwp_relative_pointer_manager_v1_interface, 1, NULL, bind_relative_pointer_manager);
+    banner_ext_init(display); /* clipboard, text input, toplevel icons (own files, see banner_ext.h) */
+    ahb_swapchain_init(display); /* zero-copy layers: banner_ahb_v1, advertised whenever a display
+                                  * layer is possible; the mode event carries the live switch
+                                  * (ahb_swapchain.h) */
     wl_list_init(&g_pending_releases);
     g_release_timer_fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
     if (g_release_timer_fd >= 0)
