@@ -332,7 +332,8 @@ fun ContainerDetailScreen(
             graphicsDriver = StringUtils.parseIdentifier(viewModel.selectedGraphicsDriver),
             initialConfig = viewModel.graphicsDriverConfig,
             onConfirm = { newConfig -> viewModel.graphicsDriverConfig = newConfig; showGraphicsDriverConfig = false },
-            onDismiss = { showGraphicsDriverConfig = false }
+            onDismiss = { showGraphicsDriverConfig = false },
+            waylandCompositorNote = viewModel.isWaylandBackend
         )
     }
     val isVegasWrapper = StringUtils.parseIdentifier(viewModel.selectedDXWrapper ?: "").contains("vegas")
@@ -907,34 +908,55 @@ private fun TopLevelFields(
         }
         Spacer(Modifier.height(8.dp))
 
-        // Graphics Driver + wrapper manager (cloud) + config button. Under Wayland the picked
-        // driver only runs the embedded compositor (the game uses the Proton's bundled Wayland
-        // Turnip), so the picker is relabelled and the config gear — present mode, sync frame,
-        // device memory, BCn, gpuName, Turnip tokens… all X11 game-driver knobs — is greyed.
+        // Graphics Driver + wrapper manager (cloud) + config button. Under Wayland the wrapper
+        // flavour is irrelevant: the compositor loads the installed Turnip named by the "version"
+        // key of graphicsDriverConfig (XServerDisplayActivity's Wayland resolve → adrenotools), and
+        // the game renders on the Proton's bundled Wayland Turnip. So on Wayland the flavour
+        // dropdown is replaced by a "Compositor driver" picker over the installed Turnip ids that
+        // writes ONLY the version key back; the config dialog stays reachable for the same key.
         var showWrapperManager by remember { mutableStateOf(false) }
         val compositorDriverOnly = viewModel.isWaylandBackend
+        var installedTurnips by remember { mutableStateOf<List<String>>(emptyList()) }
+        LaunchedEffect(compositorDriverOnly) {
+            if (!compositorDriverOnly) return@LaunchedEffect
+            installedTurnips = withContext(Dispatchers.IO) {
+                runCatching { AdrenotoolsManager(context).enumarateInstalledDrivers().toList() }
+                    .getOrDefault(emptyList())
+            }
+        }
+        val compositorVersion = com.winlator.star.contentdialog.GraphicsDriverConfigDialog
+            .getVersion(viewModel.graphicsDriverConfig) ?: ""
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            LabeledDropdown(
-                label = if (compositorDriverOnly) "Compositor driver" else stringResource(R.string.graphics_driver),
-                options = viewModel.graphicsDriverEntries,
-                selectedOption = viewModel.selectedGraphicsDriver,
-                onSelect = { viewModel.selectedGraphicsDriver = it },
-                modifier = Modifier.weight(1f)
-            )
+            if (compositorDriverOnly) {
+                LabeledDropdown(
+                    label = "Compositor driver",
+                    options = installedTurnips,
+                    selectedOption = if (compositorVersion in installedTurnips) compositorVersion else "",
+                    onSelect = { viewModel.graphicsDriverConfig = withGraphicsDriverVersion(viewModel.graphicsDriverConfig, it) },
+                    modifier = Modifier.weight(1f)
+                )
+            } else {
+                LabeledDropdown(
+                    label = stringResource(R.string.graphics_driver),
+                    options = viewModel.graphicsDriverEntries,
+                    selectedOption = viewModel.selectedGraphicsDriver,
+                    onSelect = { viewModel.selectedGraphicsDriver = it },
+                    modifier = Modifier.weight(1f)
+                )
+            }
             IconButton(onClick = { helpRes = R.string.help_graphics_driver }) {
                 Icon(Icons.Default.Help, contentDescription = "What is this?", modifier = Modifier.size(18.dp))
             }
             IconButton(onClick = { showWrapperManager = true }) {
                 Icon(Icons.Default.CloudDownload, contentDescription = stringResource(R.string.wrapper_manager_open))
             }
-            IconButton(onClick = onShowGfxConfig, enabled = !compositorDriverOnly) {
+            IconButton(onClick = onShowGfxConfig) {
                 Icon(Icons.Default.Settings, contentDescription = null)
             }
         }
         if (compositorDriverOnly) {
             Text(
-                "Used by the Wayland compositor to put frames on screen; the game renders on the " +
-                    "Turnip bundled with the Proton.",
+                "Used by the Wayland compositor to put frames on screen; the game renders on the Turnip bundled with the Proton.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -943,17 +965,14 @@ private fun TopLevelFields(
                 style = MaterialTheme.typography.bodySmall
             )
             Text(
-                "Driver configuration disabled: configures the X11 game driver; Wayland games " +
-                    "use the Proton's bundled Turnip.",
+                "Only the Turnip version here applies on Wayland; the other options configure the X11 game driver.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             // The compositor imports the game's dmabufs, which only an installed Turnip can do:
             // an empty/"System" version falls back to the system libvulkan (see
             // XServerDisplayActivity's Wayland driver resolve) and shows a black screen. Warn only.
-            val compositorVersion = com.winlator.star.contentdialog.GraphicsDriverConfigDialog
-                .getVersion(viewModel.graphicsDriverConfig)
-            if (compositorVersion.isNullOrEmpty() || compositorVersion == "System") {
+            if (compositorVersion.isEmpty() || compositorVersion == "System") {
                 Text(
                     """Wayland needs a Turnip driver here. "System" cannot import the game's frames and shows a black screen.""",
                     style = MaterialTheme.typography.bodySmall,
@@ -2709,12 +2728,27 @@ private fun CompactDropdown(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+/**
+ * Rebuilds a `k=v;k=v` graphicsDriverConfig with ONLY the "version" key replaced (or appended when
+ * absent); every other key/value is kept byte-for-byte. Used by the Wayland "Compositor driver"
+ * pickers, which must not disturb the X11 game-driver options stored alongside.
+ */
+internal fun withGraphicsDriverVersion(config: String, version: String): String {
+    val parts = config.split(";").filter { it.isNotEmpty() }.toMutableList()
+    val idx = parts.indexOfFirst { it.substringBefore("=") == "version" }
+    if (idx >= 0) parts[idx] = "version=$version" else parts.add("version=$version")
+    return parts.joinToString(";")
+}
+
 @Composable
 internal fun GraphicsDriverConfigDialog(
     graphicsDriver: String,
     initialConfig: String,
     onConfirm: (String) -> Unit,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    // Opened from a Wayland container/shortcut: only the Turnip version below is used (it's the
+    // driver the compositor loads); everything else configures the X11 game driver. Note only.
+    waylandCompositorNote: Boolean = false
 ) {
     val context = LocalContext.current
 
@@ -2980,6 +3014,14 @@ internal fun GraphicsDriverConfigDialog(
                     .heightIn(max = maxContentHeight)
                     .verticalScroll(rememberScrollState())
             ) {
+                if (waylandCompositorNote) {
+                    Text(
+                        "Only the Turnip version here applies on Wayland; the other options configure the X11 game driver.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(8.dp))
+                }
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     LabeledDropdown(stringResource(R.string.graphics_driver_vulkan_version), vulkanVersions, vulkanVersion, { vulkanVersion = it }, modifier = Modifier.weight(1f))
                     IconButton(onClick = { helpRes = R.string.help_vulkan_version }) {

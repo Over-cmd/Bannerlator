@@ -7169,20 +7169,45 @@ internal fun ShortcutSettingsDialogScreen(
                         }
                     }
 
-                    // Graphics Driver + wrapper manager (cloud). Under Wayland the picked driver only
-                    // runs the embedded compositor (the game uses the Proton's bundled Wayland Turnip),
-                    // so the picker is relabelled and the X11-only driver config below is greyed.
+                    // Graphics Driver + wrapper manager (cloud). Under Wayland the wrapper flavour is
+                    // irrelevant: the compositor loads the installed Turnip named by the "version" key of
+                    // graphicsDriverConfig (XServerDisplayActivity's Wayland resolve → adrenotools), and the
+                    // game renders on the Proton's bundled Wayland Turnip. So the flavour dropdown is swapped
+                    // for a "Compositor driver" picker over the installed Turnip ids that writes ONLY the
+                    // version key back (see withGraphicsDriverVersion); the config button stays live.
                     var showWrapperManager by remember { mutableStateOf(false) }
+                    val gfxContext = LocalContext.current
+                    var installedTurnips by remember { mutableStateOf<List<String>>(emptyList()) }
+                    LaunchedEffect(effectiveWaylandShortcut) {
+                        if (!effectiveWaylandShortcut) return@LaunchedEffect
+                        installedTurnips = withContext(Dispatchers.IO) {
+                            runCatching { AdrenotoolsManager(gfxContext).enumarateInstalledDrivers().toList() }
+                                .getOrDefault(emptyList())
+                        }
+                    }
+                    val compositorVersion = GraphicsDriverConfigDialog.getVersion(graphicsDriverConfig) ?: ""
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        DpDrop(
-                            dp, "gfxDriver",
-                            label = if (effectiveWaylandShortcut) "Compositor driver" else stringResource(R.string.graphics_driver),
-                            options = graphicsDriverEntries,
-                            selected = selectedGfxDriver,
-                            onSelect = { selectedGfxDriver = it },
-                            modifier = Modifier.weight(1f),
-                            onRightId = "gfxWrapper"
-                        )
+                        if (effectiveWaylandShortcut) {
+                            DpDrop(
+                                dp, "gfxDriver",
+                                label = "Compositor driver",
+                                options = installedTurnips,
+                                selected = if (compositorVersion in installedTurnips) compositorVersion else "",
+                                onSelect = { graphicsDriverConfig = withGraphicsDriverVersion(graphicsDriverConfig, it) },
+                                modifier = Modifier.weight(1f),
+                                onRightId = "gfxWrapper"
+                            )
+                        } else {
+                            DpDrop(
+                                dp, "gfxDriver",
+                                label = stringResource(R.string.graphics_driver),
+                                options = graphicsDriverEntries,
+                                selected = selectedGfxDriver,
+                                onSelect = { selectedGfxDriver = it },
+                                modifier = Modifier.weight(1f),
+                                onRightId = "gfxWrapper"
+                            )
+                        }
                         IconButton(onClick = { helpRes = R.string.help_graphics_driver }) {
                             Icon(Icons.Default.Help, contentDescription = "What is this?", modifier = Modifier.size(18.dp))
                         }
@@ -7198,8 +7223,7 @@ internal fun ShortcutSettingsDialogScreen(
                     })
                     if (effectiveWaylandShortcut) {
                         Text(
-                            "Used by the Wayland compositor to put frames on screen; the game renders on " +
-                                "the Turnip bundled with the Proton.",
+                            "Used by the Wayland compositor to put frames on screen; the game renders on the Turnip bundled with the Proton.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -7208,26 +7232,20 @@ internal fun ShortcutSettingsDialogScreen(
                             style = MaterialTheme.typography.bodySmall
                         )
                     }
-                    DpButton(dp, "gfxConfig", onActivate = { if (!effectiveWaylandShortcut) showGfxConfig = true }, modifier = Modifier.fillMaxWidth()) {
-                        OutlinedButton(
-                            onClick = { showGfxConfig = true },
-                            enabled = !effectiveWaylandShortcut,
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
+                    DpButton(dp, "gfxConfig", onActivate = { showGfxConfig = true }, modifier = Modifier.fillMaxWidth()) {
+                        OutlinedButton(onClick = { showGfxConfig = true }, modifier = Modifier.fillMaxWidth()) {
                             Text("${stringResource(R.string.graphics_driver)}: ${GraphicsDriverConfigDialog.getVersion(graphicsDriverConfig)}")
                         }
                     }
                     if (effectiveWaylandShortcut) {
                         Text(
-                            "Driver configuration disabled: configures the X11 game driver; Wayland games " +
-                                "use the Proton's bundled Turnip.",
+                            "Only the Turnip version here applies on Wayland; the other options configure the X11 game driver.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                         // "System"/empty falls back to the system libvulkan, which can't import the
                         // game's dmabufs (black screen) — mirrors XServerDisplayActivity's resolve. Warn only.
-                        val compositorVersion = GraphicsDriverConfigDialog.getVersion(graphicsDriverConfig)
-                        if (compositorVersion.isNullOrEmpty() || compositorVersion == "System") {
+                        if (compositorVersion.isEmpty() || compositorVersion == "System") {
                             Text(
                                 """Wayland needs a Turnip driver here. "System" cannot import the game's frames and shows a black screen.""",
                                 style = MaterialTheme.typography.bodySmall,
@@ -8147,7 +8165,8 @@ internal fun ShortcutSettingsDialogScreen(
             graphicsDriver = StringUtils.parseIdentifier(selectedGfxDriver),
             initialConfig = graphicsDriverConfig,
             onConfirm = { graphicsDriverConfig = it; showGfxConfig = false },
-            onDismiss = { showGfxConfig = false }
+            onDismiss = { showGfxConfig = false },
+            waylandCompositorNote = effectiveWaylandShortcut
         )
     }
     val isVegasCfg = StringUtils.parseIdentifier(selectedDxWrapper).contains("vegas")

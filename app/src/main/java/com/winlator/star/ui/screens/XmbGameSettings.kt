@@ -47,6 +47,7 @@ import com.winlator.star.R
 import com.winlator.star.container.Container
 import com.winlator.star.container.GameDetails
 import com.winlator.star.container.Shortcut
+import com.winlator.star.contents.AdrenotoolsManager
 import com.winlator.star.contents.ContentsManager
 import com.winlator.star.contents.WrapperManager
 import com.winlator.star.core.DirectAudioSupport
@@ -262,26 +263,33 @@ private fun generalRows(xmb: XmbScope, p: XmbPrefs, host: XmbGameHost): List<Xmb
     rows += XmbRow.Header("hGfx", "Graphics")
     val gfxEntries = WrapperManager.driverEntries(p.context, p.res.getStringArray(R.array.graphics_driver_entries))
     val gfxId = p.ex("graphicsDriver", c.graphicsDriver)
-    // Under Wayland the picked driver only runs the embedded compositor — the game renders on the
-    // Turnip bundled with the Proton — so the picker is relabelled and the X11-only config greyed.
-    rows += XmbRow.Choice("gfxDriver", if (waylandGame) "Compositor driver" else p.str(R.string.graphics_driver), Icons.Filled.Memory, gfxEntries, p.labelFor(gfxEntries, gfxId),
-        subtitle = if (waylandGame) "Used by the Wayland compositor to put frames on screen; the game renders on the Turnip bundled with the Proton" else null) { v ->
-        xmb.set(p, "graphicsDriver", StringUtils.parseIdentifier(v))
-    }
+    // Under Wayland the wrapper flavour is irrelevant: the compositor loads the installed Turnip named
+    // by the "version" key of graphicsDriverConfig (XServerDisplayActivity's Wayland resolve), and the
+    // game renders on the Proton's bundled Wayland Turnip. So the flavour picker is swapped for a
+    // "Compositor driver" choice over the installed Turnip ids that writes ONLY the version key back
+    // (withGraphicsDriverVersion); the config link stays live for the same key.
     if (waylandGame) {
+        val gdc = p.ex("graphicsDriverConfig", c.getGraphicsDriverConfig())
+        val compositorVersion = com.winlator.star.contentdialog.GraphicsDriverConfigDialog.getVersion(gdc) ?: ""
+        val turnips = runCatching { AdrenotoolsManager(p.context).enumarateInstalledDrivers().toList() }.getOrDefault(emptyList())
+        rows += XmbRow.Choice("gfxDriver", "Compositor driver", Icons.Filled.Memory, turnips, if (compositorVersion in turnips) compositorVersion else "",
+            subtitle = "Used by the Wayland compositor to put frames on screen; the game renders on the Turnip bundled with the Proton.") { v ->
+            xmb.set(p, "graphicsDriverConfig", withGraphicsDriverVersion(gdc, v))
+        }
         rows += XmbRow.Info("gfxGameDriver", "Game driver", Icons.Filled.Memory, "Wayland Turnip bundled with this Proton")
         // "System"/empty falls back to the system libvulkan, which can't import the game's dmabufs
         // (black screen) — mirrors XServerDisplayActivity's Wayland driver resolve. Warn only.
-        val compositorVersion = com.winlator.star.contentdialog.GraphicsDriverConfigDialog
-            .getVersion(p.ex("graphicsDriverConfig", c.getGraphicsDriverConfig()))
-        if (compositorVersion.isNullOrEmpty() || compositorVersion == "System") {
+        if (compositorVersion.isEmpty() || compositorVersion == "System") {
             rows += XmbRow.Info("gfxSystemWarn", "Compositor driver is \"System\"", Icons.Filled.Info,
                 subtitle = """Wayland needs a Turnip driver here. "System" cannot import the game's frames and shows a black screen.""")
         }
+    } else {
+        rows += XmbRow.Choice("gfxDriver", p.str(R.string.graphics_driver), Icons.Filled.Memory, gfxEntries, p.labelFor(gfxEntries, gfxId)) { v ->
+            xmb.set(p, "graphicsDriver", StringUtils.parseIdentifier(v))
+        }
     }
     rows += XmbRow.Link("gfxConfig", "Driver configuration", Icons.Filled.Tune,
-        subtitle = "Vulkan version, BCn, present modes…",
-        disabledReason = if (waylandGame) "Configures the X11 game driver; Wayland games use the Proton's bundled Turnip" else null) { xmbDriverConfigMenu(xmb, s) }
+        subtitle = if (waylandGame) "Only the Turnip version here applies on Wayland; the other options configure the X11 game driver." else "Vulkan version, BCn, present modes…") { xmbDriverConfigMenu(xmb, s) }
     rows += XmbRow.External("wrappers", "Manage wrappers", Icons.Filled.Cloud, subtitle = "Import or remove wrapper drivers") { host.openWrapperManager() }
     val dxEntries = p.arr(R.array.dxwrapper_entries)
     val dxId = p.ex("dxwrapper", c.getDXWrapper())
