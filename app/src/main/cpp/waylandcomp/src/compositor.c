@@ -2083,6 +2083,7 @@ static void deliver_pointer(const struct input_msg *m) {
 }
 
 static void key_event(uint32_t evdev, int pressed);
+struct wl_resource *banner_ime_target(void);
 static void deliver_key(const struct input_msg *m) {
     key_event((uint32_t)m->p1, m->p2);
 }
@@ -2107,7 +2108,16 @@ static void scroll_event(int steps) {
 }
 
 static void key_event(uint32_t evdev, int pressed) {
-    struct surface *target = g_desktop ? g_desktop : g_key_target;
+    /* Keys go to the program window the user last clicked (else the topmost non-shell window),
+     * never to Wine's desktop surface: winewayland hands each key to the hwnd of the surface that
+     * holds keyboard focus, and a key handed to explorer's desktop hwnd is queued to explorer's
+     * thread, not to the foreground program (X11 delivers keys to the focused app window, so
+     * this mirrors it). The desktop itself is the last resort. */
+    struct surface *target = NULL;
+    struct wl_resource *ime = banner_ime_target();
+    if (ime) target = wl_resource_get_user_data(ime);
+    if (!target && g_key_target && g_key_target->mapped && g_key_target != g_desktop) target = g_key_target;
+    if (!target) target = g_desktop;
     if (!target) {
         struct surface *s;
         wl_list_for_each_reverse(s, &g_toplevels, toplevel_link) { target = s; break; }
