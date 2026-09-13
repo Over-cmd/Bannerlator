@@ -76,6 +76,11 @@ public class GuestProgramLauncherComponent extends EnvironmentComponent {
     public Container getContainer() { return this.container; }
     public void setContainer(Container container) { this.container = container; }
 
+    // When true, the guest uses the Wayland display path (winewayland.drv → embedded compositor)
+    // instead of the X11 server. Set by XServerDisplayActivity in wayland_mode.
+    private boolean waylandMode = false;
+    public void setWaylandMode(boolean v) { this.waylandMode = v; }
+
     private void extractBox64Files() {
         ImageFs imageFs = environment.getImageFs();
         Context context = environment.getContext();
@@ -406,7 +411,26 @@ public class GuestProgramLauncherComponent extends EnvironmentComponent {
         envVars.put("WRAPPER_CACHE_PATH", rootDir.getPath() + "/usr/var/cache");
         envVars.put("WINE_NO_DUPLICATE_EXPLORER", "1");
         envVars.put("PREFIX", rootDir.getPath() + "/usr");
-        envVars.put("DISPLAY", ":0");
+        if (waylandMode) {
+            // Wayland display path: point Wine at the embedded compositor's socket. winewayland's
+            // unixlib runs host-side (no chroot — the guest uses full /data paths), so XDG_RUNTIME_DIR
+            // must be the FULL host path where XServerDisplayActivity created the socket
+            // (imagefs/tmp/wayland-0), not a bare "/tmp". Skip DISPLAY (winex11.drv is hidden anyway).
+            envVars.put("WAYLAND_DISPLAY", "wayland-0");
+            // Must match XServerDisplayActivity.startWaylandCompositor: filesDir/.wayland-rt (NOT
+            // imagefs/tmp, which setupXEnvironment clears out from under the compositor's socket).
+            envVars.put("XDG_RUNTIME_DIR", new File(context.getFilesDir(), ".wayland-rt").getPath());
+            // winewayland.so's DT_NEEDED libwayland-client/-egl/xkbcommon/xkbregistry are bundled in
+            // the Proton wcp's lib/ with the exact sonames winewayland was linked against (unversioned,
+            // e.g. "libxkbcommon.so"). imagefs/usr/lib ships versioned sonames ("libxkbcommon.so.0"),
+            // which bionic rejects with a verneed mismatch. So prepend the wcp lib/ to LD_LIBRARY_PATH:
+            // the 4 wayland libs resolve there (matching sonames); their transitive deps (libffi,
+            // libandroid-support, libc…) still resolve from imagefs/usr/lib further down the path.
+            envVars.put("LD_LIBRARY_PATH", imageFs.getWinePath() + "/lib" + ":"
+                    + rootDir.getPath() + "/usr/lib" + ":" + "/system/lib64");
+        } else {
+            envVars.put("DISPLAY", ":0");
+        }
         envVars.put("WINE_DISABLE_FULLSCREEN_HACK", "1");
         envVars.put("GST_PLUGIN_FEATURE_RANK", "ximagesink:3000");
         envVars.put("ALSA_CONFIG_PATH", rootDir.getPath() + "/usr/share/alsa/alsa.conf" + ":" + rootDir.getPath() + "/usr/etc/alsa/conf.d/android_aserver.conf");
@@ -530,6 +554,11 @@ public class GuestProgramLauncherComponent extends EnvironmentComponent {
         }
 
         Log.d("GuestLauncher", "Final LD_PRELOAD: " + ld_preload);
+        // winewayland.so (unixlib) dlopens libwayland-client/-egl/xkbcommon/xkbregistry. These resolve
+        // from imagefs/usr/lib via LD_LIBRARY_PATH exactly like winex11.so's libX11/libXext deps do
+        // (proven: winex11.so has the same Termux RUNPATH yet loads fine). So NO wayland-specific
+        // LD_PRELOAD — force-preloading them into the main `wine` executable aborts startup
+        // ("CANNOT LINK EXECUTABLE"). installWaylandLibs stages the libs into imagefs/usr/lib.
         envVars.put("LD_PRELOAD", ld_preload);
 
         if (this.envVars.has("MANGOHUD")) {
@@ -553,6 +582,7 @@ public class GuestProgramLauncherComponent extends EnvironmentComponent {
         if (this.envVars != null) {
             envVars.putAll(this.envVars);
         }
+
 
         String emulator = container.getEmulator();
         if (shortcut != null)

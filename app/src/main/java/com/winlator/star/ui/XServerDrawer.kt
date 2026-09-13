@@ -3456,6 +3456,7 @@ private fun ControlsContent(state: XServerDrawerState) {
 
     val moveCursorToTouch by state.moveCursorToTouchpoint.collectAsState()
     val isRelativeMouse by state.isRelativeMouseMovement.collectAsState()
+    val isWaylandSession by state.isWaylandMode.collectAsState()
     val isMouseDisabled by state.isMouseDisabled.collectAsState()
     val initOverlayOpacity by state.overlayOpacity.collectAsState()
     val controlsFollowTheme by state.controlsFollowTheme.collectAsState()
@@ -3609,7 +3610,8 @@ private fun ControlsContent(state: XServerDrawerState) {
                     ToggleChipItem("Cursor to Touch", moveCursorToTouch) {
                         state.onMoveCursorToTouchpoint?.run()
                     },
-                    ToggleChipItem("Relative Mouse", isRelativeMouse) {
+                    // Greyed on Wayland: the compositor has no pointer-constraints protocol yet.
+                    ToggleChipItem("Relative Mouse", isRelativeMouse, enabled = !isWaylandSession) {
                         state.onRelativeMouseMovement?.run()
                     },
                     ToggleChipItem("Disable Mouse", isMouseDisabled) {
@@ -3618,6 +3620,16 @@ private fun ControlsContent(state: XServerDrawerState) {
                 ),
                 perRow = 3
             )
+
+            if (isWaylandSession) {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "Relative Mouse: not available on Wayland yet (pointer constraints not implemented)",
+                    color = LocalAccentDim.current,
+                    fontSize = 11.sp,
+                    lineHeight = 13.sp
+                )
+            }
 
             // Tied directly to the toggle: the gestures only exist in absolute-cursor mode, so the
             // pane appears as part of switching Cursor to Touch on and leaves with it. No cog — one

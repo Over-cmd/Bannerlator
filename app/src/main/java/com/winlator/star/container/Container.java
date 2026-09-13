@@ -454,6 +454,29 @@ public class Container {
         catch (JSONException e) {}
     }
 
+    // --- Display backend (per-container), stored in extraData ---
+    // "x11" (default) = the Java X server + libwinlator compositor (winex11.drv).
+    // "wayland" = the embedded Wayland compositor (winewayland.drv). Wayland mode
+    // bypasses the whole Renderer group (the compositor replaces that stage) and
+    // needs a Wayland-capable Proton layer (winewayland.so + the bundled Wayland Turnip; see
+    // WineWaylandSupport). Consumed by the launch path, which falls back to X11 when the
+    // container's layer can't do it.
+    public static final String DISPLAY_BACKEND_X11 = "x11";
+    public static final String DISPLAY_BACKEND_WAYLAND = "wayland";
+
+    public String getDisplayBackend() {
+        return getExtra("displayBackend", DISPLAY_BACKEND_X11);
+    }
+
+    public void setDisplayBackend(String value) {
+        putExtra("displayBackend", DISPLAY_BACKEND_WAYLAND.equals(value)
+                ? DISPLAY_BACKEND_WAYLAND : DISPLAY_BACKEND_X11);
+    }
+
+    public boolean isWaylandBackend() {
+        return DISPLAY_BACKEND_WAYLAND.equals(getDisplayBackend());
+    }
+
     // --- bionic-fg frame generation (per-container), stored in extraData ---
     // The on/off flag is set in the container settings; multiplier & flow scale
     // are tuned live from the in-game side menu (both hot-reload via conf.toml).

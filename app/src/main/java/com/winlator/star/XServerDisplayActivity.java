@@ -339,6 +339,8 @@ public class XServerDisplayActivity extends AppCompatActivity {
     // restores each process exactly (revert philosophy). Populated on toggle ON, cleared on OFF.
     private final java.util.HashMap<Integer, Integer> bigCoreAffinitySnapshot = new java.util.HashMap<>();
     private int frameRatingWindowId = -1;
+    // Wayland mode has no X window to bind the HUD to; the compositor's game window stands in.
+    private static final int WAYLAND_HUD_WINDOW_ID = Integer.MAX_VALUE;
     // Master HUD on/off, parsed from the fps config's `hudEnabled` key (default on). When false, every
     // overlay style stays GONE even while a game window is bound to frameRatingWindowId — the drawer's
     // "Show HUD" master toggle drives this live via onFpsConfigApply.
@@ -1351,6 +1353,13 @@ public class XServerDisplayActivity extends AppCompatActivity {
     private String screenEffectProfile;
 
     private GuestProgramLauncherComponent guestProgramLauncherComponent;
+    // Experimental Wayland display path: when true, run the game through winewayland.drv into
+    // our embedded compositor instead of the X11 server. All branches are guarded by this flag,
+    // so the X11 path is unchanged when it's false. See WAYLAND_RUNTIME.md.
+    private boolean waylandMode = false;
+    private android.view.SurfaceView waylandSurfaceView;
+    private android.widget.ImageView waylandCursorView;
+    private float waylandCursorX = -1f, waylandCursorY = -1f; // touchpad cursor position (view px)
     private EnvVars overrideEnvVars;
 
     private void createNotifcationChannel() {
@@ -2050,6 +2059,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
         container = containerManager.getContainerById(getIntent().getIntExtra("container_id", 0));
 
         componentInstallerExe = getIntent().getStringExtra("component_installer_exe");
+        waylandMode = getIntent().getBooleanExtra("wayland_mode", false);
 
         // Log shortcut_path
         String shortcutPath = getIntent().getStringExtra("shortcut_path");
@@ -2114,6 +2124,15 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // limiter, renderer) can be resolved against it below; each falls back to the container value.
         if (shortcutPath != null && !shortcutPath.isEmpty()) {
             shortcut = new Shortcut(container, new File(shortcutPath));
+        }
+
+        // Display backend: the game's override, else the container's. Resolved here so every launch
+        // path (shortcut list, Games tab, Big Picture, pinned shortcuts, container Run) honours it,
+        // not only the ones that pass wayland_mode.
+        if (!waylandMode) {
+            String backend = shortcut != null ? shortcut.getExtra("displayBackend", "") : "";
+            if (backend.isEmpty()) backend = container.getDisplayBackend();
+            waylandMode = Container.DISPLAY_BACKEND_WAYLAND.equals(backend);
         }
 
         // In-game Friends tab (drawer): read the friends/chat opt-in once for this launch and start
@@ -2253,6 +2272,19 @@ public class XServerDisplayActivity extends AppCompatActivity {
 
         String wineVersion = container.getWineVersion();
         wineInfo = WineInfo.fromIdentifier(this, contentsManager, wineVersion);
+
+        // Wayland gate (the ONE resolver every launch path funnels through — the intent flag, the
+        // shortcut override and the container default were all folded into waylandMode above): the
+        // selected layer must ship winewayland.so AND its bundled Wayland Turnip, else the compositor
+        // start, the registry driver write and the winex11.drv hide below would all run against a
+        // layer that can't drive them. Fall back to X11 and say so.
+        if (waylandMode && !com.winlator.star.core.WineWaylandSupport.isWaylandCapable(wineInfo)) {
+            Log.w("XServerDisplayActivity", "wayland: layer " + wineVersion + " (" + wineInfo.path
+                    + ") lacks winewayland.so and/or lib/libvulkan_freedreno_wayland.so; launching on X11");
+            waylandMode = false;
+            Toast.makeText(this, "Wayland needs the Wayland Proton layer (11.0-2.1 arm64ec); launching on X11.",
+                    Toast.LENGTH_LONG).show();
+        }
 
         imageFs.setWinePath(wineInfo.path);
 
@@ -2591,6 +2623,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
                     // re-enters this runnable, so a live session can't be swept.)
                     sweepStaleWineProcesses();
                     preloaderDialog.step(2, "Preparing Wine & graphics driver…");
+                    setWineDisplayDriver();   // BEFORE setupWineSystemFiles starts the first wineserver
                     setupWineSystemFiles();
                     // Steam install-recipe robustness pass: a steamAppId-tagged game's installScript.vdf
                     // Registry + Copy Files land in this prefix before the game boots (covers shortcuts made
@@ -6216,6 +6249,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
             inGameControlsEditor.dispose();
             inGameControlsEditor = null;
         }
+        waylandVsyncRunning = false;
         super.onDestroy();
         // Power-user perf: stop the thermal watchdog and revert any privileged sysfs writes on game
         // exit (no-op unless a root toggle wrote something this session).
@@ -6614,6 +6648,262 @@ public class XServerDisplayActivity extends AppCompatActivity {
         }
     }
 
+    // Bring up the embedded Wayland compositor into a full-screen SurfaceView. The socket is created
+    // under the imagefs /tmp (XDG_RUNTIME_DIR = rootDir/tmp) so the guest — which sees the imagefs as
+    // its root — finds it at /tmp/wayland-0 (matching the guest env in GuestProgramLauncherComponent).
+    private void startWaylandCompositor(FrameLayout rootView) {
+        // Wayland has no XServer onUpdateWindowContent hook to dismiss the launch overlay, so
+        // dismiss on the compositor's FIRST presented client frame instead (mirrors the X11 grace
+        // delay so the boot steps are briefly visible). Fires on the compositor thread -> marshal
+        // to UI. Guard with winStarted so it runs exactly once.
+        com.winlator.star.wayland.WaylandCompositor.setFirstFrameListener(() -> runOnUiThread(() -> {
+            if (winStarted) return;
+            winStarted = true;
+            cancelLaunchTimers();
+            new android.os.Handler(getMainLooper()).postDelayed(
+                    preloaderDialog::closeOnUiThread, LAUNCH_OVERLAY_GRACE_MS);
+        }));
+        // Performance HUD: X11 shows it when a window gets _MESA_DRV and counts X presents. Here the
+        // compositor reports the window presenting GPU frames, then each of its frames.
+        com.winlator.star.wayland.WaylandCompositor.setGameListener(new com.winlator.star.wayland.WaylandCompositor.GameListener() {
+            @Override public void onGameSurface(String window, String gpuName) {
+                if (window == null) {
+                    frameRatingWindowId = -1;
+                    fpsCounter.reset();
+                    runOnUiThread(() -> {
+                        if (frameRating != null) { frameRating.setVisibility(View.GONE); frameRating.reset(); }
+                        if (frameRatingHorizontal != null) { frameRatingHorizontal.setVisibility(View.GONE); frameRatingHorizontal.reset(); }
+                        if (perfHud != null) perfHud.setVisibility(View.GONE);
+                        if (gameNativeHud != null) gameNativeHud.setVisibility(View.GONE);
+                        if (fusionHud != null) fusionHud.setVisibility(View.GONE);
+                    });
+                    return;
+                }
+                Log.d("XServerDisplayActivity", "wayland: HUD follows " + window);
+                frameRatingWindowId = WAYLAND_HUD_WINDOW_ID;
+                if (gpuName != null && !gpuName.isEmpty())
+                    hudGpuName = com.winlator.star.core.GPUInformation.extractModelName(gpuName);
+                runOnUiThread(() -> {
+                    if (hudGpuName != null) {
+                        if (frameRating != null) frameRating.setGpuName(hudGpuName);
+                        if (perfHud != null) perfHud.setGpuModel(hudGpuName);
+                        if (gameNativeHud != null) gameNativeHud.setGpuModel(hudGpuName);
+                        if (fusionHud != null) fusionHud.setGpuModel(hudGpuName);
+                    }
+                    // Respect the master toggle, like the _MESA_DRV binding does.
+                    if (!hudCounterEnabled) return;
+                    if (perfHud != null) perfHud.setVisibility(View.VISIBLE);
+                    if (gameNativeHud != null) gameNativeHud.setVisibility(View.VISIBLE);
+                    if (fusionHud != null) fusionHud.setVisibility(View.VISIBLE);
+                    if (fpsHudHorizontal) {
+                        if (frameRatingHorizontal != null) frameRatingHorizontal.setVisibility(View.VISIBLE);
+                    } else {
+                        if (frameRating != null) frameRating.setVisibility(View.VISIBLE);
+                    }
+                });
+            }
+            @Override public void onGameFrame() {
+                if (frameRatingWindowId == -1 || !hudCounterEnabled) return;
+                fpsCounter.tick();
+                if (frameRating != null) frameRating.update();
+                if (frameRatingHorizontal != null) frameRatingHorizontal.update();
+                if (perfHud != null) perfHud.update();
+            }
+        });
+
+        // On-screen controls, a mouse and keys mapped to controller buttons all inject into the X
+        // server, which has no client in wayland mode: hand that input to the compositor too.
+        if (xServer != null) xServer.setInputSink(new com.winlator.star.xserver.XServer.InputSink() {
+            @Override public void onPointerMove(int x, int y) {
+                com.winlator.star.wayland.WaylandCompositor.nativeSendSceneInput(2, x, y);
+                runOnUiThread(() -> {
+                    if (waylandSurfaceView == null || waylandCursorView == null) return;
+                    int vw = waylandSurfaceView.getWidth(), vh = waylandSurfaceView.getHeight();
+                    if (vw <= 0 || vh <= 0) return;
+                    waylandCursorX = (float) x * vw / xServer.screenInfo.width;
+                    waylandCursorY = (float) y * vh / xServer.screenInfo.height;
+                    waylandCursorView.setX(waylandCursorX);
+                    waylandCursorView.setY(waylandCursorY);
+                    if (waylandCursorView.getVisibility() != View.VISIBLE)
+                        waylandCursorView.setVisibility(View.VISIBLE);
+                });
+            }
+            @Override public void onPointerButton(com.winlator.star.xserver.Pointer.Button button, boolean pressed) {
+                switch (button) {
+                    case BUTTON_LEFT: com.winlator.star.wayland.WaylandCompositor.nativeSendSceneInput(3, 0x110, pressed ? 1 : 0); break;
+                    case BUTTON_RIGHT: com.winlator.star.wayland.WaylandCompositor.nativeSendSceneInput(3, 0x111, pressed ? 1 : 0); break;
+                    case BUTTON_MIDDLE: com.winlator.star.wayland.WaylandCompositor.nativeSendSceneInput(3, 0x112, pressed ? 1 : 0); break;
+                    case BUTTON_SCROLL_UP: if (pressed) com.winlator.star.wayland.WaylandCompositor.nativeSendSceneInput(4, -1, 0); break;
+                    case BUTTON_SCROLL_DOWN: if (pressed) com.winlator.star.wayland.WaylandCompositor.nativeSendSceneInput(4, 1, 0); break;
+                    default: break;
+                }
+            }
+            @Override public void onKey(int evdev, boolean pressed) {
+                if (evdev > 0) com.winlator.star.wayland.WaylandCompositor.nativeSendKey(evdev, pressed ? 1 : 0);
+            }
+        });
+        // Advertise the panel's real refresh rate (X11 offers it through RandR; games pick their
+        // saved 144 Hz mode from Wine's mode list, which Wine derives from the Wayland output).
+        try {
+            com.winlator.star.wayland.WaylandCompositor.nativeSetOutputRefreshRate(currentDisplayRefreshHz());
+            // And the container's screen size: on X11 the X server's screen is the container size, so
+            // Wine lists display modes up to it; a 1920x1080 output listed modes above the desktop.
+            if (xServer != null)
+                com.winlator.star.wayland.WaylandCompositor.nativeSetOutputSize(
+                        xServer.screenInfo.width, xServer.screenInfo.height);
+        } catch (Throwable t) {
+            Log.w("XServerDisplayActivity", "wayland: refresh rate unavailable", t);
+        }
+        waylandSurfaceView = new android.view.SurfaceView(this);
+        waylandSurfaceView.setLayoutParams(new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        // Touch -> wl_pointer. Map view pixels to the compositor's 1920x1080 output space (we blit
+        // the guest surface fullscreen, so that IS the guest coordinate space). action 0=down/1=move/2=up.
+        // Touchpad-style cursor: a visible on-screen pointer that moves RELATIVE to finger drag
+        // (from wherever it is, not jumping to the touch point), with tap = left-click. The cursor is
+        // an Android overlay view (waylandCursorView); we keep it in sync with the wl_pointer.motion
+        // we send, so the guest's pointer and the visible arrow always match.
+        waylandCursorView = new android.widget.ImageView(this);
+        waylandCursorView.setImageBitmap(makeArrowCursorBitmap());
+        waylandCursorView.setLayoutParams(new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT));
+        waylandCursorView.setVisibility(View.GONE);
+        final float[] last = {0f, 0f};
+        final float[] moved = {0f};
+        final float SENS = 1.4f;
+        waylandSurfaceView.setOnTouchListener((v, ev) -> {
+            int vw = v.getWidth(), vh = v.getHeight();
+            if (vw <= 0 || vh <= 0) return true;
+            if (waylandCursorX < 0) { waylandCursorX = vw / 2f; waylandCursorY = vh / 2f; }
+            switch (ev.getActionMasked()) {
+                case android.view.MotionEvent.ACTION_DOWN:
+                    last[0] = ev.getX(); last[1] = ev.getY(); moved[0] = 0f;
+                    break;
+                case android.view.MotionEvent.ACTION_MOVE: {
+                    float dx = (ev.getX() - last[0]) * SENS, dy = (ev.getY() - last[1]) * SENS;
+                    last[0] = ev.getX(); last[1] = ev.getY();
+                    moved[0] += Math.abs(dx) + Math.abs(dy);
+                    waylandCursorX = Math.max(0f, Math.min(vw, waylandCursorX + dx));
+                    waylandCursorY = Math.max(0f, Math.min(vh, waylandCursorY + dy));
+                    updateWaylandCursor(vw, vh, 1); // motion
+                    break;
+                }
+                case android.view.MotionEvent.ACTION_UP:
+                case android.view.MotionEvent.ACTION_CANCEL:
+                    if (moved[0] < 14f) { // a tap (not a drag) -> left click at the cursor
+                        updateWaylandCursor(vw, vh, 0); // button press
+                        updateWaylandCursor(vw, vh, 2); // button release
+                    }
+                    break;
+            }
+            return true;
+        });
+        // Dedicated runtime dir for the wayland socket. NOT imagefs/tmp — setupXEnvironment does
+        // FileUtils.clear(imagefs/tmp), which races the compositor's async socket creation and
+        // deletes wayland-0. filesDir/.wayland-rt is app-private, never cleared, and reachable by
+        // the guest (full /data paths, no chroot). GuestProgramLauncherComponent uses the same path.
+        File waylandRtDir = new File(getFilesDir(), ".wayland-rt");
+        waylandRtDir.mkdirs();
+        // Extract the xkb keymap so the compositor can send it to wl_keyboard clients (guest needs
+        // it to interpret our evdev key codes). Same dir as the socket = the compositor's XDG_RUNTIME_DIR.
+        try { FileUtils.copy(this, "wayland/keymap.xkb", new File(waylandRtDir, "keymap.xkb")); }
+        catch (Exception e) { Log.e("XServerDisplayActivity", "wayland: keymap extract failed", e); }
+        final String xdgRuntimeDir = waylandRtDir.getPath();
+        // Resolve the Turnip driver (adrenotools) so the compositor can import dmabufs — honoring a
+        // per-game shortcut override exactly like the guest does (the guest's ADRENOTOOLS_DRIVER_PATH
+        // is set from the same resolved value). Using container.getGraphicsDriverConfig() unconditionally
+        // grabbed the wrong driver on a shortcut launch (empty libraryName -> adrenotools load fails ->
+        // system libvulkan -> no dmabuf exts -> vkCreateDevice fails -> black screen).
+        String driverPath = null, libraryName = null;
+        try {
+            String gdc = (shortcut != null)
+                    ? shortcut.getExtra("graphicsDriverConfig", container.getGraphicsDriverConfig())
+                    : container.getGraphicsDriverConfig();
+            String driverId = com.winlator.star.contentdialog.GraphicsDriverConfigDialog.getVersion(gdc);
+            if (driverId != null && !driverId.isEmpty() && !driverId.equals("System")) {
+                com.winlator.star.contents.AdrenotoolsManager atm =
+                        new com.winlator.star.contents.AdrenotoolsManager(this);
+                driverPath = atm.getDriverPath(driverId);
+                libraryName = atm.getLibraryName(driverId);
+            }
+        } catch (Exception e) {
+            Log.e("XServerDisplayActivity", "wayland: driver resolve failed", e);
+        }
+        final String fDriverPath = driverPath, fLibraryName = libraryName;
+        final String nativeLibDir = getApplicationInfo().nativeLibraryDir;
+        waylandSurfaceView.getHolder().addCallback(new android.view.SurfaceHolder.Callback() {
+            boolean started = false;
+            @Override public void surfaceCreated(android.view.SurfaceHolder h) {
+                if (!started) {
+                    started = true;
+                    com.winlator.star.wayland.WaylandCompositor.nativeStartWithSurface(
+                            h.getSurface(), xdgRuntimeDir, fDriverPath, fLibraryName, nativeLibDir);
+                    startWaylandVsync();
+                } else {
+                    com.winlator.star.wayland.WaylandCompositor.nativeSetSurface(h.getSurface());
+                }
+            }
+            @Override public void surfaceChanged(android.view.SurfaceHolder h, int f, int w, int ht) {}
+            @Override public void surfaceDestroyed(android.view.SurfaceHolder h) {
+                com.winlator.star.wayland.WaylandCompositor.nativeSetSurface(null);
+            }
+        });
+        rootView.addView(waylandSurfaceView);
+        rootView.addView(waylandCursorView); // the overlay pointer, on top of the compositor surface
+    }
+
+    /** Move the overlay pointer to the current touchpad position and send the guest a wl_pointer
+     *  event mapped to the 1920x1080 output space. action: 0=press, 1=motion, 2=release. */
+    // The compositor draws once per screen refresh: feed it the Choreographer's vsync ticks for as
+    // long as this activity lives (the tick is a cheap JNI call; the compositor ignores it while
+    // it has nothing new to draw or no window).
+    private boolean waylandVsyncRunning = false;
+    private final android.view.Choreographer.FrameCallback waylandVsyncCallback = new android.view.Choreographer.FrameCallback() {
+        @Override public void doFrame(long frameTimeNanos) {
+            if (!waylandVsyncRunning) return;
+            com.winlator.star.wayland.WaylandCompositor.nativeVsync(frameTimeNanos);
+            android.view.Choreographer.getInstance().postFrameCallback(this);
+        }
+    };
+
+    private void startWaylandVsync() {
+        if (waylandVsyncRunning) return;
+        waylandVsyncRunning = true;
+        android.view.Choreographer.getInstance().postFrameCallback(waylandVsyncCallback);
+    }
+
+    private void updateWaylandCursor(int vw, int vh, int action) {
+        if (waylandCursorView != null) {
+            waylandCursorView.setX(waylandCursorX);
+            waylandCursorView.setY(waylandCursorY);
+            if (waylandCursorView.getVisibility() != View.VISIBLE)
+                waylandCursorView.setVisibility(View.VISIBLE);
+        }
+        int ox = (int) (waylandCursorX / vw * 1920f);
+        int oy = (int) (waylandCursorY / vh * 1080f);
+        com.winlator.star.wayland.WaylandCompositor.nativeSendPointer(action, ox, oy);
+    }
+
+    /** A small classic arrow cursor bitmap (white fill, dark outline) drawn in code. */
+    private android.graphics.Bitmap makeArrowCursorBitmap() {
+        int w = 22, h = 34;
+        android.graphics.Bitmap bmp = android.graphics.Bitmap.createBitmap(w, h,
+                android.graphics.Bitmap.Config.ARGB_8888);
+        android.graphics.Canvas cv = new android.graphics.Canvas(bmp);
+        android.graphics.Path p = new android.graphics.Path();
+        p.moveTo(1, 1); p.lineTo(1, 25); p.lineTo(7, 19); p.lineTo(11, 28);
+        p.lineTo(15, 26); p.lineTo(11, 17); p.lineTo(19, 17); p.close();
+        android.graphics.Paint paint = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        paint.setStyle(android.graphics.Paint.Style.FILL);
+        paint.setColor(0xFFFFFFFF);
+        cv.drawPath(p, paint);
+        paint.setStyle(android.graphics.Paint.Style.STROKE);
+        paint.setStrokeWidth(1.5f);
+        paint.setColor(0xFF202020);
+        cv.drawPath(p, paint);
+        return bmp;
+    }
+
     private void setupXEnvironment() throws PackageManager.NameNotFoundException {
 
         // Set environment variables
@@ -6759,6 +7049,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
             }
             guestProgramLauncherComponent.setContainer(this.container);
             guestProgramLauncherComponent.setWineInfo(this.wineInfo);
+            guestProgramLauncherComponent.setWaylandMode(waylandMode);
 
             // Real-Steam (VAC) launch (feature M3) — STAGE + build the plan BEFORE getWineStartCommand()
             // below reads realSteamPlan to rewrite the launch target. ONLY for a genuine-Steam shortcut
@@ -7009,12 +7300,15 @@ public class XServerDisplayActivity extends AppCompatActivity {
                         UnixSocketConfig.createSocket(rootPath, UnixSocketConfig.SYSVSHM_SERVER_PATH)
                 )
         );
-        environment.addComponent(
-                new XServerComponent(
-                        xServer,
-                        UnixSocketConfig.createSocket(rootPath, UnixSocketConfig.XSERVER_PATH)
-                )
-        );
+        // In wayland mode the embedded compositor is the display server, so don't run the X server.
+        if (!waylandMode) {
+            environment.addComponent(
+                    new XServerComponent(
+                            xServer,
+                            UnixSocketConfig.createSocket(rootPath, UnixSocketConfig.XSERVER_PATH)
+                    )
+            );
+        }
 
         // Audio driver logic. Reseed the launching engine's EPHEMERAL runtime prefs from the resolved
         // per-scope config (engine-scoped BANNER_AUDIO_<ENG>_* env, shortcut-over-container, else engine
@@ -7158,6 +7452,16 @@ public class XServerDisplayActivity extends AppCompatActivity {
         preloaderDialog.enterGuest("Waiting for " + preloaderGameName + " to render…");
         runOnUiThread(this::startLaunchTimers);
 
+        // Wayland: the launch overlay must ALWAYS clear so the guest is visible — the compositor
+        // present path (first-frame hook) may not fire for a shm-only desktop, and the guest must
+        // never be hidden behind a stuck spinner. Force-close it 2s after guest boot, unconditionally.
+        if (waylandMode) {
+            new android.os.Handler(getMainLooper()).postDelayed(() -> {
+                if (!winStarted) { winStarted = true; cancelLaunchTimers(); }
+                preloaderDialog.closeOnUiThread();
+            }, 2000L);
+        }
+
         // Start the WinHandler (writes events to the file)
         winHandler.start();
         // Steam Controller support (no-op unless the setting is on) — after WinHandler so pads that
@@ -7190,6 +7494,9 @@ public class XServerDisplayActivity extends AppCompatActivity {
 
     private void setupUI() {
         FrameLayout rootView = findViewById(R.id.FLXServerDisplay);
+        // Seeded here (after the container + backend are resolved, and after the drawer's reset()
+        // in onCreate) so the drawer can grey Wayland-unsupported controls such as Relative Mouse.
+        XServerDrawerState.INSTANCE.setIsWaylandMode(waylandMode);
         xServerView = new XServerView(this, xServer);
         String rendererType = container != null ? resolvedRenderer() : "vulkan";
         // Native Rendering now routes to the hardened SurfaceFlinger (ASR) renderer instead of the
@@ -7401,10 +7708,16 @@ public class XServerDisplayActivity extends AppCompatActivity {
 
         if (shortcut != null) {
             renderer.setUnviewableWMClasses("explorer.exe");
+            // Wayland: the compositor skips explorer's windows the same way.
+            if (waylandMode) com.winlator.star.wayland.WaylandCompositor.nativeSetHideShell(true);
         }
 
         xServer.setRenderer(renderer);
         rootView.addView(xServerView);
+
+        // Wayland mode: overlay the embedded compositor's SurfaceView on top of the (idle) X view,
+        // and start the compositor rendering into it. winewayland.drv connects to its socket.
+        if (waylandMode) startWaylandCompositor(rootView);
 
         // Version A: watch for an external (TV) display and reparent the game onto it, using the
         // handheld as the controller. The listener updates the in-game TV tab + raises Compose toasts.
@@ -7634,6 +7947,12 @@ public class XServerDisplayActivity extends AppCompatActivity {
 
         inputControlsView.setVisualStyle(VisualStyle.GAMEHUB);
 
+        // Wayland mode: touchpadView and inputControlsView stay above the compositor surface, exactly
+        // like on X11. Their input goes to the X server, whose input sink forwards it to the compositor,
+        // so touch gets the full X11 gesture set (tap, hold-drag, two-finger right click, scroll) and
+        // the on-screen controls and HUD stay visible (a SurfaceView brought to the front punches
+        // through the views below it). Only the overlay pointer goes on top.
+        if (waylandMode && waylandCursorView != null) waylandCursorView.bringToFront();
 
         startTouchscreenTimeout();
 
@@ -9408,6 +9727,30 @@ public class XServerDisplayActivity extends AppCompatActivity {
             return true;
         }
 
+        // Wayland mode: route keyboard keys to wl_keyboard (the guest) instead of the X server.
+        // Game controller buttons stay on the normal path below (WinHandler -> XInput, drawer
+        // hotkeys), exactly like X11; only the sticks arrive as motion events, so sending the
+        // buttons to wl_keyboard left pads with working sticks and dead A/B/X/Y.
+        // Leave system keys (back/volume/home) to Android so the device still behaves normally.
+        if (waylandMode && !ExternalController.isGameController(event.getDevice())) {
+            int kc = event.getKeyCode();
+            boolean systemKey = kc == KeyEvent.KEYCODE_BACK || kc == KeyEvent.KEYCODE_HOME
+                    || kc == KeyEvent.KEYCODE_VOLUME_UP || kc == KeyEvent.KEYCODE_VOLUME_DOWN
+                    || kc == KeyEvent.KEYCODE_VOLUME_MUTE || kc == KeyEvent.KEYCODE_BUTTON_MODE;
+            if (!systemKey) {
+                int evdev = androidKeyToEvdev(kc);
+                if (evdev <= 0 && event.getScanCode() > 0) evdev = event.getScanCode();
+                if (evdev > 0) {
+                    if (event.getAction() == KeyEvent.ACTION_DOWN)
+                        com.winlator.star.wayland.WaylandCompositor.nativeSendKey(evdev, 1);
+                    else if (event.getAction() == KeyEvent.ACTION_UP)
+                        com.winlator.star.wayland.WaylandCompositor.nativeSendKey(evdev, 0);
+                    return true;
+                }
+            }
+            return super.dispatchKeyEvent(event);
+        }
+
         // Handle the PlayStation or Xbox Home button to open the drawer
         if (event.getAction() == KeyEvent.ACTION_DOWN) {
             if (event.getKeyCode() == KeyEvent.KEYCODE_BUTTON_MODE || event.getKeyCode() == KeyEvent.KEYCODE_HOME || event.getKeyCode() == KeyEvent.KEYCODE_BUTTON_SELECT) {
@@ -9419,6 +9762,64 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // Fallback to existing input handling
         return (!inputControlsView.onKeyEvent(event) && !winHandler.onKeyEvent(event) && xServer.keyboard.onKeyEvent(event)) ||
                 (!ExternalController.isGameController(event.getDevice()) && super.dispatchKeyEvent(event));
+    }
+
+    /** Map an Android KeyEvent keyCode to a Linux evdev keycode (for wl_keyboard in wayland mode).
+     *  Returns -1 if unmapped (caller falls back to KeyEvent.getScanCode() for HW keyboards). */
+    private static int androidKeyToEvdev(int kc) {
+        switch (kc) {
+            // Letters (evdev order is NOT alphabetical)
+            case KeyEvent.KEYCODE_A: return 30; case KeyEvent.KEYCODE_B: return 48;
+            case KeyEvent.KEYCODE_C: return 46; case KeyEvent.KEYCODE_D: return 32;
+            case KeyEvent.KEYCODE_E: return 18; case KeyEvent.KEYCODE_F: return 33;
+            case KeyEvent.KEYCODE_G: return 34; case KeyEvent.KEYCODE_H: return 35;
+            case KeyEvent.KEYCODE_I: return 23; case KeyEvent.KEYCODE_J: return 36;
+            case KeyEvent.KEYCODE_K: return 37; case KeyEvent.KEYCODE_L: return 38;
+            case KeyEvent.KEYCODE_M: return 50; case KeyEvent.KEYCODE_N: return 49;
+            case KeyEvent.KEYCODE_O: return 24; case KeyEvent.KEYCODE_P: return 25;
+            case KeyEvent.KEYCODE_Q: return 16; case KeyEvent.KEYCODE_R: return 19;
+            case KeyEvent.KEYCODE_S: return 31; case KeyEvent.KEYCODE_T: return 20;
+            case KeyEvent.KEYCODE_U: return 22; case KeyEvent.KEYCODE_V: return 47;
+            case KeyEvent.KEYCODE_W: return 17; case KeyEvent.KEYCODE_X: return 45;
+            case KeyEvent.KEYCODE_Y: return 21; case KeyEvent.KEYCODE_Z: return 44;
+            // Digit row
+            case KeyEvent.KEYCODE_1: return 2;  case KeyEvent.KEYCODE_2: return 3;
+            case KeyEvent.KEYCODE_3: return 4;  case KeyEvent.KEYCODE_4: return 5;
+            case KeyEvent.KEYCODE_5: return 6;  case KeyEvent.KEYCODE_6: return 7;
+            case KeyEvent.KEYCODE_7: return 8;  case KeyEvent.KEYCODE_8: return 9;
+            case KeyEvent.KEYCODE_9: return 10; case KeyEvent.KEYCODE_0: return 11;
+            // Whitespace / edit
+            case KeyEvent.KEYCODE_ENTER: return 28; case KeyEvent.KEYCODE_NUMPAD_ENTER: return 28;
+            case KeyEvent.KEYCODE_SPACE: return 57; case KeyEvent.KEYCODE_TAB: return 15;
+            case KeyEvent.KEYCODE_DEL: return 14; /* backspace */
+            case KeyEvent.KEYCODE_FORWARD_DEL: return 111; case KeyEvent.KEYCODE_ESCAPE: return 1;
+            // Modifiers
+            case KeyEvent.KEYCODE_SHIFT_LEFT: return 42; case KeyEvent.KEYCODE_SHIFT_RIGHT: return 54;
+            case KeyEvent.KEYCODE_CTRL_LEFT: return 29; case KeyEvent.KEYCODE_CTRL_RIGHT: return 97;
+            case KeyEvent.KEYCODE_ALT_LEFT: return 56; case KeyEvent.KEYCODE_ALT_RIGHT: return 100;
+            case KeyEvent.KEYCODE_CAPS_LOCK: return 58;
+            // Arrows / nav
+            case KeyEvent.KEYCODE_DPAD_UP: return 103; case KeyEvent.KEYCODE_DPAD_DOWN: return 108;
+            case KeyEvent.KEYCODE_DPAD_LEFT: return 105; case KeyEvent.KEYCODE_DPAD_RIGHT: return 106;
+            case KeyEvent.KEYCODE_MOVE_HOME: return 102; case KeyEvent.KEYCODE_MOVE_END: return 107;
+            case KeyEvent.KEYCODE_PAGE_UP: return 104; case KeyEvent.KEYCODE_PAGE_DOWN: return 109;
+            case KeyEvent.KEYCODE_INSERT: return 110;
+            // Punctuation
+            case KeyEvent.KEYCODE_GRAVE: return 41; case KeyEvent.KEYCODE_MINUS: return 12;
+            case KeyEvent.KEYCODE_EQUALS: return 13; case KeyEvent.KEYCODE_LEFT_BRACKET: return 26;
+            case KeyEvent.KEYCODE_RIGHT_BRACKET: return 27; case KeyEvent.KEYCODE_BACKSLASH: return 43;
+            case KeyEvent.KEYCODE_SEMICOLON: return 39; case KeyEvent.KEYCODE_APOSTROPHE: return 40;
+            case KeyEvent.KEYCODE_SLASH: return 53; case KeyEvent.KEYCODE_COMMA: return 51;
+            case KeyEvent.KEYCODE_PERIOD: return 52;
+            // Function row
+            case KeyEvent.KEYCODE_F1: return 59; case KeyEvent.KEYCODE_F2: return 60;
+            case KeyEvent.KEYCODE_F3: return 61; case KeyEvent.KEYCODE_F4: return 62;
+            case KeyEvent.KEYCODE_F5: return 63; case KeyEvent.KEYCODE_F6: return 64;
+            case KeyEvent.KEYCODE_F7: return 65; case KeyEvent.KEYCODE_F8: return 66;
+            case KeyEvent.KEYCODE_F9: return 67; case KeyEvent.KEYCODE_F10: return 68;
+            case KeyEvent.KEYCODE_F11: return 87; case KeyEvent.KEYCODE_F12: return 88;
+            default: return -1;
+        }
     }
 
     public InputControlsView getInputControlsView() {
@@ -10848,6 +11249,8 @@ return true;
             HostRenderer r = xServerView.getRenderer();
             if (r != null) r.setFpsLimit(fps);
         }
+        // Wayland: the compositor paces buffer returns instead of the Present extension.
+        if (waylandMode) com.winlator.star.wayland.WaylandCompositor.nativeSetFpsLimit(Math.round(paced));
         // VRR / refresh-rate matching: vote the panel cadence to match the displayed FPS.
         applyVrr(vrrCap);
     }
@@ -11168,6 +11571,44 @@ return true;
         pill.bringToFront();
     }
 
+    // Force the Wine graphics driver via the prefix registry. Wayland selects winewayland.drv
+    // (into our compositor); otherwise we only restore x11 if a prior wayland launch had set it,
+    // so normal X11 prefixes are left untouched.
+    private void setWineDisplayDriver() {
+        File userRegFile = new File(imageFs.getRootDir(), ImageFs.WINEPREFIX + "/user.reg");
+        try (WineRegistryEditor reg = new WineRegistryEditor(userRegFile)) {
+            if (waylandMode) {
+                reg.setStringValue("Software\\Wine\\Drivers", "Graphics", "wayland");
+            } else {
+                String cur = reg.getStringValue("Software\\Wine\\Drivers", "Graphics", "");
+                if ("wayland".equals(cur))
+                    reg.setStringValue("Software\\Wine\\Drivers", "Graphics", "x11");
+            }
+        }
+        // Winlator patches winex11.drv so its init succeeds even with no X server, so it always
+        // wins Wine's driver selection. To force winewayland, hide winex11.drv in wayland mode so
+        // explorer's LoadLibrary fails and it falls through to wayland. Self-healing: any X11-mode
+        // launch restores it, so a crash mid-wayland can never permanently break the X11 path.
+        try {
+            com.winlator.star.contents.ContentProfile profile =
+                    contentsManager.getProfileByEntryName(container.getWineVersion());
+            if (profile != null) {
+                File libDir = new File(ContentsManager.getInstallDir(this, profile), profile.wineLibPath);
+                for (String arch : new String[]{"aarch64-windows", "i386-windows"}) {
+                    File drv = new File(libDir, "wine/" + arch + "/winex11.drv");
+                    File bak = new File(libDir, "wine/" + arch + "/winex11.drv.bak");
+                    if (waylandMode) {
+                        if (drv.exists() && !bak.exists()) drv.renameTo(bak);
+                    } else {
+                        if (bak.exists() && !drv.exists()) bak.renameTo(drv);
+                    }
+                }
+            }
+        } catch (Exception e) {
+            Log.e("XServerDisplayActivity", "wayland: winex11 hide/restore failed", e);
+        }
+    }
+
     private void applyGeneralPatches(Container container) {
         File rootDir = imageFs.getRootDir();
         TarCompressorUtils.extract(TarCompressorUtils.Type.ZSTD, this, "container_pattern_common.tzst", rootDir);
@@ -11428,6 +11869,7 @@ return true;
         fusionHud.applyConfig(fpsConfigString);
         if (hudEngineShort != null) fusionHud.setEngineLabel(hudEngineShort);
         if (hudGpuName != null) fusionHud.setGpuModel(hudGpuName);
+        fusionHud.setDisplayServer(waylandMode ? "Wayland" : "X11");
         // Mega stack-layer versions: Proton/Wine, the graphics-driver wrapper package, and DX wrapper.
         if (wineInfo != null) fusionHud.setWineVersion(wineInfo.toString());
         fusionHud.setGraphicsWrapper(friendlyGraphicsWrapper());

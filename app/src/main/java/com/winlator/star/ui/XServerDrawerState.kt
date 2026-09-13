@@ -39,6 +39,12 @@ object XServerDrawerState {
     private val _isRelativeMouseMovement = MutableStateFlow(false)
     val isRelativeMouseMovement: StateFlow<Boolean> = _isRelativeMouseMovement
 
+    // True while the session runs on the embedded Wayland compositor. UI-only gate: Relative Mouse
+    // needs zwp_pointer_constraints_v1 / zwp_relative_pointer_manager_v1, which the compositor
+    // doesn't implement yet, so the drawer greys the chip (the stored value is left alone).
+    private val _isWaylandMode           = MutableStateFlow(false)
+    val isWaylandMode: StateFlow<Boolean> = _isWaylandMode
+
     private val _isMouseDisabled         = MutableStateFlow(false)
     val isMouseDisabled: StateFlow<Boolean> = _isMouseDisabled
 
@@ -453,6 +459,7 @@ object XServerDrawerState {
     // Setters called from Java
     fun setIsPaused(v: Boolean)                { _isPaused.value = v }
     fun setIsRelativeMouseMovement(v: Boolean) { _isRelativeMouseMovement.value = v }
+    fun setIsWaylandMode(v: Boolean)           { _isWaylandMode.value = v }
     fun setIsMouseDisabled(v: Boolean)         { _isMouseDisabled.value = v }
     fun setMoveCursorToTouchpoint(v: Boolean)  { _moveCursorToTouchpoint.value = v }
     fun setGestureDragSelect(v: Boolean)          { _gestureDragSelect.value = v }
@@ -596,6 +603,7 @@ object XServerDrawerState {
         _controlsSubTab.value = 0
         _isPaused.value = false
         _isRelativeMouseMovement.value = false
+        _isWaylandMode.value = false
         _isMouseDisabled.value = false
         _moveCursorToTouchpoint.value = false
         _gestureDragSelect.value = true

@@ -134,6 +134,26 @@ class ContainerDetailViewModel(app: Application) : AndroidViewModel(app) {
     var rendererSwapRB      by mutableStateOf(false)
     // SurfaceFlinger (ASR) BGRA->RGBA colour correction (GN #1620). Default ON = correct colours.
     var rendererSfCompatMode by mutableStateOf(true)
+
+    // Display backend: "x11" (default) or "wayland". Wayland routes launches through the
+    // embedded compositor (winewayland.drv) and greys out the whole Renderer group above,
+    // which the compositor replaces. See Container.DISPLAY_BACKEND_*.
+    //
+    // displayBackend is the STORED/selected value; isWaylandBackend is the EFFECTIVE one — Wayland
+    // only when the selected Proton layer can actually drive it (WineWaylandSupport). A container
+    // saved as "wayland" whose layer was since removed/replaced therefore edits (and saves) as X11,
+    // and every Wayland-only greying in the editor follows the effective backend.
+    var displayBackend by mutableStateOf(Container.DISPLAY_BACKEND_X11)
+    val isWaylandStored get() = displayBackend == Container.DISPLAY_BACKEND_WAYLAND
+    val isWaylandBackend get() = isWaylandStored && isWineWaylandCapable(selectedWineVersion)
+
+    // Whether the given wine/Proton layer ships winewayland.so + its bundled Wayland Turnip. Same
+    // early-composition caveat as isWineXrandrCapable, but the conservative default is NOT capable:
+    // the bundled main wine never is, and a layer we can't probe must not unlock Wayland.
+    fun isWineWaylandCapable(wineVersion: String): Boolean {
+        if (!::contentsManager.isInitialized || wineVersion.isEmpty()) return false
+        return com.winlator.star.core.WineWaylandSupport.isWaylandCapable(context, contentsManager, wineVersion)
+    }
     // Render scale (supersampling) — stored via the "renderScale" extra (no DB field). "1.0" = Off.
     var renderScale         by mutableStateOf("1.0")
     var autoCloseOnExit     by mutableStateOf(true)
@@ -536,6 +556,7 @@ class ContainerDetailViewModel(app: Application) : AndroidViewModel(app) {
         rendererFilterMode       = seed?.getRendererFilterMode() ?: 0
         rendererSwapRB           = seed?.getRendererSwapRB() ?: false
         rendererSfCompatMode     = seed?.getRendererSfCompatMode() ?: true
+        displayBackend           = seed?.getDisplayBackend() ?: Container.DISPLAY_BACKEND_X11
         renderScale              = seed?.getExtra("renderScale", "1.0") ?: "1.0"
         autoCloseOnExit          = (seed?.getExtra("autoCloseOnExit", "1") ?: "1") == "1"
         selectedDXWrapper        = identifierToDisplay(seed?.getDXWrapper() ?: Container.DEFAULT_DXWRAPPER, dxWrapperEntries)
@@ -807,6 +828,8 @@ class ContainerDetailViewModel(app: Application) : AndroidViewModel(app) {
         val wasArm64 = isArm64EC
         selectedWineVersion = version
         coerceAudioDriverForWine()      // a switch to an unsupported layer drops a stale DirectAudio pick
+        // Wayland is only offered on a layer that ships winewayland + its Wayland Turnip: snap back to X11.
+        if (isWaylandStored && !isWineWaylandCapable(version)) displayBackend = Container.DISPLAY_BACKEND_X11
         refreshWineDependent(version)   // updates isArm64EC + swaps the box64/wowbox64 list
 
         // CREATE mode only: a wine change can FLIP the architecture. applyArch() swapped the box64 list
@@ -1022,6 +1045,9 @@ class ContainerDetailViewModel(app: Application) : AndroidViewModel(app) {
             c.setRendererFilterMode(rendererFilterMode)
             c.setRendererSwapRB(rendererSwapRB)
             c.setRendererSfCompatMode(rendererSfCompatMode)
+            // Persist the EFFECTIVE backend: a stored "wayland" on a layer that can no longer drive it
+            // displayed as X11 in the editor, so X11 is what gets saved.
+            c.setDisplayBackend(if (isWaylandBackend) Container.DISPLAY_BACKEND_WAYLAND else Container.DISPLAY_BACKEND_X11)
             c.putExtra("renderScale", if (renderScale == "1.0") null else renderScale)
             c.putExtra("autoCloseOnExit", if (autoCloseOnExit) null else "0")  // default ON
             c.setInputType(inputType)
