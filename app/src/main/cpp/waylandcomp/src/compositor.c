@@ -45,6 +45,7 @@
 #include "relative-pointer-unstable-v1-server-protocol.h"
 #include "vk_present.h"
 #include "framegen_bridge.h"
+#include "effects_chain.h"
 #include "banner_ext.h"
 
 #define WLOGI(...) __android_log_print(ANDROID_LOG_INFO, "BannerWayland", __VA_ARGS__)
@@ -266,6 +267,8 @@ volatile int g_hide_shell;
  * fullscreen window is shown on its own Android layer (sc_layer.c) instead of being blitted into the
  * screen swapchain. Set from the app before the compositor starts; read per frame. */
 volatile int g_zero_copy;
+static int g_zero_copy_paused;        /* effects hold the layer path off (render_scene) */
+static int g_zero_copy_fx_skip_said;
 
 /* Compressed (UBWC) game buffers: zwp_linux_dmabuf_v1 advertises DRM_FORMAT_MOD_QCOM_COMPRESSED next
  * to LINEAR for every format the renderer's own driver can import that way, so Turnip's Wayland WSI
@@ -294,7 +297,6 @@ static struct wl_event_source *g_release_source;
 static int g_scene_w, g_scene_h;            /* size of the last drawn scene */
 static int g_desktop_w, g_desktop_h;        /* last size the desktop had content at */
 static unsigned g_stat_frames, g_stat_dmabuf, g_stat_shm; /* since the last 10 s summary */
-static int g_zero_copy_paused;               /* the layer stands aside for frame generation */
 
 static void schedule_render(void);
 
@@ -635,16 +637,21 @@ static void take_dmabuf(struct surface *s, struct dmabuf_buffer *b, struct wl_re
                        name, b->width, b->height, b->format & 0xff, (b->format >> 8) & 0xff,
                        (b->format >> 16) & 0xff, (b->format >> 24) & 0xff,
                        vkp_modifier_name(b->modifier));
+        else if (ahb_swapchain_has_ahb(b))
+            banner_log("vulkan", "%s is presenting GPU frames through Wayland: %dx%d on its own display layer only "
+                       "(gralloc buffers the compositor cannot import for the copy path)",
+                       name, b->width, b->height);
         else
-            banner_log("error", "could not import GPU frames from %s (%dx%d, modifier %#llx)%s",
-                       name, b->width, b->height, (unsigned long long)b->modifier,
-                       ahb_swapchain_has_ahb(b) ? "; they are the game's gralloc buffers, shown on their own layer only" : "");
-        if (b->img) {
+            banner_log("error", "could not import GPU frames from %s (%dx%d, modifier %#llx)",
+                       name, b->width, b->height, (unsigned long long)b->modifier);
+        /* The HUD follows the window whether its frames are copied or go straight to the layer:
+         * a zero-copy frame the compositor never imported is still a presented game frame. */
+        if (b->img || ahb_swapchain_has_ahb(b)) {
             g_hud_surface = s;
             banner_on_game_surface(name, vkp_gpu_name());
         }
     }
-    if (s == g_hud_surface && b->img) banner_on_game_frame();
+    if (s == g_hud_surface && (b->img || ahb_swapchain_has_ahb(b))) banner_on_game_frame();
 }
 
 /* ---- hooks for ahb_swapchain.c (zero-copy layers) */
@@ -1531,19 +1538,33 @@ static void render_scene(void) {
     }
 
     int rendered;
-    /* Frame generation needs the compositor pass (the whole frame goes through vk_present.c's
-     * scene image), which a zero-copy layer bypasses: while it is armed the fullscreen window
-     * takes the copy path and the layer resumes when it is off. */
-    int framegen = vkp_framegen_active();
-    if (g_zero_copy && framegen != g_zero_copy_paused) {
-        g_zero_copy_paused = framegen;
-        banner_log("framegen", framegen ? "zero-copy paused: frame generation needs the compositor pass"
-                                        : "zero-copy resumed: frame generation is off");
+    /* Screen effects (effects_chain.c) and frame generation (framegen_bridge.c) both run in the
+     * compositor pass, which the layer path bypasses: while either is on, a fullscreen game goes
+     * through the copy path instead, and the layer resumes once both are off again. Said once per
+     * transition, by whichever needs the pass. */
+    const int fx_on = vkp_effects_active();
+    const int framegen = vkp_framegen_active();
+    const int pass_on = fx_on || framegen;
+    const int layer_ok = g_zero_copy && !pass_on;
+    if (g_zero_copy && pass_on != g_zero_copy_paused) {
+        g_zero_copy_paused = pass_on;
+        if (framegen)
+            banner_log("framegen", "zero-copy paused: frame generation needs the compositor pass");
+        else if (fx_on)
+            banner_log("effects", "zero-copy paused: screen effects need the compositor pass");
+        else
+            banner_log("effects", "zero-copy resumed: screen effects and frame generation are off");
     }
-    int layer_ok = g_zero_copy && !framegen;
     int li = layer_ok ? layer_candidate(&dl, w, h) : -1;
     struct surface *ls = li >= 0 ? surface_for_image(dl.d[li].img) : NULL;
-    if (li < 0 && layer_ok) ls = ahb_layer_only_candidate(w, h);
+    /* A frame this renderer could not import can only be shown on the layer, effects or not. */
+    if (li < 0 && g_zero_copy) ls = ahb_layer_only_candidate(w, h);
+    if (ls && pass_on && li < 0 && !g_zero_copy_fx_skip_said) {
+        g_zero_copy_fx_skip_said = 1;
+        banner_log(framegen ? "framegen" : "effects",
+                   "the game's frames cannot be imported by the compositor: shown zero-copy, %s skipped",
+                   framegen ? "frame generation" : "effects");
+    }
     if (li >= 0 || ls) {
         /* Layer mode: the fullscreen window goes to its own Android layer; whatever is under it is
          * hidden by it, so the screen surface only needs to be black. The frame goes on the layer
@@ -1620,6 +1641,8 @@ static void on_vsync(int64_t frame_time_ns) {
     /* The app's surface may have been replaced or taken away since the last frame: apply that now
      * (the app never waits for us), and redraw the scene onto a new one. */
     if (vkp_apply_window_request()) g_dirty = 1;
+    /* A screen-effect setting changed (JNI, any thread): redraw so it shows on a static scene too. */
+    if (vkp_effects_sync()) g_dirty = 1;
     if (g_dirty) render_scene();
 }
 
@@ -2360,12 +2383,15 @@ void banner_inject_key(uint32_t evdev, int pressed) { key_event(evdev, pressed);
 /* ------------------------------------------------------------------ 10 s summary */
 
 static struct wl_event_source *g_stats_timer;
+/* The last window's zero-copy count, kept for the app (WaylandCompositor.nativeZeroCopyFrames). */
+volatile unsigned g_zero_copy_last;
 
 static int on_stats_timer(void *data) {
     int windows = 0;
     struct surface *s;
     wl_list_for_each(s, &g_toplevels, toplevel_link) windows++;
     unsigned zero_copy = g_zero_copy ? ahb_swapchain_stats_take() : 0;
+    g_zero_copy_last = zero_copy;
     /* Interpolated frames the compositor added (framegen_bridge.c). They are on screen, so they
      * count there; they are NOT GPU frames from games and never inflate that number. */
     unsigned generated = vkp_framegen_stats_take();

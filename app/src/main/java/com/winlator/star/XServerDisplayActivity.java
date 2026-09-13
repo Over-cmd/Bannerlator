@@ -2197,9 +2197,9 @@ public class XServerDisplayActivity extends AppCompatActivity {
         boolean fpsLimOn = resolvedFpsLimiterEnabled();
         boolean bionicFgActive = fgEnabled || lsfgOn;
         XServerDrawerState.INSTANCE.setBionicFgActive(bionicFgActive);
-        // TODO(wayland-framegen): once XServerDrawerState gains the field, publish that the Wayland
-        // compositor's frame-generation bridge is compiled in (LSFG Native + Win-FG Native):
-        //   XServerDrawerState.INSTANCE.setWaylandFrameGenAvailable(waylandMode);
+        // Wayland: the compositor's frame-generation bridge (LSFG Native + Win-FG Native,
+        // waylandcomp/src/framegen_bridge.c) is compiled in, so the drawer's FG rows are live there.
+        XServerDrawerState.INSTANCE.setWaylandFrameGenAvailable(waylandMode);
         XServerDrawerState.INSTANCE.setFrameGenEnabled(fgEnabled || lsfgOn);
         // Frame gen normally starts OFF in-game (multiplier 0) regardless of the container setting. The
         // layer is still loaded at launch (below), so the user can opt in per session from the FG drawer
@@ -6788,6 +6788,95 @@ public class XServerDisplayActivity extends AppCompatActivity {
         return zc != null && (zc.equals("1") || zc.equalsIgnoreCase("true"));
     }
 
+    /** The in-game drawer's Wayland rows (Graphics tab): seed the Zero-copy toggle from the effective
+     *  env and wire its writer + the live frame-count poll. Runs from setupUI, after the container and
+     *  shortcut are resolved and after the drawer's reset() in onCreate. */
+    private void setupWaylandDrawerGlue() {
+        XServerDrawerState state = XServerDrawerState.INSTANCE;
+        state.setWaylandZeroCopyRequested(isWaylandZeroCopyRequested());
+        // Writes BANNER_WAYLAND_ZERO_COPY into the SHORTCUT's env vars on a shortcut launch, else the
+        // container's; every other variable is kept. The two env strings are concatenated at launch
+        // (container first, shortcut second, so the shortcut wins), hence for a shortcut: ON puts =1;
+        // OFF removes the var, or writes =0 when the container's own env still carries =1 — removing
+        // it from the shortcut alone would leave the container's value in force.
+        state.onWaylandZeroCopyToggle = on -> {
+            try {
+                if (shortcut != null) {
+                    EnvVars env = new EnvVars(shortcut.getExtra("envVars", ""));
+                    if (on) env.put("BANNER_WAYLAND_ZERO_COPY", "1");
+                    else if (isZeroCopyEnvOn(container.getEnvVars())) env.put("BANNER_WAYLAND_ZERO_COPY", "0");
+                    else env.remove("BANNER_WAYLAND_ZERO_COPY");
+                    String out = env.toString();
+                    shortcut.putExtra("envVars", out.isEmpty() ? null : out);
+                    shortcut.saveData();
+                } else {
+                    EnvVars env = new EnvVars(container.getEnvVars());
+                    if (on) env.put("BANNER_WAYLAND_ZERO_COPY", "1");
+                    else env.remove("BANNER_WAYLAND_ZERO_COPY");
+                    container.setEnvVars(env.toString());
+                    container.saveData();
+                }
+                Log.i("XServerDisplayActivity", "wayland: zero-copy presentation " + (on ? "on" : "off")
+                        + " saved to " + (shortcut != null ? "shortcut" : "container") + " env (next launch)");
+            } catch (Exception e) {
+                Log.e("XServerDisplayActivity", "wayland: zero-copy env write failed", e);
+            }
+        };
+        // Last-10-s zero-copy frame count, straight from the compositor's stats window.
+        state.onWaylandZeroCopyPoll = () ->
+                state.setWaylandZeroCopyFrames(com.winlator.star.wayland.WaylandCompositor.nativeZeroCopyFrames());
+    }
+
+    private static boolean isZeroCopyEnvOn(String raw) {
+        if (raw == null || raw.isEmpty()) return false;
+        String zc = new EnvVars(raw).get("BANNER_WAYLAND_ZERO_COPY");
+        return zc != null && (zc.equals("1") || zc.equalsIgnoreCase("true"));
+    }
+
+    /** "compositor: <adrenotools driver> · game: <Wayland game driver>" for the Task Manager's
+     *  CONTAINER block on Wayland (the X11 graphicsDriver id is idle in that session). */
+    private String waylandDriverSummary() {
+        String comp = "System";
+        try {
+            String gdc = (shortcut != null)
+                    ? shortcut.getExtra("graphicsDriverConfig", container.getGraphicsDriverConfig())
+                    : container.getGraphicsDriverConfig();
+            String driverId = com.winlator.star.contentdialog.GraphicsDriverConfigDialog.getVersion(gdc);
+            if (driverId != null && !driverId.isEmpty() && !driverId.equals("System")) {
+                AdrenotoolsManager atm = new AdrenotoolsManager(this);
+                String name = atm.getDriverName(driverId);
+                String ver = atm.getDriverVersion(driverId);
+                comp = (name == null || name.isEmpty() ? driverId : name) + (ver == null || ver.isEmpty() ? "" : " " + ver);
+            }
+        } catch (Exception e) {
+            Log.w("XServerDisplayActivity", "wayland: compositor driver name unavailable", e);
+        }
+        String game;
+        try {
+            String choice = com.winlator.star.core.WaylandGameDriver.effectiveChoice(container, shortcut);
+            if (com.winlator.star.core.WaylandGameDriver.isImported(choice)) {
+                com.winlator.star.core.WaylandGameDriver.Resolution r =
+                        com.winlator.star.core.WaylandGameDriver.resolve(this, choice);
+                game = r.icdPath != null
+                        ? new com.winlator.star.contents.WaylandGameDriverManager(this)
+                                .getDriverName(com.winlator.star.core.WaylandGameDriver.importedId(r.choice)) + " (imported)"
+                        : com.winlator.star.core.WaylandGameDriver.variantShortName(r.variant);
+            } else if (Container.WAYLAND_GAME_DRIVER_AUTO.equals(choice)) {
+                // Auto's answer is cached by the GPU probe the launch env export runs; before that
+                // (or if it never ran) say Auto rather than probing the GPU on the UI thread here.
+                String v = com.winlator.star.core.WaylandGameDriver.autoVariantIfKnown();
+                game = v == null ? "Auto (by GPU)"
+                        : com.winlator.star.core.WaylandGameDriver.variantShortName(v) + " (auto)";
+            } else {
+                game = com.winlator.star.core.WaylandGameDriver.variantShortName(
+                        com.winlator.star.core.WaylandGameDriver.resolve(this, choice).variant);
+            }
+        } catch (Exception e) {
+            game = "—";
+        }
+        return "compositor: " + comp + " · game: " + game;
+    }
+
     private void startWaylandCompositor(FrameLayout rootView) {
         // Wayland has no XServer onUpdateWindowContent hook to dismiss the launch overlay, so
         // dismiss on the compositor's FIRST presented client frame instead (mirrors the X11 grace
@@ -7017,6 +7106,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
             EnvVars env = raw != null && !raw.isEmpty() ? new EnvVars(raw) : null;
             boolean zeroCopy = isWaylandZeroCopyRequested();
             com.winlator.star.wayland.WaylandCompositor.nativeSetZeroCopy(zeroCopy);
+            XServerDrawerState.INSTANCE.setWaylandZeroCopyActive(zeroCopy);
             if (zeroCopy) Log.i("XServerDisplayActivity", "wayland: zero-copy layer mode requested");
             // Compressed (UBWC) game buffers, default on; BANNER_WAYLAND_UBWC=0 (or false/off) forces the
             // linear-only advertisement for an A/B run.
@@ -7723,6 +7813,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // Seeded here (after the container + backend are resolved, and after the drawer's reset()
         // in onCreate) so the drawer can grey Wayland-unsupported controls such as Relative Mouse.
         XServerDrawerState.INSTANCE.setIsWaylandMode(waylandMode);
+        if (waylandMode) setupWaylandDrawerGlue();
         xServerView = new XServerView(this, xServer);
         String rendererType = container != null ? resolvedRenderer() : "vulkan";
         // Native Rendering now routes to the hardened SurfaceFlinger (ASR) renderer instead of the
@@ -8541,22 +8632,102 @@ public class XServerDisplayActivity extends AppCompatActivity {
         }, "fexmode-probe").start();
     }
 
+    /** Wayland: seed the compositor's screen-effect chain from the per-game values the Vulkan path
+     *  remembers (#382 keys, same defaults) and wire the drawer's Vulkan post-chain callbacks to
+     *  {@link com.winlator.star.wayland.WaylandCompositor}. Modes/ranges are 1:1 with the X11 Vulkan
+     *  renderer; Native Rendering does not exist here, so nothing toggles it. */
+    private void initWaylandEffects(XServerDialogState ds) {
+        int initialUpscaler = resolveScalingMode();
+        int upscaleSharpness = resolveExtraInt("upscaleSharpness", 75);
+        boolean casEnabled = resolveExtraBool("casEnabled", false);
+        int casSharpness = resolveExtraInt("casSharpness", 60);
+        boolean hdrEnabled = resolveExtraBool("hdrEnabled", false);
+        boolean debandEnabled = resolveExtraBool("debandEnabled", false);
+        int debandStrength = resolveExtraInt("debandStrength", 100);
+        com.winlator.star.wayland.WaylandCompositor.nativeSetUpscaler(initialUpscaler);
+        com.winlator.star.wayland.WaylandCompositor.nativeSetUpscaleSharpness(upscaleSharpness);
+        com.winlator.star.wayland.WaylandCompositor.nativeSetCas(casEnabled, casSharpness);
+        com.winlator.star.wayland.WaylandCompositor.nativeSetHdr(hdrEnabled);
+        com.winlator.star.wayland.WaylandCompositor.nativeSetDeband(debandEnabled, debandStrength);
+        com.winlator.star.wayland.WaylandCompositor.nativeSetScreenEffects(0f, 0f, 1.0f, 100f, false, false, false, false);
+        ds.setUpscalerMode(initialUpscaler);
+        ds.setUpscaleSharpness(upscaleSharpness);
+        ds.setCasEnabled(casEnabled);
+        ds.setCasSharpness(casSharpness);
+        ds.setHdrVkEnabled(hdrEnabled);
+        ds.setDebandEnabled(debandEnabled);
+        ds.setDebandStrength(debandStrength);
+        ds.setVkBrightness(0f); ds.setVkContrast(0f); ds.setVkGamma(1.0f); ds.setVkSaturation(100f);
+        ds.setVkFxaa(false); ds.setVkToon(false); ds.setVkCrt(false); ds.setVkNtsc(false);
+        updateWaylandLookName(ds);
+
+        ds.onUpscalerApply = (mode) -> {
+            com.winlator.star.wayland.WaylandCompositor.nativeSetUpscaler(mode);
+            persistScalingMode(mode);
+            updateWaylandLookName(ds);
+        };
+        ds.onUpscaleSharpnessApply = (sharpness) -> {
+            com.winlator.star.wayland.WaylandCompositor.nativeSetUpscaleSharpness(sharpness);
+            persistExtraInt("upscaleSharpness", sharpness);
+        };
+        ds.onCasApply = (enabled, sharpness) -> {
+            com.winlator.star.wayland.WaylandCompositor.nativeSetCas(enabled, sharpness);
+            persistExtraBool("casEnabled", enabled);
+            persistExtraInt("casSharpness", sharpness);
+            updateWaylandLookName(ds);
+        };
+        ds.onHdrApply = (enabled) -> {
+            com.winlator.star.wayland.WaylandCompositor.nativeSetHdr(enabled);
+            persistExtraBool("hdrEnabled", enabled);
+        };
+        ds.onDebandApply = (enabled, strength) -> {
+            com.winlator.star.wayland.WaylandCompositor.nativeSetDeband(enabled, strength);
+            persistExtraBool("debandEnabled", enabled);
+            persistExtraInt("debandStrength", strength);
+            updateWaylandLookName(ds);
+        };
+        ds.onVulkanScreenEffectsApply = (brightness, contrast, gamma, saturation, fxaa, toon, crt, ntsc) -> {
+            com.winlator.star.wayland.WaylandCompositor.nativeSetScreenEffects(brightness, contrast, gamma, saturation, fxaa, toon, crt, ntsc);
+            updateWaylandLookName(ds);
+        };
+        // The compositor's effect chain is compiled in: un-grey the effect rows on Wayland.
+        XServerDrawerState.INSTANCE.setWaylandEffectsAvailable(true);
+    }
+
+    /** Which Look the drawer's live Vulkan-block values are (null = Custom), named in the compositor's
+     *  `effects` log line. A Look is applied through three callbacks in a row; the last one sees the
+     *  whole preset and the compositor coalesces the change into one line. */
+    private void updateWaylandLookName(XServerDialogState ds) {
+        int cas = ds.getCasEnabled().getValue() ? ds.getCasSharpness().getValue() : 0;
+        Integer idx = com.winlator.star.ui.ScreenEffectLooks.INSTANCE.indexOfMatch(
+                ds.getVkBrightness().getValue(), ds.getVkContrast().getValue(), ds.getVkGamma().getValue(),
+                ds.getVkSaturation().getValue(), cas, ds.getVkFxaa().getValue(), ds.getVkCrt().getValue(),
+                ds.getVkToon().getValue(), ds.getVkNtsc().getValue(), ds.getDebandEnabled().getValue(),
+                ds.getUpscalerMode().getValue());
+        com.winlator.star.wayland.WaylandCompositor.nativeSetLookName(
+                idx == null ? null : com.winlator.star.ui.ScreenEffectLooks.INSTANCE.getLOOKS().get(idx).getName());
+    }
+
     private void initInlineTabStates(HostRenderer renderer) {
         seedRuntimeBackend();
 
         // SGSR/HDR/screen-effect shaders are GL EffectComposer features; the Vulkan renderer has no
         // post-process pipeline, so their callbacks below are never set. Flag it so the drawer grays
         // those toggles out instead of showing dead switches.
-        XServerDialogState.INSTANCE.setEffectsSupported(renderer instanceof GLRenderer);
+        XServerDialogState.INSTANCE.setEffectsSupported(!waylandMode && renderer instanceof GLRenderer);
         XServerDialogState ds = XServerDialogState.INSTANCE;
 
         // Scaling mode (spatial upscaler) is a Vulkan-only control — the inverse of the GL-only
         // effects above. Flag it for the drawer gate and wire the apply callback here, BEFORE the
         // GL-only early return below, so it works on the Vulkan renderer. setUpscaler covers
         // modes 0..5 and drives the base sampler filter for modes 1/2 (single source of truth).
-        boolean vulkanActive = renderer instanceof com.winlator.star.renderer.vulkan.VulkanRenderer;
-        ds.setVulkanSupported(vulkanActive);
-        if (vulkanActive) {
+        // Wayland: the X renderer is idle; the embedded compositor runs the same Vulkan post chain
+        // (waylandcomp/src/effects_chain.c), so the drawer's Vulkan block drives it instead.
+        boolean vulkanActive = !waylandMode && renderer instanceof com.winlator.star.renderer.vulkan.VulkanRenderer;
+        ds.setVulkanSupported(vulkanActive || waylandMode);
+        if (waylandMode) {
+            initWaylandEffects(ds);
+        } else if (vulkanActive) {
             com.winlator.star.renderer.vulkan.VulkanRenderer vkr =
                 (com.winlator.star.renderer.vulkan.VulkanRenderer) renderer;
             // Direction A: enabling any preset that lives in the compositor post pass turns Native
@@ -9591,6 +9762,8 @@ public class XServerDisplayActivity extends AppCompatActivity {
     // the device GPU to a bundled variant, imported: hands over an imported Linux ICD (missing import →
     // Auto, logged). No-op on X11; waylandMode is final by here (gated on the layer above).
     com.winlator.star.core.WaylandGameDriver.applyToLaunchEnv(this, envVars, container, shortcut, waylandMode);
+    // The Task Manager's CONTAINER block was built before this ran (setupUI); now Auto's variant is known.
+    if (waylandMode) XServerDialogState.INSTANCE.setTmContainerInfo(buildTmContainerInfo());
 
     // --- Environment Variable Setup ---
     // 2.8.1 structure restored: WRAPPER_VK_VERSION = chosenMinor + probePatch,
@@ -12846,7 +13019,9 @@ return true;
             String device = android.os.Build.MODEL + soc + " · " + cores + " cores · Android "
                 + android.os.Build.VERSION.RELEASE;
             return new XServerDialogState.TmContainerInfo(
-                wine, dxwrapper, resolvedRenderer(), graphicsDriver, res, device);
+                wine, dxwrapper, resolvedRenderer(),
+                waylandMode ? waylandDriverSummary() : graphicsDriver, res, device,
+                waylandMode ? "Wayland" : "X11");
         } catch (Exception e) {
             return null;
         }

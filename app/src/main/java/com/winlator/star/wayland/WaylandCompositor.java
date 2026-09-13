@@ -177,6 +177,11 @@ public final class WaylandCompositor {
      *  in the container's environment variables; see waylandcomp/ZERO_COPY_SPIKE.md. Set before start. */
     public static native void nativeSetZeroCopy(boolean on);
 
+    /** Zero-copy frames the compositor presented in its LAST completed 10 s stats window (the
+     *  "| N zero-copy frames" figure of its session-log stats line); 0 while zero-copy is off or
+     *  before the first window closes. Read-only, any thread — the in-game drawer polls it. */
+    public static native int nativeZeroCopyFrames();
+
     /** Compressed (UBWC) game buffers: the compositor advertises DRM_FORMAT_MOD_QCOM_COMPRESSED next to
      *  LINEAR on zwp_linux_dmabuf_v1 for every format its driver can import that way, so the game's
      *  Turnip allocates compressed swapchain images instead of resolving every frame to a linear copy.
@@ -193,6 +198,38 @@ public final class WaylandCompositor {
      *  with the same arithmetic as {@code ViewTransformation} (which maps touch input), so the picture and
      *  the pointer agree. OFF and FIT both letterbox. Callable any time; the next frame uses it. */
     public static native void nativeSetScaleMode(int fullscreenMode, int screenAlignment);
+
+    // ---- Screen effects: the X11 Vulkan renderer's post chain, run by the compositor between the
+    // composited scene and the output blit (waylandcomp/src/effects_chain.c). Same modes, ranges and
+    // pass order as VulkanRenderer's setters, so a saved preset looks the same on both backends.
+    // Callable any time from any thread; the compositor applies them on its next frame and writes
+    // one `effects` line to the session log per change. While any effect is on, a zero-copy
+    // (layer-mode) game is presented through the compositor pass instead.
+
+    /** Scaling mode: 0=None 1=Linear 2=Nearest 3=SGSR 4=FSR 5=FSR Fit 6=Sharpen 7=NIS 8=SGSR HQ.
+     *  Resizes the scene to its mapped output size (there is no render scale on Wayland). */
+    public static native void nativeSetUpscaler(int mode);
+
+    /** The upscaler's own sharpness slider 0..100 (RCAS lobe scale, SGSR edge 0.5..4.5, NIS). */
+    public static native void nativeSetUpscaleSharpness(int sharpness);
+
+    /** AMD CAS sharpen toggle + level 0..100 (0 = the pass is off). */
+    public static native void nativeSetCas(boolean enabled, int sharpness);
+
+    /** Fake-HDR toggle. */
+    public static native void nativeSetHdr(boolean enabled);
+
+    /** Terminal debanding toggle + strength 0..200 (100 = 1 LSB). */
+    public static native void nativeSetDeband(boolean enabled, int strength);
+
+    /** Colour grade in the drawer's slider units (brightness/contrast -100..100, gamma 0.5..3.0,
+     *  saturation 0..200 percent; 0/0/1/100 = neutral, pass off) plus the FXAA / Toon / CRT / NTSC
+     *  toggles — the same signature as {@code VulkanRenderer.setScreenEffects}. */
+    public static native void nativeSetScreenEffects(float brightness, float contrast, float gamma, float saturation,
+                                                     boolean fxaa, boolean toon, boolean crt, boolean ntsc);
+
+    /** The Look the controls currently match ({@code null} = Custom); only named in the log line. */
+    public static native void nativeSetLookName(String name);
 
     /** The in-game FPS limiter: frames per second, 0 = unlimited. Paces when replaced buffers go
      *  back to the game, like the X11 IdleNotify pacer, so the game itself slows to the cap. */

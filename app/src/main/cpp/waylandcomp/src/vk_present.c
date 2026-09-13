@@ -4,6 +4,7 @@
 #include "vk_present.h"
 #include "vk_loader.h"
 #include "sc_layer.h"
+#include "effects_chain.h"
 #include "framegen_bridge.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -48,10 +49,8 @@ static VkFence g_fence;
 /* Extra swapchain images this swapchain was built with (frame generation: one per generated
  * frame, so all presents of a scene frame queue without waiting for a vblank). */
 static int g_swap_extra;
-/* The compositor pass: the scene composed 1:1 into an off-screen image (scene-sized, RGBA8,
- * kept in GENERAL) that the effects chain and frame generation work on before the mapping/blit
- * to the swapchain. Exists only while a pass needs it; the direct path never creates it. */
-static struct { VkImage img; VkDeviceMemory mem; VkImageView view; int w, h; int fresh; } g_scene;
+/* Format of the compositor pass's images (the scene image below, the effects chain's targets and
+ * the frame-generation ring): a blit converts every client format into it, the chains read RGBA. */
 #define SCENE_FMT VK_FORMAT_R8G8B8A8_UNORM
 static VkPhysicalDeviceMemoryProperties g_memprops;
 
@@ -62,6 +61,11 @@ static uint32_t g_nimg;
 static VkExtent2D g_extent;
 
 static int g_first_frame_done; /* one-shot: fire banner_on_first_frame() on first present */
+
+/* The scene image (effects path only): every draw composited 1:1 at scene size, the input of the
+ * screen-effect chain (effects_chain.c) — and of frame generation once that lands. Recreated on a
+ * scene size change; frames are fenced, so never while the GPU reads it. */
+static struct { VkImage img; VkDeviceMemory mem; int w, h; } g_scene;
 static const char *vk_result_name(VkResult r);
 
 /* The Android surface is created/destroyed on the app's UI thread while the compositor thread
@@ -384,6 +388,7 @@ static int dev_init(void) {
     VkFenceCreateInfo fci = {.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
     g_vk.CreateFence(g_dev, &fci, NULL, &g_fence);
 
+    vkp_effects_bind_device(g_dev, g_pd, &g_memprops);
     g_dev_state = 1;
     reset_sync();
     vkp_framegen_device_ready(g_dev, g_queue, g_qfam, fg_features != NULL);
@@ -693,15 +698,11 @@ void vkp_image_destroy(struct vkp_image *img) {
 /* Map a draw into swapchain pixels through the scale mode, clipping the destination to the
  * picture's region (the whole output, or its half on TOP/BOTTOM; FILL's overflow is cut here)
  * and trimming the source to match. Returns 0 if nothing is left to draw. */
-static int draw_to_blit(const struct vkp_draw *d, VkImageBlit *blit) {
-    float kx = g_map.kx, ky = g_map.ky;
-    float x0 = g_map.off_x + d->dx * kx, y0 = g_map.off_y + d->dy * ky;
-    float x1 = g_map.off_x + (d->dx + d->dw) * kx, y1 = g_map.off_y + (d->dy + d->dh) * ky;
+static int map_draw(const struct vkp_draw *d, float kx, float ky, float off_x, float off_y,
+                    float L, float T, float R, float B, VkImageBlit *blit) {
+    float x0 = off_x + d->dx * kx, y0 = off_y + d->dy * ky;
+    float x1 = off_x + (d->dx + d->dw) * kx, y1 = off_y + (d->dy + d->dh) * ky;
     float sx0 = d->sx, sy0 = d->sy, sx1 = d->sx + d->sw, sy1 = d->sy + d->sh;
-    float L = (float)g_map.rx, T = (float)g_map.ry;
-    float R = (float)(g_map.rx + g_map.rw), B = (float)(g_map.ry + g_map.rh);
-    if (R > (float)g_extent.width) R = (float)g_extent.width;
-    if (B > (float)g_extent.height) B = (float)g_extent.height;
 
     if (x1 <= x0 || y1 <= y0 || sx1 <= sx0 || sy1 <= sy0) return 0;
     if (x0 < L) { sx0 += (L - x0) / (x1 - x0) * (sx1 - sx0); x0 = L; }
@@ -722,6 +723,51 @@ static int draw_to_blit(const struct vkp_draw *d, VkImageBlit *blit) {
                           .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
                           .dstOffsets = {{ix0, iy0, 0}, {ix1, iy1, 1}}};
     return 1;
+}
+
+static int draw_to_blit(const struct vkp_draw *d, VkImageBlit *blit) {
+    float R = (float)(g_map.rx + g_map.rw), B = (float)(g_map.ry + g_map.rh);
+    if (R > (float)g_extent.width) R = (float)g_extent.width;
+    if (B > (float)g_extent.height) B = (float)g_extent.height;
+    return map_draw(d, g_map.kx, g_map.ky, g_map.off_x, g_map.off_y, (float)g_map.rx, (float)g_map.ry, R, B, blit);
+}
+
+/* The same draw 1:1 into the scene image (no mapping: scene pixels are the destination). */
+static int draw_to_scene_blit(const struct vkp_draw *d, int scene_w, int scene_h, VkImageBlit *blit) {
+    return map_draw(d, 1.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, (float)scene_w, (float)scene_h, blit);
+}
+
+static void destroy_scene_image(void) {
+    if (g_scene.img) g_vk.DestroyImage(g_dev, g_scene.img, NULL);
+    if (g_scene.mem) g_vk.FreeMemory(g_dev, g_scene.mem, NULL);
+    memset(&g_scene, 0, sizeof(g_scene));
+}
+
+/* The scene image at this size (R8G8B8A8: a blit converts every client format into it, and the
+ * chain's shaders read it as RGBA). 0 = ready. */
+static int ensure_scene_image(int w, int h) {
+    if (g_scene.img && g_scene.w == w && g_scene.h == h) return 0;
+    destroy_scene_image();
+    VkImageCreateInfo ici = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
+        .format = VK_FORMAT_R8G8B8A8_UNORM, .extent = {(uint32_t)w, (uint32_t)h, 1}, .mipLevels = 1, .arrayLayers = 1,
+        .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
+        .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
+    VkResult r = g_vk.CreateImage(g_dev, &ici, NULL, &g_scene.img);
+    if (r != VK_SUCCESS) { LOGE("effects: scene image %dx%d: vkCreateImage %s", w, h, vk_result_name(r)); g_scene.img = VK_NULL_HANDLE; return -1; }
+    VkMemoryRequirements req;
+    g_vk.GetImageMemoryRequirements(g_dev, g_scene.img, &req);
+    int idx = memory_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (idx < 0) idx = memory_type(req.memoryTypeBits, 0);
+    VkMemoryAllocateInfo mai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = req.size,
+                                .memoryTypeIndex = (uint32_t)(idx < 0 ? 0 : idx)};
+    r = g_vk.AllocateMemory(g_dev, &mai, NULL, &g_scene.mem);
+    if (r != VK_SUCCESS) { LOGE("effects: scene image %dx%d: vkAllocateMemory %s", w, h, vk_result_name(r)); destroy_scene_image(); return -1; }
+    g_vk.BindImageMemory(g_dev, g_scene.img, g_scene.mem, 0);
+    g_scene.w = w; g_scene.h = h;
+    banner_log("effects", "scene image %dx%d for the effect chain", w, h);
+    return 0;
 }
 
 /* VK_ERROR_DEVICE_LOST: nothing on this device works any more, and there is no way back short
@@ -765,77 +811,12 @@ static const char *vk_result_name(VkResult r) {
 
 /* ---------------------------------------------------------------- the compositor pass */
 
-static void destroy_scene(void) {
-    if (!g_scene.img) return;
-    g_vk.DeviceWaitIdle(g_dev);
-    if (g_scene.view) g_vk.DestroyImageView(g_dev, g_scene.view, NULL);
-    g_vk.DestroyImage(g_dev, g_scene.img, NULL);
-    g_vk.FreeMemory(g_dev, g_scene.mem, NULL);
-    memset(&g_scene, 0, sizeof(g_scene));
-}
-
-/* The off-screen scene image for this scene size: a blit destination for the composition, a
- * blit source for the screen, and sampled/storage for the effects and frame-generation chains. */
-static int ensure_scene(int w, int h) {
-    if (g_scene.img && g_scene.w == w && g_scene.h == h) return 0;
-    destroy_scene();
-    VkImageCreateInfo ici = {
-        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = SCENE_FMT,
-        .extent = {(uint32_t)w, (uint32_t)h, 1}, .mipLevels = 1, .arrayLayers = 1,
-        .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
-        .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
-                 VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
-        .sharingMode = VK_SHARING_MODE_EXCLUSIVE, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
-    if (g_vk.CreateImage(g_dev, &ici, NULL, &g_scene.img) != VK_SUCCESS) { g_scene.img = VK_NULL_HANDLE; return -1; }
-    VkMemoryRequirements req;
-    g_vk.GetImageMemoryRequirements(g_dev, g_scene.img, &req);
-    int idx = memory_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    VkMemoryAllocateInfo mai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-                                .allocationSize = req.size, .memoryTypeIndex = (uint32_t)idx};
-    if (idx < 0 || g_vk.AllocateMemory(g_dev, &mai, NULL, &g_scene.mem) != VK_SUCCESS) {
-        g_vk.DestroyImage(g_dev, g_scene.img, NULL); memset(&g_scene, 0, sizeof(g_scene));
-        LOGE("present: no memory for the %dx%d scene image", w, h);
-        return -1;
-    }
-    g_vk.BindImageMemory(g_dev, g_scene.img, g_scene.mem, 0);
-    VkImageViewCreateInfo vci = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = g_scene.img,
-                                 .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = SCENE_FMT,
-                                 .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
-    if (g_vk.CreateImageView(g_dev, &vci, NULL, &g_scene.view) != VK_SUCCESS) g_scene.view = VK_NULL_HANDLE;
-    g_scene.w = w; g_scene.h = h; g_scene.fresh = 1;
-    banner_log("gpu", "compositor pass: %dx%d scene image", w, h);
-    return 0;
-}
-
-/* A draw in scene pixels, 1:1, clipped to the scene (the mapping is applied later, when the
- * scene image goes to the screen). Returns 0 if nothing is left to draw. */
-static int draw_to_scene_blit(const struct vkp_draw *d, int scene_w, int scene_h, VkImageBlit *blit) {
-    float x0 = (float)d->dx, y0 = (float)d->dy, x1 = (float)(d->dx + d->dw), y1 = (float)(d->dy + d->dh);
-    float sx0 = d->sx, sy0 = d->sy, sx1 = d->sx + d->sw, sy1 = d->sy + d->sh;
-    float R = (float)scene_w, B = (float)scene_h;
-    if (x1 <= x0 || y1 <= y0 || sx1 <= sx0 || sy1 <= sy0) return 0;
-    if (x0 < 0) { sx0 += (0 - x0) / (x1 - x0) * (sx1 - sx0); x0 = 0; }
-    if (y0 < 0) { sy0 += (0 - y0) / (y1 - y0) * (sy1 - sy0); y0 = 0; }
-    if (x1 > R) { sx1 -= (x1 - R) / (x1 - x0) * (sx1 - sx0); x1 = R; }
-    if (y1 > B) { sy1 -= (y1 - B) / (y1 - y0) * (sy1 - sy0); y1 = B; }
-    int ix0 = (int)(x0 + 0.5f), iy0 = (int)(y0 + 0.5f), ix1 = (int)(x1 + 0.5f), iy1 = (int)(y1 + 0.5f);
-    int isx0 = (int)sx0, isy0 = (int)sy0, isx1 = (int)(sx1 + 0.5f), isy1 = (int)(sy1 + 0.5f);
-    if (isx0 < 0) isx0 = 0;
-    if (isy0 < 0) isy0 = 0;
-    if (isx1 > d->img->w) isx1 = d->img->w;
-    if (isy1 > d->img->h) isy1 = d->img->h;
-    if (ix1 <= ix0 || iy1 <= iy0 || isx1 <= isx0 || isy1 <= isy0) return 0;
-    *blit = (VkImageBlit){.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
-                          .srcOffsets = {{isx0, isy0, 0}, {isx1, isy1, 1}},
-                          .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
-                          .dstOffsets = {{ix0, iy0, 0}, {ix1, iy1, 1}}};
-    return 1;
-}
-
 /* The mapping/blit stage for one present: clear the swapchain image to black (the letterbox),
- * blit `src` (a scene-sized image in GENERAL - the scene itself or a generated frame) through the
- * scene -> output mapping, and leave the image ready to present. */
-static void record_screen_blit(VkCommandBuffer cmd, VkImage src, int scene_w, int scene_h, uint32_t img) {
+ * blit `src` (src_w x src_h, in GENERAL: the effects chain's result or a generated frame, either
+ * standing for the whole scene) through the scene -> output mapping, and leave the image ready
+ * to present. */
+static void record_screen_blit(VkCommandBuffer cmd, VkImage src, int src_w, int src_h,
+                               int scene_w, int scene_h, uint32_t img, VkFilter filter) {
     VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
     VkImageMemoryBarrier pre[2] = {
         {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
@@ -858,12 +839,12 @@ static void record_screen_blit(VkCommandBuffer cmd, VkImage src, int scene_w, in
                           .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT};
     g_vk.CmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
                             0, 1, &mb, 0, NULL, 0, NULL);
-    struct vkp_image tmp = {.w = scene_w, .h = scene_h}; /* only its size is looked at */
-    struct vkp_draw d = {&tmp, 0, 0, (float)scene_w, (float)scene_h, 0, 0, scene_w, scene_h};
+    struct vkp_image tmp = {.w = src_w, .h = src_h}; /* only its size is looked at */
+    struct vkp_draw d = {&tmp, 0, 0, (float)src_w, (float)src_h, 0, 0, scene_w, scene_h};
     VkImageBlit blit;
     if (draw_to_blit(&d, &blit))
         g_vk.CmdBlitImage(cmd, src, VK_IMAGE_LAYOUT_GENERAL, g_images[img],
-                          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
+                          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, filter);
     VkImageMemoryBarrier b_present = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
         .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
@@ -918,12 +899,14 @@ int vkp_render(int scene_w, int scene_h, const struct vkp_draw *draws, int n) {
     update_map(scene_w, scene_h);
 
     /* The compositor pass - scene -> effects -> frame generation -> mapping/blit -> swapchain -
-     * composes the scene off-screen when something needs the whole frame (frame generation; the
-     * effects chain hooks into the same place). Without it the direct path below is the one
-     * blit into the swapchain image it always was. */
-    int pass = vkp_framegen_active();
-    if (pass && ensure_scene(scene_w, scene_h) != 0) pass = 0;
-    if (!pass && g_scene.img) destroy_scene();
+     * composes the scene off-screen when either stage needs the whole frame: the screen-effect
+     * chain (effects_chain.c) or frame generation (framegen_bridge.c). With both off the draws are
+     * blitted straight through the mapping into the swapchain image, as they always were; only the
+     * blit filter follows the scaling mode. */
+    const int fx = vkp_effects_active();
+    const int fg = vkp_framegen_active();
+    const int pass = (fx || fg) && ensure_scene_image(scene_w, scene_h) == 0;
+    const VkFilter blit_filter = vkp_effects_blit_filter();
 
     VkCommandBuffer cmd = g_cmds[0];
     g_vk.ResetCommandBuffer(cmd, 0);
@@ -935,28 +918,16 @@ int vkp_render(int scene_w, int scene_h, const struct vkp_draw *draws, int n) {
     /* Source images: take dmabufs from the client's queue family, move shm images to
      * GENERAL once (host writes stay visible across frames: memory is coherent and each
      * frame is a new submission). One barrier per distinct image. The destination joins them:
-     * the swapchain image on the direct path, the scene image on the compositor pass. */
+     * the swapchain image on the direct path, the scene image on the compositor pass (the
+     * per-present blits transition the swapchain images themselves there). */
     VkImageMemoryBarrier *bars = calloc((size_t)n + 1, sizeof(*bars));
     int nb = 0;
-    if (!pass) {
-        bars[nb++] = (VkImageMemoryBarrier){
-            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-            .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-            .image = g_images[img], .subresourceRange = range, .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT};
-    } else {
-        /* Fresh: its one UNDEFINED -> GENERAL. Otherwise last frame's readers (the screen blit,
-         * the engine's copy) are done - the frame fence was waited - but say so to the GPU. */
-        bars[nb++] = (VkImageMemoryBarrier){
-            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-            .oldLayout = g_scene.fresh ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_GENERAL,
-            .newLayout = VK_IMAGE_LAYOUT_GENERAL,
-            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-            .image = g_scene.img, .subresourceRange = range,
-            .srcAccessMask = g_scene.fresh ? 0 : VK_ACCESS_MEMORY_READ_BIT,
-            .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT};
-        g_scene.fresh = 0;
-    }
+    bars[nb++] = (VkImageMemoryBarrier){
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = pass ? g_scene.img : g_images[img], .subresourceRange = range,
+        .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT};
     for (int i = 0; i < n; i++) {
         struct vkp_image *im = draws[i].img;
         int seen = 0;
@@ -983,10 +954,11 @@ int vkp_render(int scene_w, int scene_h, const struct vkp_draw *draws, int n) {
                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, (uint32_t)nb, bars);
     free(bars);
 
+    /* Clear the composition target to black (the letterbox on the direct path, the desktop's
+     * background on the pass) before the draws land on it. */
     VkImage target = pass ? g_scene.img : g_images[img];
-    VkImageLayout target_layout = pass ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     VkClearColorValue black = {.float32 = {0.0f, 0.0f, 0.0f, 1.0f}};
-    g_vk.CmdClearColorImage(cmd, target, target_layout, &black, 1, &range);
+    g_vk.CmdClearColorImage(cmd, target, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &range);
     {
         VkMemoryBarrier mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
                               .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
@@ -995,7 +967,7 @@ int vkp_render(int scene_w, int scene_h, const struct vkp_draw *draws, int n) {
                                 0, 1, &mb, 0, NULL, 0, NULL);
     }
 
-    /* Scene: the draws in order, mapped onto the output (direct) or 1:1 into the scene image. */
+    /* 1. Scene: the draws in order, 1:1 into the scene image (pass) or mapped onto the output. */
     int drawn = 0;
     for (int i = 0; i < n; i++) {
         VkImageBlit blit;
@@ -1003,12 +975,15 @@ int vkp_render(int scene_w, int scene_h, const struct vkp_draw *draws, int n) {
         if (pass ? !draw_to_scene_blit(&draws[i], scene_w, scene_h, &blit) : !draw_to_blit(&draws[i], &blit)) continue;
         g_vk.CmdBlitImage(cmd, draws[i].img->image,
                           draws[i].img->dmabuf ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL : VK_IMAGE_LAYOUT_GENERAL,
-                          target, target_layout, 1, &blit, VK_FILTER_LINEAR);
+                          target, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
+                          pass ? VK_FILTER_LINEAR : blit_filter);
         drawn++;
     }
 
     int ngen = 0;
     VkImage gens[VKP_FG_MAX_GENERATIONS] = {VK_NULL_HANDLE};
+    VkImage result = g_scene.img;
+    int rw = scene_w, rh = scene_h;
     if (!pass) {
         VkImageMemoryBarrier b_present = {
             .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
@@ -1018,18 +993,39 @@ int vkp_render(int scene_w, int scene_h, const struct vkp_draw *draws, int n) {
         g_vk.CmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
                                 0, 0, NULL, 0, NULL, 1, &b_present);
     } else {
-        /* Effects: the effects chain (feat/wayland-effects, effects_chain.c) runs on the scene
-         * image here - vkp_effects_run(cmd, g_scene.img, g_scene.view, scene_w, scene_h, SCENE_FMT)
-         * - BEFORE frame generation, so generated frames carry the same look as real ones. */
+        /* 2. Effects (the hook): scaling to the scene's mapped size, then the effects, in the X11
+         *    order. The result stands for the whole scene (rw x rh) and comes back in
+         *    TRANSFER_SRC_OPTIMAL; with nothing on the scene stays as composited. */
+        VkImageLayout result_layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        if (fx) {
+            int mapped_w = (int)(scene_w * g_map.kx + 0.5f), mapped_h = (int)(scene_h * g_map.ky + 0.5f);
+            result = vkp_effects_run(cmd, g_scene.img, scene_w, scene_h, mapped_w, mapped_h, &rw, &rh);
+            result_layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        }
+        /* Hand-off: from here the frame lives in GENERAL - the frame-generation engines copy and
+         * sample it there, and every screen blit reads it there. Whatever wrote it last (the
+         * composite blits or the chain's last pass) is made visible to both. */
+        VkImageMemoryBarrier b_general = {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .oldLayout = result_layout,
+            .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .image = result, .subresourceRange = range,
+            .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_SHADER_READ_BIT};
+        g_vk.CmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                                VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                0, 0, NULL, 0, NULL, 1, &b_general);
 
-        /* Frame generation: the scene image is frame N; the engine interpolates between N-1 and
-         * N and hands back the frames that belong in between. They are shown first, N last. */
-        ngen = vkp_framegen_run(cmd, g_scene.img, g_scene.view, scene_w, scene_h, SCENE_FMT, gens);
-        if (ngen < 0) ngen = 0;
-        if (ngen > VKP_FG_MAX_GENERATIONS) ngen = VKP_FG_MAX_GENERATIONS;
+        /* 3. Frame generation (the hook): the result is frame N; the engine interpolates between
+         *    N-1 and N and hands back the frames that belong in between. Shown first, N last. */
+        if (fg) {
+            ngen = vkp_framegen_run(cmd, result, VK_NULL_HANDLE, rw, rh, SCENE_FMT, gens);
+            if (ngen < 0) ngen = 0;
+            if (ngen > VKP_FG_MAX_GENERATIONS) ngen = VKP_FG_MAX_GENERATIONS;
+        }
 
-        /* Mapping/blit: the first present carries generated frame 0, or the scene itself. */
-        record_screen_blit(cmd, ngen ? gens[0] : g_scene.img, scene_w, scene_h, img);
+        /* 4. Mapping/blit: the first present carries generated frame 0, or the result itself. */
+        record_screen_blit(cmd, ngen ? gens[0] : result, rw, rh, scene_w, scene_h, img, blit_filter);
     }
     g_vk.EndCommandBuffer(cmd);
 
@@ -1053,7 +1049,7 @@ int vkp_render(int scene_w, int scene_h, const struct vkp_draw *draws, int n) {
             VkCommandBuffer ck = g_cmds[k];
             g_vk.ResetCommandBuffer(ck, 0);
             g_vk.BeginCommandBuffer(ck, &bi);
-            record_screen_blit(ck, k < ngen ? gens[k] : g_scene.img, scene_w, scene_h, img);
+            record_screen_blit(ck, k < ngen ? gens[k] : result, rw, rh, scene_w, scene_h, img, blit_filter);
             g_vk.EndCommandBuffer(ck);
         }
         const int last = (k + 1 == presents);
@@ -1084,7 +1080,7 @@ int vkp_render(int scene_w, int scene_h, const struct vkp_draw *draws, int n) {
         g_vk.QueueSubmit(g_queue, 1, &si, g_fence);
     }
     VkResult fr = g_vk.WaitForFences(g_dev, 1, &g_fence, VK_TRUE, UINT64_MAX);
-    if (pass) vkp_framegen_presented(presented_gen);
+    if (fg) vkp_framegen_presented(presented_gen);
     if (fr == VK_ERROR_DEVICE_LOST || pr == VK_ERROR_DEVICE_LOST) { device_lost("present"); return -1; }
     if (pr == VK_ERROR_OUT_OF_DATE_KHR || pr == VK_ERROR_SURFACE_LOST_KHR) {
         /* The surface changed or went away under this frame: rebuild before the next one. */

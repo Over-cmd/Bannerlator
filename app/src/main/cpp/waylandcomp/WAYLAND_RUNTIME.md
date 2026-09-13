@@ -214,6 +214,55 @@ Option (a') of `ZERO_COPY_SPIKE.md`, both halves:
   with `| N zero-copy frames`. Guest side (Mesa log, stderr of the game): `banner-ahb: WxH swapchain
   (N images) on gralloc buffers: UBWC|linear, stride S px` or the reason it stayed on standard buffers.
 
+## Screen effects (feat/wayland-effects, `src/effects_chain.c`)
+The X11 renderer's screen-effect chain, run by the compositor between the composited scene and the
+output. Same SPIR-V as the X11 Vulkan renderer (`winlator/*_frag.h`, made by `winlator/gen_shaders.sh`
+and committed — the NDK build compiles no GLSL, so there is no build-time shader tooling), same
+push-constant layouts, uniform ranges and pass order, so a saved preset looks the same on both backends.
+
+**Present-pass hook order (`vk_present.c`, `vkp_render`):**
+```
+scene  (every draw blitted 1:1 into a scene-sized R8G8B8A8 image; compositor pass only)
+  -> vkp_effects_run()     effects_chain.c: scaling -> effects (below)
+  -> vkp_framegen_run()    framegen_bridge.c: frame generation on the chain's result (next section)
+  -> update_map / blit     Fullscreen Mode + Screen Alignment map the result (and each generated
+                           frame) onto its own swapchain image
+  -> present               generated frames first, the real frame last, FIFO
+```
+The compositor pass runs when either stage needs it (`vkp_effects_active() || vkp_framegen_active()`).
+Effects operate on the scene; the mapping operates on the output — the chain's result stands for
+the whole scene and goes through the same `draw_to_blit` as a plain frame. With everything off the
+frame takes the old path unchanged (draws blitted straight through the mapping); only the blit filter
+follows the scaling mode (Nearest = `VK_FILTER_NEAREST`).
+
+**Pass order (locked to the X11 Vulkan renderer, `VulkanRendererContext::recordUpscalePasses`):**
+scaling → FXAA → Toon → Colour (brightness/contrast/gamma/saturation) → CAS → HDR → NTSC → CRT →
+Debanding (terminal dither). Scaling modes: 0 None / 1 Linear / 2 Nearest = a filtered resize;
+3 SGSR, 8 SGSR HQ, 7 NIS = one pass; 4 FSR / 5 FSR Fit = EASU → RCAS (fill vs fit is the Fullscreen
+Mode's business here, both run the same pair); 6 Sharpen = RCAS 1:1 (nearest scale + sharpen, as X11).
+Render scale is "Not used on Wayland": the scaling modes resize the scene to its **mapped output size**
+(3/4/5/7/8 only when that is larger than the scene, the X11 "render below display" gate; 6 always).
+Every later pass runs at that resolution, ping-ponging between two targets (+ one EASU mid target).
+
+**Settings** (`WaylandCompositor.nativeSetUpscaler / nativeSetUpscaleSharpness / nativeSetCas /
+nativeSetHdr / nativeSetDeband / nativeSetScreenEffects / nativeSetLookName`, 1:1 with
+`VulkanRenderer`'s): any thread; the compositor thread snapshots them per frame, redraws even a
+static scene, and writes one `effects` line per change:
+`effects  scaling=SGSR HQ 75%, CAS on 55%, Look="Game Clarity", colour b=+2 c=+12 g=1.00 s=108%`
+(`effects  all off: scaling=Linear (plain blit)` when nothing is on). The chain's Vulkan objects are
+built on the first active frame (`effects  chain ready: 13 passes … on <GPU>`; a driver that refuses
+them logs an `error` and effects stay off for the session). The app wires the drawer's Vulkan
+post-chain block (`XServerDialogState.on*Apply`) to these in `XServerDisplayActivity.initWaylandEffects`
+and remembers the same per-game keys as the Vulkan path (#382).
+
+**Zero-copy interplay:** the layer path (`sc_layer.c` / `ahb_swapchain.c`) bypasses the compositor
+pass, so while any effect (or frame generation) is on a fullscreen game is presented through the
+copy path instead (`effects  zero-copy paused: screen effects need the compositor pass` /
+`framegen  zero-copy paused: frame generation needs the compositor pass`) and the layer resumes once
+both are off (`effects  zero-copy resumed: screen effects and frame generation are off`). A frame this
+renderer could not import (layer-only candidate) still goes on the layer, effects/frame generation
+skipped, said once.
+
 ## Frame generation (feat/wayland-framegen, `src/framegen_bridge.c`)
 The two **native** engines the X11 renderer hosts inside `libwinlator`'s compositor run inside the
 Wayland compositor's own Turnip device: **LSFG Native** (the user's Lossless.dll chain,
@@ -223,11 +272,10 @@ standalone build gets `framegen_engine_stub.c`) and driven by `src/framegen_engi
 their `VkTable` by name from the compositor's `vkGetInstanceProcAddr`/`vkGetDeviceProcAddr`.
 **bionic-fg** (the guest-side win-fg Vulkan layer) is X11-only: its frames are born inside the guest
 and have nothing to attach to here, so on Wayland the "bionic" engine is always Win-FG Native.
-- **Present order per scene frame** (`vkp_render`): `scene -> effects -> frame generation ->
-  mapping/blit -> swapchain`. With frame generation armed the draws are composed 1:1 into an
-  off-screen scene image (scene-sized RGBA8, kept in GENERAL; `ensure_scene`), the effects chain runs
-  on it (`vkp_effects_run`, feat/wayland-effects), then the ONE hook
-  `vkp_framegen_run(cmd, scene, view, w, h, fmt, gens[])` records the engine's chain into the same
+- **Where it runs** (the hook order above): frame generation takes the effects chain's RESULT
+  (`vkp_effects_run`'s output, at its size - the scene, or the mapped output size under a scaling
+  mode - moved to GENERAL), so generated frames carry the same look as real ones. The ONE hook
+  `vkp_framegen_run(cmd, image, view, w, h, fmt, gens[])` records the engine's chain into the same
   command buffer and returns 0..3 generated images. Each image is then blitted through the scene ->
   output mapping into its own acquired swapchain image and presented: **generated frames first, the
   real frame last** (interpolation produces frames between N-1 and N; that one output interval of
@@ -235,8 +283,8 @@ and have nothing to attach to here, so on Wayland the "bionic" engine is always 
   (`MAX_PRESENTS` = 4), the frame fence on the last submit. With the FIFO swapchain the presentation
   engine shows them on consecutive vblanks: that is the pacing, there are no sleeps and no host pacer.
   The swapchain is rebuilt with `multiplier - 1` extra images while armed so every present of a frame
-  queues without a vblank wait. Frame generation off = the direct path, byte-for-byte as before (no
-  scene image exists).
+  queues without a vblank wait. Frame generation off and effects off = the direct path, byte-for-byte
+  as before.
 - **Device**: `dev_init` asks the bridge for the LSFG feature chain (`VkPhysicalDeviceVulkan12Features`
   vulkanMemoryModel + `shaderStorageImageWriteWithoutFormat/ExtendedFormats`, the same chain
   `VulkanRendererContext::createLogicalDevice` uses; instance apiVersion is 1.3 for the probe) and
@@ -249,7 +297,8 @@ and have nothing to attach to here, so on Wayland the "bionic" engine is always 
   or the `wp_presentation` feedback - the guest sees one present per real frame.
 - **Zero-copy**: the layer bypasses the compositor pass, so while frame generation is armed the
   fullscreen window takes the copy path (`render_scene`: `framegen  zero-copy paused: frame generation
-  needs the compositor pass`) and the layer resumes when it is off (`zero-copy resumed: ...`).
+  needs the compositor pass`) and the layer resumes when both it and the effects are off (see the
+  effects section's zero-copy interplay).
 - **App side**: `WaylandCompositor.nativeSetFrameGenEngine/Armed/Tuning`, `nativeSetLsfgCachePath`,
   `nativeSetWinFgTuning`, `nativeFrameGenProblem/CapsReason/Stats` (same codes and six-float shape
   as `VulkanRenderer`). `XServerDisplayActivity.applyWaylandFrameGen` is the single apply:

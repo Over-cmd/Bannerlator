@@ -13,6 +13,7 @@
 #include <android/native_window_jni.h>
 #include "vk_present.h"
 #include "banner_ext.h"
+#include "effects_chain.h"
 
 extern int banner_wayland_run(void);
 extern void banner_wayland_send_pointer(int action, int x, int y);
@@ -22,6 +23,7 @@ extern void banner_wayland_vsync(int64_t frame_time_ns);
 extern volatile int g_fps_limit;
 extern volatile int g_hide_shell;
 extern volatile int g_zero_copy;
+extern volatile unsigned g_zero_copy_last;
 extern volatile int g_ubwc;
 extern volatile int g_output_refresh_mhz;
 extern volatile int g_output_w, g_output_h;
@@ -252,6 +254,12 @@ Java_com_winlator_star_wayland_WaylandCompositor_nativeSetZeroCopy(JNIEnv *env, 
     __android_log_print(ANDROID_LOG_INFO, TAG, "zero-copy layer mode %s", on ? "on" : "off");
 }
 
+/* Zero-copy frames in the last completed 10 s stats window (on_stats_timer), for the drawer's live line. */
+JNIEXPORT jint JNICALL
+Java_com_winlator_star_wayland_WaylandCompositor_nativeZeroCopyFrames(JNIEnv *env, jclass clazz) {
+    return (jint)g_zero_copy_last;
+}
+
 /* Compressed (UBWC) game buffers: advertise DRM_FORMAT_MOD_QCOM_COMPRESSED on zwp_linux_dmabuf_v1 when
  * the renderer's driver imports it (default on; BANNER_WAYLAND_UBWC=0 = off). Set before the compositor
  * starts. */
@@ -280,6 +288,56 @@ JNIEXPORT void JNICALL
 Java_com_winlator_star_wayland_WaylandCompositor_nativeSetScaleMode(JNIEnv *env, jclass clazz, jint mode, jint alignment) {
     vk_present_set_scale_mode(mode, alignment);
     __android_log_print(ANDROID_LOG_INFO, TAG, "scale mode %d alignment %d", mode, alignment);
+}
+
+/* ---- screen effects (effects_chain.c): the X11 Vulkan renderer's post chain in the compositor.
+ * Any thread, any time; the compositor thread applies them on its next frame and logs one
+ * `effects` line per change. Values are 1:1 with VulkanRenderer's setters. */
+
+/* Scaling mode: 0=None 1=Linear 2=Nearest 3=SGSR 4=FSR 5=FSR Fit 6=Sharpen 7=NIS 8=SGSR HQ. */
+JNIEXPORT void JNICALL
+Java_com_winlator_star_wayland_WaylandCompositor_nativeSetUpscaler(JNIEnv *env, jclass clazz, jint mode) {
+    vkp_effects_set_scaling(mode);
+}
+
+/* The upscaler's sharpness slider 0..100 (RCAS lobe / SGSR edge / NIS sharpness). */
+JNIEXPORT void JNICALL
+Java_com_winlator_star_wayland_WaylandCompositor_nativeSetUpscaleSharpness(JNIEnv *env, jclass clazz, jint sharpness) {
+    vkp_effects_set_upscale_sharpness(sharpness);
+}
+
+/* AMD CAS sharpen toggle + level 0..100 (0 = pass off). */
+JNIEXPORT void JNICALL
+Java_com_winlator_star_wayland_WaylandCompositor_nativeSetCas(JNIEnv *env, jclass clazz, jboolean enabled, jint sharpness) {
+    vkp_effects_set_cas(enabled ? 1 : 0, sharpness);
+}
+
+/* Fake-HDR toggle. */
+JNIEXPORT void JNICALL
+Java_com_winlator_star_wayland_WaylandCompositor_nativeSetHdr(JNIEnv *env, jclass clazz, jboolean enabled) {
+    vkp_effects_set_hdr(enabled ? 1 : 0);
+}
+
+/* Terminal debanding toggle + strength 0..200 (100 = 1 LSB). */
+JNIEXPORT void JNICALL
+Java_com_winlator_star_wayland_WaylandCompositor_nativeSetDeband(JNIEnv *env, jclass clazz, jboolean enabled, jint strength) {
+    vkp_effects_set_deband(enabled ? 1 : 0, strength);
+}
+
+/* Colour grade (slider units: brightness/contrast -100..100, gamma 0.5..3, saturation 0..200 %) and the
+ * FXAA / Toon / CRT / NTSC toggles — VulkanRenderer.setScreenEffects. */
+JNIEXPORT void JNICALL
+Java_com_winlator_star_wayland_WaylandCompositor_nativeSetScreenEffects(JNIEnv *env, jclass clazz, jfloat brightness,
+        jfloat contrast, jfloat gamma, jfloat saturation, jboolean fxaa, jboolean toon, jboolean crt, jboolean ntsc) {
+    vkp_effects_set_screen(brightness, contrast, gamma, saturation, fxaa ? 1 : 0, toon ? 1 : 0, crt ? 1 : 0, ntsc ? 1 : 0);
+}
+
+/* The Look the controls currently match (null = Custom) — only named in the session log. */
+JNIEXPORT void JNICALL
+Java_com_winlator_star_wayland_WaylandCompositor_nativeSetLookName(JNIEnv *env, jclass clazz, jstring name) {
+    char *s = dup_jstr(env, name);
+    vkp_effects_set_look(s);
+    free(s);
 }
 
 /* The in-game FPS limiter: frames per second, 0 = unlimited. */
