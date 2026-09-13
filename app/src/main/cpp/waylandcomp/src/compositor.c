@@ -2056,10 +2056,9 @@ static void deliver_pointer(const struct input_msg *m) {
     double x, y;
     scene_size(&w, &h);
     vkp_output_size(&ow, &oh);
-    if (ow > 0 && oh > 0) {
-        vkp_output_to_scene((double)m->p2 * ow / INPUT_SPACE_W, (double)m->p3 * oh / INPUT_SPACE_H, &x, &y);
-    } else {
-        x = (double)m->p2 * w / INPUT_SPACE_W;
+    if (ow <= 0 || oh <= 0 ||
+        !vkp_output_to_scene((double)m->p2 * ow / INPUT_SPACE_W, (double)m->p3 * oh / INPUT_SPACE_H, &x, &y)) {
+        x = (double)m->p2 * w / INPUT_SPACE_W; /* nothing drawn yet: plain stretch */
         y = (double)m->p3 * h / INPUT_SPACE_H;
     }
     if (x < 0) x = 0;

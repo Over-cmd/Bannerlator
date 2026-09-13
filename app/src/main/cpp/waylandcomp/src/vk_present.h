@@ -31,9 +31,9 @@ enum vkp_scale_mode { VKP_MODE_OFF = 0, VKP_MODE_FIT = 1, VKP_MODE_STRETCH = 2, 
                       VKP_MODE_INTEGER = 4 };
 enum vkp_align { VKP_ALIGN_CENTER = 0, VKP_ALIGN_TOP = 1, VKP_ALIGN_BOTTOM = 2 };
 void vk_present_set_scale_mode(int mode, int alignment);
-/* Output pixel (0..output size) -> scene pixel through the current mapping (compositor thread;
- * before the first frame the mapping is a plain stretch). */
-void vkp_output_to_scene(double ox, double oy, double *sx, double *sy);
+/* Output pixel (0..output size) -> scene pixel through the current mapping (compositor thread).
+ * Returns 0 before the first frame has established a mapping (sx/sy untouched). */
+int vkp_output_to_scene(double ox, double oy, double *sx, double *sy);
 /* Output size in pixels (0x0 before the first swapchain). */
 void vkp_output_size(int *w, int *h);
 

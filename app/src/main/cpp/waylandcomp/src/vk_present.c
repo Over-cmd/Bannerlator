@@ -234,16 +234,11 @@ static void update_map(int scene_w, int scene_h) {
                (int)g_map.off_x, (int)g_map.off_y, W, H);
 }
 
-void vkp_output_to_scene(double ox, double oy, double *sx, double *sy) {
-    if (!g_map.valid || g_map.kx <= 0 || g_map.ky <= 0) {
-        /* No frame yet: the plain stretch the app's overlay pointer also assumes. */
-        int W = (int)g_extent.width, H = (int)g_extent.height;
-        *sx = W > 0 && g_map.scene_w > 0 ? ox * g_map.scene_w / W : ox;
-        *sy = H > 0 && g_map.scene_h > 0 ? oy * g_map.scene_h / H : oy;
-        return;
-    }
+int vkp_output_to_scene(double ox, double oy, double *sx, double *sy) {
+    if (!g_map.valid || g_map.kx <= 0 || g_map.ky <= 0) return 0;
     *sx = (ox - g_map.off_x) / g_map.kx;
     *sy = (oy - g_map.off_y) / g_map.ky;
+    return 1;
 }
 
 void vkp_output_size(int *w, int *h) {
