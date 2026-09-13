@@ -104,6 +104,8 @@ int vkp_update_map(int scene_w, int scene_h);
 /* Map a draw through the current mapping: out = {src x0,y0,x1,y1 (image px), dst x0,y0,x1,y1
  * (output px)}, clipped like the blit path. 0 = nothing of it is visible. */
 int vkp_map_draw(const struct vkp_draw *d, int out[8]);
+/* The same for a bare w x h buffer shown over the whole scene (no vkp_image: zero-copy layers). */
+int vkp_map_rect(int img_w, int img_h, int scene_w, int scene_h, int out[8]);
 /* The output window frames go to (NULL = none); compositor thread. */
 ANativeWindow *vkp_window(void);
 /* Fire the one-shot first-frame notification (layer mode presents outside vkp_render). */

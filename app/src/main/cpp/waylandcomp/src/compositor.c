@@ -37,6 +37,7 @@
 #include "xdg-shell-server-protocol.h"
 #include "linux-dmabuf-v1-server-protocol.h"
 #include "sc_layer.h"
+#include "ahb_swapchain.h"
 #include "viewporter-server-protocol.h"
 #include "banner-desktop-v1-server-protocol.h"
 #include "presentation-time-server-protocol.h"
@@ -437,6 +438,7 @@ struct dmabuf_buffer {
      * committed one is still what is on screen: the import (and the dma-buf memory it pins) stays
      * until the surface commits something newer, so the picture never blinks to black. */
     int refs;
+    void *ahb_state;                        /* zero-copy: ahb_swapchain.c's record (the game's AHardwareBuffer) */
 };
 
 static void dmabuf_buffer_unref(struct dmabuf_buffer *b) {
@@ -531,8 +533,12 @@ static void unmap_toplevel(struct surface *s) {
 static void drop_dmabuf(struct surface *s, int paced) {
     if (s->dmabuf) {
         wl_list_remove(&s->dmabuf_destroy.link);
-        if (paced) release_buffer(s, s->dmabuf);
-        else wl_buffer_send_release(s->dmabuf);
+        /* A buffer on the zero-copy layer is the display's until SurfaceFlinger says otherwise:
+         * ahb_swapchain.c releases it then. */
+        if (!(g_zero_copy && ahb_swapchain_defer_release(s->dmabuf_buf, s->dmabuf, s, paced))) {
+            if (paced) release_buffer(s, s->dmabuf);
+            else wl_buffer_send_release(s->dmabuf);
+        }
         s->dmabuf = NULL;
     }
     dmabuf_buffer_unref(s->dmabuf_buf);
@@ -628,8 +634,9 @@ static void take_dmabuf(struct surface *s, struct dmabuf_buffer *b, struct wl_re
                        (b->format >> 16) & 0xff, (b->format >> 24) & 0xff,
                        vkp_modifier_name(b->modifier));
         else
-            banner_log("error", "could not import GPU frames from %s (%dx%d, modifier %#llx)",
-                       name, b->width, b->height, (unsigned long long)b->modifier);
+            banner_log("error", "could not import GPU frames from %s (%dx%d, modifier %#llx)%s",
+                       name, b->width, b->height, (unsigned long long)b->modifier,
+                       ahb_swapchain_has_ahb(b) ? "; they are the game's gralloc buffers, shown on their own layer only" : "");
         if (b->img) {
             g_hud_surface = s;
             banner_on_game_surface(name, vkp_gpu_name());
@@ -637,6 +644,19 @@ static void take_dmabuf(struct surface *s, struct dmabuf_buffer *b, struct wl_re
     }
     if (s == g_hud_surface && b->img) banner_on_game_frame();
 }
+
+/* ---- hooks for ahb_swapchain.c (zero-copy layers) */
+struct dmabuf_buffer *banner_dmabuf_from_resource(struct wl_resource *buffer) { return get_dmabuf(buffer); }
+int banner_dmabuf_fd(const struct dmabuf_buffer *b) { return b && b->n_planes > 0 ? b->fd[0] : -1; }
+void banner_dmabuf_size(const struct dmabuf_buffer *b, int *w, int *h) { *w = b->width; *h = b->height; }
+void **banner_dmabuf_ahb_slot(struct dmabuf_buffer *b) { return &b->ahb_state; }
+void banner_dmabuf_ref(struct dmabuf_buffer *b) { b->refs++; }
+void banner_dmabuf_unref(struct dmabuf_buffer *b) { dmabuf_buffer_unref(b); }
+void banner_release_buffer(struct surface *s, struct wl_resource *buffer, int paced) {
+    if (paced && s) release_buffer(s, buffer);
+    else wl_buffer_send_release(buffer);
+}
+void banner_surface_describe(const struct surface *s, char *out, size_t size) { describe(s, out, size); }
 
 /* ------------------------------------------------------------------ wl_surface */
 
@@ -840,6 +860,7 @@ static void surface_resource_destroy(struct wl_resource *r) {
     if (s->pending_buffer) wl_list_remove(&s->pending_buffer_destroy.link);
     pending_releases_forget_surface(s);
     drop_dmabuf(s, 0);
+    if (g_zero_copy) ahb_swapchain_surface_gone(s);
     vkp_image_destroy(s->shm_img);
     wl_resource_for_each_safe(cb, cbtmp, &s->pending_frames) wl_resource_destroy(cb);
     wl_resource_for_each_safe(cb, cbtmp, &s->frames) wl_resource_destroy(cb);
@@ -1461,6 +1482,31 @@ static int layer_candidate(const struct draw_list *dl, int scene_w, int scene_h)
     return dl->n - 1;
 }
 
+/* Zero-copy: the surface whose current GPU frame `img` is (layer_candidate found the draw). */
+static struct surface *surface_for_image(const struct vkp_image *img) {
+    struct surface *s;
+    wl_list_for_each(s, &g_surfaces, link)
+        if (s->dmabuf_buf && s->dmabuf_buf->img == img) return s;
+    return NULL;
+}
+
+/* Zero-copy: the topmost window whose frame is one of the game's AHardwareBuffers that this
+ * renderer could NOT import (so it has no draw), covering the whole scene at 0,0 with nothing of
+ * its own above it: it can only be shown on the layer. NULL otherwise. */
+static struct surface *ahb_layer_only_candidate(int scene_w, int scene_h) {
+    struct surface *s;
+    int w, h;
+    if (wl_list_empty(&g_toplevels)) return NULL;
+    s = wl_container_of(g_toplevels.prev, s, toplevel_link);
+    if (!s->dmabuf_buf || s->dmabuf_buf->img || !ahb_swapchain_has_ahb(s->dmabuf_buf)) return NULL;
+    if ((g_desktop && !s->placed) || s->x != 0 || s->y != 0 || s->src_set || s->dst_set) return NULL;
+    if (!wl_list_empty(&s->children)) return NULL;
+    if (g_hide_shell && !strcmp(client_name(wl_resource_get_client(s->resource)), "explorer.exe")) return NULL;
+    surface_size(s, &w, &h);
+    if (w != scene_w || h != scene_h || s->buf_w != scene_w || s->buf_h != scene_h) return NULL;
+    return s;
+}
+
 static void render_scene(void) {
     struct draw_list dl = {0};
     struct surface *s;
@@ -1484,12 +1530,23 @@ static void render_scene(void) {
 
     int rendered;
     int li = g_zero_copy ? layer_candidate(&dl, w, h) : -1;
-    if (li >= 0) {
+    struct surface *ls = li >= 0 ? surface_for_image(dl.d[li].img) : NULL;
+    if (li < 0 && g_zero_copy) ls = ahb_layer_only_candidate(w, h);
+    if (li >= 0 || ls) {
         /* Layer mode: the fullscreen window goes to its own Android layer; whatever is under it is
-         * hidden by it, so the screen surface only needs to be black. If the layer can't take the
-         * frame, draw it the usual way. */
-        rendered = vkp_render(w, h, NULL, 0) == 0 && sc_layer_present(dl.d[li].img, w, h) == 0;
-        if (!rendered) rendered = vkp_render(w, h, dl.d, dl.n) == 0;
+         * hidden by it, so the screen surface only needs to be black. The frame goes on the layer
+         * as is when it is one of the game's own AHardwareBuffers (zero-copy, ahb_swapchain.c),
+         * else through one blit into the pool. If the layer can't take the frame, draw it the
+         * usual way. */
+        rendered = vkp_render(w, h, NULL, 0) == 0;
+        if (rendered) {
+            int r = -1;
+            if (ls && ls->dmabuf_buf && ahb_swapchain_has_ahb(ls->dmabuf_buf))
+                r = ahb_swapchain_present(ls->dmabuf_buf, ls, w, h);
+            if (r != 0 && li >= 0) r = sc_layer_present(dl.d[li].img, w, h);
+            if (r == 0) { if (ls) ls->drawn = 1; }
+            else rendered = vkp_render(w, h, dl.d, dl.n) == 0;
+        }
     } else {
         if (g_zero_copy) sc_layer_hide();
         rendered = vkp_render(w, h, dl.d, dl.n) == 0;
@@ -2296,9 +2353,13 @@ static int on_stats_timer(void *data) {
     int windows = 0;
     struct surface *s;
     wl_list_for_each(s, &g_toplevels, toplevel_link) windows++;
-    if (g_stat_frames || g_stat_dmabuf || g_stat_shm)
-        banner_log("stats", "last 10 s: %u frames on screen (%.1f fps) | %u GPU frames from games | %u window redraws | %d windows open",
-                   g_stat_frames, g_stat_frames / 10.0, g_stat_dmabuf, g_stat_shm, windows);
+    unsigned zero_copy = g_zero_copy ? ahb_swapchain_stats_take() : 0;
+    if (g_stat_frames || g_stat_dmabuf || g_stat_shm) {
+        char extra[48] = "";
+        if (g_zero_copy) snprintf(extra, sizeof(extra), " | %u zero-copy frames", zero_copy);
+        banner_log("stats", "last 10 s: %u frames on screen (%.1f fps) | %u GPU frames from games | %u window redraws | %d windows open%s",
+                   g_stat_frames, g_stat_frames / 10.0, g_stat_dmabuf, g_stat_shm, windows, extra);
+    }
     g_stat_frames = g_stat_dmabuf = g_stat_shm = 0;
     wl_event_source_timer_update(g_stats_timer, 10000);
     return 0;
@@ -2432,6 +2493,7 @@ int banner_wayland_run(void) {
     wl_global_create(display, &zwp_pointer_constraints_v1_interface, 1, NULL, bind_pointer_constraints);
     wl_global_create(display, &zwp_relative_pointer_manager_v1_interface, 1, NULL, bind_relative_pointer_manager);
     banner_ext_init(display); /* clipboard, text input, toplevel icons (own files, see banner_ext.h) */
+    ahb_swapchain_init(display); /* zero-copy layers: banner_ahb_v1, only in layer mode (ahb_swapchain.h) */
     wl_list_init(&g_pending_releases);
     g_release_timer_fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
     if (g_release_timer_fd >= 0)

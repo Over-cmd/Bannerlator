@@ -178,3 +178,38 @@ with the variable in the container's environment, one fullscreen game window is 
 `ASurfaceControl` child of the SurfaceView (pool of three compositor-allocated AHBs, one blit,
 release fences from `setOnComplete`, geometry from the fullscreen mode); any other scene falls back
 to the swapchain blit. Log tag `layer`. Off by default.
+
+## Zero-copy game frames (feat/wayland-zero-copy-wsi, `BANNER_WAYLAND_ZERO_COPY=1`)
+Option (a') of `ZERO_COPY_SPIKE.md`, both halves:
+- **Guest (our Wayland Turnip, banners-turnip-wayland `patches/wayland/banner_ahb_wsi.py`, all
+  variants):** with `BANNER_WSI_AHB=1` and the compositor advertising `banner_ahb_v1`, the Wayland
+  WSI allocates every swapchain image as a gralloc `AHardwareBuffer` (usage GPU_SAMPLED_IMAGE |
+  GPU_FRAMEBUFFER | COMPOSER_OVERLAY; UBWC when gralloc picks it and a test `vkCreateImage` with the
+  explicit `QCOM_COMPRESSED` layout succeeds, else linear via a CPU usage bit; `BANNER_WSI_AHB_LINEAR=1`
+  forces linear), imports the handle's dma-buf with an explicit modifier + pitch (the compositor's own
+  pool-import path; `vk_android.c` is not in a platforms=wayland build), shares it through
+  `zwp_linux_dmabuf_v1` as before (blit fallback), and sends the `AHardwareBuffer` once per image:
+  `socketpair` + `AHardwareBuffer_sendHandleToUnixSocket` + `banner_ahb_v1.attach(wl_buffer, fd, w, h,
+  stride, modifier hi/lo, image_count)`. Surface formats are limited to `R8G8B8A8_UNORM/SRGB` (and
+  `A2B10G10R10`) while the mode is on: gralloc has no BGRA (DXVK/Zink blit into the swapchain image
+  anyway). Marker: `strings libvulkan_freedreno_wayland*.so | grep banner_ahb_v1`.
+- **Compositor (`src/ahb_swapchain.c`, protocol `protocols/banner-ahb-v1.xml`):** the global exists only
+  in layer mode. `attach` → `AHardwareBuffer_recvHandleFromUnixSocket`, record on the `dmabuf_buffer`.
+  When that buffer is the one fullscreen frame (`layer_candidate`, or the layer-only candidate when
+  this renderer could not import it), `sc_layer_present_ahb` sets it on the `banner_wayland_game`
+  SurfaceControl as is. **Acquire fence** = `DMA_BUF_IOCTL_EXPORT_SYNC_FILE(READ)` of the dma-buf: Mesa
+  imports the render fence into the dma-buf (`wsi_signal_dma_buf_from_semaphore`) *before* the
+  `wl_surface.commit`, so the export always carries the frame; if the ioctl fails the compositor
+  polls the dma-buf instead (logged once). **Release**: `setOnComplete` →
+  `getPreviousReleaseFenceFd` → `DMA_BUF_IOCTL_IMPORT_SYNC_FILE(READ)` into the dma-buf → then
+  `wl_buffer.release` (still on the FPS limiter's cadence); Mesa's acquire
+  (`wsi_create_sync_for_dma_buf_wait`) exports every fence of the dma-buf, so the game waits for the
+  display. If the import fails the release waits on the fence fd in the event loop instead. A hidden
+  or retired layer gets a 16x16 blank buffer so SurfaceFlinger actually lets go of the game's buffer.
+- **App:** `BANNER_WAYLAND_ZERO_COPY=1` (container/shortcut env) also exports `BANNER_WSI_AHB=1` into the
+  guest (`XServerDisplayActivity.isWaylandZeroCopyRequested`), one switch for both halves.
+- **Log lines (tag `layer`):** `zero-copy: banner_ahb_v1 advertised …`, `zero-copy: <exe> bound
+  banner_ahb_v1 …`, `zero-copy: AHB swapchain from <exe> (N images, WxH, UBWC (QCOM_COMPRESSED)|linear,
+  stride S px)`, `zero-copy: presenting "<title>" (<exe>) without a copy`; the 10 s `stats` line ends
+  with `| N zero-copy frames`. Guest side (Mesa log, stderr of the game): `banner-ahb: WxH swapchain
+  (N images) on gralloc buffers: UBWC|linear, stride S px` or the reason it stayed on standard buffers.

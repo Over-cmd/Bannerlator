@@ -4,6 +4,7 @@
  * older devices and the prototype stays off every other path. */
 #define _GNU_SOURCE
 #include "sc_layer.h"
+#include "ahb_swapchain.h"
 #include "vk_present.h"
 #include <android/hardware_buffer.h>
 #include <android/native_window.h>
@@ -113,6 +114,12 @@ struct slot {
 static struct slot g_slots[POOL];
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER; /* pool + callback state */
 static int g_pending_cb;                                   /* OnComplete callbacks not yet delivered */
+/* Zero-copy: the game's own buffer on the layer, identified by the token ahb_swapchain.c gave it
+ * (NULL = a pool slot, g_cur_slot, is on the layer instead). */
+static void *g_cur_token;
+/* A small buffer set on the layer when it is hidden or retired, so SurfaceFlinger replaces (and
+ * releases, with a fence) the game's buffer instead of holding it while the layer is invisible. */
+static AHardwareBuffer *g_blank;
 
 static ASurfaceControl *g_sc;
 static ANativeWindow *g_sc_window;                         /* the window g_sc was created on */
@@ -127,7 +134,8 @@ static uint64_t g_pool_modifier;
 
 struct complete_ctx {
     ASurfaceControl *sc;
-    int prev_slot;              /* buffer this transaction replaced: free once its release fence is known */
+    int prev_slot;              /* pool buffer this transaction replaced: free once its release fence is known */
+    void *prev_token;           /* or the game's buffer it replaced: ahb_swapchain gets its release fence */
     int retire;                 /* release sc after this transaction (hide + reparent) */
 };
 
@@ -149,19 +157,47 @@ static void on_complete(void *context, ASurfaceTransactionStats *stats) {
     }
     if (g_pending_cb > 0) g_pending_cb--;
     pthread_mutex_unlock(&g_lock);
+    if (ctx->prev_token) {
+        int fd = (stats && ctx->sc) ? api.prevReleaseFence(stats, ctx->sc) : -1;
+        ahb_swapchain_layer_released(ctx->prev_token, fd); /* takes the fd */
+    }
     if (ctx->retire && ctx->sc) api.release(ctx->sc);
     free(ctx);
 }
 
-static int add_complete(ASurfaceTransaction *tx, ASurfaceControl *sc, int prev_slot, int retire) {
+static int add_complete(ASurfaceTransaction *tx, ASurfaceControl *sc, int prev_slot, void *prev_token, int retire) {
     struct complete_ctx *ctx = calloc(1, sizeof(*ctx));
     if (!ctx) return -1;
-    ctx->sc = sc; ctx->prev_slot = prev_slot; ctx->retire = retire;
+    ctx->sc = sc; ctx->prev_slot = prev_slot; ctx->prev_token = prev_token; ctx->retire = retire;
     pthread_mutex_lock(&g_lock);
     g_pending_cb++;
     pthread_mutex_unlock(&g_lock);
     api.setOnComplete(tx, ctx, on_complete);
     return 0;
+}
+
+/* The stand-in buffer for a hidden/retired layer (allocated once, black). */
+static AHardwareBuffer *blank_buffer(void) {
+    if (g_blank) return g_blank;
+    AHardwareBuffer_Desc d = {
+        .width = 16, .height = 16, .layers = 1, .format = AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM,
+        .usage = AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE | AHARDWAREBUFFER_USAGE_COMPOSER_OVERLAY |
+                 AHARDWAREBUFFER_USAGE_CPU_WRITE_RARELY};
+    if (AHardwareBuffer_allocate(&d, &g_blank) != 0 || !g_blank) { g_blank = NULL; return NULL; }
+    void *p = NULL;
+    if (AHardwareBuffer_lock(g_blank, AHARDWAREBUFFER_USAGE_CPU_WRITE_RARELY, -1, NULL, &p) == 0 && p) {
+        AHardwareBuffer_Desc got; AHardwareBuffer_describe(g_blank, &got);
+        memset(p, 0, (size_t)got.stride * 4 * 16);
+        AHardwareBuffer_unlock(g_blank, NULL);
+    }
+    return g_blank;
+}
+
+/* Take the current buffer (pool slot or the game's) off the layer by putting the blank one on it,
+ * so SurfaceFlinger releases it with a fence through this transaction's callback. */
+static void replace_with_blank(ASurfaceTransaction *tx) {
+    AHardwareBuffer *b = blank_buffer();
+    if (b) api.setBuffer(tx, g_sc, b, -1);
 }
 
 /* Hide + detach the layer; the SurfaceControl is released from the transaction's callback (the
@@ -170,17 +206,19 @@ static void retire_sc(void) {
     if (!g_sc) return;
     ASurfaceTransaction *tx = api.txCreate();
     if (tx) {
+        replace_with_blank(tx);
         api.setVisibility(tx, g_sc, ASC_VISIBILITY_HIDE);
         api.reparent(tx, g_sc, NULL);
-        if (add_complete(tx, g_sc, g_cur_slot, 1) != 0) api.release(g_sc);
+        if (add_complete(tx, g_sc, g_cur_slot, g_cur_token, 1) != 0) api.release(g_sc);
         api.txApply(tx);
         api.txDelete(tx);
     } else {
+        if (g_cur_token) ahb_swapchain_layer_released(g_cur_token, -1);
         api.release(g_sc);
     }
     banner_log("layer", "SurfaceControl retired (window %p)", (void *)g_sc_window);
     g_sc = NULL; g_sc_window = NULL;
-    g_shown = 0; g_cur_slot = -1; g_geo_valid = 0;
+    g_shown = 0; g_cur_slot = -1; g_cur_token = NULL; g_geo_valid = 0;
 }
 
 /* Wait (bounded) for SurfaceFlinger to finish with every pool buffer, then free the pool. */
@@ -307,8 +345,10 @@ void sc_layer_probe_dmabuf_fd(int fd) {
     }
 }
 
-int sc_layer_present(struct vkp_image *src, int scene_w, int scene_h) {
-    if (!src || load_api() != 0) return -1;
+/* The SurfaceControl on the current output window (created on first use, re-created after a
+ * window change). -1 = no window / no API. */
+static int ensure_sc(void) {
+    if (load_api() != 0) return -1;
     ANativeWindow *win = vkp_window();
     if (!win) return -1;
     if (g_sc && g_sc_window != win) retire_sc();
@@ -324,13 +364,68 @@ int sc_layer_present(struct vkp_image *src, int scene_w, int scene_h) {
         }
         banner_log("layer", "SurfaceControl \"banner_wayland_game\" created as a child of the screen surface");
     }
+    return 0;
+}
 
-    /* Geometry through the same mapping the blit path and the app's touch mapping use. */
+/* Geometry of a w x h buffer covering the scene, through the same mapping the blit path and the
+ * app's touch mapping use. 1 = r filled, 0 = nothing of it is on screen, -1 = no mapping. */
+static int layer_geometry(int w, int h, int scene_w, int scene_h, int r[8]) {
     if (vkp_update_map(scene_w, scene_h) != 0) return -1;
-    int sw = vkp_image_width(src), sh = vkp_image_height(src);
-    struct vkp_draw d = {src, 0, 0, (float)sw, (float)sh, 0, 0, scene_w, scene_h};
+    return vkp_map_rect(w, h, scene_w, scene_h, r) ? 1 : 0;
+}
+
+static void apply_geometry(ASurfaceTransaction *tx, const int r[8]) {
+    ARect srcR = {r[0], r[1], r[2], r[3]}, dstR = {r[4], r[5], r[6], r[7]};
+    if (!g_geo_valid || memcmp(&srcR, &g_geo_src, sizeof(srcR)) || memcmp(&dstR, &g_geo_dst, sizeof(dstR))) {
+        api.setGeometry(tx, g_sc, &srcR, &dstR, 0 /* no transform: the DPU scales, never rotates */);
+        g_geo_src = srcR; g_geo_dst = dstR; g_geo_valid = 1;
+        banner_log("layer", "geometry: buffer %d,%d-%d,%d -> screen %d,%d-%d,%d", r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]);
+    }
+}
+
+int sc_layer_present_ahb(AHardwareBuffer *ahb, int w, int h, int acquire_fd, void *token, int scene_w, int scene_h) {
     int r[8];
-    if (!vkp_map_draw(&d, r)) { sc_layer_hide(); return 0; } /* nothing of it is on screen */
+    if (!ahb || !token || ensure_sc() != 0) goto unavailable;
+    int g = layer_geometry(w, h, scene_w, scene_h, r);
+    if (g < 0) goto unavailable;
+    if (g == 0) { if (acquire_fd >= 0) close(acquire_fd); sc_layer_hide(); return 1; }
+    if (token == g_cur_token && g_shown) {
+        /* The same frame again (the scene was redrawn for another reason): the display already
+         * has it; only the placement may have changed. */
+        if (acquire_fd >= 0) close(acquire_fd);
+        ASurfaceTransaction *tx = api.txCreate();
+        if (tx) { apply_geometry(tx, r); api.txApply(tx); api.txDelete(tx); }
+        return 0;
+    }
+    ASurfaceTransaction *tx = api.txCreate();
+    if (!tx) goto unavailable;
+    api.setBuffer(tx, g_sc, ahb, acquire_fd); /* the transaction owns the fence */
+    api.setBufferTransparency(tx, g_sc, ASC_TRANSPARENCY_OPAQUE);
+    apply_geometry(tx, r);
+    if (!g_shown) api.setVisibility(tx, g_sc, ASC_VISIBILITY_SHOW);
+    if (add_complete(tx, g_sc, g_cur_slot, g_cur_token == token ? NULL : g_cur_token, 0) != 0) {
+        api.txDelete(tx); /* the fence went with the transaction */
+        return -1;
+    }
+    api.txApply(tx);
+    api.txDelete(tx);
+    g_cur_slot = -1;
+    g_cur_token = token;
+    if (!g_shown) { g_shown = 1; banner_log("layer", "layer shown"); }
+    if (!g_first_logged) { g_first_logged = 1; vkp_signal_first_frame(); }
+    return 0;
+unavailable:
+    if (acquire_fd >= 0) close(acquire_fd);
+    return -1;
+}
+
+int sc_layer_present(struct vkp_image *src, int scene_w, int scene_h) {
+    if (!src || ensure_sc() != 0) return -1;
+    int sw = vkp_image_width(src), sh = vkp_image_height(src);
+    int r[8];
+    int g = layer_geometry(sw, sh, scene_w, scene_h, r);
+    if (g < 0) return -1;
+    if (g == 0) { sc_layer_hide(); return 0; } /* nothing of it is on screen */
 
     int idx = take_free_slot(sw, sh);
     if (idx < 0) {
@@ -350,20 +445,16 @@ int sc_layer_present(struct vkp_image *src, int scene_w, int scene_h) {
      * submit fence as a sync_fd and hand it here instead of waiting. */
     api.setBuffer(tx, g_sc, s->ahb, -1);
     api.setBufferTransparency(tx, g_sc, ASC_TRANSPARENCY_OPAQUE);
-    ARect srcR = {r[0], r[1], r[2], r[3]}, dstR = {r[4], r[5], r[6], r[7]};
-    if (!g_geo_valid || memcmp(&srcR, &g_geo_src, sizeof(srcR)) || memcmp(&dstR, &g_geo_dst, sizeof(dstR))) {
-        api.setGeometry(tx, g_sc, &srcR, &dstR, 0 /* no transform: the DPU scales, never rotates */);
-        g_geo_src = srcR; g_geo_dst = dstR; g_geo_valid = 1;
-        banner_log("layer", "geometry: buffer %d,%d-%d,%d -> screen %d,%d-%d,%d", r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]);
-    }
+    apply_geometry(tx, r);
     if (!g_shown) api.setVisibility(tx, g_sc, ASC_VISIBILITY_SHOW);
-    add_complete(tx, g_sc, g_cur_slot, 0);
+    add_complete(tx, g_sc, g_cur_slot, g_cur_token, 0);
     pthread_mutex_lock(&g_lock);
     s->busy = 1;
     pthread_mutex_unlock(&g_lock);
     api.txApply(tx);
     api.txDelete(tx);
     g_cur_slot = idx;
+    g_cur_token = NULL;
     if (!g_shown) { g_shown = 1; banner_log("layer", "layer shown"); }
     if (!g_first_logged) {
         g_first_logged = 1;
@@ -379,9 +470,13 @@ void sc_layer_hide(void) {
     if (!g_sc || !g_shown || api.state != 1) return;
     ASurfaceTransaction *tx = api.txCreate();
     if (!tx) return;
+    /* The buffer comes off the layer with it: a hidden layer would keep the game's buffer (or the
+     * pool slot) referenced, and the game needs it back to keep presenting the other way. */
+    replace_with_blank(tx);
     api.setVisibility(tx, g_sc, ASC_VISIBILITY_HIDE);
+    add_complete(tx, g_sc, g_cur_slot, g_cur_token, 0);
     api.txApply(tx); api.txDelete(tx);
-    g_shown = 0;
+    g_shown = 0; g_cur_slot = -1; g_cur_token = NULL;
     banner_log("layer", "layer hidden (scene is not a single fullscreen window)");
 }
 
