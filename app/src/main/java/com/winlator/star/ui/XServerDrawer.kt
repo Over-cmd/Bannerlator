@@ -1366,15 +1366,19 @@ private fun GraphicsContent(state: XServerDrawerState) {
 }
 
 // ───── Wayland: Zero-copy presentation ─────
-// The toggle mirrors BANNER_WAYLAND_ZERO_COPY=1 in the effective env (shortcut override else
-// container) and writes it there (activity callback); the compositor and the guest's Turnip read it
-// at launch, so a change applies on the NEXT launch. While this session actually runs zero-copy the
-// row shows the compositor's live count (its last-10-s stats window, polled every 2 s).
+// A live switch. Flipping it applies to the RUNNING compositor at once (it broadcasts
+// banner_ahb_v1.mode, and every game rebuilds its swapchain on — or off — gralloc display buffers,
+// one frame's worth of latency, no black frame in between) and is also written to the effective env
+// (shortcut override else container) as the next launch's default.
+//
+// The status line follows the COMPOSITOR, not the toggle: a flip is only real once frames actually
+// start — or stop — reaching the display layer, which is what waylandZeroCopyLive reports. The
+// 10 s frame counter is far too slow to show that, so it is only used once the mode has settled.
 @Composable
 private fun WaylandZeroCopyRow(state: XServerDrawerState, effectsAvailable: Boolean) {
     val requested by state.waylandZeroCopyRequested.collectAsState()
-    val active by state.waylandZeroCopyActive.collectAsState()
     val frames by state.waylandZeroCopyFrames.collectAsState()
+    val live by state.waylandZeroCopyLive.collectAsState()
     // Keyed on the seeded value so a reopen shows what is stored, not a stale capture.
     var checked by remember(requested) { mutableStateOf(requested) }
 
@@ -1384,24 +1388,27 @@ private fun WaylandZeroCopyRow(state: XServerDrawerState, effectsAvailable: Bool
         state.setWaylandZeroCopyRequested(it)
         state.onWaylandZeroCopyToggle?.accept(it)
     }
-    HelperText("Fullscreen games are shown on their own display layer with no compositor copy. Applies on the next launch.")
+    HelperText("Fullscreen games are shown on their own display layer with no compositor copy. Applies immediately, and is kept as this game's default.")
 
-    if (active) {
-        // Any effect that needs the compositor pass forces the blit path; only possible once the
-        // compositor has the chain (until then the effect controls above are greyed and off).
-        val effectsOn = effectsAvailable && waylandCompositorEffectsOn()
-        if (effectsOn) {
-            HelperText("Zero-copy is paused while screen effects are on.")
-        } else {
-            LaunchedEffect(Unit) {
-                while (true) {
-                    state.onWaylandZeroCopyPoll?.run()
-                    delay(2000)
-                }
-            }
-            HelperText("This session: $frames zero-copy frames in the last 10 s")
+    // Polled whichever way the switch is set: the line has to be able to say "switching off" too.
+    LaunchedEffect(Unit) {
+        while (true) {
+            state.onWaylandZeroCopyPoll?.run()
+            delay(1000)
         }
     }
+    // Any effect that needs the compositor pass forces the blit path until it is off again.
+    val effectsOn = effectsAvailable && waylandCompositorEffectsOn()
+    HelperText(
+        when {
+            checked && effectsOn  -> "Paused while screen effects are on; resumes when they are off."
+            checked && !live      -> "Switching on… the game is rebuilding its swapchain on display buffers."
+            checked && frames > 0 -> "On: $frames zero-copy frames in the last 10 s"
+            checked               -> "On: frames are going straight to the display layer."
+            live                  -> "Switching off… the game's last display-layer frames are still on screen."
+            else                  -> "Off: the compositor copies each frame into its own swapchain."
+        }
+    )
 }
 
 /** True when any Vulkan-block effect that runs in the compositor pass is currently on. */

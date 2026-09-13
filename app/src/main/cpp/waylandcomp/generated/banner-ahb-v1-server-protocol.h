@@ -69,8 +69,18 @@ struct wl_buffer;
  * reference to the AHardwareBuffer lives as long as the wl_buffer (plus
  * whatever the display still holds).
  *
- * The compositor only advertises this global when its layer mode is on.
- * A client that does not see it (or does not want it) keeps allocating
+ * The compositor advertises this global whenever it can put buffers on a
+ * display layer at all; whether it WANTS gralloc buffers right now is the
+ * mode event (version 2), sent on bind and every time the user switches
+ * zero-copy on or off during the session. A client decides per swapchain,
+ * when it creates the swapchain, from the last mode it received, and a
+ * client whose live swapchain was built for the other mode retires it
+ * (VK_ERROR_OUT_OF_DATE_KHR on its next acquire or present) so the program
+ * rebuilds it for the new mode. Buffers of the old swapchain stay fully
+ * presentable until then: an attached AHardwareBuffer keeps its association
+ * for the wl_buffer's lifetime whatever the mode is now. A version 1
+ * client (no mode event) keeps deciding from its own environment. A
+ * client that does not see the global (or does not want it) allocates
  * swapchain images the standard way; nothing else changes.
  *
  * Synchronisation stays implicit: the dma-buf carries the client's render
@@ -101,8 +111,18 @@ struct wl_buffer;
  * reference to the AHardwareBuffer lives as long as the wl_buffer (plus
  * whatever the display still holds).
  *
- * The compositor only advertises this global when its layer mode is on.
- * A client that does not see it (or does not want it) keeps allocating
+ * The compositor advertises this global whenever it can put buffers on a
+ * display layer at all; whether it WANTS gralloc buffers right now is the
+ * mode event (version 2), sent on bind and every time the user switches
+ * zero-copy on or off during the session. A client decides per swapchain,
+ * when it creates the swapchain, from the last mode it received, and a
+ * client whose live swapchain was built for the other mode retires it
+ * (VK_ERROR_OUT_OF_DATE_KHR on its next acquire or present) so the program
+ * rebuilds it for the new mode. Buffers of the old swapchain stay fully
+ * presentable until then: an attached AHardwareBuffer keeps its association
+ * for the wl_buffer's lifetime whatever the mode is now. A version 1
+ * client (no mode event) keeps deciding from its own environment. A
+ * client that does not see the global (or does not want it) allocates
  * swapchain images the standard way; nothing else changes.
  *
  * Synchronisation stays implicit: the dma-buf carries the client's render
@@ -159,6 +179,12 @@ struct banner_ahb_v1_interface {
 		       uint32_t image_count);
 };
 
+#define BANNER_AHB_V1_MODE 0
+
+/**
+ * @ingroup iface_banner_ahb_v1
+ */
+#define BANNER_AHB_V1_MODE_SINCE_VERSION 2
 
 /**
  * @ingroup iface_banner_ahb_v1
@@ -168,6 +194,18 @@ struct banner_ahb_v1_interface {
  * @ingroup iface_banner_ahb_v1
  */
 #define BANNER_AHB_V1_ATTACH_SINCE_VERSION 1
+
+/**
+ * @ingroup iface_banner_ahb_v1
+ * Sends an mode event to the client owning the resource.
+ * @param resource_ The client's resource
+ * @param enabled 1 = gralloc swapchain images wanted, 0 = not
+ */
+static inline void
+banner_ahb_v1_send_mode(struct wl_resource *resource_, uint32_t enabled)
+{
+	wl_resource_post_event(resource_, BANNER_AHB_V1_MODE, enabled);
+}
 
 #ifdef  __cplusplus
 }

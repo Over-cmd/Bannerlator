@@ -13,12 +13,17 @@
  * before the guest WSI learns to render straight into such buffers (which removes the copy).
  *
  * Compositor thread only, except the SurfaceFlinger OnComplete callbacks (binder threads), which
- * only touch the pool under its mutex. Never called unless g_zero_copy is set.
+ * only touch the pool under its mutex. Presents run only while g_zero_copy is set (or for a
+ * game buffer that can only be shown here); sc_layer_hide() is safe at any time.
  */
 #include <stdint.h>
 #include <android/hardware_buffer.h>
 
 struct vkp_image;
+
+/* 1 when this device has the SurfaceControl API the layer needs (Android 10+, libnativewindow's
+ * getNativeHandle); the reason is logged (tag `layer`) the first time it is missing. */
+int sc_layer_available(void);
 
 /* One-shot: does the kernel export a sync_file from the game's dma-buf (DMA_BUF_IOCTL_EXPORT_SYNC_FILE)?
  * Decides where a zero-copy acquire fence can come from; result goes to the session log. */

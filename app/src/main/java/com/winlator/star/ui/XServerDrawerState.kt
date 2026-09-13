@@ -55,16 +55,20 @@ object XServerDrawerState {
     private val _waylandFrameGenAvailable = MutableStateFlow(false)
     val waylandFrameGenAvailable: StateFlow<Boolean> = _waylandFrameGenAvailable
 
-    // Zero-copy presentation (BANNER_WAYLAND_ZERO_COPY=1 in the effective env: shortcut override
-    // else container). `requested` = what the toggle shows and writes (takes effect on the next
-    // launch); `active` = what THIS session's compositor was started with; `frames` = the
-    // compositor's zero-copy frames in its last 10 s window, polled while active.
+    // Zero-copy presentation. `requested` = what the toggle shows; it is applied to the running
+    // compositor at once AND written to the effective env (shortcut override else container) as the
+    // next launch's default. `active` = the compositor's live state. `frames` = its zero-copy frames
+    // in the last completed 10 s window. `live` = a zero-copy frame reached the display layer in the
+    // last ~1.5 s, which is what separates "switching..." from "running" right after a flip (the
+    // 10 s counter is far too slow for that).
     private val _waylandZeroCopyRequested = MutableStateFlow(false)
     val waylandZeroCopyRequested: StateFlow<Boolean> = _waylandZeroCopyRequested
     private val _waylandZeroCopyActive    = MutableStateFlow(false)
     val waylandZeroCopyActive: StateFlow<Boolean> = _waylandZeroCopyActive
     private val _waylandZeroCopyFrames    = MutableStateFlow(0)
     val waylandZeroCopyFrames: StateFlow<Int> = _waylandZeroCopyFrames
+    private val _waylandZeroCopyLive      = MutableStateFlow(false)
+    val waylandZeroCopyLive: StateFlow<Boolean> = _waylandZeroCopyLive
 
     private val _isMouseDisabled         = MutableStateFlow(false)
     val isMouseDisabled: StateFlow<Boolean> = _isMouseDisabled
@@ -436,9 +440,12 @@ object XServerDrawerState {
     @JvmField var onRelativeMouseMovement:  Runnable? = null
     @JvmField var onDisableMouse:           Runnable? = null
     @JvmField var onNativeRenderingToggle: Runnable? = null
-    // Zero-copy presentation toggle: writes/removes BANNER_WAYLAND_ZERO_COPY=1 in the shortcut's
-    // (else the container's) env vars. Poll: reads the compositor's last-10-s zero-copy frame count
-    // into waylandZeroCopyFrames (the drawer calls it every 2 s while the row is on screen).
+    // Zero-copy presentation toggle: applies the switch to the RUNNING compositor (nativeSetZeroCopy,
+    // which tells the game to rebuild its swapchain) and writes/removes BANNER_WAYLAND_ZERO_COPY=1 in
+    // the shortcut's (else the container's) env vars as the next launch's default. Poll: reads the
+    // compositor's last-10-s zero-copy frame count into waylandZeroCopyFrames and whether a zero-copy
+    // frame arrived just now into waylandZeroCopyLive (the drawer calls it every second while the row
+    // is on screen).
     @JvmField var onWaylandZeroCopyToggle: java.util.function.Consumer<Boolean>? = null
     @JvmField var onWaylandZeroCopyPoll: Runnable? = null
 
@@ -491,6 +498,7 @@ object XServerDrawerState {
     fun setWaylandZeroCopyRequested(v: Boolean) { _waylandZeroCopyRequested.value = v }
     fun setWaylandZeroCopyActive(v: Boolean)    { _waylandZeroCopyActive.value = v }
     fun setWaylandZeroCopyFrames(v: Int)        { _waylandZeroCopyFrames.value = v }
+    fun setWaylandZeroCopyLive(v: Boolean)      { _waylandZeroCopyLive.value = v }
     fun setIsMouseDisabled(v: Boolean)         { _isMouseDisabled.value = v }
     fun setMoveCursorToTouchpoint(v: Boolean)  { _moveCursorToTouchpoint.value = v }
     fun setGestureDragSelect(v: Boolean)          { _gestureDragSelect.value = v }
@@ -640,6 +648,7 @@ object XServerDrawerState {
         _waylandZeroCopyRequested.value = false
         _waylandZeroCopyActive.value = false
         _waylandZeroCopyFrames.value = 0
+        _waylandZeroCopyLive.value = false
         _isMouseDisabled.value = false
         _moveCursorToTouchpoint.value = false
         _gestureDragSelect.value = true

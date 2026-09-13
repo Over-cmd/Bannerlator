@@ -13,6 +13,7 @@
 #include <android/native_window_jni.h>
 #include "vk_present.h"
 #include "banner_ext.h"
+#include "ahb_swapchain.h"
 #include "effects_chain.h"
 
 extern int banner_wayland_run(void);
@@ -246,12 +247,23 @@ Java_com_winlator_star_wayland_WaylandCompositor_nativeSetHideShell(JNIEnv *env,
     g_hide_shell = hide ? 1 : 0;
 }
 
-/* Experimental layer mode (BANNER_WAYLAND_ZERO_COPY=1): one fullscreen window on its own Android
- * layer instead of the swapchain blit (sc_layer.c). Set before the compositor starts. */
+/* Zero-copy layer mode (BANNER_WAYLAND_ZERO_COPY=1 at launch, the drawer's switch live): one fullscreen
+ * window on its own Android layer instead of the swapchain blit (sc_layer.c / ahb_swapchain.c). Any
+ * thread, any time: before the compositor starts it is the launch default; afterwards the compositor
+ * thread flips the state, tells the bound games to rebuild their swapchains for it and redraws. */
 JNIEXPORT void JNICALL
 Java_com_winlator_star_wayland_WaylandCompositor_nativeSetZeroCopy(JNIEnv *env, jclass clazz, jboolean on) {
-    g_zero_copy = on ? 1 : 0;
-    __android_log_print(ANDROID_LOG_INFO, TAG, "zero-copy layer mode %s", on ? "on" : "off");
+    int live = banner_get_display() != NULL;
+    if (!live) g_zero_copy = on ? 1 : 0; /* read by ahb_swapchain_init before the queue drains */
+    banner_host_zero_copy(on ? 1 : 0, live);
+    __android_log_print(ANDROID_LOG_INFO, TAG, "zero-copy layer mode %s%s", on ? "on" : "off", live ? " (live)" : "");
+}
+
+/* Milliseconds since the compositor last put a game frame on the layer without a copy; -1 = never
+ * this session. The drawer's status line ("switching..." until the frames arrive / stop). */
+JNIEXPORT jint JNICALL
+Java_com_winlator_star_wayland_WaylandCompositor_nativeZeroCopyLastFrameAgeMs(JNIEnv *env, jclass clazz) {
+    return (jint)ahb_swapchain_last_frame_age_ms();
 }
 
 /* Zero-copy frames in the last completed 10 s stats window (on_stats_timer), for the drawer's live line. */

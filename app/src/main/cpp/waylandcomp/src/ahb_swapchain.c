@@ -49,10 +49,15 @@ struct ahb_buf {
 };
 
 static struct wl_list g_bufs;
+static struct wl_list g_clients;             /* bound banner_ahb_v1 resources (wl_resource links) */
 static uint64_t g_next_id = 1;
 static struct wl_event_loop *g_loop;
 static unsigned g_stat_zero_copy;
 static int g_export_failed_logged, g_import_failed_logged;
+static int g_advertised;                     /* the global exists */
+static int g_mode_sent = -1;                 /* the mode clients were last told (-1 = none yet) */
+static struct surface *g_announced;          /* "presenting X without a copy" said for this surface */
+static volatile int64_t g_last_zero_copy_ns; /* when a frame last went on the layer without a copy */
 
 /* SurfaceFlinger's callback thread -> compositor thread: released tokens + their fences. */
 struct released { uint64_t id; int fd; };
@@ -64,6 +69,11 @@ static int g_rel_pipe[2] = {-1, -1};
 /* Which swapchains were announced (one log line per swapchain, not per image). */
 struct chain_seen { struct wl_client *client; int w, h; uint32_t image_count; uint64_t modifier; };
 static struct chain_seen g_last_chain;
+
+static int64_t now_ns(void) {
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+}
 
 static struct ahb_buf *find_buf(uint64_t id) {
     struct ahb_buf *ab;
@@ -212,17 +222,22 @@ int ahb_swapchain_present(struct dmabuf_buffer *b, struct surface *s, int scene_
     if (!ab->on_layer) {
         ab->on_layer = 1;
         g_stat_zero_copy++;
+        g_last_zero_copy_ns = now_ns();
     }
-    if (s) {
-        static struct surface *announced;
-        if (announced != s) {
-            char name[160];
-            announced = s;
-            banner_surface_describe(s, name, sizeof(name));
-            banner_log("layer", "zero-copy: presenting %s without a copy", name);
-        }
+    if (s && g_announced != s) {
+        char name[160];
+        g_announced = s;
+        banner_surface_describe(s, name, sizeof(name));
+        banner_log("layer", "zero-copy: presenting %s without a copy", name);
     }
     return 0;
+}
+
+int ahb_swapchain_last_frame_age_ms(void) {
+    int64_t t = g_last_zero_copy_ns;
+    if (!t) return -1;
+    int64_t age = (now_ns() - t) / 1000000LL;
+    return age > INT32_MAX ? INT32_MAX : (int)age;
 }
 
 int ahb_swapchain_defer_release(struct dmabuf_buffer *b, struct wl_resource *buffer, struct surface *s, int paced) {
@@ -318,16 +333,69 @@ static const struct banner_ahb_v1_interface ahb_impl = {
     .attach = ahb_attach,
 };
 
+static void on_client_resource_destroyed(struct wl_resource *r) {
+    wl_list_remove(wl_resource_get_link(r));
+}
+
 static void bind_ahb(struct wl_client *c, void *data, uint32_t ver, uint32_t id) {
+    static struct wl_client *last_named;
+    if (ver > 2) ver = 2;
     struct wl_resource *r = wl_resource_create(c, &banner_ahb_v1_interface, (int)ver, id);
     if (!r) { wl_client_post_no_memory(c); return; }
-    wl_resource_set_implementation(r, &ahb_impl, NULL, NULL);
-    banner_log("layer", "zero-copy: %s bound banner_ahb_v1 (its swapchain images can be gralloc buffers)", banner_client_name(c));
+    wl_resource_set_implementation(r, &ahb_impl, NULL, on_client_resource_destroyed);
+    wl_list_insert(&g_clients, wl_resource_get_link(r));
+    /* The mode travels with the bind, so the client's registry roundtrip already has it when it
+     * decides about its first swapchain. */
+    if (ver >= BANNER_AHB_V1_MODE_SINCE_VERSION) banner_ahb_v1_send_mode(r, g_zero_copy ? 1u : 0u);
+    /* One line per program, not per surface-format query (each binds its own). */
+    if (last_named != c) {
+        last_named = c;
+        banner_log("layer", "zero-copy: %s bound banner_ahb_v1 version %u (%s)", banner_client_name(c), ver,
+                   ver >= 2 ? "follows the live switch" : "version 1: decides from its launch environment only");
+    }
+}
+
+void ahb_swapchain_set_mode(int on, int live) {
+    on = on ? 1 : 0;
+    g_zero_copy = on;
+    if (!g_advertised) {
+        if (live) banner_log("layer", "zero-copy switched %s from the drawer, but no display layer is available on this device: no change",
+                             on ? "on" : "off");
+        return;
+    }
+    if (g_mode_sent == on) return;
+    g_mode_sent = on;
+    int told = 0;
+    struct wl_resource *r;
+    wl_resource_for_each(r, &g_clients) {
+        if (wl_resource_get_version(r) >= BANNER_AHB_V1_MODE_SINCE_VERSION) {
+            banner_ahb_v1_send_mode(r, (uint32_t)on);
+            told++;
+        }
+    }
+    /* The next chain and the next fullscreen frame get announced again. */
+    memset(&g_last_chain, 0, sizeof(g_last_chain));
+    g_announced = NULL;
+    if (live)
+        banner_log("layer", "zero-copy switched %s from the drawer: %d bound program%s told to rebuild their swapchains%s",
+                   on ? "on" : "off", told, told == 1 ? "" : "s",
+                   on ? "; frames go on the display layer once the new gralloc swapchain is up"
+                      : "; gralloc frames still in flight stay on the layer (or take the copy path) until then");
+    else
+        banner_log("layer", "zero-copy: %s at launch (%s)", on ? "on" : "off",
+                   on ? "BANNER_WAYLAND_ZERO_COPY=1: games present their own gralloc buffers on the display layer"
+                      : "the drawer's Zero-copy presentation switch turns it on live");
+    if (live) wl_display_flush_clients(banner_get_display());
+    banner_request_redraw();
 }
 
 void ahb_swapchain_init(struct wl_display *display) {
     wl_list_init(&g_bufs);
-    if (!g_zero_copy) return;
+    wl_list_init(&g_clients);
+    if (!sc_layer_available()) {
+        banner_log("layer", "zero-copy: no display layer on this device (see the line above): banner_ahb_v1 not advertised");
+        return;
+    }
     g_loop = wl_display_get_event_loop(display);
     if (pipe2(g_rel_pipe, O_CLOEXEC | O_NONBLOCK) != 0) {
         banner_log("error", "zero-copy: release pipe creation failed (%s); zero-copy presents disabled", strerror(errno));
@@ -335,9 +403,11 @@ void ahb_swapchain_init(struct wl_display *display) {
         return;
     }
     wl_event_loop_add_fd(g_loop, g_rel_pipe[0], WL_EVENT_READABLE, on_release_pipe, NULL);
-    if (!wl_global_create(display, &banner_ahb_v1_interface, 1, NULL, bind_ahb)) {
+    if (!wl_global_create(display, &banner_ahb_v1_interface, 2, NULL, bind_ahb)) {
         banner_log("error", "zero-copy: banner_ahb_v1 global creation failed");
         return;
     }
-    banner_log("layer", "zero-copy: banner_ahb_v1 advertised (games built for it present their own gralloc buffers)");
+    g_advertised = 1;
+    banner_log("layer", "zero-copy: banner_ahb_v1 version 2 advertised (games built for it present their own gralloc buffers while the switch is on)");
+    ahb_swapchain_set_mode(g_zero_copy, 0);
 }

@@ -37,6 +37,7 @@ void banner_host_clipboard_text(const char *utf8, int len);  /* len 0 = clear */
 void banner_host_text_commit(const char *utf8, int len);
 void banner_host_text_preedit(const char *utf8, int len, int cursor_begin, int cursor_end);
 void banner_host_text_delete(int before, int after);
+void banner_host_zero_copy(int on, int live);                 /* the drawer's zero-copy switch (ahb_swapchain_set_mode) */
 
 /* ---- module internals reached through the queue (banner_ext.c → modules) */
 void clipboard_init(struct wl_display *display);

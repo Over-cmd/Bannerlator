@@ -539,7 +539,7 @@ static void drop_dmabuf(struct surface *s, int paced) {
         wl_list_remove(&s->dmabuf_destroy.link);
         /* A buffer on the zero-copy layer is the display's until SurfaceFlinger says otherwise:
          * ahb_swapchain.c releases it then. */
-        if (!(g_zero_copy && ahb_swapchain_defer_release(s->dmabuf_buf, s->dmabuf, s, paced))) {
+        if (!ahb_swapchain_defer_release(s->dmabuf_buf, s->dmabuf, s, paced)) {
             if (paced) release_buffer(s, s->dmabuf);
             else wl_buffer_send_release(s->dmabuf);
         }
@@ -869,7 +869,7 @@ static void surface_resource_destroy(struct wl_resource *r) {
     if (s->pending_buffer) wl_list_remove(&s->pending_buffer_destroy.link);
     pending_releases_forget_surface(s);
     drop_dmabuf(s, 0);
-    if (g_zero_copy) ahb_swapchain_surface_gone(s);
+    ahb_swapchain_surface_gone(s);
     vkp_image_destroy(s->shm_img);
     wl_resource_for_each_safe(cb, cbtmp, &s->pending_frames) wl_resource_destroy(cb);
     wl_resource_for_each_safe(cb, cbtmp, &s->frames) wl_resource_destroy(cb);
@@ -1558,7 +1558,7 @@ static void render_scene(void) {
     int li = layer_ok ? layer_candidate(&dl, w, h) : -1;
     struct surface *ls = li >= 0 ? surface_for_image(dl.d[li].img) : NULL;
     /* A frame this renderer could not import can only be shown on the layer, effects or not. */
-    if (li < 0 && g_zero_copy) ls = ahb_layer_only_candidate(w, h);
+    if (li < 0) ls = ahb_layer_only_candidate(w, h);
     if (ls && pass_on && li < 0 && !g_zero_copy_fx_skip_said) {
         g_zero_copy_fx_skip_said = 1;
         banner_log(framegen ? "framegen" : "effects",
@@ -1581,7 +1581,7 @@ static void render_scene(void) {
             else rendered = vkp_render(w, h, dl.d, dl.n) == 0;
         }
     } else {
-        if (g_zero_copy) sc_layer_hide();
+        sc_layer_hide();
         rendered = vkp_render(w, h, dl.d, dl.n) == 0;
     }
     if (rendered) {
@@ -2360,6 +2360,7 @@ void banner_wayland_send_scene_input(int type, int a, int b) {
 
 const char *banner_client_name(struct wl_client *client) { return client_name(client); }
 struct wl_display *banner_get_display(void) { return g_display; }
+void banner_request_redraw(void) { schedule_render(); }
 
 /* The surface text input follows: the last clicked mapped program window, else the topmost
  * mapped window not owned by the desktop's process (explorer). NULL when there is none. */
@@ -2390,7 +2391,7 @@ static int on_stats_timer(void *data) {
     int windows = 0;
     struct surface *s;
     wl_list_for_each(s, &g_toplevels, toplevel_link) windows++;
-    unsigned zero_copy = g_zero_copy ? ahb_swapchain_stats_take() : 0;
+    unsigned zero_copy = ahb_swapchain_stats_take();
     g_zero_copy_last = zero_copy;
     /* Interpolated frames the compositor added (framegen_bridge.c). They are on screen, so they
      * count there; they are NOT GPU frames from games and never inflate that number. */
@@ -2398,7 +2399,7 @@ static int on_stats_timer(void *data) {
     if (g_stat_frames || g_stat_dmabuf || g_stat_shm || generated) {
         char extra[96] = "";
         int off = 0;
-        if (g_zero_copy) off += snprintf(extra + off, sizeof(extra) - (size_t)off, " | %u zero-copy frames", zero_copy);
+        if (g_zero_copy || zero_copy) off += snprintf(extra + off, sizeof(extra) - (size_t)off, " | %u zero-copy frames", zero_copy);
         if (generated) snprintf(extra + off, sizeof(extra) - (size_t)off, " | %u generated frames", generated);
         banner_log("stats", "last 10 s: %u frames on screen (%.1f fps) | %u GPU frames from games | %u window redraws | %d windows open%s",
                    g_stat_frames + generated, (g_stat_frames + generated) / 10.0, g_stat_dmabuf, g_stat_shm, windows, extra);
@@ -2536,7 +2537,9 @@ int banner_wayland_run(void) {
     wl_global_create(display, &zwp_pointer_constraints_v1_interface, 1, NULL, bind_pointer_constraints);
     wl_global_create(display, &zwp_relative_pointer_manager_v1_interface, 1, NULL, bind_relative_pointer_manager);
     banner_ext_init(display); /* clipboard, text input, toplevel icons (own files, see banner_ext.h) */
-    ahb_swapchain_init(display); /* zero-copy layers: banner_ahb_v1, only in layer mode (ahb_swapchain.h) */
+    ahb_swapchain_init(display); /* zero-copy layers: banner_ahb_v1, advertised whenever a display
+                                  * layer is possible; the mode event carries the live switch
+                                  * (ahb_swapchain.h) */
     wl_list_init(&g_pending_releases);
     g_release_timer_fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
     if (g_release_timer_fd >= 0)
