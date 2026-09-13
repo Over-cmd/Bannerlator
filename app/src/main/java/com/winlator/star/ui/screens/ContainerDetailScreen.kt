@@ -950,12 +950,13 @@ private fun TopLevelFields(
             IconButton(onClick = { helpRes = R.string.help_graphics_driver }) {
                 Icon(Icons.Default.Help, contentDescription = "What is this?", modifier = Modifier.size(18.dp))
             }
-            IconButton(onClick = { showWrapperManager = true }) {
-                Icon(Icons.Default.CloudDownload, contentDescription = stringResource(R.string.wrapper_manager_open))
-            }
-            // Driver configuration is X11 tuning; on Wayland its only live field (the Turnip
-            // version) is covered by the Compositor driver dropdown, so the gear is hidden there.
+            // Wrappers are X11 game-driver shims and driver configuration is X11 tuning (its only
+            // live field, the Turnip version, is the Compositor driver dropdown), so both entry
+            // points are left out of the Wayland layout; the "?" stays.
             if (!compositorDriverOnly) {
+                IconButton(onClick = { showWrapperManager = true }) {
+                    Icon(Icons.Default.CloudDownload, contentDescription = stringResource(R.string.wrapper_manager_open))
+                }
                 IconButton(onClick = onShowGfxConfig) {
                     Icon(Icons.Default.Settings, contentDescription = null)
                 }

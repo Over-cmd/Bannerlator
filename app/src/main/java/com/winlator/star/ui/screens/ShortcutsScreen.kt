@@ -6798,8 +6798,8 @@ internal fun ShortcutSettingsDialogScreen(
                 add("name"); add("execArgs"); add("screenSize")
                 if (selectedScreenSize == "Custom") { add("customW"); add("customH") }
                 add("screenAlignment")
-                add("selectIcon"); add("displayBackend"); add("gfxDriver"); add("gfxWrapper")
-                if (!effectiveWaylandShortcut) add("gfxConfig") // hidden on Wayland (X11 tuning)
+                add("selectIcon"); add("displayBackend"); add("gfxDriver")
+                if (!effectiveWaylandShortcut) { add("gfxWrapper"); add("gfxConfig") } // hidden on Wayland (X11 shims/tuning)
                 add("dxWrapper"); add("dxConfig"); add("renderer")
                 if (!effectiveWaylandShortcut && selectedRenderer == "SurfaceFlinger") add("sfCompat")
                 if (!effectiveWaylandShortcut && selectedRenderer == "Vulkan") { add("vkNative"); add("vkColors"); add("vkPresent"); if (vkNative) add("vkBackend"); add("vkDriver") }
@@ -7198,8 +7198,7 @@ internal fun ShortcutSettingsDialogScreen(
                                 options = compositorChoices,
                                 selected = if (compositorVersion in compositorChoices) compositorVersion else "",
                                 onSelect = { graphicsDriverConfig = withGraphicsDriverVersion(graphicsDriverConfig, it) },
-                                modifier = Modifier.weight(1f),
-                                onRightId = "gfxWrapper"
+                                modifier = Modifier.weight(1f)
                             )
                         } else {
                             DpDrop(
@@ -7215,9 +7214,13 @@ internal fun ShortcutSettingsDialogScreen(
                         IconButton(onClick = { helpRes = R.string.help_graphics_driver }) {
                             Icon(Icons.Default.Help, contentDescription = "What is this?", modifier = Modifier.size(18.dp))
                         }
-                        DpButton(dp, "gfxWrapper", onActivate = { showWrapperManager = true }, onLeftId = "gfxDriver") {
-                            IconButton(onClick = { showWrapperManager = true }) {
-                                Icon(Icons.Default.CloudDownload, contentDescription = stringResource(R.string.wrapper_manager_open))
+                        // Wrappers are X11 game-driver shims: nothing on the Wayland path uses them,
+                        // so the manager button is left out there (the "?" stays).
+                        if (!effectiveWaylandShortcut) {
+                            DpButton(dp, "gfxWrapper", onActivate = { showWrapperManager = true }, onLeftId = "gfxDriver") {
+                                IconButton(onClick = { showWrapperManager = true }) {
+                                    Icon(Icons.Default.CloudDownload, contentDescription = stringResource(R.string.wrapper_manager_open))
+                                }
                             }
                         }
                     }

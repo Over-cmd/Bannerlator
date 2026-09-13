@@ -310,7 +310,8 @@ private fun generalRows(xmb: XmbScope, p: XmbPrefs, host: XmbGameHost): List<Xmb
     // covered by the Compositor driver row above, so the link is left out of the Wayland layout.
     if (!waylandGame) rows += XmbRow.Link("gfxConfig", "Driver configuration", Icons.Filled.Tune,
         subtitle = "Vulkan version, BCn, present modes…") { xmbDriverConfigMenu(xmb, s) }
-    rows += XmbRow.External("wrappers", "Manage wrappers", Icons.Filled.Cloud, subtitle = "Import or remove wrapper drivers") { host.openWrapperManager() }
+    // Wrappers are X11 game-driver shims; nothing on the Wayland path uses them.
+    if (!waylandGame) rows += XmbRow.External("wrappers", "Manage wrappers", Icons.Filled.Cloud, subtitle = "Import or remove wrapper drivers") { host.openWrapperManager() }
     val dxEntries = p.arr(R.array.dxwrapper_entries)
     val dxId = p.ex("dxwrapper", c.getDXWrapper())
     rows += XmbRow.Choice("dxWrapper", "DX wrapper", Icons.Filled.Layers, dxEntries, p.labelFor(dxEntries, dxId)) { v ->
