@@ -36,6 +36,7 @@
 
 #include "xdg-shell-server-protocol.h"
 #include "linux-dmabuf-v1-server-protocol.h"
+#include "sc_layer.h"
 #include "viewporter-server-protocol.h"
 #include "banner-desktop-v1-server-protocol.h"
 #include "presentation-time-server-protocol.h"
@@ -258,6 +259,11 @@ volatile int g_fps_limit;
 /* Shortcut launches: explorer's windows (the desktop, taskbar, Start menu) aren't drawn, matching
  * the X11 renderer's unviewable "explorer.exe". They still exist for input routing. */
 volatile int g_hide_shell;
+
+/* Experimental layer mode (BANNER_WAYLAND_ZERO_COPY=1 in the container's environment): a single
+ * fullscreen window is shown on its own Android layer (sc_layer.c) instead of being blitted into the
+ * screen swapchain. Set from the app before the compositor starts; read per frame. */
+volatile int g_zero_copy;
 
 /* The panel's refresh rate in mHz, from the app; wl_output advertises it so Wine's display modes
  * carry the real rate (games pick their saved 144 Hz mode, as on X11). 0 = 60 Hz. */
@@ -593,6 +599,7 @@ static void take_dmabuf(struct surface *s, struct dmabuf_buffer *b, struct wl_re
     if (!b->img && !b->import_failed && b->n_planes >= 1) {
         b->img = vkp_image_from_dmabuf(b->fd[0], b->format, b->modifier, b->width, b->height,
                                        b->stride[0], b->offset[0]);
+        if (b->img && g_zero_copy) sc_layer_probe_dmabuf_fd(b->fd[0]);
         if (!b->img) {
             b->import_failed = 1;
             WLOGE("dmabuf import failed (%dx%d fmt=0x%08x mod=0x%llx)", b->width, b->height,
@@ -1393,6 +1400,18 @@ static int on_frame_timer(void *data) {
     return 0;
 }
 
+/* Layer mode: the index of a draw that is the topmost one and shows a whole client GPU frame
+ * over the whole scene (one fullscreen game, nothing above it), or -1. */
+static int layer_candidate(const struct draw_list *dl, int scene_w, int scene_h) {
+    if (dl->n <= 0) return -1;
+    const struct vkp_draw *d = &dl->d[dl->n - 1];
+    if (!vkp_image_is_dmabuf(d->img)) return -1;
+    if (d->dx != 0 || d->dy != 0 || d->dw != scene_w || d->dh != scene_h) return -1;
+    if (d->sx != 0 || d->sy != 0 || (int)d->sw != vkp_image_width(d->img) ||
+        (int)d->sh != vkp_image_height(d->img)) return -1;
+    return dl->n - 1;
+}
+
 static void render_scene(void) {
     struct draw_list dl = {0};
     struct surface *s;
@@ -1414,7 +1433,19 @@ static void render_scene(void) {
         add_tree(&dl, s, s->placed ? s->x : 0, s->placed ? s->y : 0, 0);
     }
 
-    if (vkp_render(w, h, dl.d, dl.n) == 0) {
+    int rendered;
+    int li = g_zero_copy ? layer_candidate(&dl, w, h) : -1;
+    if (li >= 0) {
+        /* Layer mode: the fullscreen window goes to its own Android layer; whatever is under it is
+         * hidden by it, so the screen surface only needs to be black. If the layer can't take the
+         * frame, draw it the usual way. */
+        rendered = vkp_render(w, h, NULL, 0) == 0 && sc_layer_present(dl.d[li].img, w, h) == 0;
+        if (!rendered) rendered = vkp_render(w, h, dl.d, dl.n) == 0;
+    } else {
+        if (g_zero_copy) sc_layer_hide();
+        rendered = vkp_render(w, h, dl.d, dl.n) == 0;
+    }
+    if (rendered) {
         int64_t t = now_ns();
         g_stat_frames++;
         /* A surface outside the scene (role-less, not placed yet, a hidden helper window such

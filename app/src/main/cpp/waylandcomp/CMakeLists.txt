@@ -8,6 +8,7 @@ add_library(bannerwayland SHARED
         src/compositor.c
         src/vk_present.c
         src/vk_loader.c
+        src/sc_layer.c
         src/waylandcomp_jni.c
         src/banner_ext.c
         src/wl_clipboard.c

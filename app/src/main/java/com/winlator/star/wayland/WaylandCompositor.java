@@ -172,6 +172,11 @@ public final class WaylandCompositor {
      *  Set before the compositor starts. */
     public static native void nativeSetOutputRefreshRate(float hz);
 
+    /** Experimental: show a single fullscreen window on its own Android layer (SurfaceControl)
+     *  instead of blitting it into the compositor's swapchain. Enabled by BANNER_WAYLAND_ZERO_COPY=1
+     *  in the container's environment variables; see waylandcomp/ZERO_COPY_SPIKE.md. Set before start. */
+    public static native void nativeSetZeroCopy(boolean on);
+
     /** The container's screen size, advertised as the Wayland output's mode so Wine's display-mode
      *  list stops at the desktop size, as the X server's does on X11. Set before the compositor starts. */
     public static native void nativeSetOutputSize(int width, int height);

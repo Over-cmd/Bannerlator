@@ -133,3 +133,13 @@ small interface in `src/banner_ext.h` (compositor.c only gained hook calls + acc
 - Host → compositor text crosses as UTF-8 `byte[]` through `banner_ext.c`'s queue (mutex + wake
   pipe), drained on the compositor thread. Glue for the three protocols is pre-generated with
   wayland-scanner 1.24.0 from `protocols/`.
+
+## Zero-copy window layers (spike, `BANNER_WAYLAND_ZERO_COPY=1`)
+Research + host-side prototype in `ZERO_COPY_SPIKE.md`: why a dma-buf can't become an
+`AHardwareBuffer` (the game's buffers are DMA-heap allocations, not gralloc's), why the interop
+must start from a gralloc buffer whose native-handle fd the drivers import (Turnip's own AHB path),
+and the WSI patch this needs in our Wayland Turnip. `src/sc_layer.c` implements the receive side:
+with the variable in the container's environment, one fullscreen game window is shown on its own
+`ASurfaceControl` child of the SurfaceView (pool of three compositor-allocated AHBs, one blit,
+release fences from `setOnComplete`, geometry from the fullscreen mode); any other scene falls back
+to the swapchain blit. Log tag `layer`. Off by default.
