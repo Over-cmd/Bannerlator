@@ -81,6 +81,63 @@ public final class WaylandCompositor {
         if (l != null) l.onPointerLock(locked, x, y);
     }
 
+    /** Clipboard text a program in the guest copied (wl_data_device / zwlr_data_control). */
+    public interface ClipboardListener {
+        /** {@code text} is what the guest put on its clipboard. Compositor thread. */
+        void onGuestClipboardText(String text);
+    }
+
+    private static volatile ClipboardListener clipboardListener;
+
+    public static void setClipboardListener(ClipboardListener l) { clipboardListener = l; }
+
+    /** Invoked from native (banner_on_clipboard_text) with UTF-8 bytes. */
+    @SuppressWarnings("unused")
+    static void onClipboardText(byte[] utf8) {
+        ClipboardListener l = clipboardListener;
+        if (l != null && utf8 != null) l.onGuestClipboardText(new String(utf8, java.nio.charset.StandardCharsets.UTF_8));
+    }
+
+    /** Text input (zwp_text_input_v3) state: a program accepts IME text, or stopped. */
+    public interface TextInputListener {
+        /** {@code enabled}: {@code program} (its exe name) accepts IME text; {@code x,y,w,h} is its caret
+         *  rectangle in scene (virtual desktop) pixels, all 0 until the program positions one. Compositor
+         *  thread. */
+        void onTextInput(boolean enabled, String program, int x, int y, int w, int h);
+    }
+
+    private static volatile TextInputListener textInputListener;
+
+    public static void setTextInputListener(TextInputListener l) { textInputListener = l; }
+
+    /** Invoked from native (banner_on_text_input). */
+    @SuppressWarnings("unused")
+    static void onTextInput(boolean enabled, String program, int x, int y, int w, int h) {
+        TextInputListener l = textInputListener;
+        if (l != null) l.onTextInput(enabled, program, x, y, w, h);
+    }
+
+    private static byte[] utf8(String s) {
+        return s == null ? new byte[0] : s.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+    }
+
+    /** Android's clipboard text becomes the guest's selection ({@code null}/empty clears it). Any thread. */
+    public static void setClipboardText(String text) { nativeSetClipboardText(utf8(text)); }
+
+    /** Commit soft-keyboard text to the program accepting text input. Any thread. */
+    public static void textInputCommit(String text) { if (text != null && !text.isEmpty()) nativeTextInputCommit(utf8(text)); }
+
+    /** Composing (pre-edit) text with the caret at character index {@code cursor} (-1 = end); empty clears. */
+    public static void textInputPreedit(String text, int cursor) { nativeTextInputPreedit(utf8(text), cursor, cursor); }
+
+    /** The IME deleted {@code before} characters before and {@code after} after the caret. */
+    public static void textInputDelete(int before, int after) { nativeTextInputDelete(before, after); }
+
+    private static native void nativeSetClipboardText(byte[] utf8);
+    private static native void nativeTextInputCommit(byte[] utf8);
+    private static native void nativeTextInputPreedit(byte[] utf8, int cursorBegin, int cursorEnd);
+    private static native void nativeTextInputDelete(int before, int after);
+
     /** Start the compositor headless (no output window) — bring-up tests only. */
     public static native void nativeStart(String xdgRuntimeDir);
 

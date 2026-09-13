@@ -42,6 +42,7 @@
 #include "pointer-constraints-unstable-v1-server-protocol.h"
 #include "relative-pointer-unstable-v1-server-protocol.h"
 #include "vk_present.h"
+#include "banner_ext.h"
 
 #define WLOGI(...) __android_log_print(ANDROID_LOG_INFO, "BannerWayland", __VA_ARGS__)
 #define WLOGE(...) __android_log_print(ANDROID_LOG_ERROR, "BannerWayland", __VA_ARGS__)
@@ -377,6 +378,7 @@ static struct seat_keyboard g_kbs[MAX_PTRS];
 static int g_nkbs;
 static struct surface *g_grab;              /* no-desktop fallback: surface holding the button */
 static struct surface *g_key_target;        /* no-desktop fallback: last clicked surface */
+static struct surface *g_ime_click;         /* last clicked program window: where text input goes */
 static int g_input_pipe[2] = {-1, -1};
 /* type 0 = pointer (p1=action 0down/1move/2up, p2=x, p3=y); type 1 = key (p1=evdev, p2=state 1down/0up) */
 struct input_msg { int type; int p1; int p2; int p3; };
@@ -506,6 +508,8 @@ static void unmap_toplevel(struct surface *s) {
     }
     wl_list_remove(&s->toplevel_link);
     wl_list_init(&s->toplevel_link);
+    if (g_ime_click == s) g_ime_click = NULL;
+    banner_text_input_refocus();
 }
 
 /* Let go of the surface's dmabuf content. paced = 1: the buffer was replaced, give it back on the
@@ -806,6 +810,8 @@ static void surface_resource_destroy(struct wl_resource *r) {
     for (int i = 0; i < g_nkbs; i++) if (g_kbs[i].focus == r) g_kbs[i].focus = NULL;
     if (g_grab == s) g_grab = NULL;
     if (g_key_target == s) g_key_target = NULL;
+    if (g_ime_click == s) g_ime_click = NULL;
+    banner_text_input_surface_gone(r);
     if (g_desktop == s) { g_desktop = NULL; banner_log("desktop", "the desktop closed"); }
     if (g_hud_surface == s) { g_hud_surface = NULL; banner_on_game_surface(NULL, NULL); }
     constraints_surface_gone(s);
@@ -1598,6 +1604,7 @@ static void keyboard_focus(struct wl_resource *target) {
     /* Baseline modifiers = none; Shift/Ctrl arrive as their own key events. */
     wl_keyboard_send_modifiers(sk->kb, wl_display_next_serial(g_display), 0, 0, 0, 0);
     wl_array_release(&keys);
+    banner_clipboard_keyboard_focus(wl_resource_get_client(target)); /* wl_data_device selection follows focus */
 }
 
 /* ------------------------------------------------------------------ pointer constraints
@@ -2030,6 +2037,13 @@ static void pointer_input(double x, double y, int relative, uint32_t button, int
                                pressed ? WL_POINTER_BUTTON_STATE_PRESSED : WL_POINTER_BUTTON_STATE_RELEASED);
     if (wl_resource_get_version(sp->ptr) >= WL_POINTER_FRAME_SINCE_VERSION)
         wl_pointer_send_frame(sp->ptr);
+    /* A click lands text input (the soft keyboard's IME text) on the window under the pointer:
+     * that's where Wine's focus goes, and winewayland routes IME updates per process. */
+    if (button && pressed && !(k && k->is_lock)) {
+        struct surface *clicked = toplevel_at(g_ptr_x, g_ptr_y);
+        if (clicked) g_ime_click = clicked;
+        banner_text_input_refocus();
+    }
     wl_display_flush_clients(g_display);
 }
 
@@ -2158,6 +2172,31 @@ void banner_wayland_send_scene_input(int type, int a, int b) {
     ssize_t n = write(g_input_pipe[1], &m, sizeof(m));
     (void)n;
 }
+
+/* ------------------------------------------------------------------ extension module hooks
+ * What wl_clipboard.c / wl_text_input.c need from the scene (see banner_ext.h). */
+
+const char *banner_client_name(struct wl_client *client) { return client_name(client); }
+struct wl_display *banner_get_display(void) { return g_display; }
+
+/* The surface text input follows: the last clicked mapped program window, else the topmost
+ * mapped window not owned by the desktop's process (explorer). NULL when there is none. */
+struct wl_resource *banner_ime_target(void) {
+    struct surface *s;
+    if (g_ime_click && g_ime_click->mapped) return g_ime_click->resource;
+    struct wl_client *shell = g_desktop ? wl_resource_get_client(g_desktop->resource) : NULL;
+    wl_list_for_each_reverse(s, &g_toplevels, toplevel_link)
+        if (!shell || wl_resource_get_client(s->resource) != shell) return s->resource;
+    return NULL;
+}
+
+void banner_surface_scene_origin(struct wl_resource *surface, int *x, int *y) {
+    struct surface *s = surface ? wl_resource_get_user_data(surface) : NULL;
+    *x = 0; *y = 0;
+    if (s && s->placed) { *x = s->x; *y = s->y; }
+}
+
+void banner_inject_key(uint32_t evdev, int pressed) { key_event(evdev, pressed); }
 
 /* ------------------------------------------------------------------ 10 s summary */
 
@@ -2302,6 +2341,7 @@ int banner_wayland_run(void) {
     wl_global_create(display, &wp_presentation_interface, 2, NULL, bind_presentation);
     wl_global_create(display, &zwp_pointer_constraints_v1_interface, 1, NULL, bind_pointer_constraints);
     wl_global_create(display, &zwp_relative_pointer_manager_v1_interface, 1, NULL, bind_relative_pointer_manager);
+    banner_ext_init(display); /* clipboard, text input, toplevel icons (own files, see banner_ext.h) */
     wl_list_init(&g_pending_releases);
     g_release_timer_fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
     if (g_release_timer_fd >= 0)

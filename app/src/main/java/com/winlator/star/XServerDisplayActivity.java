@@ -1371,6 +1371,9 @@ public class XServerDisplayActivity extends AppCompatActivity {
     };
     private android.view.SurfaceView waylandSurfaceView;
     private android.widget.ImageView waylandCursorView;
+    // Wayland mode: Android clipboard <-> guest selection, and the soft keyboard's IME text.
+    private com.winlator.star.wayland.WaylandClipboardSync waylandClipboard;
+    private com.winlator.star.wayland.WaylandTextInput waylandTextInput;
     private float waylandCursorX = -1f, waylandCursorY = -1f; // touchpad cursor position (view px)
     private volatile boolean waylandPointerLocked; // a program holds a pointer lock in the compositor
     private EnvVars overrideEnvVars;
@@ -1456,6 +1459,8 @@ public class XServerDisplayActivity extends AppCompatActivity {
 
     protected void showGuestKeyboard() {
         AppUtils.showKeyboard(this);
+        // Wayland: a keyboard the user toggled is theirs; text input won't auto-hide it.
+        if (waylandTextInput != null) waylandTextInput.onUserToggledKeyboard();
     }
 
 
@@ -2809,6 +2814,8 @@ public class XServerDisplayActivity extends AppCompatActivity {
             // Re-assert the Samsung Galaxy performance profile (released while backgrounded).
             com.winlator.star.perf.galaxy.GalaxyPerfManager.resume();
         }
+        // Android hides clipboard changes from background apps: re-read it now we're in front.
+        if (waylandClipboard != null) waylandClipboard.refresh();
         startTime = System.currentTimeMillis();
         handler.postDelayed(savePlaytimeRunnable, SAVE_INTERVAL_MS);
         ProcessHelper.resumeAllWineProcesses();
@@ -6264,6 +6271,8 @@ public class XServerDisplayActivity extends AppCompatActivity {
         }
         waylandVsyncRunning = false;
         if (waylandHudThread != null) { waylandHudThread.quitSafely(); waylandHudThread = null; waylandHudSampler = null; }
+        if (waylandClipboard != null) { waylandClipboard.stop(); waylandClipboard = null; }
+        if (waylandTextInput != null) { waylandTextInput.stop(); waylandTextInput = null; }
         super.onDestroy();
         // Power-user perf: stop the thermal watchdog and revert any privileged sysfs writes on game
         // exit (no-op unless a root toggle wrote something this session).
@@ -6423,6 +6432,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
     @Override
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
+        if (hasFocus && waylandClipboard != null) waylandClipboard.refresh();
 
         if (hasFocus && (cursorLock || isRelativeMouseMovement || waylandPointerLocked) && inGameControlsEditor == null) {
             touchpadView.requestPointerCapture();
@@ -6801,7 +6811,10 @@ public class XServerDisplayActivity extends AppCompatActivity {
         } catch (Throwable t) {
             Log.w("XServerDisplayActivity", "wayland: refresh rate unavailable", t);
         }
-        waylandSurfaceView = new android.view.SurfaceView(this);
+        // The SurfaceView can host the soft keyboard's InputConnection (text input for the guest).
+        com.winlator.star.wayland.WaylandTextInput.SurfaceInputView waylandInputView =
+                new com.winlator.star.wayland.WaylandTextInput.SurfaceInputView(this);
+        waylandSurfaceView = waylandInputView;
         waylandSurfaceView.setLayoutParams(new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
         // Touch -> wl_pointer. Map view pixels to the compositor's 1920x1080 output space (we blit
@@ -6897,6 +6910,12 @@ public class XServerDisplayActivity extends AppCompatActivity {
         });
         rootView.addView(waylandSurfaceView);
         rootView.addView(waylandCursorView); // the overlay pointer, on top of the compositor surface
+        // Clipboard both ways and the soft keyboard's text; the compositor queues anything sent
+        // before its thread is up.
+        waylandClipboard = new com.winlator.star.wayland.WaylandClipboardSync(this);
+        waylandClipboard.start();
+        waylandTextInput = new com.winlator.star.wayland.WaylandTextInput(this, waylandInputView);
+        waylandTextInput.start();
     }
 
     /** Scene (virtual desktop) pixel -> view pixel through the fullscreen mode + alignment, with the
