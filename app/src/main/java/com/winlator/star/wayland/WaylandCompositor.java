@@ -177,6 +177,13 @@ public final class WaylandCompositor {
      *  in the container's environment variables; see waylandcomp/ZERO_COPY_SPIKE.md. Set before start. */
     public static native void nativeSetZeroCopy(boolean on);
 
+    /** Compressed (UBWC) game buffers: the compositor advertises DRM_FORMAT_MOD_QCOM_COMPRESSED next to
+     *  LINEAR on zwp_linux_dmabuf_v1 for every format its driver can import that way, so the game's
+     *  Turnip allocates compressed swapchain images instead of resolving every frame to a linear copy.
+     *  Default on; BANNER_WAYLAND_UBWC=0 in the container's environment variables turns it off (A/B).
+     *  Set before the compositor starts. */
+    public static native void nativeSetUbwc(boolean on);
+
     /** The container's screen size, advertised as the Wayland output's mode so Wine's display-mode
      *  list stops at the desktop size, as the X server's does on X11. Set before the compositor starts. */
     public static native void nativeSetOutputSize(int width, int height);

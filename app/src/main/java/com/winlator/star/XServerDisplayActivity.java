@@ -6900,10 +6900,17 @@ public class XServerDisplayActivity extends AppCompatActivity {
                 String sv = shortcut.getExtra("envVars", "");
                 if (sv != null && !sv.isEmpty()) raw = (raw == null ? "" : raw + " ") + sv;
             }
-            String zc = raw != null && !raw.isEmpty() ? new EnvVars(raw).get("BANNER_WAYLAND_ZERO_COPY") : null;
+            EnvVars env = raw != null && !raw.isEmpty() ? new EnvVars(raw) : null;
+            String zc = env != null ? env.get("BANNER_WAYLAND_ZERO_COPY") : null;
             boolean zeroCopy = zc != null && (zc.equals("1") || zc.equalsIgnoreCase("true"));
             com.winlator.star.wayland.WaylandCompositor.nativeSetZeroCopy(zeroCopy);
             if (zeroCopy) Log.i("XServerDisplayActivity", "wayland: zero-copy layer mode requested");
+            // Compressed (UBWC) game buffers, default on; BANNER_WAYLAND_UBWC=0 (or false/off) forces the
+            // linear-only advertisement for an A/B run.
+            String ub = env != null ? env.get("BANNER_WAYLAND_UBWC") : null;
+            boolean ubwc = !(ub != null && (ub.equals("0") || ub.equalsIgnoreCase("false") || ub.equalsIgnoreCase("off")));
+            com.winlator.star.wayland.WaylandCompositor.nativeSetUbwc(ubwc);
+            if (!ubwc) Log.i("XServerDisplayActivity", "wayland: compressed (UBWC) game buffers disabled by BANNER_WAYLAND_UBWC");
         } catch (Exception e) {
             Log.e("XServerDisplayActivity", "wayland: zero-copy flag read failed", e);
         }

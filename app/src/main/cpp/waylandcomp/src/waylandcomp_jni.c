@@ -22,6 +22,7 @@ extern void banner_wayland_vsync(int64_t frame_time_ns);
 extern volatile int g_fps_limit;
 extern volatile int g_hide_shell;
 extern volatile int g_zero_copy;
+extern volatile int g_ubwc;
 extern volatile int g_output_refresh_mhz;
 extern volatile int g_output_w, g_output_h;
 
@@ -249,6 +250,15 @@ JNIEXPORT void JNICALL
 Java_com_winlator_star_wayland_WaylandCompositor_nativeSetZeroCopy(JNIEnv *env, jclass clazz, jboolean on) {
     g_zero_copy = on ? 1 : 0;
     __android_log_print(ANDROID_LOG_INFO, TAG, "zero-copy layer mode %s", on ? "on" : "off");
+}
+
+/* Compressed (UBWC) game buffers: advertise DRM_FORMAT_MOD_QCOM_COMPRESSED on zwp_linux_dmabuf_v1 when
+ * the renderer's driver imports it (default on; BANNER_WAYLAND_UBWC=0 = off). Set before the compositor
+ * starts. */
+JNIEXPORT void JNICALL
+Java_com_winlator_star_wayland_WaylandCompositor_nativeSetUbwc(JNIEnv *env, jclass clazz, jboolean on) {
+    g_ubwc = on ? 1 : 0;
+    __android_log_print(ANDROID_LOG_INFO, TAG, "compressed (UBWC) game buffers %s", on ? "on" : "off");
 }
 
 /* The panel's refresh rate (Hz) for the advertised wl_output mode. Set before the compositor starts. */

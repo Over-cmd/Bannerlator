@@ -265,6 +265,13 @@ volatile int g_hide_shell;
  * screen swapchain. Set from the app before the compositor starts; read per frame. */
 volatile int g_zero_copy;
 
+/* Compressed (UBWC) game buffers: zwp_linux_dmabuf_v1 advertises DRM_FORMAT_MOD_QCOM_COMPRESSED next
+ * to LINEAR for every format the renderer's own driver can import that way, so Turnip's Wayland WSI
+ * in the game allocates UBWC swapchain images instead of resolving each frame to a linear copy.
+ * BANNER_WAYLAND_UBWC=0 in the container's environment turns the advertisement off (A/B switch). Set
+ * from the app before the compositor starts; read at every zwp_linux_dmabuf_v1 bind. */
+volatile int g_ubwc = 1;
+
 /* The panel's refresh rate in mHz, from the app; wl_output advertises it so Wine's display modes
  * carry the real rate (games pick their saved 144 Hz mode, as on X11). 0 = 60 Hz. */
 volatile int g_output_refresh_mhz;
@@ -406,8 +413,8 @@ static void constraints_focus_entered(struct wl_resource *target, struct wl_clie
 #define DRM_XRGB8888 FOURCC('X', 'R', '2', '4')
 #define DRM_ABGR8888 FOURCC('A', 'B', '2', '4')
 #define DRM_XBGR8888 FOURCC('X', 'B', '2', '4')
-#define MOD_LINEAR 0ULL
-#define MOD_INVALID 0x00ffffffffffffffULL
+#define MOD_LINEAR VKP_MOD_LINEAR
+#define MOD_INVALID VKP_MOD_INVALID
 #define MAX_PLANES 4
 
 struct dmabuf_params {
@@ -619,7 +626,7 @@ static void take_dmabuf(struct surface *s, struct dmabuf_buffer *b, struct wl_re
             banner_log("vulkan", "%s is presenting GPU frames through Wayland: %dx%d, format %c%c%c%c, %s (zero-copy)",
                        name, b->width, b->height, b->format & 0xff, (b->format >> 8) & 0xff,
                        (b->format >> 16) & 0xff, (b->format >> 24) & 0xff,
-                       b->modifier == MOD_LINEAR ? "linear" : "tiled");
+                       vkp_modifier_name(b->modifier));
         else
             banner_log("error", "could not import GPU frames from %s (%dx%d, modifier %#llx)",
                        name, b->width, b->height, (unsigned long long)b->modifier);
@@ -1280,17 +1287,59 @@ static const struct zwp_linux_dmabuf_v1_interface dmabuf_impl = {
     .destroy = dmabuf_destroy,
     .create_params = dmabuf_create_params,
 };
+/* The advertised format/modifier table, built at the first bind from what the renderer's driver
+ * can import (vkp_dmabuf_modifiers). INVALID is always offered too (Mesa drops it; other clients
+ * may use it for the implicit path). Without a renderer the list is LINEAR + INVALID, as before. */
+#define DMABUF_NFMT 4
+#define DMABUF_NMOD 4
+static struct { uint32_t fmt; uint64_t mods[DMABUF_NMOD]; int n; } g_dmabuf_fmts[DMABUF_NFMT] = {
+    {DRM_ARGB8888}, {DRM_XRGB8888}, {DRM_ABGR8888}, {DRM_XBGR8888}};
+static int g_dmabuf_fmts_ready;
+
+static void dmabuf_build_formats(void) {
+    char line[256];
+    int pos = 0, compressed = 0;
+    g_dmabuf_fmts_ready = 1;
+    for (int f = 0; f < DMABUF_NFMT; f++) {
+        uint64_t got[DMABUF_NMOD];
+        int n = vkp_dmabuf_modifiers(g_dmabuf_fmts[f].fmt, got, DMABUF_NMOD), k = 0;
+        /* LINEAR first: it is the layout every client and the shm fallback agree on, and the one
+         * we advertised before this table existed. */
+        g_dmabuf_fmts[f].mods[k++] = MOD_LINEAR;
+        for (int i = 0; i < n && k < DMABUF_NMOD - 1; i++) {
+            if (got[i] == MOD_LINEAR) continue;
+            if (got[i] == VKP_MOD_QCOM_COMPRESSED && !g_ubwc) continue;
+            g_dmabuf_fmts[f].mods[k++] = got[i];
+            if (got[i] == VKP_MOD_QCOM_COMPRESSED) compressed++;
+        }
+        g_dmabuf_fmts[f].mods[k++] = MOD_INVALID;
+        g_dmabuf_fmts[f].n = k;
+        uint32_t fmt = g_dmabuf_fmts[f].fmt;
+        pos += snprintf(line + pos, sizeof(line) - (size_t)pos, "%s%c%c%c%c", f ? ", " : "",
+                        fmt & 0xff, (fmt >> 8) & 0xff, (fmt >> 16) & 0xff, (fmt >> 24) & 0xff);
+        for (int i = 0; i < k - 1 && pos < (int)sizeof(line); i++)
+            pos += snprintf(line + pos, sizeof(line) - (size_t)pos, "%s%s", i ? "+" : " ",
+                            vkp_modifier_name(g_dmabuf_fmts[f].mods[i]));
+        if (pos >= (int)sizeof(line)) pos = (int)sizeof(line) - 1;
+    }
+    banner_log("dmabuf", "formats: %s%s", line,
+               !g_ubwc ? " (BANNER_WAYLAND_UBWC=0: qcom_compressed not advertised)" : "");
+    if (g_ubwc && !compressed)
+        banner_log("dmabuf", "the compositor's driver (%s) reports no importable qcom_compressed layout: "
+                   "game swapchains stay linear", vkp_gpu_name());
+}
+
 static void bind_dmabuf(struct wl_client *c, void *data, uint32_t ver, uint32_t id) {
     struct wl_resource *r = wl_resource_create(c, &zwp_linux_dmabuf_v1_interface, ver, id);
     wl_resource_set_implementation(r, &dmabuf_impl, NULL, NULL);
-    uint32_t fmts[] = {DRM_ARGB8888, DRM_XRGB8888, DRM_ABGR8888, DRM_XBGR8888};
-    uint64_t mods[] = {MOD_LINEAR, MOD_INVALID};
-    for (unsigned f = 0; f < 4; f++) {
-        zwp_linux_dmabuf_v1_send_format(r, fmts[f]);
+    if (!g_dmabuf_fmts_ready) dmabuf_build_formats();
+    for (int f = 0; f < DMABUF_NFMT; f++) {
+        zwp_linux_dmabuf_v1_send_format(r, g_dmabuf_fmts[f].fmt);
         if (ver >= 3)
-            for (unsigned m = 0; m < 2; m++)
-                zwp_linux_dmabuf_v1_send_modifier(r, fmts[f], (uint32_t)(mods[m] >> 32),
-                                                  (uint32_t)(mods[m] & 0xffffffff));
+            for (int m = 0; m < g_dmabuf_fmts[f].n; m++)
+                zwp_linux_dmabuf_v1_send_modifier(r, g_dmabuf_fmts[f].fmt,
+                                                  (uint32_t)(g_dmabuf_fmts[f].mods[m] >> 32),
+                                                  (uint32_t)(g_dmabuf_fmts[f].mods[m] & 0xffffffff));
     }
 }
 
