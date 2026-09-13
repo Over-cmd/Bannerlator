@@ -21,6 +21,7 @@ extern void banner_wayland_send_scene_input(int type, int a, int b);
 extern void banner_wayland_vsync(int64_t frame_time_ns);
 extern volatile int g_fps_limit;
 extern volatile int g_hide_shell;
+extern volatile int g_zero_copy;
 extern volatile int g_output_refresh_mhz;
 extern volatile int g_output_w, g_output_h;
 
@@ -240,6 +241,14 @@ Java_com_winlator_star_wayland_WaylandCompositor_nativeVsync(JNIEnv *env, jclass
 JNIEXPORT void JNICALL
 Java_com_winlator_star_wayland_WaylandCompositor_nativeSetHideShell(JNIEnv *env, jclass clazz, jboolean hide) {
     g_hide_shell = hide ? 1 : 0;
+}
+
+/* Experimental layer mode (BANNER_WAYLAND_ZERO_COPY=1): one fullscreen window on its own Android
+ * layer instead of the swapchain blit (sc_layer.c). Set before the compositor starts. */
+JNIEXPORT void JNICALL
+Java_com_winlator_star_wayland_WaylandCompositor_nativeSetZeroCopy(JNIEnv *env, jclass clazz, jboolean on) {
+    g_zero_copy = on ? 1 : 0;
+    __android_log_print(ANDROID_LOG_INFO, TAG, "zero-copy layer mode %s", on ? "on" : "off");
 }
 
 /* The panel's refresh rate (Hz) for the advertised wl_output mode. Set before the compositor starts. */

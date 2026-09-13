@@ -43,6 +43,12 @@ struct vkp_image;
 // later client frames rendered into the same buffer show up without re-importing.
 struct vkp_image *vkp_image_from_dmabuf(int fd, uint32_t drm_format, uint64_t modifier,
                                         int w, int h, uint32_t stride, uint32_t offset);
+// Same, choosing the role: as_blit_dst = 0 imports a client frame (blit source), 1 imports a
+// buffer this backend blits INTO (layer mode's AHardwareBuffer pool, see sc_layer.h).
+struct vkp_image *vkp_image_import_dmabuf(int fd, uint32_t drm_format, uint64_t modifier,
+                                          int w, int h, uint32_t stride, uint32_t offset,
+                                          int as_blit_dst);
+int vkp_image_is_dmabuf(const struct vkp_image *img);
 
 // Create a host-visible image and copy BGRA/XRGB8888 pixels into it. NULL on failure.
 struct vkp_image *vkp_image_create_shm(int w, int h);
@@ -73,6 +79,20 @@ int vkp_device_lost(void);
 // Clear to black, blit the draws in order (first = bottom) and present.
 // Returns 0 on success, -1 if nothing could be presented (no window yet, etc.).
 int vkp_render(int scene_w, int scene_h, const struct vkp_draw *draws, int n);
+
+/* ---- layer mode helpers (sc_layer.c; compositor thread) ---- */
+/* Whole-image copy of src into dst (a blit-destination dmabuf image), waited for on the CPU. */
+int vkp_blit_image(struct vkp_image *src, struct vkp_image *dst);
+/* Refresh the scene -> output mapping for this scene size without presenting (creates the
+ * swapchain if needed, since the mapping is in output pixels). 0 = mapping valid. */
+int vkp_update_map(int scene_w, int scene_h);
+/* Map a draw through the current mapping: out = {src x0,y0,x1,y1 (image px), dst x0,y0,x1,y1
+ * (output px)}, clipped like the blit path. 0 = nothing of it is visible. */
+int vkp_map_draw(const struct vkp_draw *d, int out[8]);
+/* The output window frames go to (NULL = none); compositor thread. */
+ANativeWindow *vkp_window(void);
+/* Fire the one-shot first-frame notification (layer mode presents outside vkp_render). */
+void vkp_signal_first_frame(void);
 
 // Session log (compositor.c): one line to Download/Wayland-logs and logcat.
 void banner_log(const char *tag, const char *fmt, ...) __attribute__((format(printf, 2, 3)));

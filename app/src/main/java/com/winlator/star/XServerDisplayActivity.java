@@ -6891,6 +6891,22 @@ public class XServerDisplayActivity extends AppCompatActivity {
         }
         final String fDriverPath = driverPath, fLibraryName = libraryName;
         final String nativeLibDir = getApplicationInfo().nativeLibraryDir;
+        // Experimental layer mode (ZERO_COPY_SPIKE.md): BANNER_WAYLAND_ZERO_COPY=1 in the container's
+        // (or the shortcut's) environment variables presents a fullscreen game on its own Android
+        // layer. Read here, before the compositor starts; nothing else looks at the variable.
+        try {
+            String raw = container.getEnvVars();
+            if (shortcut != null) {
+                String sv = shortcut.getExtra("envVars", "");
+                if (sv != null && !sv.isEmpty()) raw = (raw == null ? "" : raw + " ") + sv;
+            }
+            String zc = raw != null && !raw.isEmpty() ? new EnvVars(raw).get("BANNER_WAYLAND_ZERO_COPY") : null;
+            boolean zeroCopy = zc != null && (zc.equals("1") || zc.equalsIgnoreCase("true"));
+            com.winlator.star.wayland.WaylandCompositor.nativeSetZeroCopy(zeroCopy);
+            if (zeroCopy) Log.i("XServerDisplayActivity", "wayland: zero-copy layer mode requested");
+        } catch (Exception e) {
+            Log.e("XServerDisplayActivity", "wayland: zero-copy flag read failed", e);
+        }
         waylandSurfaceView.getHolder().addCallback(new android.view.SurfaceHolder.Callback() {
             boolean started = false;
             @Override public void surfaceCreated(android.view.SurfaceHolder h) {

@@ -3,6 +3,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "vk_present.h"
 #include "vk_loader.h"
+#include "sc_layer.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,6 +21,7 @@ struct vkp_image {
     VkDeviceMemory mem;
     int w, h;
     int dmabuf;               /* imported from a client; owned by the foreign queue family */
+    int blit_dst;             /* layer mode: a pool buffer this backend blits into (never a source) */
     void *map;                /* shm images: persistently mapped linear memory */
     VkDeviceSize offset, row_pitch;
     int in_general;           /* shm images: moved from PREINITIALIZED to GENERAL */
@@ -146,6 +148,7 @@ int vkp_apply_window_request(void) {
         if (w) ANativeWindow_release(w);
         return 0;
     }
+    sc_layer_window_gone();  /* the layer (if any) belongs to the old window */
     destroy_swapchain(); /* recreated against the new window on the next frame */
     if (g_window) ANativeWindow_release(g_window);
     g_window = w;
@@ -436,12 +439,19 @@ static int memory_type(uint32_t bits, VkMemoryPropertyFlags want) {
 
 struct vkp_image *vkp_image_from_dmabuf(int fd, uint32_t drm_format, uint64_t modifier, int w, int h,
                                         uint32_t stride, uint32_t offset) {
+    return vkp_image_import_dmabuf(fd, drm_format, modifier, w, h, stride, offset, 0);
+}
+
+int vkp_image_is_dmabuf(const struct vkp_image *img) { return img && img->dmabuf && !img->blit_dst; }
+
+struct vkp_image *vkp_image_import_dmabuf(int fd, uint32_t drm_format, uint64_t modifier, int w, int h,
+                                          uint32_t stride, uint32_t offset, int as_blit_dst) {
     if (modifier == MOD_INVALID || w <= 0 || h <= 0) return NULL;
     if (dev_init() != 0) return NULL;
 
     struct vkp_image *img = calloc(1, sizeof(*img));
     if (!img) return NULL;
-    img->w = w; img->h = h; img->dmabuf = 1;
+    img->w = w; img->h = h; img->dmabuf = 1; img->blit_dst = as_blit_dst ? 1 : 0;
 
     VkSubresourceLayout plane = {.offset = offset, .rowPitch = stride};
     VkImageDrmFormatModifierExplicitCreateInfoEXT modInfo = {
@@ -454,9 +464,15 @@ struct vkp_image *vkp_image_from_dmabuf(int fd, uint32_t drm_format, uint64_t mo
         .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .pNext = &extImg,
         .imageType = VK_IMAGE_TYPE_2D, .format = drm_to_vk(drm_format), .extent = {w, h, 1},
         .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT,
-        .tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT, .usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+        .tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT,
+        .usage = as_blit_dst ? VK_IMAGE_USAGE_TRANSFER_DST_BIT : VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
-    if (g_vk.CreateImage(g_dev, &ici, NULL, &img->image) != VK_SUCCESS) { free(img); return NULL; }
+    VkResult cr = g_vk.CreateImage(g_dev, &ici, NULL, &img->image);
+    if (cr != VK_SUCCESS) {
+        if (as_blit_dst) LOGE("layer: vkCreateImage(modifier %#llx, %dx%d, pitch %u) -> %d",
+                              (unsigned long long)modifier, w, h, stride, (int)cr);
+        free(img); return NULL;
+    }
 
     int dupfd = dup(fd);
     uint32_t allowed = 0xffffffff;
@@ -758,5 +774,92 @@ int vkp_render(int scene_w, int scene_h, const struct vkp_draw *draws, int n) {
         g_first_frame_done = 1;
         banner_on_first_frame();
     }
+    return 0;
+}
+
+/* ---------------------------------------------------------------- layer mode helpers */
+
+ANativeWindow *vkp_window(void) { return g_window; }
+
+void vkp_signal_first_frame(void) {
+    if (g_first_frame_done) return;
+    g_first_frame_done = 1;
+    banner_on_first_frame();
+}
+
+int vkp_update_map(int scene_w, int scene_h) {
+    if (g_dev_state == -2 || dev_init() != 0 || !g_window || scene_w <= 0 || scene_h <= 0) return -1;
+    if (!g_swapchain && swap_init() != 0) return -1;
+    update_map(scene_w, scene_h);
+    return g_map.valid ? 0 : -1;
+}
+
+int vkp_map_draw(const struct vkp_draw *d, int out[8]) {
+    VkImageBlit blit;
+    if (!d || !d->img || !g_map.valid || !draw_to_blit(d, &blit)) return 0;
+    out[0] = blit.srcOffsets[0].x; out[1] = blit.srcOffsets[0].y;
+    out[2] = blit.srcOffsets[1].x; out[3] = blit.srcOffsets[1].y;
+    out[4] = blit.dstOffsets[0].x; out[5] = blit.dstOffsets[0].y;
+    out[6] = blit.dstOffsets[1].x; out[7] = blit.dstOffsets[1].y;
+    return 1;
+}
+
+/* Copy src (a client frame) into dst (a layer pool buffer) 1:1 and wait for it. Both images are
+ * owned by the "foreign" queue family (the game's driver / the display) between our uses, so each
+ * use acquires them and the destination is released back for the display to read. */
+int vkp_blit_image(struct vkp_image *src, struct vkp_image *dst) {
+    if (!src || !dst || !dst->blit_dst || g_dev_state == -2 || dev_init() != 0) return -1;
+    VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+    g_vk.ResetCommandBuffer(g_cmd, 0);
+    VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                                   .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
+    g_vk.BeginCommandBuffer(g_cmd, &bi);
+    VkImageMemoryBarrier acq[2] = {
+        {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+         .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+         .srcQueueFamilyIndex = src->dmabuf ? VK_QUEUE_FAMILY_FOREIGN_EXT : VK_QUEUE_FAMILY_IGNORED,
+         .dstQueueFamilyIndex = src->dmabuf ? g_qfam : VK_QUEUE_FAMILY_IGNORED,
+         .image = src->image, .subresourceRange = range, .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT},
+        {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+         .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_FOREIGN_EXT, .dstQueueFamilyIndex = g_qfam,
+         .image = dst->image, .subresourceRange = range, .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT}};
+    if (!src->dmabuf) { /* shm image: host-written, GENERAL */
+        acq[0].oldLayout = src->in_general ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_PREINITIALIZED;
+        acq[0].newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        acq[0].srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
+        src->in_general = 1;
+    }
+    g_vk.CmdPipelineBarrier(g_cmd, VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                            VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 2, acq);
+    int bw = src->w < dst->w ? src->w : dst->w, bh = src->h < dst->h ? src->h : dst->h;
+    VkImageBlit blit = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                        .srcOffsets = {{0, 0, 0}, {bw, bh, 1}},
+                        .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                        .dstOffsets = {{0, 0, 0}, {bw, bh, 1}}};
+    g_vk.CmdBlitImage(g_cmd, src->image,
+                      src->dmabuf ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL : VK_IMAGE_LAYOUT_GENERAL,
+                      dst->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_NEAREST);
+    VkImageMemoryBarrier rel = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        .newLayout = VK_IMAGE_LAYOUT_GENERAL, .srcQueueFamilyIndex = g_qfam,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_FOREIGN_EXT, .image = dst->image, .subresourceRange = range,
+        .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT};
+    g_vk.CmdPipelineBarrier(g_cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                            0, 0, NULL, 0, NULL, 1, &rel);
+    g_vk.EndCommandBuffer(g_cmd);
+
+    VkSubmitInfo si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &g_cmd};
+    g_vk.ResetFences(g_dev, 1, &g_fence);
+    VkResult qr = g_vk.QueueSubmit(g_queue, 1, &si, g_fence);
+    if (qr != VK_SUCCESS) {
+        if (qr == VK_ERROR_DEVICE_LOST) device_lost("layer blit");
+        else LOGE("layer: blit submit failed (%d)", (int)qr);
+        return -1;
+    }
+    VkResult fr = g_vk.WaitForFences(g_dev, 1, &g_fence, VK_TRUE, 1000000000ULL);
+    if (fr == VK_ERROR_DEVICE_LOST) { device_lost("layer blit"); return -1; }
+    if (fr != VK_SUCCESS) { LOGE("layer: blit fence wait -> %s", vk_result_name(fr)); return -1; }
     return 0;
 }
