@@ -1344,12 +1344,17 @@ private fun TopLevelFields(
         // FG's present-mode/mailbox delivery only exists on the Vulkan host renderer; OpenGL (GLRenderer)
         // and SurfaceFlinger (ASR) have no present-mode control, so FG is unsupported there — gate the
         // whole dropdown on Vulkan and grey it out otherwise (combined with the lsfg-DLL option gate).
-        val fgVulkan = viewModel.selectedRenderer == "Vulkan"
+        // On Wayland the renderer gate is meaningless (the compositor is Vulkan) — FG is simply not
+        // wired to the compositor yet, so it is disabled with that reason and DISPLAYS it; the stored
+        // engine is untouched and comes back with the X11 backend.
+        val fgWayland = viewModel.isWaylandBackend
+        val fgVulkan = !fgWayland && viewModel.selectedRenderer == "Vulkan"
+        val fgShown = if (fgWayland) "Not available on Wayland yet" else fgEngineLabels[fgSelIdx]
         Row(verticalAlignment = Alignment.CenterVertically) {
             LabeledDropdown(
                 label = stringResource(R.string.frame_generation),
-                options = fgEngineLabels,
-                selectedOption = fgEngineLabels[fgSelIdx],
+                options = if (fgWayland) listOf(fgShown) else fgEngineLabels,
+                selectedOption = fgShown,
                 onSelect = { viewModel.frameGenEngine = fgEngines[fgEngineLabels.indexOf(it)] },
                 enabled = fgVulkan,
                 disabledOptions = fgDisabledOpts,
@@ -1361,7 +1366,7 @@ private fun TopLevelFields(
         }
         if (!fgVulkan) {
             Text(
-                text = stringResource(R.string.frame_generation_requires_vulkan),
+                text = if (fgWayland) "Not available on Wayland yet (frame generation has not been wired to the Wayland compositor)" else stringResource(R.string.frame_generation_requires_vulkan),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(start = 52.dp, top = 2.dp, bottom = 4.dp)
@@ -1477,16 +1482,21 @@ private fun TopLevelFields(
                     color = MaterialTheme.colorScheme.primary
                 )
             }
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            // Same Wayland gate as Frame Generation above (LSFG Native isn't wired to the compositor).
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = if (fgWayland) Modifier.alpha(0.5f) else Modifier
+            ) {
                 Switch(
                     checked = viewModel.lsfgVk11Compat,
-                    onCheckedChange = { viewModel.lsfgVk11Compat = it }
+                    onCheckedChange = { viewModel.lsfgVk11Compat = it },
+                    enabled = !fgWayland
                 )
                 Spacer(Modifier.width(8.dp))
                 Text(stringResource(R.string.lsfg_vk11_compat), modifier = Modifier.weight(1f))
             }
             Text(
-                text = stringResource(R.string.lsfg_vk11_compat_hint),
+                text = if (fgWayland) "Not available on Wayland yet (frame generation has not been wired to the Wayland compositor)" else stringResource(R.string.lsfg_vk11_compat_hint),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(start = 52.dp, top = 2.dp, bottom = 4.dp)
@@ -1838,12 +1848,27 @@ private fun WineConfigTab(
 
         // DirectInput section
         SectionBox(title = "DirectInput") {
+            // Mouse warp needs pointer constraints, which the Wayland compositor doesn't implement yet
+            // (same rule as the in-game Relative Mouse chip): greyed there, displays "Not available",
+            // stored index untouched.
+            val mouseWarpEnabled = !viewModel.isWaylandBackend
+            val mouseWarpShown = if (mouseWarpEnabled)
+                viewModel.mouseWarpEntries.getOrElse(viewModel.selectedMouseWarpIndex) { "" }
+            else "Not available on Wayland yet"
             LabeledDropdown(
                 label = stringResource(R.string.mouse_warp_override),
-                options = viewModel.mouseWarpEntries,
-                selectedOption = viewModel.mouseWarpEntries.getOrElse(viewModel.selectedMouseWarpIndex) { "" },
-                onSelect = { opt -> viewModel.selectedMouseWarpIndex = viewModel.mouseWarpEntries.indexOf(opt).coerceAtLeast(0) }
+                options = if (mouseWarpEnabled) viewModel.mouseWarpEntries else listOf(mouseWarpShown),
+                selectedOption = mouseWarpShown,
+                onSelect = { opt -> viewModel.selectedMouseWarpIndex = viewModel.mouseWarpEntries.indexOf(opt).coerceAtLeast(0) },
+                enabled = mouseWarpEnabled
             )
+            if (!mouseWarpEnabled) {
+                Text(
+                    "Not available on Wayland yet: pointer constraints are not implemented in the Wayland compositor",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
         }
 
         // System section — "Run as administrator" (default ON) toggles UAC in the prefix. Backed by
