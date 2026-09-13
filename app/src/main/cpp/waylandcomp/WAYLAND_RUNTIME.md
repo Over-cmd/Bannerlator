@@ -70,3 +70,33 @@ The staged `src/` here is that proven code, to grow into the app-embedded compos
 - Session log tag `pointer`: `lock requested by …`, `locked: … frozen at x,y`, `unlocked: … (why)`,
   `confined: …`, `unconfined: …`, `relative pointer created for …`, `position hint: …`.
   Test FIFO gained `rel DX DY`.
+
+## Clipboard, text input, window icons (feat/wayland-clipboard-ime)
+Three globals winewayland used to complain about at startup, each in its own file behind the
+small interface in `src/banner_ext.h` (compositor.c only gained hook calls + accessors):
+- **Clipboard** (`src/wl_clipboard.c`): `wl_data_device_manager` **v3** and
+  `zwlr_data_control_manager_v1` **v1**, selection only (start_drag is refused with `cancelled`).
+  Wine prefers data-control: its desktop process then owns the clipboard without needing keyboard
+  focus and the "clipboard functionality will be limited" ERR goes away too. One shared selection:
+  a program's source, or text from Android (`nativeSetClipboardText`), or nothing. Data-control
+  devices hear every change; `wl_data_device`s only while their client holds keyboard focus (hook in
+  `keyboard_focus()`), and on focus arrival. Guest → Android: a selection with a text mime is read
+  once over a pipe on the event loop (1 MiB cap, 3 s timeout) → `banner_on_clipboard_text` →
+  `WaylandClipboardSync` → `ClipboardManager`. Android → guest: `OnPrimaryClipChangedListener` plus a
+  re-read on resume / window focus (Android hides clipboard changes from background apps); `receive`
+  is served by a non-blocking writer. Echo guard on both sides. Log tag `clipboard`.
+- **Text input** (`src/wl_text_input.c`): `zwp_text_input_manager_v3` **v1**, double-buffered state,
+  `done(serial)` only when we sent events. winewayland enables text input for whichever surface gets
+  `enter` and posts IME updates inside *that window's process*, so text input can't follow keyboard
+  focus (the desktop surface): it follows the last clicked program window (`g_ime_click`, set in
+  `pointer_input`), else the topmost non-shell window. `set_cursor_rectangle` arrives when an edit
+  control calls `ImmSetCompositionWindow`; the app (`WaylandTextInput`) shows the soft keyboard only
+  then (and with no hardware keyboard), hides it on disable unless the user's own toggle opened it.
+  Typed text: `SurfaceInputView`'s `InputConnection` → `commit_string` / `preedit_string` + `done`.
+  Deletions become Backspace/Delete key presses — winewayland's `delete_surrounding_text` handler is
+  empty. Log tag `text-input`.
+- **Window icons** (`src/wl_toplevel_icon.c`): `xdg_toplevel_icon_manager_v1` **v1**, accepts and
+  drops icons (`done` at bind, no sizes).
+- Host → compositor text crosses as UTF-8 `byte[]` through `banner_ext.c`'s queue (mutex + wake
+  pipe), drained on the compositor thread. Glue for the three protocols is pre-generated with
+  wayland-scanner 1.24.0 from `protocols/`.
