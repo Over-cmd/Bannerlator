@@ -1,88 +1,60 @@
-Bannerlator Wayland test kit  (2026-09-13, phase 2)
-===================================================
+Bannerlator Wayland test kit  (2026-09-13, phase 3 = pre-release 2)
+====================================================================
 
-What is in this folder (only the latest of each kind is kept here):
+1. Bannerlator-3.1.2-wayland-pre2-<flavour>.apk   (all three flavours on the GitHub pre-release)
+   versionCode 85 like 3.1.1, so you can go back to 3.1.1 or forward to the next stable.
+   New since pre-release 1:
+   - Eight Wayland game drivers built into the Proton (see 2). Auto picks by GPU; the a8xx
+     alternatives are for Adreno 830/840 owners to compare.
+   - Zero-copy presentation (experimental, off by default): put BANNER_WAYLAND_ZERO_COPY=1 in the
+     container's or shortcut's Env Vars and a fullscreen game's own frames go straight to the display
+     hardware, no compositor copy (session log shows "N zero-copy frames"). Proven with Half-Life 2.
+   - Compressed (UBWC) game buffers are accepted by the compositor (default on;
+     BANNER_WAYLAND_UBWC=0 forces linear if you see a scrambled picture on your GPU).
+   - Fixes: the first launch after installing a Wayland Proton no longer comes up at 1024x768;
+     Wine's desktop no longer closes a second into a game's startup (32-bit games under FEX).
+   - Keyboard layout names now come from xkb data bundled in the Proton (no longer forced to "us").
 
-1. Bannerlator-wayland-phase2-pubg.apk
-   App build from branch feat/wayland-phase2 (commit 2aeda707), "pubg" flavour
-   (package com.tencent.ig). Install over the existing one; data is kept.
-   New since the merged main build:
-   - Wayland game driver picker (container, shortcut and XMB settings, under "Compositor driver"):
-     Auto (by GPU) / Bundled (Adreno 6xx, 730-750) / Bundled a7xx (710/720/722) /
-     Bundled a8xx (830/840, WinNative Balanced) / Bundled a8xx Performance (WinNative PWR_MAX) /
-     any imported Linux ICD. Auto picks Balanced on an 8xx. Imports: Contents screen >
-     "Wayland game drivers (Linux ICD)" (a zip with a Wayland-built libvulkan_freedreno*.so;
-     Android Turnip zips are rejected there on purpose).
-   - Pointer lock / mouse-look: games that grab the mouse now get relative motion
-     (Half-Life 2 plays with touch mouse-look). Relative Mouse chip and Mouse Warp Override
-     are live on Wayland.
-   - KEYBOARD WORKS on Wayland (it never did before): typing, shortcuts, WASD.
-   - Clipboard both ways (Android <-> Windows programs) and the soft keyboard opens on its own
-     when a Windows text field takes focus (tap into the field first).
-   - Fullscreen Mode (Off/Fit/Stretch/Fill/Integer) and Screen Alignment (Center/Top/Bottom)
-     now work on Wayland, live from the in-game drawer too.
-   - Compositor fixes: no black frame / window churn when a game rebuilds its swapchain,
-     background + resume recovers the screen, the FPS limiter cap stays exact, HUD sampling
-     no longer stalls the compositor thread, swapchain recovery on surface loss.
-   - Two crash fixes: a shortcut whose exe has no folder or no ".exe" no longer crashes the launch.
-   - EXPERIMENTAL, off by default: put BANNER_WAYLAND_ZERO_COPY=1 in a container's or shortcut's
-     Env Vars and a fullscreen game is shown on its own Android hardware layer (SurfaceFlinger
-     composes it directly). Proven with Half-Life 2 here; it does not save a copy yet, it is the
-     first half of the zero-copy work. Leave it unset for normal play.
+2. proton-11.0-2.1-arm64ec-wayland-v5.wcp   (installs as Proton-11.0-2.1-arm64ec-5)
+   Proton 11.0-2 + winewayland + EIGHT Wayland Turnips chosen under "Wayland game driver":
+     Bundled                    upstream Mesa 7cda7850, no patches        Adreno 6xx, 730, 740, 750
+     Bundled a7xx               Vauzi-17 "710" v3.6 recipe                  Adreno 710, 720, 722
+     Bundled a8xx               WinNative WN-Turnip 1.15 Balanced (Auto on 8xx)   Adreno 830/840
+     Bundled a8xx Performance   WinNative WN-Turnip 1.15 Performance (PWR_MAX)
+     Bundled a8xx gen8          Banners-Turnip gen8 recipe (own Android a8xx job)
+     Bundled a8xx SMXZ          StevenMXZ Turnip Gen8 V36 recipe
+     Bundled a8xx WHITE         whitebelyash Mainline Turnip v31 recipe
+     Bundled a8xx upstream      pure Mesa main @ bbc7792f (2026-09-13), no patches
+   Also inside: the zero-copy swapchain patch in every driver, xkeyboard-config data, and the
+   Wine fix restoring the 1 s desktop-close grace. Remove older -1 … -4 entries on the Contents screen.
+   All eight load and render on an Adreno 750; none has been run on real 710/720/722 or 830/840 yet.
 
-2. proton-11.0-2.1-arm64ec-wayland-v3.wcp
-   The Proton to use for Wayland containers. Installs as "Proton-11.0-2.1-arm64ec-3"
-   (own layer line, never offered as an "update" to a normal 11.0-2 container; if you had the
-   -1 or -2 entry, switch your Wayland containers to -3 and remove the old ones on the Contents
-   screen).
-   Inside: Proton 11.0-2 + winewayland + FOUR Wayland Turnips chosen by the picker above:
-     plain      = upstream Mesa 7cda7850, no device patches      (Adreno 6xx, 730, 740, 750)
-     a7xx       = Vauzi-17 "710" v3.6 recipe, rebuilt for Wayland (Adreno 710, 720, 722)
-     a8xx       = WinNative WN-Turnip 1.15 Balanced recipe        (Adreno 830, 840 + 810/825/829)
-     a8xx-perf  = WinNative WN-Turnip 1.15 Performance recipe (holds the GPU at PWR_MAX)
-   plus the keyboard fix (winewayland no longer gives up its keyboard when the xkb registry data
-   is unreadable). Vauzi recommends TU_DEBUG=sysmem on 710/720/722 for stability (set it in the
-   container's Env Vars if you see artifacts).
-   It also runs as a normal X11 Proton. OpenGL on Wayland is on (Zink).
-
-3. (No Turnip zip needed.) On Wayland the COMPOSITOR uses whatever Android Turnip you pick under
-   "Compositor driver" — any recent one from the in-app catalog works. Do NOT pick "System"
-   (the stock driver cannot import the game's frames: black screen).
+3. No Turnip zip needed: the compositor uses whatever Android Turnip you pick under
+   "Compositor driver" (any recent one from the in-app catalog). Never pick "System".
 
 Setup
 -----
-1. Install the APK.
-2. Make sure an Android Turnip driver is installed (Contents screen > Graphics drivers, any recent one).
-3. Install the wcp on the Contents screen (Proton > Install from file).
-4. Container settings: Proton = Proton-11.0-2.1-arm64ec-3, Display backend = Wayland,
-   Compositor driver = that Android Turnip, Wayland game driver = Auto, FEXCore = an INSTALLED
-   version. DXVK / VKD3D versions, Wine components, esync, audio: same as on X11.
-5. The FIRST launch after installing the wcp comes up at the wrong size (1024x768): just relaunch.
+1. Install the APK for your flavour over 3.1.1 or pre-release 1.
+2. Contents > Proton > Install from file: the v5 wcp.
+3. Container: Proton = Proton-11.0-2.1-arm64ec-5, Display backend = Wayland, Compositor driver =
+   an Android Turnip, Wayland game driver = Auto (8xx owners: try the alternatives one by one),
+   FEXCore = an installed version. DXVK / VKD3D / components / audio as on X11.
+4. Optional experiments via Env Vars: BANNER_WAYLAND_ZERO_COPY=1 (fullscreen games only),
+   BANNER_WAYLAND_UBWC=0 (if the picture is scrambled), TU_DEBUG=sysmem (Vauzi's tip for 710/720/722).
 
-Verified on this build (AYANEO Pocket FIT, Adreno 750):
-  AIO Graphics Test, one launch, Vulkan -> D3D12 -> D3D9 on Wayland, all alive.
-  Half-Life 2 (d1_trainstation_01) 144 fps on Wayland with touch mouse-look under a pointer lock.
-  Notepad: paste from Android, type, copy back to Android; soft keyboard auto-opens.
-  Integer fullscreen mode: picture 1:1 centered, taps land where the arrow is.
-  60 fps cap: flat 16.7 ms. HOME and back: picture returns, game keeps running.
-  Each of the four bundled game drivers forced on the 750: Wine loads that driver's manifest and
-  the test renders (plain / a7xx / a8xx / a8xx Performance).
-  (Real Adreno 710/720/8xx hardware NOT tested here: please report.)
+Verified on this build (AYANEO Pocket FIT, Adreno 750)
+-----------------------------------------------------
+  All eight game drivers load their own manifest and render the AIO Graphics Test on Wayland.
+  Switch sweep Vulkan -> D3D12 -> D3D9 alive in one launch.
+  Half-Life 2: desktop survives the launch; touch mouse-look under a pointer lock; 144 fps.
+  Zero-copy on: 1239 of 1240 presented frames without a copy, picture correct, same 144 fps cap.
+  First launch with a stale prefix: 1280x720, no resize.
+  Notepad: paste from Android, type, copy back; soft keyboard auto-opens.
 
-Known gaps on Wayland right now
--------------------------------
-- Performance headroom: the compositor still copies every frame once. The zero-copy path needs a
-  change in the Wayland Turnip's swapchain (next step); the Android-layer half is in (flag above).
-- Launching Half-Life 2 closes Wine's desktop process a second after start (fullscreen games are
-  unaffected; windowed games launched the same way lose the taskbar). Under investigation.
-- Layout names default to "us" on Wayland (the xkb registry data is not bundled yet).
-- Drag-and-drop and image clipboard are not bridged (text only).
-- Window icons / title-bar decorations are missing (cosmetic).
-- Leaving the app pauses the whole container; come back and it resumes. By design.
+Known gaps
+----------
+- Frame rate is still not ahead of X11 on synthetic tests (the cap hides the zero-copy gain here).
+- Real Adreno 710/720/722 and 830/840 hardware untested: please report which a8xx build works best.
+- Frame generation, drag-and-drop, image clipboard, window decorations: not on Wayland yet.
 
-Logs, if something goes wrong
------------------------------
-- Download/Wayland-logs/wayland-<date>_<time>.log : the compositor's session log
-  (windows, frames on screen per 10 s, pointer lock, clipboard, text input, screen mode).
-- Download/bannerlator/<game name>/wine_debug.log and the DXVK/VKD3D logs next to it
-  (turn on Wine debug logging in Settings > Log Manager).
+Logs: Download/Wayland-logs/wayland-*.log (compositor) and Download/bannerlator/<game>/wine_debug.log.
