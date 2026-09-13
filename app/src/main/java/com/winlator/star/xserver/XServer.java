@@ -63,13 +63,23 @@ public class XServer {
         setupExtensions();
     }
 
+    /** Relative (delta) mouse delivery: the user's Relative Mouse toggle, or — Wayland mode only —
+     *  a program holding a pointer lock in the compositor, which needs deltas the same way. */
     public boolean isRelativeMouseMovement() {
-        return relativeMouseMovement;
+        return relativeMouseMovement || externalRelativeMode;
     }
 
     public void setRelativeMouseMovement(boolean relativeMouseMovement) {
         cursorLocker.setEnabled(!relativeMouseMovement);
         this.relativeMouseMovement = relativeMouseMovement;
+    }
+
+    private volatile boolean externalRelativeMode;
+
+    /** Wayland mode: a program locked the pointer (zwp_pointer_constraints_v1), so the input path
+     *  must deliver deltas while it holds. Leaves the X11 cursor locker alone (no X clients here). */
+    public void setExternalRelativeMode(boolean on) {
+        externalRelativeMode = on;
     }
 
     public boolean isSimulateTouchScreen() { return simulateTouchScreen; }

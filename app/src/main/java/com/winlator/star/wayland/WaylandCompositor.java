@@ -61,6 +61,26 @@ public final class WaylandCompositor {
         if (l != null) l.onGameFrame();
     }
 
+    /** Pointer lock (zwp_pointer_constraints_v1) state, for the app's input path. */
+    public interface PointerLockListener {
+        /** A program locked the pointer ({@code locked}): the app must feed the compositor deltas
+         *  (scene input type 6) instead of absolute positions. When the lock ends, {@code x,y} is
+         *  where the pointer now is (scene = virtual-desktop coordinates) for the app to re-sync
+         *  its own pointer to. Compositor thread. */
+        void onPointerLock(boolean locked, int x, int y);
+    }
+
+    private static volatile PointerLockListener pointerLockListener;
+
+    public static void setPointerLockListener(PointerLockListener l) { pointerLockListener = l; }
+
+    /** Invoked from native (banner_on_pointer_lock). */
+    @SuppressWarnings("unused")
+    static void onPointerLock(boolean locked, int x, int y) {
+        PointerLockListener l = pointerLockListener;
+        if (l != null) l.onPointerLock(locked, x, y);
+    }
+
     /** Start the compositor headless (no output window) — bring-up tests only. */
     public static native void nativeStart(String xdgRuntimeDir);
 
@@ -107,4 +127,12 @@ public final class WaylandCompositor {
      *  3 = evdev button a (BTN_LEFT=0x110…) pressed (b=1) or released (b=0); 4 = a wheel steps,
      *  negative = up. */
     public static native void nativeSendSceneInput(int type, int a, int b);
+
+    /** Relative pointer motion by dx,dy scene pixels (the Relative Mouse / captured-mouse path):
+     *  while a program holds a pointer lock this is what it receives as relative_motion; otherwise
+     *  the compositor moves its pointer by the delta. */
+    public static void sendPointerDelta(int dx, int dy) {
+        if (dx == 0 && dy == 0) return;
+        nativeSendSceneInput(6, dx * 256, dy * 256);
+    }
 }

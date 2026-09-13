@@ -14,6 +14,8 @@ add_library(bannerwayland SHARED
         generated/viewporter-protocol.c
         generated/banner-desktop-v1-protocol.c
         generated/presentation-time-protocol.c
+        generated/pointer-constraints-unstable-v1-protocol.c
+        generated/relative-pointer-unstable-v1-protocol.c
 )
 target_include_directories(bannerwayland PRIVATE
         generated

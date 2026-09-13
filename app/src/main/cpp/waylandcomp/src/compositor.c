@@ -39,6 +39,8 @@
 #include "viewporter-server-protocol.h"
 #include "banner-desktop-v1-server-protocol.h"
 #include "presentation-time-server-protocol.h"
+#include "pointer-constraints-unstable-v1-server-protocol.h"
+#include "relative-pointer-unstable-v1-server-protocol.h"
 #include "vk_present.h"
 
 #define WLOGI(...) __android_log_print(ANDROID_LOG_INFO, "BannerWayland", __VA_ARGS__)
@@ -353,6 +355,15 @@ static struct surface *g_key_target;        /* no-desktop fallback: last clicked
 static int g_input_pipe[2] = {-1, -1};
 /* type 0 = pointer (p1=action 0down/1move/2up, p2=x, p3=y); type 1 = key (p1=evdev, p2=state 1down/0up) */
 struct input_msg { int type; int p1; int p2; int p3; };
+
+/* Pointer constraints (zwp_pointer_constraints_v1) and relative pointers
+ * (zwp_relative_pointer_manager_v1); see the "pointer constraints" section. */
+struct surface;
+static void constraints_surface_gone(struct surface *s);
+static void constraints_surface_commit(struct surface *s);
+static void constraints_pointer_gone(struct wl_resource *pointer);
+static void relative_pointers_pointer_gone(struct wl_resource *pointer);
+static void constraints_focus_entered(struct wl_resource *target, struct wl_client *client);
 
 /* ------------------------------------------------------------------ dmabuf buffers */
 
@@ -704,6 +715,7 @@ static void surface_commit(struct wl_client *c, struct wl_resource *r) {
     wl_list_init(&s->pending_frames);
     wl_list_insert_list(s->feedback.prev, &s->pending_feedback);
     wl_list_init(&s->pending_feedback);
+    constraints_surface_commit(s);
 
     if (s->role == ROLE_TOPLEVEL && s->xdg_toplevel) {
         if (s->has_content) map_toplevel(s);
@@ -750,6 +762,7 @@ static void surface_resource_destroy(struct wl_resource *r) {
     if (g_key_target == s) g_key_target = NULL;
     if (g_desktop == s) { g_desktop = NULL; banner_log("desktop", "the desktop closed"); }
     if (g_hud_surface == s) { g_hud_surface = NULL; banner_on_game_surface(NULL, NULL); }
+    constraints_surface_gone(s);
 
     unmap_toplevel(s);
     detach_from_parent(s);
@@ -777,11 +790,25 @@ static void surface_resource_destroy(struct wl_resource *r) {
 
 /* ------------------------------------------------------------------ wl_region */
 
+/* A region is kept as the bounding box of its rectangles: enough for pointer confinement,
+ * where winewayland sends one rectangle (the ClipCursor area). Subtractions are ignored. */
+struct region { int set; int x, y, w, h; };
+
 static void region_destroy(struct wl_client *c, struct wl_resource *r) { wl_resource_destroy(r); }
 static void region_add(struct wl_client *c, struct wl_resource *r,
-                       int32_t x, int32_t y, int32_t w, int32_t h) {}
+                       int32_t x, int32_t y, int32_t w, int32_t h) {
+    struct region *rg = wl_resource_get_user_data(r);
+    if (!rg || w <= 0 || h <= 0) return;
+    if (!rg->set) { rg->x = x; rg->y = y; rg->w = w; rg->h = h; rg->set = 1; return; }
+    int x2 = rg->x + rg->w > x + w ? rg->x + rg->w : x + w;
+    int y2 = rg->y + rg->h > y + h ? rg->y + rg->h : y + h;
+    if (x < rg->x) rg->x = x;
+    if (y < rg->y) rg->y = y;
+    rg->w = x2 - rg->x; rg->h = y2 - rg->y;
+}
 static void region_subtract(struct wl_client *c, struct wl_resource *r,
                             int32_t x, int32_t y, int32_t w, int32_t h) {}
+static void region_resource_destroy(struct wl_resource *r) { free(wl_resource_get_user_data(r)); }
 static const struct wl_region_interface region_impl = {
     .destroy = region_destroy,
     .add = region_add,
@@ -809,7 +836,8 @@ static void compositor_create_surface(struct wl_client *c, struct wl_resource *r
 static void compositor_create_region(struct wl_client *c, struct wl_resource *r, uint32_t id) {
     struct wl_resource *reg = wl_resource_create(c, &wl_region_interface, 1, id);
     if (!reg) { wl_client_post_no_memory(c); return; }
-    wl_resource_set_implementation(reg, &region_impl, NULL, NULL);
+    wl_resource_set_implementation(reg, &region_impl, calloc(1, sizeof(struct region)),
+                                   region_resource_destroy);
 }
 static const struct wl_compositor_interface compositor_impl = {
     .create_surface = compositor_create_surface,
@@ -1410,6 +1438,8 @@ static const struct wl_pointer_interface pointer_impl = {
     .set_cursor = pointer_set_cursor, .release = pointer_release,
 };
 static void pointer_res_destroy(struct wl_resource *r) {
+    constraints_pointer_gone(r);
+    relative_pointers_pointer_gone(r);
     for (int i = 0; i < g_nptrs; i++)
         if (g_ptrs[i].ptr == r) { g_ptrs[i] = g_ptrs[--g_nptrs]; break; }
 }
@@ -1502,6 +1532,7 @@ static void pointer_focus(struct wl_resource *target, wl_fixed_t fx, wl_fixed_t 
     if (sp && sp->focus != target) {
         sp->focus = target;
         wl_pointer_send_enter(sp->ptr, wl_display_next_serial(g_display), target, fx, fy);
+        constraints_focus_entered(target, client);
     }
 }
 
@@ -1523,41 +1554,452 @@ static void keyboard_focus(struct wl_resource *target) {
     wl_array_release(&keys);
 }
 
+/* ------------------------------------------------------------------ pointer constraints
+ * zwp_pointer_constraints_v1 and zwp_relative_pointer_manager_v1: what winewayland uses for
+ * SetCursorPos, ClipCursor and hidden-cursor (mouse-look) games.
+ *
+ * A lock freezes the pointer where it is: no wl_pointer.motion is sent while it holds, and
+ * every input delta (a relative event from the app, or the difference between absolute
+ * positions) reaches the locking program as zwp_relative_pointer_v1.relative_motion. A confine
+ * clamps the pointer to the surface (and the program's region inside it). Relative motion is
+ * also sent while unlocked, to any program holding a relative pointer.
+ *
+ * Input normally goes to the desktop surface; while a constraint holds, pointer focus moves
+ * to the constrained surface, so the constraining program receives the events itself
+ * (winewayland only enables relative motion for a window its pointer has entered). One
+ * constraint holds at a time; a newer request ends the older one. A lock's cursor position
+ * hint is applied on the surface's commit and is where the pointer ends up when the lock
+ * ends (winewayland's SetCursorPos: lock, hint, commit, unlock). */
+
+struct constraint {
+    struct wl_list link;                    /* g_constraints */
+    struct wl_resource *resource;           /* zwp_locked_pointer_v1 or zwp_confined_pointer_v1 */
+    struct wl_resource *pointer;            /* the program's wl_pointer; NULL once released */
+    struct surface *surface;                /* NULL once the surface is gone */
+    int is_lock;
+    uint32_t lifetime;
+    int active;
+    int defunct;                            /* a oneshot that ended, or surface/pointer gone */
+    struct region region, pending_region;   /* confine area, surface-local; unset = whole surface */
+    int pending_region_set;
+    int hint_set, pending_hint_set;         /* lock: cursor position hint, surface-local */
+    double hint_x, hint_y, pending_hint_x, pending_hint_y;
+};
+static struct wl_list g_constraints;
+static struct constraint *g_active_constraint;
+
+struct relative_pointer {
+    struct wl_list link;                    /* g_relative_pointers */
+    struct wl_resource *resource;
+    struct wl_resource *pointer;            /* the program's wl_pointer; NULL once released */
+};
+static struct wl_list g_relative_pointers;
+
 /* Last pointer position in scene coordinates (buttons and scrolls from the app's X-server
  * input path arrive without one). */
 static double g_ptr_x, g_ptr_y;
+/* Last absolute input position: absolute input becomes deltas while the pointer is locked. */
+static double g_raw_x, g_raw_y;
+static int g_raw_valid;
 
-/* One pointer event at scene coordinates: motion, then an optional button change
- * (button 0 = none). */
-static void pointer_event(double x, double y, uint32_t button, int pressed) {
-    struct surface *target;
+/* JNI: the app switches its touch/mouse path to deltas while a lock holds and re-syncs its
+ * pointer to x,y when it ends. */
+extern void banner_on_pointer_lock(int locked, int x, int y);
 
-    g_ptr_x = x; g_ptr_y = y;
+static void sync_lock_notify(void) {
+    static int last;
+    int locked = g_active_constraint && g_active_constraint->is_lock;
+    if (locked == last) return;
+    last = locked;
+    banner_on_pointer_lock(locked, (int)g_ptr_x, (int)g_ptr_y);
+}
 
-    if (g_desktop) {
-        target = g_desktop;
+static void constraint_describe(const struct constraint *k, char *out, size_t size) {
+    if (k->surface) describe(k->surface, out, size);
+    else snprintf(out, size, "a closed window");
+}
+
+/* Scene position of the constrained surface. */
+static void constraint_origin(const struct constraint *k, int *x, int *y) {
+    *x = *y = 0;
+    if (k->surface && k->surface != g_desktop && k->surface->placed) { *x = k->surface->x; *y = k->surface->y; }
+}
+
+/* Keep x,y (scene coordinates) inside the confine area. */
+static void confine_clamp(const struct constraint *k, double *x, double *y) {
+    int ox, oy, w, h, rx = 0, ry = 0, rw, rh;
+    if (!k->surface) return;
+    constraint_origin(k, &ox, &oy);
+    surface_size(k->surface, &w, &h);
+    rw = w; rh = h;
+    if (k->region.set) {
+        int x2 = rx + rw < k->region.x + k->region.w ? rx + rw : k->region.x + k->region.w;
+        int y2 = ry + rh < k->region.y + k->region.h ? ry + rh : k->region.y + k->region.h;
+        if (k->region.x > rx) rx = k->region.x;
+        if (k->region.y > ry) ry = k->region.y;
+        rw = x2 - rx; rh = y2 - ry;
+    }
+    if (rw <= 0 || rh <= 0) return;
+    if (*x < ox + rx) *x = ox + rx;
+    if (*x > ox + rx + rw - 1) *x = ox + rx + rw - 1;
+    if (*y < oy + ry) *y = oy + ry;
+    if (*y > oy + ry + rh - 1) *y = oy + ry + rh - 1;
+}
+
+static void constraint_send_state(struct constraint *k, int on) {
+    if (k->is_lock) {
+        if (on) zwp_locked_pointer_v1_send_locked(k->resource);
+        else zwp_locked_pointer_v1_send_unlocked(k->resource);
     } else {
-        target = g_grab ? g_grab : toplevel_at(x, y);
-        if (button && pressed) { g_grab = target; g_key_target = target; }
-        if (button && !pressed) g_grab = NULL;
+        if (on) zwp_confined_pointer_v1_send_confined(k->resource);
+        else zwp_confined_pointer_v1_send_unconfined(k->resource);
+    }
+}
+
+/* A constraint stops holding. tell_client = 0 when its resource is being destroyed. */
+static void constraint_end(struct constraint *k, int tell_client, const char *why) {
+    char name[160];
+    if (!k->active) return;
+    k->active = 0;
+    if (g_active_constraint == k) g_active_constraint = NULL;
+    if (k->lifetime == ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_ONESHOT) k->defunct = 1;
+    if (k->is_lock && k->hint_set && k->surface) {
+        int ox, oy;
+        constraint_origin(k, &ox, &oy);
+        g_ptr_x = ox + k->hint_x;
+        g_ptr_y = oy + k->hint_y;
+    }
+    g_raw_valid = 0;
+    if (tell_client) constraint_send_state(k, 0);
+    constraint_describe(k, name, sizeof(name));
+    banner_log("pointer", "%s: %s (%s), pointer at %d,%d", k->is_lock ? "unlocked" : "unconfined",
+               name, why, (int)g_ptr_x, (int)g_ptr_y);
+    sync_lock_notify();
+}
+
+static void constraint_activate(struct constraint *k) {
+    char name[160];
+    int ox, oy;
+    if (k->active || k->defunct || !k->surface || !k->pointer) return;
+    if (g_active_constraint && g_active_constraint != k)
+        constraint_end(g_active_constraint, 1, "replaced by a newer request");
+    k->active = 1;
+    g_active_constraint = k;
+    if (!k->is_lock) confine_clamp(k, &g_ptr_x, &g_ptr_y);
+    /* Pointer focus follows the constraint: the program gets the events itself. */
+    constraint_origin(k, &ox, &oy);
+    pointer_focus(k->surface->resource, wl_fixed_from_double(g_ptr_x - ox), wl_fixed_from_double(g_ptr_y - oy));
+    constraint_send_state(k, 1);
+    constraint_describe(k, name, sizeof(name));
+    if (k->is_lock)
+        banner_log("pointer", "locked: %s (%s), pointer frozen at %d,%d", name,
+                   k->lifetime == ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_ONESHOT ? "oneshot" : "persistent",
+                   (int)g_ptr_x, (int)g_ptr_y);
+    else if (k->region.set)
+        banner_log("pointer", "confined: %s (%s) to %dx%d at %d,%d of the window", name,
+                   k->lifetime == ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_ONESHOT ? "oneshot" : "persistent",
+                   k->region.w, k->region.h, k->region.x, k->region.y);
+    else
+        banner_log("pointer", "confined: %s (%s) to the whole window", name,
+                   k->lifetime == ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_ONESHOT ? "oneshot" : "persistent");
+    sync_lock_notify();
+    wl_display_flush_clients(g_display);
+}
+
+/* Pointer focus entered target: a persistent constraint waiting on it takes hold again. */
+static void constraints_focus_entered(struct wl_resource *target, struct wl_client *client) {
+    struct constraint *k;
+    if (g_active_constraint) return;
+    wl_list_for_each(k, &g_constraints, link) {
+        if (k->active || k->defunct || !k->surface || !k->pointer) continue;
+        if (k->surface->resource != target || wl_resource_get_client(k->pointer) != client) continue;
+        constraint_activate(k);
+        return;
+    }
+}
+
+static void constraints_surface_gone(struct surface *s) {
+    struct constraint *k;
+    wl_list_for_each(k, &g_constraints, link) {
+        if (k->surface != s) continue;
+        constraint_end(k, 1, "window closed");
+        k->surface = NULL;
+        k->defunct = 1;
+    }
+}
+
+static void constraints_pointer_gone(struct wl_resource *pointer) {
+    struct constraint *k;
+    wl_list_for_each(k, &g_constraints, link) {
+        if (k->pointer != pointer) continue;
+        constraint_end(k, 1, "pointer released");
+        k->pointer = NULL;
+        k->defunct = 1;
+    }
+}
+
+/* Double-buffered state (position hint, confine region) applies on the surface's commit. */
+static void constraints_surface_commit(struct surface *s) {
+    struct constraint *k;
+    wl_list_for_each(k, &g_constraints, link) {
+        if (k->surface != s) continue;
+        if (k->pending_hint_set) {
+            k->hint_set = 1;
+            k->hint_x = k->pending_hint_x;
+            k->hint_y = k->pending_hint_y;
+            k->pending_hint_set = 0;
+            if (k->active && k->is_lock) {
+                int ox, oy;
+                constraint_origin(k, &ox, &oy);
+                g_ptr_x = ox + k->hint_x;
+                g_ptr_y = oy + k->hint_y;
+                if (log_budget())
+                    banner_log("pointer", "position hint: pointer moved to %d,%d", (int)g_ptr_x, (int)g_ptr_y);
+            }
+        }
+        if (k->pending_region_set) {
+            k->region = k->pending_region;
+            k->pending_region_set = 0;
+            if (k->active && !k->is_lock) confine_clamp(k, &g_ptr_x, &g_ptr_y);
+        }
+    }
+}
+
+static void constraint_resource_destroy(struct wl_resource *r) {
+    struct constraint *k = wl_resource_get_user_data(r);
+    if (!k) return;
+    constraint_end(k, 0, "released by the program");
+    wl_list_remove(&k->link);
+    free(k);
+}
+
+static void constraint_destroy_req(struct wl_client *c, struct wl_resource *r) { wl_resource_destroy(r); }
+static void locked_pointer_set_cursor_position_hint(struct wl_client *c, struct wl_resource *r,
+                                                    wl_fixed_t x, wl_fixed_t y) {
+    struct constraint *k = wl_resource_get_user_data(r);
+    if (!k) return;
+    k->pending_hint_set = 1;
+    k->pending_hint_x = wl_fixed_to_double(x);
+    k->pending_hint_y = wl_fixed_to_double(y);
+}
+static void locked_pointer_set_region(struct wl_client *c, struct wl_resource *r, struct wl_resource *region) {
+    /* A lock's region only says where it may take hold; a lock here takes hold anywhere. */
+}
+static const struct zwp_locked_pointer_v1_interface locked_pointer_impl = {
+    .destroy = constraint_destroy_req,
+    .set_cursor_position_hint = locked_pointer_set_cursor_position_hint,
+    .set_region = locked_pointer_set_region,
+};
+static void confined_pointer_set_region(struct wl_client *c, struct wl_resource *r, struct wl_resource *region) {
+    struct constraint *k = wl_resource_get_user_data(r);
+    struct region *rg = region ? wl_resource_get_user_data(region) : NULL;
+    if (!k) return;
+    k->pending_region_set = 1;
+    if (rg) k->pending_region = *rg;
+    else memset(&k->pending_region, 0, sizeof(k->pending_region));
+}
+static const struct zwp_confined_pointer_v1_interface confined_pointer_impl = {
+    .destroy = constraint_destroy_req,
+    .set_region = confined_pointer_set_region,
+};
+
+static void constraint_create(struct wl_client *c, struct wl_resource *r, uint32_t id,
+                              struct wl_resource *surface_res, struct wl_resource *pointer_res,
+                              struct wl_resource *region_res, uint32_t lifetime, int is_lock) {
+    struct surface *s = wl_resource_get_user_data(surface_res);
+    struct constraint *k;
+    struct wl_resource *res;
+    char name[160];
+
+    wl_list_for_each(k, &g_constraints, link) {
+        if (k->defunct || k->surface != s || k->pointer != pointer_res) continue;
+        wl_resource_post_error(r, ZWP_POINTER_CONSTRAINTS_V1_ERROR_ALREADY_CONSTRAINED,
+                               "the surface already has a pointer constraint for this pointer");
+        return;
+    }
+    res = wl_resource_create(c, is_lock ? &zwp_locked_pointer_v1_interface : &zwp_confined_pointer_v1_interface,
+                             wl_resource_get_version(r), id);
+    if (!res || !(k = calloc(1, sizeof(*k)))) { wl_client_post_no_memory(c); return; }
+    k->resource = res;
+    k->pointer = pointer_res;
+    k->surface = s;
+    k->is_lock = is_lock;
+    k->lifetime = lifetime == ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_PERSISTENT
+                  ? ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_PERSISTENT : ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_ONESHOT;
+    if (!is_lock && region_res) {
+        struct region *rg = wl_resource_get_user_data(region_res);
+        if (rg) k->region = *rg;
+    }
+    wl_resource_set_implementation(res, is_lock ? (const void *)&locked_pointer_impl : (const void *)&confined_pointer_impl,
+                                   k, constraint_resource_destroy);
+    wl_list_insert(g_constraints.prev, &k->link);
+    if (!s) { k->defunct = 1; return; }
+    constraint_describe(k, name, sizeof(name));
+    banner_log("pointer", "%s requested by %s for %s", is_lock ? "lock" : "confine", client_name(c), name);
+    constraint_activate(k);
+}
+
+static void pointer_constraints_destroy(struct wl_client *c, struct wl_resource *r) { wl_resource_destroy(r); }
+static void pointer_constraints_lock_pointer(struct wl_client *c, struct wl_resource *r, uint32_t id,
+                                             struct wl_resource *surface, struct wl_resource *pointer,
+                                             struct wl_resource *region, uint32_t lifetime) {
+    constraint_create(c, r, id, surface, pointer, region, lifetime, 1);
+}
+static void pointer_constraints_confine_pointer(struct wl_client *c, struct wl_resource *r, uint32_t id,
+                                                struct wl_resource *surface, struct wl_resource *pointer,
+                                                struct wl_resource *region, uint32_t lifetime) {
+    constraint_create(c, r, id, surface, pointer, region, lifetime, 0);
+}
+static const struct zwp_pointer_constraints_v1_interface pointer_constraints_impl = {
+    .destroy = pointer_constraints_destroy,
+    .lock_pointer = pointer_constraints_lock_pointer,
+    .confine_pointer = pointer_constraints_confine_pointer,
+};
+static void bind_pointer_constraints(struct wl_client *c, void *data, uint32_t ver, uint32_t id) {
+    struct wl_resource *r = wl_resource_create(c, &zwp_pointer_constraints_v1_interface, ver, id);
+    if (!r) { wl_client_post_no_memory(c); return; }
+    wl_resource_set_implementation(r, &pointer_constraints_impl, NULL, NULL);
+}
+
+/* --- relative pointers --- */
+
+static void relative_pointer_resource_destroy(struct wl_resource *r) {
+    struct relative_pointer *rp = wl_resource_get_user_data(r);
+    if (!rp) return;
+    banner_log("pointer", "relative pointer released by %s", client_name(wl_resource_get_client(r)));
+    wl_list_remove(&rp->link);
+    free(rp);
+}
+static void relative_pointer_destroy_req(struct wl_client *c, struct wl_resource *r) { wl_resource_destroy(r); }
+static const struct zwp_relative_pointer_v1_interface relative_pointer_impl = {
+    .destroy = relative_pointer_destroy_req,
+};
+
+static void relative_pointer_manager_destroy(struct wl_client *c, struct wl_resource *r) { wl_resource_destroy(r); }
+static void relative_pointer_manager_get(struct wl_client *c, struct wl_resource *r, uint32_t id,
+                                         struct wl_resource *pointer) {
+    struct wl_resource *res = wl_resource_create(c, &zwp_relative_pointer_v1_interface, wl_resource_get_version(r), id);
+    struct relative_pointer *rp;
+    if (!res || !(rp = calloc(1, sizeof(*rp)))) { wl_client_post_no_memory(c); return; }
+    rp->resource = res;
+    rp->pointer = pointer;
+    wl_resource_set_implementation(res, &relative_pointer_impl, rp, relative_pointer_resource_destroy);
+    wl_list_insert(g_relative_pointers.prev, &rp->link);
+    banner_log("pointer", "relative pointer created for %s (motion arrives as deltas)", client_name(c));
+}
+static const struct zwp_relative_pointer_manager_v1_interface relative_pointer_manager_impl = {
+    .destroy = relative_pointer_manager_destroy,
+    .get_relative_pointer = relative_pointer_manager_get,
+};
+static void bind_relative_pointer_manager(struct wl_client *c, void *data, uint32_t ver, uint32_t id) {
+    struct wl_resource *r = wl_resource_create(c, &zwp_relative_pointer_manager_v1_interface, ver, id);
+    if (!r) { wl_client_post_no_memory(c); return; }
+    wl_resource_set_implementation(r, &relative_pointer_manager_impl, NULL, NULL);
+}
+
+static void relative_pointers_pointer_gone(struct wl_resource *pointer) {
+    struct relative_pointer *rp;
+    wl_list_for_each(rp, &g_relative_pointers, link)
+        if (rp->pointer == pointer) rp->pointer = NULL;
+}
+
+/* relative_motion to every relative pointer of the program owning the focus (winewayland wants
+ * it whenever it holds one, locked or not). Returns whether any was sent. */
+static int send_relative_motion(struct wl_client *client, double dx, double dy) {
+    struct relative_pointer *rp;
+    struct timespec ts;
+    uint64_t ut;
+    int sent = 0;
+    if (dx == 0 && dy == 0) return 0;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    ut = (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000;
+    wl_list_for_each(rp, &g_relative_pointers, link) {
+        if (!rp->pointer || wl_resource_get_client(rp->pointer) != client) continue;
+        zwp_relative_pointer_v1_send_relative_motion(rp->resource, (uint32_t)(ut >> 32), (uint32_t)ut,
+                                                     wl_fixed_from_double(dx), wl_fixed_from_double(dy),
+                                                     wl_fixed_from_double(dx), wl_fixed_from_double(dy));
+        sent = 1;
+    }
+    return sent;
+}
+
+/* ------------------------------------------------------------------ pointer events */
+
+/* One pointer event: a motion, then an optional button change (button 0 = none). Absolute
+ * x,y are scene coordinates; with `relative` they are a delta. While a lock holds the pointer
+ * stays put and the delta (or the change between absolute positions) becomes relative motion
+ * for the locking program; a confine keeps the pointer inside its area. */
+static void pointer_input(double x, double y, int relative, uint32_t button, int pressed) {
+    struct surface *target;
+    struct constraint *k = g_active_constraint;
+    double dx, dy;
+
+    if (relative) {
+        dx = x; dy = y;
+    } else {
+        dx = g_raw_valid ? x - g_raw_x : 0;
+        dy = g_raw_valid ? y - g_raw_y : 0;
+        g_raw_x = x; g_raw_y = y; g_raw_valid = 1;
+    }
+
+    if (k && k->is_lock) {
+        target = k->surface;
+    } else {
+        if (relative) {
+            int w, h;
+            scene_size(&w, &h);
+            x = g_ptr_x + dx; y = g_ptr_y + dy;
+            if (x < 0) x = 0;
+            if (y < 0) y = 0;
+            if (x > w - 1) x = w - 1;
+            if (y > h - 1) y = h - 1;
+        }
+        if (k) confine_clamp(k, &x, &y);
+        g_ptr_x = x; g_ptr_y = y;
+        if (k) {
+            target = k->surface;
+        } else if (g_desktop) {
+            target = g_desktop;
+        } else {
+            target = g_grab ? g_grab : toplevel_at(x, y);
+            if (button && pressed) { g_grab = target; g_key_target = target; }
+            if (button && !pressed) g_grab = NULL;
+        }
     }
     if (!target) return;
 
-    struct seat_pointer *sp = pointer_for(wl_resource_get_client(target->resource));
+    struct wl_client *client = wl_resource_get_client(target->resource);
+    struct seat_pointer *sp = pointer_for(client);
     if (!sp) return;
     int tx = 0, ty = 0;
     if (target != g_desktop && target->placed) { tx = target->x; ty = target->y; }
-    wl_fixed_t fx = wl_fixed_from_double(x - tx), fy = wl_fixed_from_double(y - ty);
+    wl_fixed_t fx = wl_fixed_from_double(g_ptr_x - tx), fy = wl_fixed_from_double(g_ptr_y - ty);
     uint32_t t = now_ms();
 
     pointer_focus(target->resource, fx, fy);
-    wl_pointer_send_motion(sp->ptr, t, fx, fy);
+    if (!(k && k->is_lock)) wl_pointer_send_motion(sp->ptr, t, fx, fy);
+    send_relative_motion(client, dx, dy);
     if (button)
         wl_pointer_send_button(sp->ptr, wl_display_next_serial(g_display), t, button,
                                pressed ? WL_POINTER_BUTTON_STATE_PRESSED : WL_POINTER_BUTTON_STATE_RELEASED);
     if (wl_resource_get_version(sp->ptr) >= WL_POINTER_FRAME_SINCE_VERSION)
         wl_pointer_send_frame(sp->ptr);
     wl_display_flush_clients(g_display);
+}
+
+/* Absolute motion to scene x,y, then an optional button change. */
+static void pointer_event(double x, double y, uint32_t button, int pressed) {
+    pointer_input(x, y, 0, button, pressed);
+}
+
+/* A delta from the app's relative input path (Relative Mouse, captured mouse, stick-as-mouse). */
+static void pointer_delta(double dx, double dy) {
+    pointer_input(dx, dy, 1, 0, 0);
+}
+
+/* A button change at the current pointer position. */
+static void pointer_button(uint32_t button, int pressed) {
+    pointer_input(0, 0, 1, button, pressed);
 }
 
 /* Java touch events arrive in INPUT_SPACE over the whole output: action 0=press, 1=move, 2=release. */
@@ -1575,7 +2017,8 @@ static void deliver_key(const struct input_msg *m) {
 
 /* Vertical wheel steps (negative = up) at the current pointer position. */
 static void scroll_event(int steps) {
-    struct surface *target = g_desktop ? g_desktop : (g_grab ? g_grab : toplevel_at(g_ptr_x, g_ptr_y));
+    struct surface *target = g_active_constraint ? g_active_constraint->surface
+                           : g_desktop ? g_desktop : (g_grab ? g_grab : toplevel_at(g_ptr_x, g_ptr_y));
     if (!target || !steps) return;
     struct seat_pointer *sp = pointer_for(wl_resource_get_client(target->resource));
     if (!sp) return;
@@ -1613,9 +2056,10 @@ static int on_input_readable(int fd, uint32_t mask, void *data) {
         switch (m.type) {
         case 1: deliver_key(&m); break;
         case 2: pointer_event(m.p1, m.p2, 0, 0); break;          /* scene motion */
-        case 3: pointer_event(g_ptr_x, g_ptr_y, m.p1, m.p2); break; /* button at pointer */
+        case 3: pointer_button(m.p1, m.p2); break;               /* button at pointer */
         case 4: scroll_event(m.p1); break;
         case 5: on_vsync(((int64_t)m.p1 << 32) | (uint32_t)m.p2); break;
+        case 6: pointer_delta(m.p1 / 256.0, m.p2 / 256.0); break; /* relative motion, 1/256 px */
         default: deliver_pointer(&m); break;
         }
     }
@@ -1648,7 +2092,8 @@ void banner_wayland_vsync(int64_t frame_time_ns) {
 }
 
 /* Called from JNI with the app's X-server input (on-screen controls, mouse): type 2 = motion
- * to scene x,y; 3 = evdev button a pressed/released (b); 4 = a wheel steps (negative = up). */
+ * to scene x,y; 3 = evdev button a pressed/released (b); 4 = a wheel steps (negative = up);
+ * 6 = relative motion by a,b in 1/256 pixel (the app's Relative Mouse / captured-mouse path). */
 void banner_wayland_send_scene_input(int type, int a, int b) {
     if (g_input_pipe[1] < 0) return;
     struct input_msg m = { type, a, b, 0 };
@@ -1675,7 +2120,8 @@ static int on_stats_timer(void *data) {
 /* ------------------------------------------------------------------ test input
  * $XDG_RUNTIME_DIR/test-input is a FIFO for scripted testing from a root shell, in scene
  * (desktop) coordinates: "move X Y", "click X Y", "rclick X Y", "dclick X Y", "down X Y",
- * "up X Y", "rdown X Y", "rup X Y", "key CODE" (evdev), "keydown CODE", "keyup CODE".
+ * "up X Y", "rdown X Y", "rup X Y", "rel DX DY" (relative motion, like the app's Relative
+ * Mouse path), "key CODE" (evdev), "keydown CODE", "keyup CODE".
  * It lives in the app's private directory, so only the app and root can reach it. */
 
 static char g_test_buf[512];
@@ -1697,6 +2143,7 @@ static void test_input_line(const char *line) {
     }
     if (n < 3) return;
     if (!strcmp(cmd, "move")) pointer_event(x, y, 0, 0);
+    else if (!strcmp(cmd, "rel")) pointer_delta(x, y);
     else if (!strcmp(cmd, "down")) pointer_event(x, y, BTN_LEFT, 1);
     else if (!strcmp(cmd, "up")) pointer_event(x, y, BTN_LEFT, 0);
     else if (!strcmp(cmd, "rdown")) pointer_event(x, y, BTN_RIGHT, 1);
@@ -1753,6 +2200,8 @@ static struct wl_listener g_client_created = { .notify = on_client_created };
 int banner_wayland_run(void) {
     wl_list_init(&g_surfaces);
     wl_list_init(&g_toplevels);
+    wl_list_init(&g_constraints);
+    wl_list_init(&g_relative_pointers);
     open_session_log();
 
     /* Bring the GPU up before any client can connect: loading Turnip the first time
@@ -1793,6 +2242,8 @@ int banner_wayland_run(void) {
     wl_global_create(display, &wl_seat_interface, 5, NULL, bind_seat);
     wl_global_create(display, &banner_desktop_v1_interface, 1, NULL, bind_desktop);
     wl_global_create(display, &wp_presentation_interface, 2, NULL, bind_presentation);
+    wl_global_create(display, &zwp_pointer_constraints_v1_interface, 1, NULL, bind_pointer_constraints);
+    wl_global_create(display, &zwp_relative_pointer_manager_v1_interface, 1, NULL, bind_relative_pointer_manager);
     wl_list_init(&g_pending_releases);
     g_release_timer_fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
     if (g_release_timer_fd >= 0)
