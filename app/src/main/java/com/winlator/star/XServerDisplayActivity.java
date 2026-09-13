@@ -2273,6 +2273,19 @@ public class XServerDisplayActivity extends AppCompatActivity {
         String wineVersion = container.getWineVersion();
         wineInfo = WineInfo.fromIdentifier(this, contentsManager, wineVersion);
 
+        // Wayland gate (the ONE resolver every launch path funnels through — the intent flag, the
+        // shortcut override and the container default were all folded into waylandMode above): the
+        // selected layer must ship winewayland.so AND its bundled Wayland Turnip, else the compositor
+        // start, the registry driver write and the winex11.drv hide below would all run against a
+        // layer that can't drive them. Fall back to X11 and say so.
+        if (waylandMode && !com.winlator.star.core.WineWaylandSupport.isWaylandCapable(wineInfo)) {
+            Log.w("XServerDisplayActivity", "wayland: layer " + wineVersion + " (" + wineInfo.path
+                    + ") lacks winewayland.so and/or lib/libvulkan_freedreno_wayland.so; launching on X11");
+            waylandMode = false;
+            Toast.makeText(this, "Wayland needs the Wayland Proton layer (11.0-2.1 arm64ec); launching on X11.",
+                    Toast.LENGTH_LONG).show();
+        }
+
         imageFs.setWinePath(wineInfo.path);
 
         ProcessHelper.removeAllDebugCallbacks();

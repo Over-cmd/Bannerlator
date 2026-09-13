@@ -458,7 +458,9 @@ public class Container {
     // "x11" (default) = the Java X server + libwinlator compositor (winex11.drv).
     // "wayland" = the embedded Wayland compositor (winewayland.drv). Wayland mode
     // bypasses the whole Renderer group (the compositor replaces that stage) and
-    // needs a winewayland-capable Proton (11.0-1-arm64ec-7+). Consumed by the launch path.
+    // needs a Wayland-capable Proton layer (winewayland.so + the bundled Wayland Turnip; see
+    // WineWaylandSupport). Consumed by the launch path, which falls back to X11 when the
+    // container's layer can't do it.
     public static final String DISPLAY_BACKEND_X11 = "x11";
     public static final String DISPLAY_BACKEND_WAYLAND = "wayland";
 
