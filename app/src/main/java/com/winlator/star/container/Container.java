@@ -477,6 +477,31 @@ public class Container {
         return DISPLAY_BACKEND_WAYLAND.equals(getDisplayBackend());
     }
 
+    // --- Wayland game driver (per-container), stored in extraData ---
+    // On Wayland the GAME renders on a Vulkan driver the Proton layer picks (winewayland sets
+    // VK_ICD_FILENAMES), not on the compositor's Turnip. The layer bundles three Wayland Turnip
+    // variants and honours two env vars (see core.WaylandGameDriver): "auto" (default, stored as
+    // absent) picks the variant from the device GPU; "bundled" / "bundled-a7xx" / "bundled-a8xx"
+    // force one; "imported:<id>" points at a driver imported on the Contents screen
+    // (WaylandGameDriverManager). A shortcut may override with the same-named extra ("" = this).
+    // Only consumed when the resolved display backend is Wayland.
+    public static final String WAYLAND_GAME_DRIVER_AUTO = "auto";
+    public static final String WAYLAND_GAME_DRIVER_BUNDLED = "bundled";
+    public static final String WAYLAND_GAME_DRIVER_BUNDLED_A7XX = "bundled-a7xx";
+    public static final String WAYLAND_GAME_DRIVER_BUNDLED_A8XX = "bundled-a8xx";
+    public static final String WAYLAND_GAME_DRIVER_IMPORTED_PREFIX = "imported:";
+
+    public String getWaylandGameDriver() {
+        String v = getExtra("waylandGameDriver", WAYLAND_GAME_DRIVER_AUTO);
+        return v.isEmpty() ? WAYLAND_GAME_DRIVER_AUTO : v;
+    }
+
+    /** "auto" (or null/"") clears the extra so the default stays an untouched default. */
+    public void setWaylandGameDriver(String value) {
+        putExtra("waylandGameDriver",
+                value == null || value.isEmpty() || WAYLAND_GAME_DRIVER_AUTO.equals(value) ? null : value);
+    }
+
     // --- bionic-fg frame generation (per-container), stored in extraData ---
     // The on/off flag is set in the container settings; multiplier & flow scale
     // are tuned live from the in-game side menu (both hot-reload via conf.toml).

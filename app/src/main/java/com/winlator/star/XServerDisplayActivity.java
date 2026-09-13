@@ -9354,6 +9354,13 @@ public class XServerDisplayActivity extends AppCompatActivity {
         adrenotoolsManager.setDriverById(envVars, imageFs, adrenoToolsDriverId);
     }
 
+    // Wayland GAME driver (the adrenotools driver above only feeds the compositor on Wayland: winewayland
+    // sets VK_ICD_FILENAMES itself). Resolve the container's waylandGameDriver extra (shortcut override
+    // first) into the Proton's BANNER_WAYLAND_VK_VARIANT / BANNER_WAYLAND_VK_ICD contract — Auto maps
+    // the device GPU to a bundled variant, imported: hands over an imported Linux ICD (missing import →
+    // Auto, logged). No-op on X11; waylandMode is final by here (gated on the layer above).
+    com.winlator.star.core.WaylandGameDriver.applyToLaunchEnv(this, envVars, container, shortcut, waylandMode);
+
     // --- Environment Variable Setup ---
     // 2.8.1 structure restored: WRAPPER_VK_VERSION = chosenMinor + probePatch,
     // unconditionally. The clamp introduced between 2.9 and 2.9.1 (WinNative PR

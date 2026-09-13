@@ -946,18 +946,19 @@ private fun TopLevelFields(
         var showWrapperManager by remember { mutableStateOf(false) }
         val compositorDriverOnly = viewModel.isWaylandBackend
         var compositorChoices by remember { mutableStateOf<List<String>>(emptyList()) }
+        // Wayland GAME driver choices (bundled variants + imported Linux ICDs) and the variant Auto
+        // resolves to on this GPU — the latter is a native probe, so it runs with the compositor
+        // choices off-main under graphicsProbeMutex (cached per process after the first run).
+        var waylandGameDriverValues by remember { mutableStateOf<List<String>>(emptyList()) }
+        var waylandAutoPick by remember { mutableStateOf(com.winlator.star.core.WaylandGameDriver.autoVariantIfKnown()) }
         LaunchedEffect(compositorDriverOnly) {
             if (!compositorDriverOnly) return@LaunchedEffect
             compositorChoices = compositorDriverChoices(context) // same source as the config dialog
+            waylandGameDriverValues = com.winlator.star.core.WaylandGameDriver.optionValues(context)
+            waylandAutoPick = waylandAutoVariant(context)
         }
         val compositorVersion = com.winlator.star.contentdialog.GraphicsDriverConfigDialog
             .getVersion(viewModel.graphicsDriverConfig) ?: ""
-        if (compositorDriverOnly) {
-            Text(
-                "Game driver: Wayland Turnip bundled with this Proton",
-                style = MaterialTheme.typography.bodySmall
-            )
-        }
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             if (compositorDriverOnly) {
                 LabeledDropdown(
@@ -1003,10 +1004,32 @@ private fun TopLevelFields(
                 )
             }
             Text(
-                "Used by the Wayland compositor to put frames on screen; the game renders on the Turnip bundled with the Proton.",
+                "Used by the Wayland compositor to put frames on screen; the game renders on the Wayland game driver below.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+            Spacer(Modifier.height(8.dp))
+            // Wayland game driver: what the GAME renders on (winewayland sets VK_ICD_FILENAMES from
+            // it). Auto / the three bundled Turnip variants / each imported Linux ICD. A stored
+            // imported:<id> whose import is gone is still listed (labelled missing) so the editor
+            // shows what is saved; launch falls back to Auto for it.
+            run {
+                val stored = viewModel.waylandGameDriver
+                val values = if (stored in waylandGameDriverValues) waylandGameDriverValues
+                             else waylandGameDriverValues + stored
+                val labels = values.map { com.winlator.star.core.WaylandGameDriver.optionLabel(context, it, waylandAutoPick) }
+                LabeledDropdown(
+                    label = "Wayland game driver",
+                    options = labels,
+                    selectedOption = labels[values.indexOf(stored)],
+                    onSelect = { viewModel.waylandGameDriver = values[labels.indexOf(it)] }
+                )
+                Text(
+                    com.winlator.star.core.WaylandGameDriver.HELP_TEXT,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
         }
         if (showWrapperManager) WrapperManagerDialog(onDismiss = {
             showWrapperManager = false
@@ -2856,6 +2879,17 @@ internal fun importedDriverVersions(context: Context): List<String> =
  */
 internal suspend fun compositorDriverChoices(context: Context): List<String> =
     (supportedBundledDriverVersions(context) + importedDriverVersions(context)).distinct()
+
+/**
+ * The bundled Wayland Turnip variant "Auto" resolves to on this GPU (WaylandGameDriver.VARIANT_*),
+ * for the "Auto (by GPU: …)" label of the Wayland game driver pickers. The first call is a native
+ * renderer probe: off-main and serialized on graphicsProbeMutex like the other driver probes; the
+ * cached answer is returned without touching the mutex afterwards.
+ */
+internal suspend fun waylandAutoVariant(context: Context): String =
+    com.winlator.star.core.WaylandGameDriver.autoVariantIfKnown() ?: withContext(Dispatchers.IO) {
+        graphicsProbeMutex.withLock { com.winlator.star.core.WaylandGameDriver.autoVariant(context) }
+    }
 
 @Composable
 internal fun GraphicsDriverConfigDialog(
