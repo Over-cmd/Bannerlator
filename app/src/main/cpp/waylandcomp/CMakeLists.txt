@@ -7,6 +7,7 @@
 add_library(bannerwayland SHARED
         src/compositor.c
         src/vk_present.c
+        src/effects_chain.c
         src/vk_loader.c
         src/sc_layer.c
         src/ahb_swapchain.c
@@ -31,6 +32,9 @@ target_include_directories(bannerwayland PRIVATE
         generated
         prebuilt/include
         src
+        # The X11 Vulkan renderer's committed SPIR-V headers (*_frag.h / upscale_vert.h, made by
+        # winlator/gen_shaders.sh): the screen-effect chain (src/effects_chain.c) runs the same bytes.
+        ${CMAKE_CURRENT_SOURCE_DIR}/../winlator
 )
 add_library(wayland-server SHARED IMPORTED)
 set_target_properties(wayland-server PROPERTIES IMPORTED_LOCATION

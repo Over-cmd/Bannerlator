@@ -4,6 +4,7 @@
 #include "vk_present.h"
 #include "vk_loader.h"
 #include "sc_layer.h"
+#include "effects_chain.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -48,6 +49,11 @@ static uint32_t g_nimg;
 static VkExtent2D g_extent;
 
 static int g_first_frame_done; /* one-shot: fire banner_on_first_frame() on first present */
+
+/* The scene image (effects path only): every draw composited 1:1 at scene size, the input of the
+ * screen-effect chain (effects_chain.c) — and of frame generation once that lands. Recreated on a
+ * scene size change; frames are fenced, so never while the GPU reads it. */
+static struct { VkImage img; VkDeviceMemory mem; int w, h; } g_scene;
 static const char *vk_result_name(VkResult r);
 
 /* The Android surface is created/destroyed on the app's UI thread while the compositor thread
@@ -343,6 +349,7 @@ static int dev_init(void) {
     VkFenceCreateInfo fci = {.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
     g_vk.CreateFence(g_dev, &fci, NULL, &g_fence);
 
+    vkp_effects_bind_device(g_dev, g_pd, &g_memprops);
     g_dev_state = 1;
     return 0;
 }
@@ -646,15 +653,11 @@ void vkp_image_destroy(struct vkp_image *img) {
 /* Map a draw into swapchain pixels through the scale mode, clipping the destination to the
  * picture's region (the whole output, or its half on TOP/BOTTOM; FILL's overflow is cut here)
  * and trimming the source to match. Returns 0 if nothing is left to draw. */
-static int draw_to_blit(const struct vkp_draw *d, VkImageBlit *blit) {
-    float kx = g_map.kx, ky = g_map.ky;
-    float x0 = g_map.off_x + d->dx * kx, y0 = g_map.off_y + d->dy * ky;
-    float x1 = g_map.off_x + (d->dx + d->dw) * kx, y1 = g_map.off_y + (d->dy + d->dh) * ky;
+static int map_draw(const struct vkp_draw *d, float kx, float ky, float off_x, float off_y,
+                    float L, float T, float R, float B, VkImageBlit *blit) {
+    float x0 = off_x + d->dx * kx, y0 = off_y + d->dy * ky;
+    float x1 = off_x + (d->dx + d->dw) * kx, y1 = off_y + (d->dy + d->dh) * ky;
     float sx0 = d->sx, sy0 = d->sy, sx1 = d->sx + d->sw, sy1 = d->sy + d->sh;
-    float L = (float)g_map.rx, T = (float)g_map.ry;
-    float R = (float)(g_map.rx + g_map.rw), B = (float)(g_map.ry + g_map.rh);
-    if (R > (float)g_extent.width) R = (float)g_extent.width;
-    if (B > (float)g_extent.height) B = (float)g_extent.height;
 
     if (x1 <= x0 || y1 <= y0 || sx1 <= sx0 || sy1 <= sy0) return 0;
     if (x0 < L) { sx0 += (L - x0) / (x1 - x0) * (sx1 - sx0); x0 = L; }
@@ -675,6 +678,51 @@ static int draw_to_blit(const struct vkp_draw *d, VkImageBlit *blit) {
                           .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
                           .dstOffsets = {{ix0, iy0, 0}, {ix1, iy1, 1}}};
     return 1;
+}
+
+static int draw_to_blit(const struct vkp_draw *d, VkImageBlit *blit) {
+    float R = (float)(g_map.rx + g_map.rw), B = (float)(g_map.ry + g_map.rh);
+    if (R > (float)g_extent.width) R = (float)g_extent.width;
+    if (B > (float)g_extent.height) B = (float)g_extent.height;
+    return map_draw(d, g_map.kx, g_map.ky, g_map.off_x, g_map.off_y, (float)g_map.rx, (float)g_map.ry, R, B, blit);
+}
+
+/* The same draw 1:1 into the scene image (no mapping: scene pixels are the destination). */
+static int draw_to_scene_blit(const struct vkp_draw *d, int scene_w, int scene_h, VkImageBlit *blit) {
+    return map_draw(d, 1.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, (float)scene_w, (float)scene_h, blit);
+}
+
+static void destroy_scene_image(void) {
+    if (g_scene.img) g_vk.DestroyImage(g_dev, g_scene.img, NULL);
+    if (g_scene.mem) g_vk.FreeMemory(g_dev, g_scene.mem, NULL);
+    memset(&g_scene, 0, sizeof(g_scene));
+}
+
+/* The scene image at this size (R8G8B8A8: a blit converts every client format into it, and the
+ * chain's shaders read it as RGBA). 0 = ready. */
+static int ensure_scene_image(int w, int h) {
+    if (g_scene.img && g_scene.w == w && g_scene.h == h) return 0;
+    destroy_scene_image();
+    VkImageCreateInfo ici = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
+        .format = VK_FORMAT_R8G8B8A8_UNORM, .extent = {(uint32_t)w, (uint32_t)h, 1}, .mipLevels = 1, .arrayLayers = 1,
+        .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
+        .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
+    VkResult r = g_vk.CreateImage(g_dev, &ici, NULL, &g_scene.img);
+    if (r != VK_SUCCESS) { LOGE("effects: scene image %dx%d: vkCreateImage %s", w, h, vk_result_name(r)); g_scene.img = VK_NULL_HANDLE; return -1; }
+    VkMemoryRequirements req;
+    g_vk.GetImageMemoryRequirements(g_dev, g_scene.img, &req);
+    int idx = memory_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (idx < 0) idx = memory_type(req.memoryTypeBits, 0);
+    VkMemoryAllocateInfo mai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = req.size,
+                                .memoryTypeIndex = (uint32_t)(idx < 0 ? 0 : idx)};
+    r = g_vk.AllocateMemory(g_dev, &mai, NULL, &g_scene.mem);
+    if (r != VK_SUCCESS) { LOGE("effects: scene image %dx%d: vkAllocateMemory %s", w, h, vk_result_name(r)); destroy_scene_image(); return -1; }
+    g_vk.BindImageMemory(g_dev, g_scene.img, g_scene.mem, 0);
+    g_scene.w = w; g_scene.h = h;
+    banner_log("effects", "scene image %dx%d for the effect chain", w, h);
+    return 0;
 }
 
 /* VK_ERROR_DEVICE_LOST: nothing on this device works any more, and there is no way back short
@@ -746,6 +794,12 @@ int vkp_render(int scene_w, int scene_h, const struct vkp_draw *draws, int n) {
     }
     update_map(scene_w, scene_h);
 
+    /* Screen effects (effects_chain.c): the draws are composited into the scene image first, the
+     * chain runs, and its result is mapped onto the output like a single scene-sized draw. With
+     * everything off the draws are blitted straight through the mapping as before (zero cost). */
+    const int fx = vkp_effects_active() && ensure_scene_image(scene_w, scene_h) == 0;
+    const VkFilter blit_filter = vkp_effects_blit_filter();
+
     g_vk.ResetCommandBuffer(g_cmd, 0);
     VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
                                    .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
@@ -755,13 +809,19 @@ int vkp_render(int scene_w, int scene_h, const struct vkp_draw *draws, int n) {
     /* Source images: take dmabufs from the client's queue family, move shm images to
      * GENERAL once (host writes stay visible across frames: memory is coherent and each
      * frame is a new submission). One barrier per distinct image. */
-    VkImageMemoryBarrier *bars = calloc((size_t)n + 1, sizeof(*bars));
+    VkImageMemoryBarrier *bars = calloc((size_t)n + 2, sizeof(*bars));
     int nb = 0;
     bars[nb++] = (VkImageMemoryBarrier){
         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
         .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .image = g_images[img], .subresourceRange = range, .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT};
+    if (fx)
+        bars[nb++] = (VkImageMemoryBarrier){
+            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+            .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .image = g_scene.img, .subresourceRange = range, .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT};
     for (int i = 0; i < n; i++) {
         struct vkp_image *im = draws[i].img;
         int seen = 0;
@@ -789,6 +849,7 @@ int vkp_render(int scene_w, int scene_h, const struct vkp_draw *draws, int n) {
 
     VkClearColorValue black = {.float32 = {0.0f, 0.0f, 0.0f, 1.0f}};
     g_vk.CmdClearColorImage(g_cmd, g_images[img], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &range);
+    if (fx) g_vk.CmdClearColorImage(g_cmd, g_scene.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &range);
     {
         VkMemoryBarrier mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
                               .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
@@ -798,13 +859,37 @@ int vkp_render(int scene_w, int scene_h, const struct vkp_draw *draws, int n) {
     }
 
     int drawn = 0;
-    for (int i = 0; i < n; i++) {
+    if (fx) {
+        /* 1. scene: every draw 1:1 into the scene image. */
+        for (int i = 0; i < n; i++) {
+            VkImageBlit blit;
+            if (!draws[i].img || !draw_to_scene_blit(&draws[i], scene_w, scene_h, &blit)) continue;
+            g_vk.CmdBlitImage(g_cmd, draws[i].img->image,
+                              draws[i].img->dmabuf ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL : VK_IMAGE_LAYOUT_GENERAL,
+                              g_scene.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
+            drawn++;
+        }
+        /* 2. the chain (hook): scaling to the scene's mapped size, then the effects. Frame
+         *    generation (vkp_framegen_run, feat/wayland-framegen) slots in right after this. */
+        int rw = scene_w, rh = scene_h;
+        int mapped_w = (int)(scene_w * g_map.kx + 0.5f), mapped_h = (int)(scene_h * g_map.ky + 0.5f);
+        VkImage result = vkp_effects_run(g_cmd, g_scene.img, scene_w, scene_h, mapped_w, mapped_h, &rw, &rh);
+        /* 3. mapping: the result stands for the whole scene; Fullscreen Mode / Alignment place it. */
+        struct vkp_image tmp = {.image = result, .w = rw, .h = rh};
+        struct vkp_draw whole = {&tmp, 0, 0, (float)rw, (float)rh, 0, 0, scene_w, scene_h};
         VkImageBlit blit;
-        if (!draws[i].img || !draw_to_blit(&draws[i], &blit)) continue;
-        g_vk.CmdBlitImage(g_cmd, draws[i].img->image,
-                          draws[i].img->dmabuf ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL : VK_IMAGE_LAYOUT_GENERAL,
-                          g_images[img], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
-        drawn++;
+        if (draw_to_blit(&whole, &blit))
+            g_vk.CmdBlitImage(g_cmd, result, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, g_images[img],
+                              VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, blit_filter);
+    } else {
+        for (int i = 0; i < n; i++) {
+            VkImageBlit blit;
+            if (!draws[i].img || !draw_to_blit(&draws[i], &blit)) continue;
+            g_vk.CmdBlitImage(g_cmd, draws[i].img->image,
+                              draws[i].img->dmabuf ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL : VK_IMAGE_LAYOUT_GENERAL,
+                              g_images[img], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, blit_filter);
+            drawn++;
+        }
     }
 
     VkImageMemoryBarrier b_present = {

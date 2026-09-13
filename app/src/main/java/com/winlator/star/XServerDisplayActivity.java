@@ -8531,22 +8531,102 @@ public class XServerDisplayActivity extends AppCompatActivity {
         }, "fexmode-probe").start();
     }
 
+    /** Wayland: seed the compositor's screen-effect chain from the per-game values the Vulkan path
+     *  remembers (#382 keys, same defaults) and wire the drawer's Vulkan post-chain callbacks to
+     *  {@link com.winlator.star.wayland.WaylandCompositor}. Modes/ranges are 1:1 with the X11 Vulkan
+     *  renderer; Native Rendering does not exist here, so nothing toggles it. */
+    private void initWaylandEffects(XServerDialogState ds) {
+        int initialUpscaler = resolveScalingMode();
+        int upscaleSharpness = resolveExtraInt("upscaleSharpness", 75);
+        boolean casEnabled = resolveExtraBool("casEnabled", false);
+        int casSharpness = resolveExtraInt("casSharpness", 60);
+        boolean hdrEnabled = resolveExtraBool("hdrEnabled", false);
+        boolean debandEnabled = resolveExtraBool("debandEnabled", false);
+        int debandStrength = resolveExtraInt("debandStrength", 100);
+        com.winlator.star.wayland.WaylandCompositor.nativeSetUpscaler(initialUpscaler);
+        com.winlator.star.wayland.WaylandCompositor.nativeSetUpscaleSharpness(upscaleSharpness);
+        com.winlator.star.wayland.WaylandCompositor.nativeSetCas(casEnabled, casSharpness);
+        com.winlator.star.wayland.WaylandCompositor.nativeSetHdr(hdrEnabled);
+        com.winlator.star.wayland.WaylandCompositor.nativeSetDeband(debandEnabled, debandStrength);
+        com.winlator.star.wayland.WaylandCompositor.nativeSetScreenEffects(0f, 0f, 1.0f, 100f, false, false, false, false);
+        ds.setUpscalerMode(initialUpscaler);
+        ds.setUpscaleSharpness(upscaleSharpness);
+        ds.setCasEnabled(casEnabled);
+        ds.setCasSharpness(casSharpness);
+        ds.setHdrVkEnabled(hdrEnabled);
+        ds.setDebandEnabled(debandEnabled);
+        ds.setDebandStrength(debandStrength);
+        ds.setVkBrightness(0f); ds.setVkContrast(0f); ds.setVkGamma(1.0f); ds.setVkSaturation(100f);
+        ds.setVkFxaa(false); ds.setVkToon(false); ds.setVkCrt(false); ds.setVkNtsc(false);
+        updateWaylandLookName(ds);
+
+        ds.onUpscalerApply = (mode) -> {
+            com.winlator.star.wayland.WaylandCompositor.nativeSetUpscaler(mode);
+            persistScalingMode(mode);
+            updateWaylandLookName(ds);
+        };
+        ds.onUpscaleSharpnessApply = (sharpness) -> {
+            com.winlator.star.wayland.WaylandCompositor.nativeSetUpscaleSharpness(sharpness);
+            persistExtraInt("upscaleSharpness", sharpness);
+        };
+        ds.onCasApply = (enabled, sharpness) -> {
+            com.winlator.star.wayland.WaylandCompositor.nativeSetCas(enabled, sharpness);
+            persistExtraBool("casEnabled", enabled);
+            persistExtraInt("casSharpness", sharpness);
+            updateWaylandLookName(ds);
+        };
+        ds.onHdrApply = (enabled) -> {
+            com.winlator.star.wayland.WaylandCompositor.nativeSetHdr(enabled);
+            persistExtraBool("hdrEnabled", enabled);
+        };
+        ds.onDebandApply = (enabled, strength) -> {
+            com.winlator.star.wayland.WaylandCompositor.nativeSetDeband(enabled, strength);
+            persistExtraBool("debandEnabled", enabled);
+            persistExtraInt("debandStrength", strength);
+            updateWaylandLookName(ds);
+        };
+        ds.onVulkanScreenEffectsApply = (brightness, contrast, gamma, saturation, fxaa, toon, crt, ntsc) -> {
+            com.winlator.star.wayland.WaylandCompositor.nativeSetScreenEffects(brightness, contrast, gamma, saturation, fxaa, toon, crt, ntsc);
+            updateWaylandLookName(ds);
+        };
+        // TODO(drawer): XServerDrawerState.INSTANCE.setWaylandEffectsAvailable(true); — the drawer branch adds the
+        // `waylandEffectsAvailable` flag that un-greys the effect rows on Wayland; set it here once it lands.
+    }
+
+    /** Which Look the drawer's live Vulkan-block values are (null = Custom), named in the compositor's
+     *  `effects` log line. A Look is applied through three callbacks in a row; the last one sees the
+     *  whole preset and the compositor coalesces the change into one line. */
+    private void updateWaylandLookName(XServerDialogState ds) {
+        int cas = ds.getCasEnabled().getValue() ? ds.getCasSharpness().getValue() : 0;
+        Integer idx = com.winlator.star.ui.ScreenEffectLooks.INSTANCE.indexOfMatch(
+                ds.getVkBrightness().getValue(), ds.getVkContrast().getValue(), ds.getVkGamma().getValue(),
+                ds.getVkSaturation().getValue(), cas, ds.getVkFxaa().getValue(), ds.getVkCrt().getValue(),
+                ds.getVkToon().getValue(), ds.getVkNtsc().getValue(), ds.getDebandEnabled().getValue(),
+                ds.getUpscalerMode().getValue());
+        com.winlator.star.wayland.WaylandCompositor.nativeSetLookName(
+                idx == null ? null : com.winlator.star.ui.ScreenEffectLooks.INSTANCE.getLOOKS().get(idx).getName());
+    }
+
     private void initInlineTabStates(HostRenderer renderer) {
         seedRuntimeBackend();
 
         // SGSR/HDR/screen-effect shaders are GL EffectComposer features; the Vulkan renderer has no
         // post-process pipeline, so their callbacks below are never set. Flag it so the drawer grays
         // those toggles out instead of showing dead switches.
-        XServerDialogState.INSTANCE.setEffectsSupported(renderer instanceof GLRenderer);
+        XServerDialogState.INSTANCE.setEffectsSupported(!waylandMode && renderer instanceof GLRenderer);
         XServerDialogState ds = XServerDialogState.INSTANCE;
 
         // Scaling mode (spatial upscaler) is a Vulkan-only control — the inverse of the GL-only
         // effects above. Flag it for the drawer gate and wire the apply callback here, BEFORE the
         // GL-only early return below, so it works on the Vulkan renderer. setUpscaler covers
         // modes 0..5 and drives the base sampler filter for modes 1/2 (single source of truth).
-        boolean vulkanActive = renderer instanceof com.winlator.star.renderer.vulkan.VulkanRenderer;
-        ds.setVulkanSupported(vulkanActive);
-        if (vulkanActive) {
+        // Wayland: the X renderer is idle; the embedded compositor runs the same Vulkan post chain
+        // (waylandcomp/src/effects_chain.c), so the drawer's Vulkan block drives it instead.
+        boolean vulkanActive = !waylandMode && renderer instanceof com.winlator.star.renderer.vulkan.VulkanRenderer;
+        ds.setVulkanSupported(vulkanActive || waylandMode);
+        if (waylandMode) {
+            initWaylandEffects(ds);
+        } else if (vulkanActive) {
             com.winlator.star.renderer.vulkan.VulkanRenderer vkr =
                 (com.winlator.star.renderer.vulkan.VulkanRenderer) renderer;
             // Direction A: enabling any preset that lives in the compositor post pass turns Native
