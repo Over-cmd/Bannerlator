@@ -47,3 +47,26 @@ The staged `src/` here is that proven code, to grow into the app-embedded compos
   window (last un-proven render step) + input + launch wiring (start compositor, `WAYLAND_DISPLAY`,
   per-prefix `Drivers\Graphics=winewayland`) + `ImageFsInstaller.installWaylandLibs()` (client/egl/xkb
   into the imagefs for winewayland.so).
+
+## Pointer lock / relative mouse (zwp_pointer_constraints_v1 + zwp_relative_pointer_manager_v1)
+- Both globals are advertised (version 1); glue is pre-generated in `generated/` with
+  `wayland-scanner server-header` / `private-code` from `protocols/*-unstable-v1.xml` (same
+  scanner version as the rest, 1.24.0), no build-time scanner needed.
+- winewayland's use: `ClipCursor`/fullscreen + hidden cursor → `lock_pointer` (persistent);
+  `SetCursorPos` → lock + `set_cursor_position_hint` + commit + unlock; visible cursor +
+  `ClipCursor(rect)` → `confine_pointer` with a one-rectangle region. It only turns relative
+  motion on for a window its `wl_pointer` has entered, so **pointer focus follows an active
+  constraint** (the desktop surface gets `leave`, the constrained surface `enter`) and goes
+  back to the desktop on the next motion after the constraint ends.
+- Lock: the pointer is frozen; every input delta becomes `relative_motion` (no `motion`).
+  Confine: absolute motion is clamped to surface ∩ region. The position hint is applied on
+  the surface's commit (pointer moves there) and is where the pointer stays when the lock ends.
+  One constraint holds at a time (a newer request ends the older one); oneshot constraints
+  are defunct after ending, persistent ones re-take hold on focus re-entry.
+- App side: input type 6 = relative delta (1/256 px); `banner_on_pointer_lock(locked, x, y)`
+  tells Java to switch its touch/mouse path to deltas (`XServer.setExternalRelativeMode`) and,
+  on unlock, to re-sync the X pointer (the absolute input's source) to x,y. With Wayland mode
+  `WinHandler.mouseEvent` routes relative-mode input to the compositor instead of the guest.
+- Session log tag `pointer`: `lock requested by …`, `locked: … frozen at x,y`, `unlocked: … (why)`,
+  `confined: …`, `unconfined: …`, `relative pointer created for …`, `position hint: …`.
+  Test FIFO gained `rel DX DY`.
