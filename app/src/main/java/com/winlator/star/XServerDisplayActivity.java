@@ -8589,8 +8589,8 @@ public class XServerDisplayActivity extends AppCompatActivity {
             com.winlator.star.wayland.WaylandCompositor.nativeSetScreenEffects(brightness, contrast, gamma, saturation, fxaa, toon, crt, ntsc);
             updateWaylandLookName(ds);
         };
-        // TODO(drawer): XServerDrawerState.INSTANCE.setWaylandEffectsAvailable(true); — the drawer branch adds the
-        // `waylandEffectsAvailable` flag that un-greys the effect rows on Wayland; set it here once it lands.
+        // The compositor's effect chain is compiled in: un-grey the effect rows on Wayland.
+        XServerDrawerState.INSTANCE.setWaylandEffectsAvailable(true);
     }
 
     /** Which Look the drawer's live Vulkan-block values are (null = Custom), named in the compositor's
