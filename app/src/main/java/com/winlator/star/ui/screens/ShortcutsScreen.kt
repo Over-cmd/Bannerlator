@@ -7099,13 +7099,24 @@ internal fun ShortcutSettingsDialogScreen(
                             stringResource(R.string.screen_alignment_bottom)
                         )
                         val saIdx = saValues.indexOf(screenAlignment).coerceAtLeast(0)
+                        // Not wired to the Wayland compositor: greyed there, displays "Not used on
+                        // Wayland", stored value untouched (see ContainerDetailScreen).
+                        val saShown = if (effectiveWaylandShortcut) "Not used on Wayland" else saLabels[saIdx]
                         DpDrop(
                             dp, "screenAlignment",
                             label = stringResource(R.string.screen_alignment),
-                            options = saLabels,
-                            selected = saLabels[saIdx],
-                            onSelect = { screenAlignment = saValues[saLabels.indexOf(it)] }
+                            options = if (effectiveWaylandShortcut) listOf(saShown) else saLabels,
+                            selected = saShown,
+                            onSelect = { screenAlignment = saValues[saLabels.indexOf(it)] },
+                            enabled = !effectiveWaylandShortcut
                         )
+                        if (effectiveWaylandShortcut) {
+                        Text(
+                            "Not used on Wayland: the Wayland compositor always scales the whole desktop to the screen; fullscreen modes and alignment are not wired to it yet.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        }
                     }
 
                     // Icon
@@ -7784,16 +7795,27 @@ internal fun ShortcutSettingsDialogScreen(
                     )
                     val fsOverrideIdx = if (fullscreenModeOverride < 0) 0 else (fullscreenModeOverride + 1)
                         .coerceIn(1, fsOverrideLabels.size - 1)
+                    // Not wired to the Wayland compositor: greyed there, displays "Not used on Wayland",
+                    // stored override untouched (see ContainerDetailScreen).
+                    val fsShown = if (effectiveWaylandShortcut) "Not used on Wayland" else fsOverrideLabels[fsOverrideIdx]
                     DpDrop(
                         dp, "fullscreen",
                         label = stringResource(R.string.fullscreen_mode),
-                        options = fsOverrideLabels,
-                        selected = fsOverrideLabels[fsOverrideIdx],
+                        options = if (effectiveWaylandShortcut) listOf(fsShown) else fsOverrideLabels,
+                        selected = fsShown,
                         onSelect = { sel ->
                             val idx = fsOverrideLabels.indexOf(sel)
                             fullscreenModeOverride = if (idx <= 0) -1 else idx - 1
-                        }
+                        },
+                        enabled = !effectiveWaylandShortcut
                     )
+                    if (effectiveWaylandShortcut) {
+                        Text(
+                            "Not used on Wayland: the Wayland compositor always scales the whole desktop to the screen; fullscreen modes and alignment are not wired to it yet.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
 
                     // Close the session when this game exits (per-game override; container default is ON)
                     Row(verticalAlignment = Alignment.CenterVertically) {
