@@ -1,5 +1,10 @@
 # Star-Compose — Progress Log
 
+## 2026-09-13 (later) — ⏸️ **Superset v8: step 1 closed out, pausing until tomorrow**
+> - The seven post-merge parent builds all came back green under their new per-layer workflow names, so every layer branch now builds through the hardened pipeline end to end. Shipped layers are unchanged: all seven are still the v7 Wine XP builds; no v8 exists yet.
+> - Resume point: step 2, the two device A/Bs on the Pocket FIT (Rockstar Launcher / Social Club UI, and TF2 + Brawlhalla launch livelock — 11.0-2 vs GE 11.0-6). Then step 3 targeted fixes, then the Option A base decision (Valve bleeding-edge at GE-Proton 11-6's pin).
+> - Housekeeping still open: the `staging/<parent>/harden` branches are identical to the parents and left in place; versionCode goes 7 → 8 at the v8 cut.
+
 ## 2026-09-13 — ✅✅ **v8 step 1 MERGED: all 7 Proton layer parents now build with the hardened pipeline; output proven identical to v7; CI workflows cleaned up**
 > - Proof the new pipeline changes nothing shipped: a server-side comparison (one-off `verify/` branch, nothing downloaded to the device) put each v7 release wcp next to its hardened build. All 8: identical file lists and sizes, identical profile.json and prefix pack, every unix `.so` plus the loader and wineserver byte-identical, and every code/data section of every Windows DLL/EXE identical (`.text`, `.data`, `.rodata`, `.reloc`, `.rsrc`, `.pdata`, the arm64ec thunk tables). The only differing bytes are the PE header build stamp and the linker's per-build CodeView GUID inside `.rdata`. Same code, same data, different clock.
 > - Round 4 (after the workflow cleanup commit) green on all 7; user "go" → parents fast-forwarded to their `staging/<parent>/harden` tips (10.0 `5da239e98aa`, 10.34-GE `b784101b0f6`, 11.0 `0c990d26645`, 11.0-2 `777342a9618`, 11.3-GE `e4ce93c380d`, 11.5-GE `471652aa953`, 11.6-GE `d4e97500091`). Each parent = v7 + 5 commits, none touching Wine source, Android patches or GE patches. Post-merge artifact-only runs fired under the new per-layer workflow names. Parents still stamp versionCode 7; the v8 cut bumps to 8.
