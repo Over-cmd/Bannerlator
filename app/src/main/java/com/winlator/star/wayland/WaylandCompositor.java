@@ -203,6 +203,40 @@ public final class WaylandCompositor {
      *  negative = up. */
     public static native void nativeSendSceneInput(int type, int a, int b);
 
+    // ── Frame generation (waylandcomp/src/framegen_bridge.c) ─────────────────────────────────
+    // LSFG Native and Win-FG Native run inside the compositor's Turnip device, the same engines
+    // the X11 VulkanRenderer hosts. Every setter only stores a value; the compositor thread applies
+    // it on its next frame, so they are safe from any thread and before the compositor starts.
+    // bionic-fg (the guest-side win-fg layer) is X11-only and has no Wayland counterpart.
+    public static final int FG_ENGINE_LSFG = 0, FG_ENGINE_WINFG = 1;
+
+    /** Which native engine generates: {@link #FG_ENGINE_LSFG} or {@link #FG_ENGINE_WINFG}. */
+    public static native void nativeSetFrameGenEngine(int kind);
+
+    /** Arm (multiplier 2..4: one real frame plus multiplier-1 interpolated ones per game frame) or
+     *  disarm. Generated frames are presented ahead of the real frame on consecutive vblanks. */
+    public static native void nativeSetFrameGenArmed(boolean armed, int multiplier);
+
+    /** LSFG Native: the SPIR-V cache built from the user's Lossless.dll ({@code LsfgNative.cacheFile}). */
+    public static native void nativeSetLsfgCachePath(String path);
+
+    /** Flow scale (0.25-1.0) and the panel's real refresh rate (the pacer never generates above it). */
+    public static native void nativeSetFrameGenTuning(float flowScale, float refreshHz);
+
+    /** Win-FG Native only: interpolation model (3/4) and performance preset (0..2). */
+    public static native void nativeSetWinFgTuning(int model, int perfPreset);
+
+    /** Same codes as {@code VulkanRenderer.getFrameGenProblem()}: -1 not known yet (the compositor's
+     *  device is not up), 0 fine, 1 the driver lacks what the selected engine needs
+     *  ({@link #nativeFrameGenCapsReason()} says what), 2 the engine failed to start. */
+    public static native int nativeFrameGenProblem();
+    public static native String nativeFrameGenCapsReason();
+
+    /** Same shape as {@code VulkanRenderer.getFrameGenStats()}: {generations trusted, generations
+     *  planned, real fps, presented fps (generated frames included), thermal (-1 = none),
+     *  GPU ms per generated frame (-1 = unknown)}. */
+    public static native float[] nativeFrameGenStats();
+
     /** Relative pointer motion by dx,dy scene pixels (the Relative Mouse / captured-mouse path):
      *  while a program holds a pointer lock this is what it receives as relative_motion; otherwise
      *  the compositor moves its pointer by the delta. */

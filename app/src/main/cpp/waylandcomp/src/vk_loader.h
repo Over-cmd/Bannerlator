@@ -28,7 +28,8 @@
     X(ResetCommandBuffer) X(BeginCommandBuffer) X(CmdPipelineBarrier) X(CmdBlitImage) \
     X(EndCommandBuffer) X(ResetFences) X(QueueSubmit) X(QueuePresentKHR) X(WaitForFences) \
     X(QueueWaitIdle) X(GetMemoryFdPropertiesKHR) \
-    X(GetImageSubresourceLayout) X(MapMemory) X(UnmapMemory) X(CmdClearColorImage)
+    X(GetImageSubresourceLayout) X(MapMemory) X(UnmapMemory) X(CmdClearColorImage) \
+    X(CreateImageView) X(DestroyImageView) X(DestroySemaphore)
 
 struct vk_api {
 #define X(n) PFN_vk##n n;
@@ -43,5 +44,8 @@ int vk_loader_open(const char *driver_path, const char *library_name,
                    const char *native_lib_dir);
 void vk_loader_load_instance(VkInstance instance);
 void vk_loader_load_device(VkDevice device);
+/* The driver's vkGetInstanceProcAddr (NULL before vk_loader_open): for modules that resolve their
+ * own entry points, e.g. the frame-generation engines (framegen_engine.cpp). */
+PFN_vkGetInstanceProcAddr vk_loader_gipa(void);
 
 #endif

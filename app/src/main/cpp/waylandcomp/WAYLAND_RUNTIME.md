@@ -213,3 +213,55 @@ Option (a') of `ZERO_COPY_SPIKE.md`, both halves:
   stride S px)`, `zero-copy: presenting "<title>" (<exe>) without a copy`; the 10 s `stats` line ends
   with `| N zero-copy frames`. Guest side (Mesa log, stderr of the game): `banner-ahb: WxH swapchain
   (N images) on gralloc buffers: UBWC|linear, stride S px` or the reason it stayed on standard buffers.
+
+## Frame generation (feat/wayland-framegen, `src/framegen_bridge.c`)
+The two **native** engines the X11 renderer hosts inside `libwinlator`'s compositor run inside the
+Wayland compositor's own Turnip device: **LSFG Native** (the user's Lossless.dll chain,
+`winlator/lsfg`) and **Win-FG Native** (our FSR3-derived optical-flow chain, `winlator/winfg`).
+The engine sources are compiled into `libbannerwayland.so` unmodified (CMake, app build only; the
+standalone build gets `framegen_engine_stub.c`) and driven by `src/framegen_engine.cpp`, which fills
+their `VkTable` by name from the compositor's `vkGetInstanceProcAddr`/`vkGetDeviceProcAddr`.
+**bionic-fg** (the guest-side win-fg Vulkan layer) is X11-only: its frames are born inside the guest
+and have nothing to attach to here, so on Wayland the "bionic" engine is always Win-FG Native.
+- **Present order per scene frame** (`vkp_render`): `scene -> effects -> frame generation ->
+  mapping/blit -> swapchain`. With frame generation armed the draws are composed 1:1 into an
+  off-screen scene image (scene-sized RGBA8, kept in GENERAL; `ensure_scene`), the effects chain runs
+  on it (`vkp_effects_run`, feat/wayland-effects), then the ONE hook
+  `vkp_framegen_run(cmd, scene, view, w, h, fmt, gens[])` records the engine's chain into the same
+  command buffer and returns 0..3 generated images. Each image is then blitted through the scene ->
+  output mapping into its own acquired swapchain image and presented: **generated frames first, the
+  real frame last** (interpolation produces frames between N-1 and N; that one output interval of
+  latency is inherent). One acquire/render-done semaphore pair and command buffer per present
+  (`MAX_PRESENTS` = 4), the frame fence on the last submit. With the FIFO swapchain the presentation
+  engine shows them on consecutive vblanks: that is the pacing, there are no sleeps and no host pacer.
+  The swapchain is rebuilt with `multiplier - 1` extra images while armed so every present of a frame
+  queues without a vblank wait. Frame generation off = the direct path, byte-for-byte as before (no
+  scene image exists).
+- **Device**: `dev_init` asks the bridge for the LSFG feature chain (`VkPhysicalDeviceVulkan12Features`
+  vulkanMemoryModel + `shaderStorageImageWriteWithoutFormat/ExtendedFormats`, the same chain
+  `VulkanRendererContext::createLogicalDevice` uses; instance apiVersion is 1.3 for the probe) and
+  retries device creation without it if the driver refuses. Win-FG needs only a storage-capable ring
+  format (RGBA8). The generation ring (`STORAGE|SAMPLED|TRANSFER_SRC|DST`, GENERAL) and the engines'
+  own history live for the session; arming/disarming is a flag, a multiplier change resizes the ring.
+- **FPS limiter / vsync**: untouched. The limiter still paces the game's buffer returns (real frames);
+  `applyNativeFgLocks` forces it on while multiplying, exactly as on X11 (`pacedLimitWithSlack` still
+  applies through `nativeSetFpsLimit`). Generated frames never touch the limiter, the frame callbacks
+  or the `wp_presentation` feedback - the guest sees one present per real frame.
+- **Zero-copy**: the layer bypasses the compositor pass, so while frame generation is armed the
+  fullscreen window takes the copy path (`render_scene`: `framegen  zero-copy paused: frame generation
+  needs the compositor pass`) and the layer resumes when it is off (`zero-copy resumed: ...`).
+- **App side**: `WaylandCompositor.nativeSetFrameGenEngine/Armed/Tuning`, `nativeSetLsfgCachePath`,
+  `nativeSetWinFgTuning`, `nativeFrameGenProblem/CapsReason/Stats` (same codes and six-float shape
+  as `VulkanRenderer`). `XServerDisplayActivity.applyWaylandFrameGen` is the single apply:
+  `applyLsfgNative`/`applyWinFgNative` route to it in Wayland mode (launch and drawer), the drawer's
+  `onBionicFgConfigChange` has a Wayland branch, `nativeFgProblemReason`/`startLsfgStatsReadout` read
+  the bridge. Every native setter is a value store, so the launch code may arm before the compositor
+  thread exists.
+- **Log tag `framegen`**: `engines ready on the compositor's device: LSFG Native available (supported),
+  Win-FG Native available`, `<engine> engine ready (...)`, `<engine> x2 armed (flow scale 0.80, panel
+  120 Hz): ...`, `generating: <engine> x2 at 1920x1080 (1 interpolated frame per game frame)`, the
+  fallbacks (`... can't start: no shader cache`, `... failed to start on the compositor's driver`,
+  `... could not build its chain at WxH`, `the driver refused the LSFG feature set`), `frame generation
+  off (N frames generated this session)`, and the zero-copy pause/resume above. The 10 s `stats` line
+  counts generated frames in `frames on screen` and ends with `| N generated frames`; `GPU frames from
+  games` never includes them.

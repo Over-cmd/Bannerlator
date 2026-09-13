@@ -1699,6 +1699,27 @@ public class XServerDisplayActivity extends AppCompatActivity {
                 Toast.makeText(this, fgProblem, Toast.LENGTH_LONG).show();
                 return;
             }
+            // Wayland: both native engines run inside the Wayland compositor (framegen_bridge.c),
+            // so a level/flow/model change is one JNI call - no conf.toml, no layer, no present-mode
+            // override (the compositor is always FIFO) and no presentation reset. Same persistence
+            // and limiter re-evaluation as the X11 branches below.
+            if (waylandMode) {
+                int wModel = s.getFrameGenModel().getValue();
+                int wPreset = s.getFrameGenPerfPreset().getValue();
+                Log.i("XServerDisplayActivity", "wayland framegen toggle: engine=" + resolvedFrameGenEngine()
+                    + " fgOn=" + fgOn + " mult=" + mult + " flow=" + flow + " model=" + wModel);
+                applyWaylandFrameGen(mult, flow, wModel, wPreset);
+                if (fgOn) container.setFrameGenMultiplier(mult);
+                container.setFrameGenFlowScale(flow);
+                if (!resolvedFrameGenEngine().equals("lsfg-native")) {
+                    container.setFrameGenModel(wModel);
+                    container.setFrameGenPerfPreset(wPreset);
+                }
+                container.saveData();
+                // The limiter guard and the exact-fit slack still have to see the >=2 crossing.
+                reapplyFpsLimit();
+                return;
+            }
             // Route the single in-game multiplier/flow control to whichever engine is running this
             // session (honors a per-game engine override, else the container's engine).
             if (resolvedFrameGenEngine().equals("lsfg-native")) {
@@ -2176,6 +2197,9 @@ public class XServerDisplayActivity extends AppCompatActivity {
         boolean fpsLimOn = resolvedFpsLimiterEnabled();
         boolean bionicFgActive = fgEnabled || lsfgOn;
         XServerDrawerState.INSTANCE.setBionicFgActive(bionicFgActive);
+        // TODO(wayland-framegen): once XServerDrawerState gains the field, publish that the Wayland
+        // compositor's frame-generation bridge is compiled in (LSFG Native + Win-FG Native):
+        //   XServerDrawerState.INSTANCE.setWaylandFrameGenAvailable(waylandMode);
         XServerDrawerState.INSTANCE.setFrameGenEnabled(fgEnabled || lsfgOn);
         // Frame gen normally starts OFF in-game (multiplier 0) regardless of the container setting. The
         // layer is still loaded at launch (below), so the user can opt in per session from the FG drawer
@@ -3173,6 +3197,10 @@ public class XServerDisplayActivity extends AppCompatActivity {
 
     /** Point the renderer at the cache and arm it at `multiplier` (0 = off). */
     private void applyLsfgNative(int multiplier, float flowScale) {
+        if (waylandMode) {
+            applyWaylandFrameGen(multiplier, flowScale, resolvedFrameGenModel(), resolvedFrameGenPerfPreset());
+            return;
+        }
         com.winlator.star.renderer.vulkan.VulkanRenderer vkr = vulkanRendererOrNull();
         if (vkr == null) {
             Log.w("XServerDisplayActivity",
@@ -3233,6 +3261,28 @@ public class XServerDisplayActivity extends AppCompatActivity {
         if (lsfg && lsfgNativeStatus > com.winlator.star.core.LsfgNative.STATUS_OK)
             return "LSFG Native can't start: "
                 + com.winlator.star.core.LsfgNative.explain(lsfgNativeStatus) + ".";
+        if (waylandMode) {
+            // The Wayland compositor is always Vulkan (Turnip via adrenotools); the verdict comes
+            // from its frame-generation bridge once its device is up (-1 until then -> retry).
+            switch (com.winlator.star.wayland.WaylandCompositor.nativeFrameGenProblem()) {
+                case com.winlator.star.renderer.vulkan.VulkanRenderer.FG_PROBLEM_DRIVER: {
+                    String caps = com.winlator.star.wayland.WaylandCompositor.nativeFrameGenCapsReason();
+                    boolean version = caps != null && caps.contains("Vulkan version below");
+                    return name + " can't run on this Renderer Driver: "
+                        + (version ? "it needs Vulkan 1.3, which this driver doesn't provide."
+                                   : "this driver is missing a feature it needs.")
+                        + " In this container's settings, set Renderer Driver to a Turnip driver,"
+                        + " then relaunch the game.";
+                }
+                case com.winlator.star.renderer.vulkan.VulkanRenderer.FG_PROBLEM_START_FAILED:
+                    return name + " couldn't start in the Wayland compositor. In this container's"
+                        + " settings, try a Turnip driver under Renderer Driver, then relaunch the game.";
+                case com.winlator.star.renderer.vulkan.VulkanRenderer.FG_PROBLEM_NONE:
+                    return "";
+                default:
+                    return null;
+            }
+        }
         if (!"vulkan".equalsIgnoreCase(resolvedRenderer()))
             return getString(R.string.frame_generation_requires_vulkan)
                 + " Change Renderer in this container's settings, then relaunch the game.";
@@ -3279,9 +3329,16 @@ public class XServerDisplayActivity extends AppCompatActivity {
 
     private void setNativeFgProblem(String reason, boolean announce) {
         com.winlator.star.renderer.vulkan.VulkanRenderer vkr = vulkanRendererOrNull();
-        String detail = (!reason.isEmpty() && vkr != null
-                && vkr.getFrameGenProblem() == com.winlator.star.renderer.vulkan.VulkanRenderer.FG_PROBLEM_DRIVER)
-            ? vkr.getLsfgCapsReason() : "";
+        String detail = "";
+        if (!reason.isEmpty() && waylandMode) {
+            if (com.winlator.star.wayland.WaylandCompositor.nativeFrameGenProblem()
+                    == com.winlator.star.renderer.vulkan.VulkanRenderer.FG_PROBLEM_DRIVER)
+                detail = com.winlator.star.wayland.WaylandCompositor.nativeFrameGenCapsReason();
+        } else if (!reason.isEmpty() && vkr != null
+                && vkr.getFrameGenProblem() == com.winlator.star.renderer.vulkan.VulkanRenderer.FG_PROBLEM_DRIVER) {
+            detail = vkr.getLsfgCapsReason();
+        }
+        if (detail == null) detail = "";
         XServerDrawerState.INSTANCE.setFgUnavailable(reason, detail);
         if (reason.isEmpty()) return;
         Log.w("XServerDisplayActivity", "native frame gen unavailable: " + reason
@@ -3311,6 +3368,10 @@ public class XServerDisplayActivity extends AppCompatActivity {
 
     /** Select win-fg in the renderer, push its knobs, and arm it at `multiplier` (0 = off). */
     private void applyWinFgNative(int multiplier, float flowScale, int model, int perfPreset) {
+        if (waylandMode) {
+            applyWaylandFrameGen(multiplier, flowScale, model, perfPreset);
+            return;
+        }
         com.winlator.star.renderer.vulkan.VulkanRenderer vkr = vulkanRendererOrNull();
         if (vkr == null) {
             Log.w("XServerDisplayActivity",
@@ -3340,6 +3401,38 @@ public class XServerDisplayActivity extends AppCompatActivity {
         if (multiplier >= 2) startLsfgStatsReadout(); else stopLsfgStatsReadout();
     }
 
+    /**
+     * Wayland: select the native engine in the compositor's frame-generation bridge
+     * (waylandcomp/src/framegen_bridge.c), push its knobs and arm it at {@code multiplier}
+     * (0 = off). Same engines, same tuning and the same follow-through as the X11 native path
+     * (limiter/VRR locks, the base->shown readout); only the present-mode step is absent, the
+     * Wayland compositor is FIFO by construction, which is what the multi-present pacing needs.
+     * Every setter is a value store on the native side, so this is safe before the compositor
+     * thread is up (launch) and from the drawer mid-game. bionic-fg (the guest-side win-fg
+     * layer) is X11-only: on Wayland "bionic" always means Win-FG Native.
+     */
+    private void applyWaylandFrameGen(int multiplier, float flowScale, int model, int perfPreset) {
+        final boolean lsfg = "lsfg-native".equals(resolvedFrameGenEngine());
+        Log.i("XServerDisplayActivity", "applyWaylandFrameGen: engine=" + (lsfg ? "lsfg-native" : "winfg-native")
+            + " multiplier=" + multiplier + " flow=" + flowScale
+            + (lsfg ? "" : " model=" + model + " preset=" + WINFG_PERF_PRESET + " (pinned; requested " + perfPreset + ")")
+            + " refresh=" + currentDisplayRefreshHz());
+        com.winlator.star.wayland.WaylandCompositor.nativeSetFrameGenEngine(lsfg
+            ? com.winlator.star.wayland.WaylandCompositor.FG_ENGINE_LSFG
+            : com.winlator.star.wayland.WaylandCompositor.FG_ENGINE_WINFG);
+        if (lsfg) {
+            com.winlator.star.wayland.WaylandCompositor.nativeSetLsfgCachePath(
+                com.winlator.star.core.LsfgNative.cacheFile(this).getAbsolutePath());
+        } else {
+            // Performance preset pinned exactly as applyWinFgNative does (user decision, 2026-09-09).
+            com.winlator.star.wayland.WaylandCompositor.nativeSetWinFgTuning(model, WINFG_PERF_PRESET);
+        }
+        com.winlator.star.wayland.WaylandCompositor.nativeSetFrameGenTuning(flowScale, currentDisplayRefreshHz());
+        com.winlator.star.wayland.WaylandCompositor.nativeSetFrameGenArmed(multiplier >= 2, multiplier);
+        applyNativeFgLocks(multiplier >= 2);
+        if (multiplier >= 2) startLsfgStatsReadout(); else stopLsfgStatsReadout();
+    }
+
     // Live readout for the FG drawer, polled while the native engine is armed.
     private android.os.Handler lsfgStatsHandler;
     private Runnable lsfgStatsTick;
@@ -3359,15 +3452,21 @@ public class XServerDisplayActivity extends AppCompatActivity {
                 com.winlator.star.renderer.vulkan.VulkanRenderer vkr = vulkanRendererOrNull();
                 // Armed but the engine can't generate here (driver lacks what it needs, or
                 // it failed to start): stop pretending, say why, and go back to Off.
-                if (vkr != null && nativeFgLocksHeld) {
-                    int p = vkr.getFrameGenProblem();
+                if ((waylandMode || vkr != null) && nativeFgLocksHeld) {
+                    int p = waylandMode
+                        ? com.winlator.star.wayland.WaylandCompositor.nativeFrameGenProblem()
+                        : vkr.getFrameGenProblem();
                     if (p == com.winlator.star.renderer.vulkan.VulkanRenderer.FG_PROBLEM_DRIVER
                             || p == com.winlator.star.renderer.vulkan.VulkanRenderer.FG_PROBLEM_START_FAILED) {
                         onNativeFgFailed();
                         return;
                     }
                 }
-                float[] st = (vkr != null) ? vkr.getFrameGenStats() : null;
+                // Wayland: the same six numbers, measured by the compositor's bridge (presents
+                // counted per source frame, generated frames included).
+                float[] st = waylandMode
+                    ? com.winlator.star.wayland.WaylandCompositor.nativeFrameGenStats()
+                    : (vkr != null) ? vkr.getFrameGenStats() : null;
                 if (st != null && st.length >= 5) {
                     // st[1] is what is actually planned for this frame. st[0] is
                     // the governor's accepted level, which is meaningless while
@@ -7203,7 +7302,9 @@ public class XServerDisplayActivity extends AppCompatActivity {
             // is Vulkan; honor the same rule here so a stale "FG on + non-Vulkan renderer" config simply
             // doesn't run FG (no broken layer). Conservative: a SurfaceFlinger config that would fall
             // back to Vulkan (ASR unsupported) also skips FG — safe, and the editor prevents that combo.
-            boolean fgRendererVulkan = "vulkan".equalsIgnoreCase(resolvedRenderer());
+            // Wayland: the compositor is Vulkan by construction, and the two native engines run
+            // inside it (framegen_bridge.c); prepareLsfgNative/prepareWinFgNative route there.
+            boolean fgRendererVulkan = "vulkan".equalsIgnoreCase(resolvedRenderer()) || waylandMode;
             if (fgRendererVulkan) {
             if (resolvedFrameGenEngine().equals("lsfg-native")) {
                 // LSFG Native runs the Lossless Scaling chain inside OUR compositor, on the Android
@@ -10694,8 +10795,17 @@ return true;
     private boolean winFgNativeSession = false;
 
     private boolean computeWinFgNativeSession() {
-        return "bionic".equals(resolvedFrameGenEngine())
-            && "vulkan".equalsIgnoreCase(resolvedRenderer())
+        if (!"bionic".equals(resolvedFrameGenEngine())) return false;
+        // Wayland: the compositor is always Vulkan, and the guest-side bionic-fg layer is
+        // X11-only (its frames are born inside the guest and have nothing to attach to in the
+        // Wayland compositor), so "bionic" is Win-FG Native there - training capture included.
+        if (waylandMode) {
+            if (WinFgCapture.isEnabled(this))
+                Log.w("XServerDisplayActivity", "framegen: bionic-fg guest layer (training capture) is X11-only;"
+                    + " running Win-FG Native in the Wayland compositor without capture");
+            return true;
+        }
+        return "vulkan".equalsIgnoreCase(resolvedRenderer())
             // Training capture records from INSIDE the guest; it needs the layer.
             && !WinFgCapture.isEnabled(this);
     }

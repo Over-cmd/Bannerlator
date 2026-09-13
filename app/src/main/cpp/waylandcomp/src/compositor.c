@@ -44,6 +44,7 @@
 #include "pointer-constraints-unstable-v1-server-protocol.h"
 #include "relative-pointer-unstable-v1-server-protocol.h"
 #include "vk_present.h"
+#include "framegen_bridge.h"
 #include "banner_ext.h"
 
 #define WLOGI(...) __android_log_print(ANDROID_LOG_INFO, "BannerWayland", __VA_ARGS__)
@@ -293,6 +294,7 @@ static struct wl_event_source *g_release_source;
 static int g_scene_w, g_scene_h;            /* size of the last drawn scene */
 static int g_desktop_w, g_desktop_h;        /* last size the desktop had content at */
 static unsigned g_stat_frames, g_stat_dmabuf, g_stat_shm; /* since the last 10 s summary */
+static int g_zero_copy_paused;               /* the layer stands aside for frame generation */
 
 static void schedule_render(void);
 
@@ -1529,9 +1531,19 @@ static void render_scene(void) {
     }
 
     int rendered;
-    int li = g_zero_copy ? layer_candidate(&dl, w, h) : -1;
+    /* Frame generation needs the compositor pass (the whole frame goes through vk_present.c's
+     * scene image), which a zero-copy layer bypasses: while it is armed the fullscreen window
+     * takes the copy path and the layer resumes when it is off. */
+    int framegen = vkp_framegen_active();
+    if (g_zero_copy && framegen != g_zero_copy_paused) {
+        g_zero_copy_paused = framegen;
+        banner_log("framegen", framegen ? "zero-copy paused: frame generation needs the compositor pass"
+                                        : "zero-copy resumed: frame generation is off");
+    }
+    int layer_ok = g_zero_copy && !framegen;
+    int li = layer_ok ? layer_candidate(&dl, w, h) : -1;
     struct surface *ls = li >= 0 ? surface_for_image(dl.d[li].img) : NULL;
-    if (li < 0 && g_zero_copy) ls = ahb_layer_only_candidate(w, h);
+    if (li < 0 && layer_ok) ls = ahb_layer_only_candidate(w, h);
     if (li >= 0 || ls) {
         /* Layer mode: the fullscreen window goes to its own Android layer; whatever is under it is
          * hidden by it, so the screen surface only needs to be black. The frame goes on the layer
@@ -2354,11 +2366,16 @@ static int on_stats_timer(void *data) {
     struct surface *s;
     wl_list_for_each(s, &g_toplevels, toplevel_link) windows++;
     unsigned zero_copy = g_zero_copy ? ahb_swapchain_stats_take() : 0;
-    if (g_stat_frames || g_stat_dmabuf || g_stat_shm) {
-        char extra[48] = "";
-        if (g_zero_copy) snprintf(extra, sizeof(extra), " | %u zero-copy frames", zero_copy);
+    /* Interpolated frames the compositor added (framegen_bridge.c). They are on screen, so they
+     * count there; they are NOT GPU frames from games and never inflate that number. */
+    unsigned generated = vkp_framegen_stats_take();
+    if (g_stat_frames || g_stat_dmabuf || g_stat_shm || generated) {
+        char extra[96] = "";
+        int off = 0;
+        if (g_zero_copy) off += snprintf(extra + off, sizeof(extra) - (size_t)off, " | %u zero-copy frames", zero_copy);
+        if (generated) snprintf(extra + off, sizeof(extra) - (size_t)off, " | %u generated frames", generated);
         banner_log("stats", "last 10 s: %u frames on screen (%.1f fps) | %u GPU frames from games | %u window redraws | %d windows open%s",
-                   g_stat_frames, g_stat_frames / 10.0, g_stat_dmabuf, g_stat_shm, windows, extra);
+                   g_stat_frames + generated, (g_stat_frames + generated) / 10.0, g_stat_dmabuf, g_stat_shm, windows, extra);
     }
     g_stat_frames = g_stat_dmabuf = g_stat_shm = 0;
     wl_event_source_timer_update(g_stats_timer, 10000);
