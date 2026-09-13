@@ -6789,8 +6789,8 @@ public class XServerDisplayActivity extends AppCompatActivity {
     }
 
     /** The in-game drawer's Wayland rows (Graphics tab): seed the Zero-copy toggle from the effective
-     *  env and wire its writer + the live frame-count poll. Runs from setupUI, after the container and
-     *  shortcut are resolved and after the drawer's reset() in onCreate. */
+     *  env and wire its live switch + writer + the frame-count poll. Runs from setupUI, after the
+     *  container and shortcut are resolved and after the drawer's reset() in onCreate. */
     private void setupWaylandDrawerGlue() {
         XServerDrawerState state = XServerDrawerState.INSTANCE;
         state.setWaylandZeroCopyRequested(isWaylandZeroCopyRequested());
@@ -6800,6 +6800,16 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // OFF removes the var, or writes =0 when the container's own env still carries =1 — removing
         // it from the shortcut alone would leave the container's value in force.
         state.onWaylandZeroCopyToggle = on -> {
+            // Live first, so the switch is felt before any disk write: the compositor flips its state
+            // on its own thread and tells every bound game (banner_ahb_v1.mode) to rebuild its
+            // swapchain on -- or off -- gralloc buffers. The env write below is only the DEFAULT for
+            // the next launch; nothing in this session waits for it.
+            try {
+                com.winlator.star.wayland.WaylandCompositor.nativeSetZeroCopy(on);
+                state.setWaylandZeroCopyActive(on);
+            } catch (Throwable t) {
+                Log.e("XServerDisplayActivity", "wayland: live zero-copy switch failed", t);
+            }
             try {
                 if (shortcut != null) {
                     EnvVars env = new EnvVars(shortcut.getExtra("envVars", ""));
@@ -6817,14 +6827,21 @@ public class XServerDisplayActivity extends AppCompatActivity {
                     container.saveData();
                 }
                 Log.i("XServerDisplayActivity", "wayland: zero-copy presentation " + (on ? "on" : "off")
-                        + " saved to " + (shortcut != null ? "shortcut" : "container") + " env (next launch)");
+                        + " applied live and saved to " + (shortcut != null ? "shortcut" : "container")
+                        + " env as the next launch's default");
             } catch (Exception e) {
                 Log.e("XServerDisplayActivity", "wayland: zero-copy env write failed", e);
             }
         };
-        // Last-10-s zero-copy frame count, straight from the compositor's stats window.
-        state.onWaylandZeroCopyPoll = () ->
-                state.setWaylandZeroCopyFrames(com.winlator.star.wayland.WaylandCompositor.nativeZeroCopyFrames());
+        // Last-10-s zero-copy frame count, straight from the compositor's stats window, plus whether
+        // a zero-copy frame reached the display layer just now. The 10 s counter cannot show a switch
+        // that happened two seconds ago; the age can, so the row says "switching..." only for as long
+        // as it really is.
+        state.onWaylandZeroCopyPoll = () -> {
+            state.setWaylandZeroCopyFrames(com.winlator.star.wayland.WaylandCompositor.nativeZeroCopyFrames());
+            int age = com.winlator.star.wayland.WaylandCompositor.nativeZeroCopyLastFrameAgeMs();
+            state.setWaylandZeroCopyLive(age >= 0 && age < 1500);
+        };
     }
 
     private static boolean isZeroCopyEnvOn(String raw) {

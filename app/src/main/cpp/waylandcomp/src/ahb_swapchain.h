@@ -1,21 +1,27 @@
 #ifndef AHB_SWAPCHAIN_H
 #define AHB_SWAPCHAIN_H
 /*
- * Zero-copy game frames (layer mode, BANNER_WAYLAND_ZERO_COPY=1): the guest half of the design in
- * ZERO_COPY_SPIKE.md. Our Wayland Turnip (banners-turnip-wayland, patches/wayland/banner_ahb_wsi.py),
- * with BANNER_WSI_AHB=1 and this compositor advertising the private global banner_ahb_v1, allocates
- * each swapchain image as a gralloc AHardwareBuffer, shares its dma-buf through zwp_linux_dmabuf_v1
- * as before (so the blit path still works) and hands us the AHardwareBuffer once per wl_buffer
- * over a socketpair (banner_ahb_v1.attach). When such a buffer is the one fullscreen frame, it goes
- * straight onto the sc_layer SurfaceControl: SurfaceFlinger / the display scan out the game's own
- * buffer, no copy anywhere.
+ * Zero-copy game frames (layer mode, BANNER_WAYLAND_ZERO_COPY=1 at launch, the drawer's "Zero-copy
+ * presentation" switch live): the guest half of the design in ZERO_COPY_SPIKE.md. Our Wayland Turnip
+ * (banners-turnip-wayland, patches/wayland/banner_ahb_wsi.py) binds the private global banner_ahb_v1
+ * (version 2), which this compositor advertises on every session where a display layer is possible,
+ * and follows its `mode` event: while the mode is on, each swapchain the game creates has its images
+ * allocated as gralloc AHardwareBuffers, shared as dma-bufs through zwp_linux_dmabuf_v1 as before (so
+ * the blit path still works) and handed to us once per wl_buffer over a socketpair
+ * (banner_ahb_v1.attach). When such a buffer is the one fullscreen frame, it goes straight onto the
+ * sc_layer SurfaceControl: SurfaceFlinger / the display scan out the game's own buffer, no copy
+ * anywhere. A mode flip (ahb_swapchain_set_mode, from the drawer through the host queue) is
+ * broadcast to every bound client; a client whose live swapchain was built for the other mode
+ * retires it (VK_ERROR_OUT_OF_DATE_KHR) so the program rebuilds it, and until then its buffers keep
+ * presenting as before: an attached AHardwareBuffer stays with its wl_buffer whatever the mode is.
  *
  * Fences stay implicit, in the dma-buf itself: Mesa imports the render fence into the dma-buf
  * before it commits, we export it as the layer's acquire fence (DMA_BUF_IOCTL_EXPORT_SYNC_FILE),
  * and import SurfaceFlinger's release fence back (DMA_BUF_IOCTL_IMPORT_SYNC_FILE) before sending
  * wl_buffer.release, so Mesa's acquire (wsi_create_sync_for_dma_buf_wait) waits for the display.
  *
- * Compositor thread unless noted. Off = the global is not created and nothing here runs.
+ * Compositor thread unless noted. Without a usable display layer (sc_layer_available() == 0) the
+ * global is not created and nothing here runs.
  */
 #include <stddef.h>
 #include <stdint.h>
@@ -25,8 +31,14 @@ struct dmabuf_buffer;
 struct surface;
 
 /* ---- compositor.c -> ahb_swapchain.c */
-/* Create the banner_ahb_v1 global (only when layer mode is on) and the release queue. */
+/* Create the banner_ahb_v1 global (when a display layer is possible at all) and the release queue. */
 void ahb_swapchain_init(struct wl_display *display);
+/* Zero-copy on/off, live: sets g_zero_copy, tells every bound client (banner_ahb_v1.mode) and logs
+ * it (live = 1: a drawer switch mid-session; 0: the launch default). Compositor thread. */
+void ahb_swapchain_set_mode(int on, int live);
+/* Milliseconds since a game frame was last put on the layer without a copy (-1 = never). Any thread:
+ * the drawer's status line. */
+int ahb_swapchain_last_frame_age_ms(void);
 /* 1 if the buffer carries an AHardwareBuffer from the game. */
 int ahb_swapchain_has_ahb(const struct dmabuf_buffer *b);
 /* Show b (the topmost fullscreen frame, shown by surface s) on the layer without a copy.
@@ -55,6 +67,8 @@ void banner_dmabuf_ref(struct dmabuf_buffer *b);
 void banner_dmabuf_unref(struct dmabuf_buffer *b);
 /* Give a wl_buffer back to its client now (paced = 0) or on the FPS limiter's cadence (s != NULL). */
 void banner_release_buffer(struct surface *s, struct wl_resource *buffer, int paced);
+/* Redraw the scene on the next tick (the present path may have changed). */
+void banner_request_redraw(void);
 /* "<title>" (program) of the window a surface belongs to, for the log. */
 void banner_surface_describe(const struct surface *s, char *out, size_t size);
 

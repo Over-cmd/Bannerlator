@@ -179,10 +179,10 @@ with the variable in the container's environment, one fullscreen game window is 
 release fences from `setOnComplete`, geometry from the fullscreen mode); any other scene falls back
 to the swapchain blit. Log tag `layer`. Off by default.
 
-## Zero-copy game frames (feat/wayland-zero-copy-wsi, `BANNER_WAYLAND_ZERO_COPY=1`)
+## Zero-copy game frames (`BANNER_WAYLAND_ZERO_COPY=1`, drawer switch live)
 Option (a') of `ZERO_COPY_SPIKE.md`, both halves:
 - **Guest (our Wayland Turnip, banners-turnip-wayland `patches/wayland/banner_ahb_wsi.py`, all
-  variants):** with `BANNER_WSI_AHB=1` and the compositor advertising `banner_ahb_v1`, the Wayland
+  variants):** while the compositor's mode is on (see the live switch below), the Wayland
   WSI allocates every swapchain image as a gralloc `AHardwareBuffer` (usage GPU_SAMPLED_IMAGE |
   GPU_FRAMEBUFFER | COMPOSER_OVERLAY; UBWC when gralloc picks it and a test `vkCreateImage` with the
   explicit `QCOM_COMPRESSED` layout succeeds, else linear via a CPU usage bit; `BANNER_WSI_AHB_LINEAR=1`
@@ -193,8 +193,10 @@ Option (a') of `ZERO_COPY_SPIKE.md`, both halves:
   stride, modifier hi/lo, image_count)`. Surface formats are limited to `R8G8B8A8_UNORM/SRGB` (and
   `A2B10G10R10`) while the mode is on: gralloc has no BGRA (DXVK/Zink blit into the swapchain image
   anyway). Marker: `strings libvulkan_freedreno_wayland*.so | grep banner_ahb_v1`.
-- **Compositor (`src/ahb_swapchain.c`, protocol `protocols/banner-ahb-v1.xml`):** the global exists only
-  in layer mode. `attach` → `AHardwareBuffer_recvHandleFromUnixSocket`, record on the `dmabuf_buffer`.
+- **Compositor (`src/ahb_swapchain.c`, protocol `protocols/banner-ahb-v1.xml`):** the global is
+  advertised on every session where a display layer is possible at all (`sc_layer_available()`);
+  whether gralloc buffers are WANTED right now is the `mode` event, not the global's presence.
+  `attach` → `AHardwareBuffer_recvHandleFromUnixSocket`, record on the `dmabuf_buffer`.
   When that buffer is the one fullscreen frame (`layer_candidate`, or the layer-only candidate when
   this renderer could not import it), `sc_layer_present_ahb` sets it on the `banner_wayland_game`
   SurfaceControl as is. **Acquire fence** = `DMA_BUF_IOCTL_EXPORT_SYNC_FILE(READ)` of the dma-buf: Mesa
@@ -206,13 +208,48 @@ Option (a') of `ZERO_COPY_SPIKE.md`, both halves:
   (`wsi_create_sync_for_dma_buf_wait`) exports every fence of the dma-buf, so the game waits for the
   display. If the import fails the release waits on the fence fd in the event loop instead. A hidden
   or retired layer gets a 16x16 blank buffer so SurfaceFlinger actually lets go of the game's buffer.
-- **App:** `BANNER_WAYLAND_ZERO_COPY=1` (container/shortcut env) also exports `BANNER_WSI_AHB=1` into the
-  guest (`XServerDisplayActivity.isWaylandZeroCopyRequested`), one switch for both halves.
-- **Log lines (tag `layer`):** `zero-copy: banner_ahb_v1 advertised …`, `zero-copy: <exe> bound
-  banner_ahb_v1 …`, `zero-copy: AHB swapchain from <exe> (N images, WxH, UBWC (QCOM_COMPRESSED)|linear,
+- **App:** `BANNER_WAYLAND_ZERO_COPY=1` (container/shortcut env) is the session's STARTING state and
+  also exports `BANNER_WSI_AHB=1` into the guest (`XServerDisplayActivity.isWaylandZeroCopyRequested`),
+  which is what an older driver (bound at `banner_ahb_v1` version 1) needs.
+
+### The live switch ("Zero-copy presentation", Graphics tab)
+`banner_ahb_v1` version 2 adds one event, `mode(enabled)`, sent to every bound client on bind and
+again on every flip. The compositor owns the state:
+- `WaylandCompositor.nativeSetZeroCopy(on)` is live and callable from any thread. Before the
+  compositor starts it just seeds `g_zero_copy`; afterwards it posts through the `banner_ext.c` host
+  queue (like the clipboard/IME setters) so `ahb_swapchain_set_mode()` runs on the compositor thread,
+  which flips `g_zero_copy`, broadcasts `mode`, flushes the clients and redraws.
+- **Guest:** the WSI follows `display->banner_ahb_mode`, decided per swapchain at creation. When a
+  live swapchain was built for the other mode, the next `vkAcquireNextImageKHR` /
+  `vkQueuePresentKHR` returns `VK_ERROR_OUT_OF_DATE_KHR` (it reuses Mesa's own `chain->retired`
+  early-outs), which DXVK, vkd3d-proton and Zink all answer by rebuilding the swapchain. The mode
+  event is read with a non-blocking dispatch of the display queue on each acquire/present, because
+  in MAILBOX that queue is otherwise only dispatched when the acquire loop runs out of images.
+- **Compatibility, both directions.** The registry bind clamps to `MIN(advertised, 2)` — binding
+  above the advertised version is a fatal `wl_display` error, and a Bannerlator from before the live
+  switch advertises version 1. On version 1, and on version 2 before the first `mode` event arrives,
+  the driver keeps the original contract exactly: gralloc images iff `BANNER_WSI_AHB=1`, decided per
+  swapchain, and no swapchain is ever retired. Once the mode is in play `BANNER_WSI_AHB=1` no longer
+  forces it on (the app exports that on every zero-copy launch, which would freeze the switch);
+  `BANNER_WSI_AHB=0` still forces the whole feature off.
+- **No black frame, either way.** Switching OFF does not tear down anything: the old gralloc chain's
+  frames keep being shown — on the layer when this renderer could not import them, through the copy
+  path when it could — until the game has rebuilt, and only then does `sc_layer_hide()` run. Buffers
+  already on the layer keep their deferred release (`ahb_swapchain_defer_release` is no longer gated
+  on `g_zero_copy`, or the display would be handed a buffer it is still scanning out). Switching ON,
+  the layer path resumes as soon as the first `attach` of the new chain lands.
+- **Drawer:** the toggle applies live *and* writes the env as the next launch's default. Its status
+  line follows the compositor, not the switch: `nativeZeroCopyLastFrameAgeMs()` (updated on every
+  zero-copy present, unlike the 10 s counter) is what makes it say "Switching on…" / "Switching off…"
+  only for as long as it really is.
+- **Log lines (tag `layer`):** `zero-copy: banner_ahb_v1 version 2 advertised …`, `zero-copy: <exe>
+  bound banner_ahb_v1 version N …`, `zero-copy: on|off at launch …`, `zero-copy switched on|off from
+  the drawer: N bound programs told to rebuild their swapchains …`, `zero-copy: AHB swapchain from <exe> (N images, WxH, UBWC (QCOM_COMPRESSED)|linear,
   stride S px)`, `zero-copy: presenting "<title>" (<exe>) without a copy`; the 10 s `stats` line ends
   with `| N zero-copy frames`. Guest side (Mesa log, stderr of the game): `banner-ahb: WxH swapchain
-  (N images) on gralloc buffers: UBWC|linear, stride S px` or the reason it stayed on standard buffers.
+  (N images) on gralloc buffers: UBWC|linear, stride S px` or the reason it stayed on standard
+  buffers, plus `banner-ahb: compositor wants gralloc|standard swapchain images` and `banner-ahb:
+  zero-copy switched on|off: retiring the WxH swapchain …` on a live flip.
 
 ## Screen effects (feat/wayland-effects, `src/effects_chain.c`)
 The X11 renderer's screen-effect chain, run by the compositor between the composited scene and the

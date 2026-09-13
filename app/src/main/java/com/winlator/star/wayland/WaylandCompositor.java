@@ -172,15 +172,27 @@ public final class WaylandCompositor {
      *  Set before the compositor starts. */
     public static native void nativeSetOutputRefreshRate(float hz);
 
-    /** Experimental: show a single fullscreen window on its own Android layer (SurfaceControl)
-     *  instead of blitting it into the compositor's swapchain. Enabled by BANNER_WAYLAND_ZERO_COPY=1
-     *  in the container's environment variables; see waylandcomp/ZERO_COPY_SPIKE.md. Set before start. */
+    /** Show a single fullscreen window on its own Android layer (SurfaceControl) instead of blitting
+     *  it into the compositor's swapchain. BANNER_WAYLAND_ZERO_COPY=1 in the container's environment
+     *  variables is the launch default; see waylandcomp/ZERO_COPY_SPIKE.md.
+     *
+     *  Live and thread-safe: before the compositor starts this is the initial state, and afterwards
+     *  the call is marshalled onto the compositor thread, which flips the state, tells every bound
+     *  game over banner_ahb_v1.mode to rebuild its swapchain for it, and redraws. The switch is one
+     *  frame's worth of latency; the picture never goes black, because the old swapchain's buffers
+     *  keep being shown until the game has replaced them. */
     public static native void nativeSetZeroCopy(boolean on);
 
     /** Zero-copy frames the compositor presented in its LAST completed 10 s stats window (the
      *  "| N zero-copy frames" figure of its session-log stats line); 0 while zero-copy is off or
      *  before the first window closes. Read-only, any thread — the in-game drawer polls it. */
     public static native int nativeZeroCopyFrames();
+
+    /** Milliseconds since the compositor last put a game frame on the display layer without a copy;
+     *  -1 if it never has this session. Unlike nativeZeroCopyFrames this updates on every such frame
+     *  rather than once per 10 s window, so the drawer can tell "switching..." from "running" within
+     *  a frame or two of the live toggle. Read-only, any thread. */
+    public static native int nativeZeroCopyLastFrameAgeMs();
 
     /** Compressed (UBWC) game buffers: the compositor advertises DRM_FORMAT_MOD_QCOM_COMPRESSED next to
      *  LINEAR on zwp_linux_dmabuf_v1 for every format its driver can import that way, so the game's

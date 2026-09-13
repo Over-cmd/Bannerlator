@@ -14,8 +14,9 @@
 #include <pthread.h>
 #include <android/log.h>
 #include "banner_ext.h"
+#include "ahb_swapchain.h"
 
-enum host_kind { HOST_CLIPBOARD = 1, HOST_TEXT_COMMIT, HOST_TEXT_PREEDIT, HOST_TEXT_DELETE };
+enum host_kind { HOST_CLIPBOARD = 1, HOST_TEXT_COMMIT, HOST_TEXT_PREEDIT, HOST_TEXT_DELETE, HOST_ZERO_COPY };
 
 struct host_msg {
     enum host_kind kind;
@@ -63,6 +64,9 @@ void banner_host_text_preedit(const char *utf8, int len, int cursor_begin, int c
 void banner_host_text_delete(int before, int after) {
     host_post(HOST_TEXT_DELETE, NULL, 0, before, after);
 }
+void banner_host_zero_copy(int on, int live) {
+    host_post(HOST_ZERO_COPY, NULL, 0, on, live);
+}
 
 static int on_wake(int fd, uint32_t mask, void *data) {
     char buf[64];
@@ -86,6 +90,9 @@ static int on_wake(int fd, uint32_t mask, void *data) {
             break;
         case HOST_TEXT_DELETE:
             text_input_host_delete(m->a, m->b);
+            break;
+        case HOST_ZERO_COPY:
+            ahb_swapchain_set_mode(m->a, m->b);
             break;
         }
         free(m->text);

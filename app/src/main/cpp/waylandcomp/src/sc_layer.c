@@ -330,6 +330,8 @@ static int take_free_slot(int w, int h) {
 
 /* ---- public --------------------------------------------------------------------------------- */
 
+int sc_layer_available(void) { return load_api() == 0; }
+
 void sc_layer_probe_dmabuf_fd(int fd) {
     static int done;
     if (done || fd < 0) return;
