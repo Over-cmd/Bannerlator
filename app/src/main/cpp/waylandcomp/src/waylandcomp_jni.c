@@ -12,6 +12,7 @@
 #include <android/log.h>
 #include <android/native_window_jni.h>
 #include "vk_present.h"
+#include "banner_ext.h"
 
 extern int banner_wayland_run(void);
 extern void banner_wayland_send_pointer(int action, int x, int y);
@@ -31,6 +32,8 @@ static jmethodID g_on_first_frame;   /* static void onFirstFramePresented() */
 static jmethodID g_on_game_surface;  /* static void onGameSurface(String, String) */
 static jmethodID g_on_game_frame;    /* static void onGameFrame() */
 static jmethodID g_on_pointer_lock;  /* static void onPointerLock(boolean, int, int) */
+static jmethodID g_on_clipboard;     /* static void onClipboardText(byte[]) */
+static jmethodID g_on_text_input;    /* static void onTextInput(boolean, String, int, int, int, int) */
 
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
     (void)reserved;
@@ -46,6 +49,9 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
                                                           "(Ljava/lang/String;Ljava/lang/String;)V");
             g_on_game_frame = (*env)->GetStaticMethodID(env, g_compositor_cls, "onGameFrame", "()V");
             g_on_pointer_lock = (*env)->GetStaticMethodID(env, g_compositor_cls, "onPointerLock", "(ZII)V");
+            g_on_clipboard = (*env)->GetStaticMethodID(env, g_compositor_cls, "onClipboardText", "([B)V");
+            g_on_text_input = (*env)->GetStaticMethodID(env, g_compositor_cls, "onTextInput",
+                                                        "(ZLjava/lang/String;IIII)V");
         }
     }
     return JNI_VERSION_1_6;
@@ -112,6 +118,31 @@ void banner_on_pointer_lock(int locked, int x, int y) {
     if (!g_compositor_cls || !g_on_pointer_lock || !(env = thread_env())) return;
     (*env)->CallStaticVoidMethod(env, g_compositor_cls, g_on_pointer_lock, (jboolean)(locked != 0), (jint)x, (jint)y);
     if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+}
+
+/* A program copied text (UTF-8, not NUL-terminated for the app's sake — a byte[] so emoji and
+ * NULs survive JNI). Compositor thread. */
+void banner_on_clipboard_text(const char *utf8, int len) {
+    JNIEnv *env;
+    if (!g_compositor_cls || !g_on_clipboard || !(env = thread_env())) return;
+    jbyteArray arr = (*env)->NewByteArray(env, len);
+    if (!arr) { (*env)->ExceptionClear(env); return; }
+    (*env)->SetByteArrayRegion(env, arr, 0, len, (const jbyte *)utf8);
+    (*env)->CallStaticVoidMethod(env, g_compositor_cls, g_on_clipboard, arr);
+    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    (*env)->DeleteLocalRef(env, arr);
+}
+
+/* A program started (enabled) or stopped accepting IME text; x,y,w,h = its caret rectangle in
+ * scene pixels (all 0 = unknown). Compositor thread. */
+void banner_on_text_input(int enabled, const char *program, int x, int y, int w, int h) {
+    JNIEnv *env;
+    if (!g_compositor_cls || !g_on_text_input || !(env = thread_env())) return;
+    jstring jp = (*env)->NewStringUTF(env, program ? program : "");
+    (*env)->CallStaticVoidMethod(env, g_compositor_cls, g_on_text_input, (jboolean)(enabled != 0), jp,
+                                 (jint)x, (jint)y, (jint)w, (jint)h);
+    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    if (jp) (*env)->DeleteLocalRef(env, jp);
 }
 
 static void *comp_thread(void *arg) {
@@ -240,4 +271,53 @@ Java_com_winlator_star_wayland_WaylandCompositor_nativeSetSurface(
     } else {
         vk_present_set_window(NULL);
     }
+}
+
+/* ---- clipboard + text input (any thread; queued to the compositor thread) ----
+ * Text crosses as UTF-8 byte arrays: JNI's modified UTF-8 would mangle emoji. */
+
+static char *dup_bytes(JNIEnv *env, jbyteArray arr, int *len) {
+    *len = 0;
+    if (!arr) return NULL;
+    jsize n = (*env)->GetArrayLength(env, arr);
+    char *buf = malloc((size_t)n + 1);
+    if (!buf) return NULL;
+    if (n) (*env)->GetByteArrayRegion(env, arr, 0, n, (jbyte *)buf);
+    buf[n] = 0;
+    *len = (int)n;
+    return buf;
+}
+
+/* Android's clipboard text becomes the guest's selection (empty/null = clear). */
+JNIEXPORT void JNICALL
+Java_com_winlator_star_wayland_WaylandCompositor_nativeSetClipboardText(JNIEnv *env, jclass clazz, jbyteArray utf8) {
+    int len;
+    char *buf = dup_bytes(env, utf8, &len);
+    banner_host_clipboard_text(buf ? buf : "", len);
+    free(buf);
+}
+
+/* Soft-keyboard text committed to the program accepting text input. */
+JNIEXPORT void JNICALL
+Java_com_winlator_star_wayland_WaylandCompositor_nativeTextInputCommit(JNIEnv *env, jclass clazz, jbyteArray utf8) {
+    int len;
+    char *buf = dup_bytes(env, utf8, &len);
+    if (buf && len) banner_host_text_commit(buf, len);
+    free(buf);
+}
+
+/* Composing (pre-edit) text; cursorBegin/cursorEnd are character indexes into it, -1 = end. */
+JNIEXPORT void JNICALL
+Java_com_winlator_star_wayland_WaylandCompositor_nativeTextInputPreedit(JNIEnv *env, jclass clazz, jbyteArray utf8,
+                                                                        jint cursorBegin, jint cursorEnd) {
+    int len;
+    char *buf = dup_bytes(env, utf8, &len);
+    banner_host_text_preedit(buf ? buf : "", len, cursorBegin, cursorEnd);
+    free(buf);
+}
+
+/* The IME deleted characters around the caret. */
+JNIEXPORT void JNICALL
+Java_com_winlator_star_wayland_WaylandCompositor_nativeTextInputDelete(JNIEnv *env, jclass clazz, jint before, jint after) {
+    banner_host_text_delete(before, after);
 }
