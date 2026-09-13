@@ -16,7 +16,7 @@ import java.util.List;
  * picker) never reaches the game; the Proton layer bundles three Wayland Turnip variants and
  * honours two env vars, which this class emits:
  * <ul>
- *   <li>{@link #ENV_VARIANT} {@code = a7xx | a8xx} — pick a bundled variant; unset (or any other
+ *   <li>{@link #ENV_VARIANT} {@code = a7xx | a8xx | a8xx-perf} — pick a bundled variant; unset (or any other
  *       value) = the plain bundled driver. plain covers Adreno 6xx + 730/740/750; a7xx covers
  *       710/720/722; a8xx covers 830/840.</li>
  *   <li>{@link #ENV_ICD} {@code = /abs/path/icd.json} — an IMPORTED Wayland-built driver
@@ -39,6 +39,7 @@ public final class WaylandGameDriver {
     public static final String VARIANT_PLAIN = "";
     public static final String VARIANT_A7XX = "a7xx";
     public static final String VARIANT_A8XX = "a8xx";
+    public static final String VARIANT_A8XX_PERF = "a8xx-perf"; // WinNative "Performance" tuning: KGSL PWR_MAX held
 
     /** Shared editor help text (container, shortcut and XMB editors show the same line). */
     public static final String HELP_TEXT =
@@ -131,6 +132,7 @@ public final class WaylandGameDriver {
             case Container.WAYLAND_GAME_DRIVER_BUNDLED:      return new Resolution(choice, VARIANT_PLAIN, null);
             case Container.WAYLAND_GAME_DRIVER_BUNDLED_A7XX: return new Resolution(choice, VARIANT_A7XX, null);
             case Container.WAYLAND_GAME_DRIVER_BUNDLED_A8XX: return new Resolution(choice, VARIANT_A8XX, null);
+            case Container.WAYLAND_GAME_DRIVER_BUNDLED_A8XX_PERF: return new Resolution(choice, VARIANT_A8XX_PERF, null);
             case Container.WAYLAND_GAME_DRIVER_AUTO:         break;
             default:
                 Log.w(TAG, "unknown waylandGameDriver '" + choice + "'; treating as auto");
@@ -160,7 +162,8 @@ public final class WaylandGameDriver {
 
     public static String variantLabel(String variant) {
         if (VARIANT_A7XX.equals(variant)) return "Bundled a7xx (Adreno 710/720/722)";
-        if (VARIANT_A8XX.equals(variant)) return "Bundled a8xx (Adreno 830/840)";
+        if (VARIANT_A8XX.equals(variant)) return "Bundled a8xx (Adreno 830/840, WinNative Balanced)";
+        if (VARIANT_A8XX_PERF.equals(variant)) return "Bundled a8xx Performance (Adreno 830/840, WinNative PWR_MAX)";
         return "Bundled (Adreno 6xx / 730–750)";
     }
 
@@ -168,16 +171,18 @@ public final class WaylandGameDriver {
     public static String variantShortName(String variant) {
         if (VARIANT_A7XX.equals(variant)) return "Bundled a7xx";
         if (VARIANT_A8XX.equals(variant)) return "Bundled a8xx";
+        if (VARIANT_A8XX_PERF.equals(variant)) return "Bundled a8xx Performance";
         return "Bundled";
     }
 
-    /** Stored values in editor order: auto, the three bundled variants, then each imported driver. */
+    /** Stored values in editor order: auto, the four bundled variants, then each imported driver. */
     public static List<String> optionValues(Context context) {
         ArrayList<String> values = new ArrayList<>();
         values.add(Container.WAYLAND_GAME_DRIVER_AUTO);
         values.add(Container.WAYLAND_GAME_DRIVER_BUNDLED);
         values.add(Container.WAYLAND_GAME_DRIVER_BUNDLED_A7XX);
         values.add(Container.WAYLAND_GAME_DRIVER_BUNDLED_A8XX);
+        values.add(Container.WAYLAND_GAME_DRIVER_BUNDLED_A8XX_PERF);
         for (String id : new WaylandGameDriverManager(context).enumerateInstalledDrivers())
             values.add(Container.WAYLAND_GAME_DRIVER_IMPORTED_PREFIX + id);
         return values;
@@ -195,6 +200,7 @@ public final class WaylandGameDriver {
             case Container.WAYLAND_GAME_DRIVER_BUNDLED:      return variantLabel(VARIANT_PLAIN);
             case Container.WAYLAND_GAME_DRIVER_BUNDLED_A7XX: return variantLabel(VARIANT_A7XX);
             case Container.WAYLAND_GAME_DRIVER_BUNDLED_A8XX: return variantLabel(VARIANT_A8XX);
+            case Container.WAYLAND_GAME_DRIVER_BUNDLED_A8XX_PERF: return variantLabel(VARIANT_A8XX_PERF);
         }
         if (isImported(value)) {
             String id = importedId(value);

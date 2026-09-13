@@ -146,7 +146,7 @@ class ContainerDetailViewModel(app: Application) : AndroidViewModel(app) {
     var displayBackend by mutableStateOf(Container.DISPLAY_BACKEND_X11)
     val isWaylandStored get() = displayBackend == Container.DISPLAY_BACKEND_WAYLAND
     val isWaylandBackend get() = isWaylandStored && isWineWaylandCapable(selectedWineVersion)
-    // Wayland GAME driver (extra "waylandGameDriver": auto | bundled | bundled-a7xx | bundled-a8xx |
+    // Wayland GAME driver (extra "waylandGameDriver": auto | bundled | bundled-a7xx | bundled-a8xx | bundled-a8xx-perf |
     // imported:<id>). Only shown/used on the Wayland backend; kept as stored on X11 so flipping the
     // backend back and forth doesn't lose it. See core.WaylandGameDriver.
     var waylandGameDriver by mutableStateOf(Container.WAYLAND_GAME_DRIVER_AUTO)
