@@ -3610,8 +3610,7 @@ private fun ControlsContent(state: XServerDrawerState) {
                     ToggleChipItem("Cursor to Touch", moveCursorToTouch) {
                         state.onMoveCursorToTouchpoint?.run()
                     },
-                    // Greyed on Wayland: the compositor has no pointer-constraints protocol yet.
-                    ToggleChipItem("Relative Mouse", isRelativeMouse, enabled = !isWaylandSession) {
+                    ToggleChipItem("Relative Mouse", isRelativeMouse) {
                         state.onRelativeMouseMovement?.run()
                     },
                     ToggleChipItem("Disable Mouse", isMouseDisabled) {
@@ -3624,7 +3623,7 @@ private fun ControlsContent(state: XServerDrawerState) {
             if (isWaylandSession) {
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    "Relative Mouse: not available on Wayland yet (pointer constraints not implemented)",
+                    "Wayland: mouse deltas go to the compositor; a game that locks the pointer receives them as relative motion",
                     color = LocalAccentDim.current,
                     fontSize = 11.sp,
                     lineHeight = 13.sp

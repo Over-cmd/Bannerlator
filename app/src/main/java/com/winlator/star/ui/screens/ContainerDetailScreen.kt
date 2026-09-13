@@ -1899,27 +1899,15 @@ private fun WineConfigTab(
 
         // DirectInput section
         SectionBox(title = "DirectInput") {
-            // Mouse warp needs pointer constraints, which the Wayland compositor doesn't implement yet
-            // (same rule as the in-game Relative Mouse chip): greyed there, displays "Not available",
-            // stored index untouched.
-            val mouseWarpEnabled = !viewModel.isWaylandBackend
-            val mouseWarpShown = if (mouseWarpEnabled)
-                viewModel.mouseWarpEntries.getOrElse(viewModel.selectedMouseWarpIndex) { "" }
-            else "Not available on Wayland yet"
+            // Mouse warp (DirectInput's SetCursorPos re-centring) works on both backends: on Wayland
+            // the compositor implements pointer constraints, which is what winewayland's SetCursorPos
+            // goes through (lock + position hint + unlock).
             LabeledDropdown(
                 label = stringResource(R.string.mouse_warp_override),
-                options = if (mouseWarpEnabled) viewModel.mouseWarpEntries else listOf(mouseWarpShown),
-                selectedOption = mouseWarpShown,
-                onSelect = { opt -> viewModel.selectedMouseWarpIndex = viewModel.mouseWarpEntries.indexOf(opt).coerceAtLeast(0) },
-                enabled = mouseWarpEnabled
+                options = viewModel.mouseWarpEntries,
+                selectedOption = viewModel.mouseWarpEntries.getOrElse(viewModel.selectedMouseWarpIndex) { "" },
+                onSelect = { opt -> viewModel.selectedMouseWarpIndex = viewModel.mouseWarpEntries.indexOf(opt).coerceAtLeast(0) }
             )
-            if (!mouseWarpEnabled) {
-                Text(
-                    "Not available on Wayland yet: pointer constraints are not implemented in the Wayland compositor",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
         }
 
         // System section — "Run as administrator" (default ON) toggles UAC in the prefix. Backed by
