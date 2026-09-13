@@ -7142,7 +7142,8 @@ internal fun ShortcutSettingsDialogScreen(
                     }
 
                     // Display backend override (per-game): default to the container, or force
-                    // X11 / Wayland. Wayland greys the Renderer group below (compositor replaces it).
+                    // X11 / Wayland. Wayland greys the Renderer group below (compositor replaces it)
+                    // and the driver-config button (the game runs on the Proton's bundled Turnip).
                     run {
                         val dbLabels = listOf("Use container default", "Force X11", "Force Wayland")
                         val dbValues = listOf("", Container.DISPLAY_BACKEND_X11, Container.DISPLAY_BACKEND_WAYLAND)
@@ -7157,19 +7158,25 @@ internal fun ShortcutSettingsDialogScreen(
                         if (effectiveWaylandShortcut) {
                             Text(
                                 "Wayland (experimental): renders through the embedded compositor " +
-                                    "(winewayland). Renderer options below don't apply.",
+                                    "(winewayland). Needs a Wayland-capable Proton (11.0-2-arm64ec-90 " +
+                                    "or newer). The game renders on the Turnip bundled with that " +
+                                    "Proton — the graphics-driver picker only affects the compositor. " +
+                                    "DX wrapper (DXVK/VKD3D) settings apply as on X11. Renderer " +
+                                    "options below don't apply.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
                     }
 
-                    // Graphics Driver + wrapper manager (cloud)
+                    // Graphics Driver + wrapper manager (cloud). Under Wayland the picked driver only
+                    // runs the embedded compositor (the game uses the Proton's bundled Wayland Turnip),
+                    // so the picker is relabelled and the X11-only driver config below is greyed.
                     var showWrapperManager by remember { mutableStateOf(false) }
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                         DpDrop(
                             dp, "gfxDriver",
-                            label = stringResource(R.string.graphics_driver),
+                            label = if (effectiveWaylandShortcut) "Compositor driver" else stringResource(R.string.graphics_driver),
                             options = graphicsDriverEntries,
                             selected = selectedGfxDriver,
                             onSelect = { selectedGfxDriver = it },
@@ -7189,10 +7196,34 @@ internal fun ShortcutSettingsDialogScreen(
                         showWrapperManager = false
                         wrapperRefreshKey++ // pick up a just-imported/deleted wrapper
                     })
-                    DpButton(dp, "gfxConfig", onActivate = { showGfxConfig = true }, modifier = Modifier.fillMaxWidth()) {
-                        OutlinedButton(onClick = { showGfxConfig = true }, modifier = Modifier.fillMaxWidth()) {
+                    if (effectiveWaylandShortcut) {
+                        Text(
+                            "Used by the Wayland compositor to put frames on screen; the game renders on " +
+                                "the Turnip bundled with the Proton.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(
+                            "Game driver: Wayland Turnip bundled with this Proton",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                    DpButton(dp, "gfxConfig", onActivate = { if (!effectiveWaylandShortcut) showGfxConfig = true }, modifier = Modifier.fillMaxWidth()) {
+                        OutlinedButton(
+                            onClick = { showGfxConfig = true },
+                            enabled = !effectiveWaylandShortcut,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
                             Text("${stringResource(R.string.graphics_driver)}: ${GraphicsDriverConfigDialog.getVersion(graphicsDriverConfig)}")
                         }
+                    }
+                    if (effectiveWaylandShortcut) {
+                        Text(
+                            "Driver configuration disabled: configures the X11 game driver; Wayland games " +
+                                "use the Proton's bundled Turnip.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
 
                     // DX Wrapper

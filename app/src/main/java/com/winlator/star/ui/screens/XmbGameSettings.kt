@@ -262,11 +262,16 @@ private fun generalRows(xmb: XmbScope, p: XmbPrefs, host: XmbGameHost): List<Xmb
     rows += XmbRow.Header("hGfx", "Graphics")
     val gfxEntries = WrapperManager.driverEntries(p.context, p.res.getStringArray(R.array.graphics_driver_entries))
     val gfxId = p.ex("graphicsDriver", c.graphicsDriver)
-    rows += XmbRow.Choice("gfxDriver", p.str(R.string.graphics_driver), Icons.Filled.Memory, gfxEntries, p.labelFor(gfxEntries, gfxId)) { v ->
+    // Under Wayland the picked driver only runs the embedded compositor — the game renders on the
+    // Turnip bundled with the Proton — so the picker is relabelled and the X11-only config greyed.
+    rows += XmbRow.Choice("gfxDriver", if (waylandGame) "Compositor driver" else p.str(R.string.graphics_driver), Icons.Filled.Memory, gfxEntries, p.labelFor(gfxEntries, gfxId),
+        subtitle = if (waylandGame) "Used by the Wayland compositor to put frames on screen; the game renders on the Turnip bundled with the Proton" else null) { v ->
         xmb.set(p, "graphicsDriver", StringUtils.parseIdentifier(v))
     }
+    if (waylandGame) rows += XmbRow.Info("gfxGameDriver", "Game driver", Icons.Filled.Memory, "Wayland Turnip bundled with this Proton")
     rows += XmbRow.Link("gfxConfig", "Driver configuration", Icons.Filled.Tune,
-        subtitle = "Vulkan version, BCn, present modes…") { xmbDriverConfigMenu(xmb, s) }
+        subtitle = "Vulkan version, BCn, present modes…",
+        disabledReason = if (waylandGame) "Configures the X11 game driver; Wayland games use the Proton's bundled Turnip" else null) { xmbDriverConfigMenu(xmb, s) }
     rows += XmbRow.External("wrappers", "Manage wrappers", Icons.Filled.Cloud, subtitle = "Import or remove wrapper drivers") { host.openWrapperManager() }
     val dxEntries = p.arr(R.array.dxwrapper_entries)
     val dxId = p.ex("dxwrapper", c.getDXWrapper())

@@ -878,8 +878,10 @@ private fun TopLevelFields(
 
         // Display backend: X11 (Java X server + libwinlator) vs the embedded Wayland
         // compositor (winewayland.drv). Wayland routes launches through our compositor and
-        // greys out the whole Renderer group below, which the compositor replaces. The
-        // Graphics Driver (Turnip) + DX Wrapper stay live — Wayland runs on top of them.
+        // greys out the whole Renderer group below, which the compositor replaces. On Wayland
+        // the game renders on the Turnip bundled with the Proton wcp (winewayland picks it via
+        // VK_ICD_FILENAMES); the Graphics Driver picker only feeds the compositor, and its
+        // config dialog is X11-only. The DX Wrapper (DXVK/VKD3D) applies on both backends.
         run {
             val backendLabels = listOf("X11", "Wayland")
             val backendValues = listOf(Container.DISPLAY_BACKEND_X11, Container.DISPLAY_BACKEND_WAYLAND)
@@ -893,8 +895,11 @@ private fun TopLevelFields(
             if (viewModel.isWaylandBackend) {
                 Text(
                     "Wayland (experimental): games render through the embedded compositor " +
-                        "(winewayland). Needs a winewayland Proton (11.0-1-arm64ec-7+). The " +
-                        "Renderer options below don't apply and are disabled.",
+                        "(winewayland). Needs a Wayland-capable Proton (11.0-2-arm64ec-90 or " +
+                        "newer). Games render on the Turnip bundled with that Proton — the " +
+                        "graphics-driver picker only affects the compositor. DX wrapper " +
+                        "(DXVK/VKD3D) settings apply as on X11. The Renderer options below " +
+                        "don't apply and are disabled.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -902,11 +907,15 @@ private fun TopLevelFields(
         }
         Spacer(Modifier.height(8.dp))
 
-        // Graphics Driver + wrapper manager (cloud) + config button
+        // Graphics Driver + wrapper manager (cloud) + config button. Under Wayland the picked
+        // driver only runs the embedded compositor (the game uses the Proton's bundled Wayland
+        // Turnip), so the picker is relabelled and the config gear — present mode, sync frame,
+        // device memory, BCn, gpuName, Turnip tokens… all X11 game-driver knobs — is greyed.
         var showWrapperManager by remember { mutableStateOf(false) }
+        val compositorDriverOnly = viewModel.isWaylandBackend
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             LabeledDropdown(
-                label = stringResource(R.string.graphics_driver),
+                label = if (compositorDriverOnly) "Compositor driver" else stringResource(R.string.graphics_driver),
                 options = viewModel.graphicsDriverEntries,
                 selectedOption = viewModel.selectedGraphicsDriver,
                 onSelect = { viewModel.selectedGraphicsDriver = it },
@@ -918,9 +927,27 @@ private fun TopLevelFields(
             IconButton(onClick = { showWrapperManager = true }) {
                 Icon(Icons.Default.CloudDownload, contentDescription = stringResource(R.string.wrapper_manager_open))
             }
-            IconButton(onClick = onShowGfxConfig) {
+            IconButton(onClick = onShowGfxConfig, enabled = !compositorDriverOnly) {
                 Icon(Icons.Default.Settings, contentDescription = null)
             }
+        }
+        if (compositorDriverOnly) {
+            Text(
+                "Used by the Wayland compositor to put frames on screen; the game renders on the " +
+                    "Turnip bundled with the Proton.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Text(
+                "Game driver: Wayland Turnip bundled with this Proton",
+                style = MaterialTheme.typography.bodySmall
+            )
+            Text(
+                "Driver configuration disabled: configures the X11 game driver; Wayland games " +
+                    "use the Proton's bundled Turnip.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
         if (showWrapperManager) WrapperManagerDialog(onDismiss = {
             showWrapperManager = false
@@ -1195,24 +1222,17 @@ private fun TopLevelFields(
         )
         Spacer(Modifier.height(8.dp))
 
-        // Show FPS + config — the HUD's FPS number is fed by the X11/scanout present path, which
-        // the Wayland compositor replaces (it doesn't tick the counter yet), so grey it under Wayland.
-        val fpsCounterEnabled = !viewModel.isWaylandBackend
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = if (fpsCounterEnabled) Modifier else Modifier.alpha(0.5f)
-        ) {
+        // Show FPS + config — the HUD ticks on both backends (the Wayland compositor feeds the
+        // counter from its own present path), so this is not gated on the display backend.
+        Row(verticalAlignment = Alignment.CenterVertically) {
             Switch(
                 checked = viewModel.showFPS,
-                onCheckedChange = { viewModel.showFPS = it },
-                enabled = fpsCounterEnabled
+                onCheckedChange = { viewModel.showFPS = it }
             )
             Spacer(Modifier.width(8.dp))
             Text(stringResource(R.string.show_fps), modifier = Modifier.weight(1f))
-            if (fpsCounterEnabled) {
-                IconButton(onClick = onShowFpsConfig) {
-                    Icon(Icons.Default.Settings, contentDescription = null)
-                }
+            IconButton(onClick = onShowFpsConfig) {
+                Icon(Icons.Default.Settings, contentDescription = null)
             }
         }
 

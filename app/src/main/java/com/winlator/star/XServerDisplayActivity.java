@@ -7481,6 +7481,9 @@ public class XServerDisplayActivity extends AppCompatActivity {
 
     private void setupUI() {
         FrameLayout rootView = findViewById(R.id.FLXServerDisplay);
+        // Seeded here (after the container + backend are resolved, and after the drawer's reset()
+        // in onCreate) so the drawer can grey Wayland-unsupported controls such as Relative Mouse.
+        XServerDrawerState.INSTANCE.setIsWaylandMode(waylandMode);
         xServerView = new XServerView(this, xServer);
         String rendererType = container != null ? resolvedRenderer() : "vulkan";
         // Native Rendering now routes to the hardened SurfaceFlinger (ASR) renderer instead of the
