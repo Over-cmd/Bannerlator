@@ -30,6 +30,7 @@ static jclass g_compositor_cls;      /* global ref */
 static jmethodID g_on_first_frame;   /* static void onFirstFramePresented() */
 static jmethodID g_on_game_surface;  /* static void onGameSurface(String, String) */
 static jmethodID g_on_game_frame;    /* static void onGameFrame() */
+static jmethodID g_on_pointer_lock;  /* static void onPointerLock(boolean, int, int) */
 
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
     (void)reserved;
@@ -44,6 +45,7 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
             g_on_game_surface = (*env)->GetStaticMethodID(env, g_compositor_cls, "onGameSurface",
                                                           "(Ljava/lang/String;Ljava/lang/String;)V");
             g_on_game_frame = (*env)->GetStaticMethodID(env, g_compositor_cls, "onGameFrame", "()V");
+            g_on_pointer_lock = (*env)->GetStaticMethodID(env, g_compositor_cls, "onPointerLock", "(ZII)V");
         }
     }
     return JNI_VERSION_1_6;
@@ -99,6 +101,16 @@ void banner_on_game_frame(void) {
     JNIEnv *env;
     if (!g_compositor_cls || !g_on_game_frame || !(env = thread_env())) return;
     (*env)->CallStaticVoidMethod(env, g_compositor_cls, g_on_game_frame);
+    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+}
+
+/* A program locked the pointer (locked = 1; the app's input path switches to deltas) or the lock
+ * ended (locked = 0; x,y = where the pointer is now, in scene coordinates, for the app to re-sync
+ * its own pointer to). Compositor thread. */
+void banner_on_pointer_lock(int locked, int x, int y) {
+    JNIEnv *env;
+    if (!g_compositor_cls || !g_on_pointer_lock || !(env = thread_env())) return;
+    (*env)->CallStaticVoidMethod(env, g_compositor_cls, g_on_pointer_lock, (jboolean)(locked != 0), (jint)x, (jint)y);
     if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
 }
 
