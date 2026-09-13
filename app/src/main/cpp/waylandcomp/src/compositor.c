@@ -633,16 +633,21 @@ static void take_dmabuf(struct surface *s, struct dmabuf_buffer *b, struct wl_re
                        name, b->width, b->height, b->format & 0xff, (b->format >> 8) & 0xff,
                        (b->format >> 16) & 0xff, (b->format >> 24) & 0xff,
                        vkp_modifier_name(b->modifier));
+        else if (ahb_swapchain_has_ahb(b))
+            banner_log("vulkan", "%s is presenting GPU frames through Wayland: %dx%d on its own display layer only "
+                       "(gralloc buffers the compositor cannot import for the copy path)",
+                       name, b->width, b->height);
         else
-            banner_log("error", "could not import GPU frames from %s (%dx%d, modifier %#llx)%s",
-                       name, b->width, b->height, (unsigned long long)b->modifier,
-                       ahb_swapchain_has_ahb(b) ? "; they are the game's gralloc buffers, shown on their own layer only" : "");
-        if (b->img) {
+            banner_log("error", "could not import GPU frames from %s (%dx%d, modifier %#llx)",
+                       name, b->width, b->height, (unsigned long long)b->modifier);
+        /* The HUD follows the window whether its frames are copied or go straight to the layer:
+         * a zero-copy frame the compositor never imported is still a presented game frame. */
+        if (b->img || ahb_swapchain_has_ahb(b)) {
             g_hud_surface = s;
             banner_on_game_surface(name, vkp_gpu_name());
         }
     }
-    if (s == g_hud_surface && b->img) banner_on_game_frame();
+    if (s == g_hud_surface && (b->img || ahb_swapchain_has_ahb(b))) banner_on_game_frame();
 }
 
 /* ---- hooks for ahb_swapchain.c (zero-copy layers) */
