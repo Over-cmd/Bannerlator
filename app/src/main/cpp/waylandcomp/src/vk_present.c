@@ -14,7 +14,7 @@
 #define TAG "BannerWayland"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
 #define LOGE(...) banner_log("error", __VA_ARGS__)
-#define MOD_INVALID 0x00ffffffffffffffULL
+#define MOD_INVALID VKP_MOD_INVALID
 
 struct vkp_image {
     VkImage image;
@@ -48,6 +48,7 @@ static uint32_t g_nimg;
 static VkExtent2D g_extent;
 
 static int g_first_frame_done; /* one-shot: fire banner_on_first_frame() on first present */
+static const char *vk_result_name(VkResult r);
 
 /* The Android surface is created/destroyed on the app's UI thread while the compositor thread
  * may be inside a WSI call (acquire and present can block for a refresh or more). The UI thread
@@ -437,6 +438,69 @@ static int memory_type(uint32_t bits, VkMemoryPropertyFlags want) {
     return -1;
 }
 
+const char *vkp_modifier_name(uint64_t modifier) {
+    static char other[40];
+    if (modifier == VKP_MOD_LINEAR) return "linear";
+    if (modifier == VKP_MOD_QCOM_COMPRESSED) return "qcom_compressed";
+    if (modifier == VKP_MOD_INVALID) return "implicit";
+    snprintf(other, sizeof(other), "modifier %#llx", (unsigned long long)modifier);
+    return other;
+}
+
+/* Can the driver create the image vkp_image_import_dmabuf() creates for this format+modifier
+ * (2D, DRM_FORMAT_MODIFIER tiling, TRANSFER_SRC, dma-buf memory) — and import it? */
+static int modifier_importable(VkFormat fmt, uint64_t modifier) {
+    if (!g_vk.GetPhysicalDeviceImageFormatProperties2) return 1; /* can't ask; the create will tell */
+    VkPhysicalDeviceExternalImageFormatInfo ext = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO,
+        .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT};
+    VkPhysicalDeviceImageDrmFormatModifierInfoEXT mod = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_DRM_FORMAT_MODIFIER_INFO_EXT, .pNext = &ext,
+        .drmFormatModifier = modifier, .sharingMode = VK_SHARING_MODE_EXCLUSIVE};
+    VkPhysicalDeviceImageFormatInfo2 info = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2, .pNext = &mod,
+        .format = fmt, .type = VK_IMAGE_TYPE_2D, .tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT,
+        .usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT};
+    VkExternalImageFormatProperties extp = {.sType = VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES};
+    VkImageFormatProperties2 props = {.sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2, .pNext = &extp};
+    if (g_vk.GetPhysicalDeviceImageFormatProperties2(g_pd, &info, &props) != VK_SUCCESS) return 0;
+    return (extp.externalMemoryProperties.externalMemoryFeatures &
+            VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT) != 0;
+}
+
+int vkp_dmabuf_modifiers(uint32_t drm_format, uint64_t *out, int max) {
+    if (max <= 0 || dev_init() != 0 || !g_vk.GetPhysicalDeviceFormatProperties2) return 0;
+    VkFormat fmt = drm_to_vk(drm_format);
+    VkDrmFormatModifierPropertiesListEXT list = {
+        .sType = VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT};
+    VkFormatProperties2 fp = {.sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2, .pNext = &list};
+    g_vk.GetPhysicalDeviceFormatProperties2(g_pd, fmt, &fp);
+    if (!list.drmFormatModifierCount) return 0;
+    VkDrmFormatModifierPropertiesEXT *props = calloc(list.drmFormatModifierCount, sizeof(*props));
+    if (!props) return 0;
+    list.pDrmFormatModifierProperties = props;
+    g_vk.GetPhysicalDeviceFormatProperties2(g_pd, fmt, &fp);
+
+    int n = 0;
+    for (uint32_t i = 0; i < list.drmFormatModifierCount; i++) {
+        uint64_t m = props[i].drmFormatModifier;
+        const char *why = NULL;
+        if (m != VKP_MOD_LINEAR && m != VKP_MOD_QCOM_COMPRESSED) why = "unknown layout";
+        else if (props[i].drmFormatModifierPlaneCount != 1) why = "not single-plane";
+        else if (!(props[i].drmFormatModifierTilingFeatures & VK_FORMAT_FEATURE_BLIT_SRC_BIT)) why = "no blit source";
+        else if (!modifier_importable(fmt, m)) why = "not importable as a dma-buf";
+        if (why) {
+            LOGI("dmabuf: %c%c%c%c %s reported by the driver but not advertised: %s",
+                 drm_format & 0xff, (drm_format >> 8) & 0xff, (drm_format >> 16) & 0xff,
+                 (drm_format >> 24) & 0xff, vkp_modifier_name(m), why);
+            continue;
+        }
+        if (n < max) out[n++] = m;
+    }
+    free(props);
+    return n;
+}
+
 struct vkp_image *vkp_image_from_dmabuf(int fd, uint32_t drm_format, uint64_t modifier, int w, int h,
                                         uint32_t stride, uint32_t offset) {
     return vkp_image_import_dmabuf(fd, drm_format, modifier, w, h, stride, offset, 0);
@@ -469,8 +533,10 @@ struct vkp_image *vkp_image_import_dmabuf(int fd, uint32_t drm_format, uint64_t 
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
     VkResult cr = g_vk.CreateImage(g_dev, &ici, NULL, &img->image);
     if (cr != VK_SUCCESS) {
-        if (as_blit_dst) LOGE("layer: vkCreateImage(modifier %#llx, %dx%d, pitch %u) -> %d",
-                              (unsigned long long)modifier, w, h, stride, (int)cr);
+        LOGE("%s: vkCreateImage(%s, %dx%d, pitch %u, offset %u) -> %s%s", as_blit_dst ? "layer" : "dmabuf",
+             vkp_modifier_name(modifier), w, h, stride, offset, vk_result_name(cr),
+             (!as_blit_dst && modifier == VKP_MOD_QCOM_COMPRESSED)
+                 ? ": the game's UBWC layout was refused; BANNER_WAYLAND_UBWC=0 forces linear buffers" : "");
         free(img); return NULL;
     }
 
@@ -487,7 +553,11 @@ struct vkp_image *vkp_image_import_dmabuf(int fd, uint32_t drm_format, uint64_t 
     uint32_t bits = req.memoryTypeBits & allowed;
     int idx = -1;
     for (int i = 0; i < 32; i++) if (bits & (1u << i)) { idx = i; break; }
-    if (idx < 0) { g_vk.DestroyImage(g_dev, img->image, NULL); close(dupfd); free(img); return NULL; }
+    if (idx < 0) {
+        LOGE("%s: no memory type can import the %s dma-buf (image types %#x, fd types %#x)",
+             as_blit_dst ? "layer" : "dmabuf", vkp_modifier_name(modifier), req.memoryTypeBits, allowed);
+        g_vk.DestroyImage(g_dev, img->image, NULL); close(dupfd); free(img); return NULL;
+    }
 
     VkImportMemoryFdInfoKHR imp = {.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR,
                                    .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
@@ -496,10 +566,16 @@ struct vkp_image *vkp_image_import_dmabuf(int fd, uint32_t drm_format, uint64_t 
                                          .pNext = &imp, .image = img->image};
     VkMemoryAllocateInfo mai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = &ded,
                                 .allocationSize = req.size, .memoryTypeIndex = (uint32_t)idx};
-    if (g_vk.AllocateMemory(g_dev, &mai, NULL, &img->mem) != VK_SUCCESS) {
+    VkResult mr = g_vk.AllocateMemory(g_dev, &mai, NULL, &img->mem);
+    if (mr != VK_SUCCESS) {
+        LOGE("%s: importing the %s dma-buf (%dx%d, %llu bytes) -> %s", as_blit_dst ? "layer" : "dmabuf",
+             vkp_modifier_name(modifier), w, h, (unsigned long long)req.size, vk_result_name(mr));
         g_vk.DestroyImage(g_dev, img->image, NULL); close(dupfd); free(img); return NULL;
     }
-    if (g_vk.BindImageMemory(g_dev, img->image, img->mem, 0) != VK_SUCCESS) {
+    VkResult br = g_vk.BindImageMemory(g_dev, img->image, img->mem, 0);
+    if (br != VK_SUCCESS) {
+        LOGE("%s: vkBindImageMemory(%s dma-buf) -> %s", as_blit_dst ? "layer" : "dmabuf",
+             vkp_modifier_name(modifier), vk_result_name(br));
         g_vk.FreeMemory(g_dev, img->mem, NULL); g_vk.DestroyImage(g_dev, img->image, NULL);
         free(img); return NULL;
     }
@@ -626,7 +702,16 @@ static const char *vk_result_name(VkResult r) {
     case VK_ERROR_DEVICE_LOST: return "DEVICE_LOST";
     case VK_TIMEOUT: return "TIMEOUT";
     case VK_NOT_READY: return "NOT_READY";
-    default: return "error";
+    case VK_ERROR_OUT_OF_DEVICE_MEMORY: return "OUT_OF_DEVICE_MEMORY";
+    case VK_ERROR_OUT_OF_HOST_MEMORY: return "OUT_OF_HOST_MEMORY";
+    case VK_ERROR_FORMAT_NOT_SUPPORTED: return "FORMAT_NOT_SUPPORTED";
+    case VK_ERROR_INVALID_EXTERNAL_HANDLE: return "INVALID_EXTERNAL_HANDLE";
+    case VK_ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT: return "INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT";
+    default: {
+        static char other[24];
+        snprintf(other, sizeof(other), "error %d", (int)r);
+        return other;
+    }
     }
 }
 

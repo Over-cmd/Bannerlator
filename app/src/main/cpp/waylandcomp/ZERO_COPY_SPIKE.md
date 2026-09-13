@@ -239,8 +239,9 @@ to our own Mesa build plus one small protocol.
 Prerequisite: a build of this branch, container on Wayland, the AIO Graphics Test (Vulkan and
 D3D12 tabs) as the workload, session log in `Download/Wayland-logs/`.
 
-0. **UBWC modifier A/B (no layers).** Add `MOD_QCOM_COMPRESSED` to `bind_dmabuf`'s list (one
-   line, not in this branch), run the AIO Vulkan/D3D12 with and without. Expect
+0. **UBWC modifier A/B (no layers).** Done on `feat/wayland-ubwc` (advertised when the compositor's
+   driver imports it, `BANNER_WAYLAND_UBWC=0` = old linear-only list; see `WAYLAND_RUNTIME.md`
+   "Compressed (UBWC) game buffers"). Run the AIO Vulkan/D3D12 with and without. Expect
    `vulkan: … is presenting GPU frames through Wayland: WxH, format XB24, tiled (zero-copy)` and
    no `dmabuf import failed`. Records how much of the 20 % is the linear swapchain alone.
 1. **Layer mode smoke.** Put `BANNER_WAYLAND_ZERO_COPY=1` in the container's environment

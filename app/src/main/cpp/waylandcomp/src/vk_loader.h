@@ -17,7 +17,8 @@
     X(GetPhysicalDeviceSurfaceCapabilitiesKHR) X(GetPhysicalDeviceSurfaceFormatsKHR) \
     X(CreateAndroidSurfaceKHR) X(DestroySurfaceKHR) X(CreateDevice) \
     X(GetDeviceProcAddr) X(EnumerateDeviceExtensionProperties) \
-    X(GetPhysicalDeviceMemoryProperties)
+    X(GetPhysicalDeviceMemoryProperties) X(GetPhysicalDeviceFormatProperties2) \
+    X(GetPhysicalDeviceImageFormatProperties2)
 
 #define VK_DEVICE_FUNCS(X) \
     X(GetDeviceQueue) X(CreateSwapchainKHR) X(DestroySwapchainKHR) X(GetSwapchainImagesKHR) \

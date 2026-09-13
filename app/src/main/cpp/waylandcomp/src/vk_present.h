@@ -39,6 +39,21 @@ void vkp_output_size(int *w, int *h);
 
 struct vkp_image;
 
+/* DRM format modifiers this backend knows the memory layout of (both single-plane on Adreno):
+ * LINEAR, and QCOM_COMPRESSED = UBWC (drm_fourcc.h: fourcc_mod_code(QCOM = 0x05, 1)). */
+#define VKP_MOD_LINEAR          0x0000000000000000ULL
+#define VKP_MOD_QCOM_COMPRESSED 0x0500000000000001ULL
+#define VKP_MOD_INVALID         0x00ffffffffffffffULL
+/* "linear", "qcom_compressed", or "modifier 0x…" for anything else (static buffer). */
+const char *vkp_modifier_name(uint64_t modifier);
+/* The modifiers a dma-buf of this DRM fourcc can be imported with as a blit source, asked of the
+ * renderer's own driver (VkDrmFormatModifierPropertiesListEXT, each confirmed for a dma-buf-backed
+ * TRANSFER_SRC image with vkGetPhysicalDeviceImageFormatProperties2). Only LINEAR and
+ * QCOM_COMPRESSED are ever returned (the ones this file can describe a plane layout for); other
+ * modifiers the driver reports are logged once. Returns the count, 0 when the device is not up
+ * (LINEAR is then the only safe assumption). Compositor thread. */
+int vkp_dmabuf_modifiers(uint32_t drm_format, uint64_t *out, int max);
+
 // Import a dmabuf (single plane). NULL on failure. The image aliases the buffer, so
 // later client frames rendered into the same buffer show up without re-importing.
 struct vkp_image *vkp_image_from_dmabuf(int fd, uint32_t drm_format, uint64_t modifier,
