@@ -883,27 +883,56 @@ private fun TopLevelFields(
         // the game renders on the Turnip bundled with the Proton wcp (winewayland picks it via
         // VK_ICD_FILENAMES); the Graphics Driver picker only feeds the compositor, and its
         // config dialog is X11-only. The DX Wrapper (DXVK/VKD3D) applies on both backends.
+        //
+        // Wayland is only selectable on a layer that ships winewayland.so + its bundled Wayland Turnip
+        // (WineWaylandSupport). On any other layer the item is disabled and the dropdown shows the
+        // EFFECTIVE backend (X11) — including for a container saved as "wayland" whose layer was since
+        // removed/replaced, which the save path then persists as X11. Keyed on the wine version so the
+        // cached probe only re-runs when the layer changes.
         run {
             val backendLabels = listOf("X11", "Wayland")
             val backendValues = listOf(Container.DISPLAY_BACKEND_X11, Container.DISPLAY_BACKEND_WAYLAND)
-            val selIdx = backendValues.indexOf(viewModel.displayBackend).coerceAtLeast(0)
+            val waylandCapable = remember(viewModel.selectedWineVersion) {
+                viewModel.isWineWaylandCapable(viewModel.selectedWineVersion)
+            }
+            val selIdx = if (viewModel.isWaylandBackend) 1 else 0
             LabeledDropdown(
                 label = "Display backend",
                 options = backendLabels,
                 selectedOption = backendLabels[selIdx],
-                onSelect = { viewModel.displayBackend = backendValues[backendLabels.indexOf(it)] }
+                disabledOptions = if (waylandCapable) emptySet() else setOf(backendLabels[1]),
+                onSelect = {
+                    val picked = backendValues[backendLabels.indexOf(it)]
+                    viewModel.displayBackend =
+                        if (picked == Container.DISPLAY_BACKEND_WAYLAND && !waylandCapable) Container.DISPLAY_BACKEND_X11
+                        else picked
+                }
             )
             if (viewModel.isWaylandBackend) {
                 Text(
                     "Wayland (experimental): games render through the embedded compositor " +
-                        "(winewayland). Needs a Wayland-capable Proton (11.0-2-arm64ec-90 or " +
-                        "newer). Games render on the Turnip bundled with that Proton — the " +
+                        "(winewayland). Needs " + com.winlator.star.core.WineWaylandSupport.LAYER_HINT +
+                        ". Games render on the Turnip bundled with that Proton — the " +
                         "graphics-driver picker only affects the compositor. DX wrapper " +
                         "(DXVK/VKD3D) settings apply as on X11. The Renderer options below " +
                         "don't apply and are disabled.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+            } else if (!waylandCapable) {
+                Text(
+                    "Wayland needs " + com.winlator.star.core.WineWaylandSupport.LAYER_HINT +
+                        ". The selected layer does not include winewayland and its Wayland Turnip.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                if (viewModel.isWaylandStored) {
+                    Text(
+                        "This container was saved on Wayland, but its Proton layer is no longer Wayland-capable: it runs on X11 and will be saved as X11.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
             }
         }
         Spacer(Modifier.height(8.dp))
