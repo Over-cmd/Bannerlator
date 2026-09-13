@@ -123,9 +123,9 @@ th.num{text-align:right}
 <main class="slides">
 
 <section class="slide" id="s1">
-  <div class="eyebrow">Bannerlator · 3.1.2 Wayland pre-release 1 · 13 September 2026</div>
+  <div class="eyebrow">Bannerlator · 3.1.2 Wayland pre-release 2 · 13 September 2026</div>
   <h1>Two display backends, one handheld</h1>
-  <p class="lede">X11 is the mature path every Bannerlator game has used until now. Wayland is a second backend that runs Windows games through a compositor Bannerlator carries itself. This deck compares the two as they stand today, lists what shipped in the pre-release, and is honest about what is left.</p>
+  <p class="lede">X11 is the mature path every Bannerlator game has used until now. Wayland is a second backend that runs Windows games through a compositor Bannerlator carries itself. This deck compares the two as they stand after pre-release 2, lists what shipped, shows the measured zero-copy result, and is honest about what is left.</p>
   <div class="legend"><span><i class="x"></i>X11: Java X server + libwinlator</span><span><i class="w"></i>Wayland: winewayland + embedded compositor</span></div>
   <p class="note">Every number and claim here comes from one device: an AYANEO Pocket FIT with an Adreno 750. Nothing else has run it yet.</p>
 </section>
@@ -138,9 +138,10 @@ th.num{text-align:right}
       <div class="chain"><span class="box">game</span><span class="arrow">→</span><span class="box">DXVK / VKD3D / GL</span><span class="arrow">→</span><span class="box">your picked Android Turnip</span><span class="arrow">→</span><span class="box hi-x11">Java X server</span><span class="arrow">→</span><span class="box hi-x11">libwinlator compositor</span><span class="arrow">→</span><span class="box">SurfaceFlinger</span></div></div>
     <div class="pipe-row"><div class="pipe-label"><span class="tag way">Wayland</span></div>
       <div class="chain"><span class="box">game</span><span class="arrow">→</span><span class="box">DXVK / VKD3D / Zink</span><span class="arrow">→</span><span class="box hi-way">Wayland Turnip inside the Proton</span><span class="arrow">→</span><span class="box hi-way">winewayland.drv</span><span class="arrow">→</span><span class="box hi-way">embedded Vulkan compositor</span><span class="arrow">→</span><span class="box">SurfaceFlinger</span></div></div>
-    <div class="pipe-row"><div class="pipe-label"><span class="tag way">Wayland, next</span></div>
-      <div class="chain"><span class="box">game</span><span class="arrow">→</span><span class="box">Wayland Turnip, Android-buffer swapchain</span><span class="arrow">→</span><span class="box ghost">compositor hands the buffer over, no copy</span><span class="arrow">→</span><span class="box hi-way">own hardware layer</span><span class="arrow">→</span><span class="box">display hardware</span></div></div>
+    <div class="pipe-row"><div class="pipe-label"><span class="tag way">Wayland, zero-copy</span></div>
+      <div class="chain"><span class="box">game</span><span class="arrow">→</span><span class="box">Wayland Turnip, Android-buffer swapchain</span><span class="arrow">→</span><span class="box hi-way">compositor hands the buffer over, no copy</span><span class="arrow">→</span><span class="box hi-way">own hardware layer</span><span class="arrow">→</span><span class="box">display hardware</span></div></div>
   </div>
+  <p class="note">The zero-copy row is real since pre-release 2, behind the BANNER_WAYLAND_ZERO_COPY=1 flag: the game's driver builds its swapchain on Android gralloc buffers and the compositor passes them to the display hardware untouched.</p>
   <div class="two">
     <div class="col"><h3>Two drivers on Wayland</h3><p>The game renders on a Turnip built into the Proton layer (Linux build, KGSL backend, Wayland WSI). The compositor uses whatever Android Turnip you pick under Compositor driver. The stock "System" driver cannot import the game's frames, so it is never a valid compositor pick.</p></div>
     <div class="col"><h3>One driver on X11</h3><p>The picked Android Turnip renders the game and the X server hands the result to libwinlator. No X server exists on the Wayland side, which is where the future gains come from and also why keyboard, clipboard and pointer capture had to be built from scratch.</p></div>
@@ -188,7 +189,19 @@ th.num{text-align:right}
     </svg>
   </figure>
   <div class="legend"><span><i class="x"></i>X11</span><span><i class="w"></i>Wayland</span><span class="mono">AIO Graphics Test, Adreno 750, one launch switching between all eight APIs</span></div>
-  <p class="note">Wayland is not a frame-rate win today. Vulkan and D3D12 sit about 20 percent behind X11 because the compositor copies every frame once; the DXVK paths are within a few percent; OpenGL is ahead because Zink on Wayland beats the X11 GL path. At hundreds of frames per second one copy shows up hard. In a GPU-bound game at 40 to 60 fps the same copy costs well under half a millisecond, a few percent either way. Half-Life 2 sits at the 144 Hz cap on both. Power draw has not been measured against X11.</p>
+  <p class="note">With the default copy path Wayland is not a frame-rate win. Vulkan and D3D12 sit about 20 percent behind X11 because the compositor copies every frame once; the DXVK paths are within a few percent; OpenGL is ahead because Zink on Wayland beats the X11 GL path. At hundreds of frames per second one copy shows up hard. In a GPU-bound game at 40 to 60 fps the same copy costs well under half a millisecond, a few percent either way. Half-Life 2 sits at the 144 Hz cap on both.</p>
+  <div class="tablewrap"><table>
+    <thead><tr><th>Zero-copy, measured (pre-release 2)</th><th class="num">Zero-copy on</th><th class="num">Copy path</th></tr></thead>
+    <tbody>
+      <tr><td>Game frame rate, cap and vsync removed</td><td class="num">185 fps</td><td class="num">187 fps</td></tr>
+      <tr><td>Frames on screen (144 Hz panel)</td><td class="num">134.5</td><td class="num">134.0</td></tr>
+      <tr><td>GPU busy</td><td class="num">78.6 %</td><td class="num">82.6 %</td></tr>
+      <tr><td>GPU clock</td><td class="num">944 MHz</td><td class="num">1000 MHz</td></tr>
+      <tr><td>Power draw</td><td class="num">16.29 W</td><td class="num">16.78 W</td></tr>
+      <tr><td>Frames presented without a copy</td><td class="num">133 of 134 per second</td><td class="num">none</td></tr>
+    </tbody>
+  </table></div>
+  <p class="note">Half-Life 2, same scripted intro scene, two 60-second passes per mode alternating, GPU and battery sampled once a second. Frame rate did not move because the game is CPU-bound under FEX on this device; the compositor's GPU work did go away. A frame-rate gain needs a GPU-bound game or a large panel.</p>
 </section>
 
 <section class="slide" id="s4">
@@ -204,43 +217,47 @@ th.num{text-align:right}
       <tr><td>Soft keyboard on a text field</td><td>Manual toggle</td><td>Opens by itself when a field takes focus</td></tr>
       <tr><td>Fullscreen modes and screen alignment</td><td>Yes</td><td>Yes, live from the drawer, touch mapped to match</td></tr>
       <tr><td>FPS cap, HOME and back, swapchain rebuilds</td><td>Yes</td><td>Yes, fixed this release</td></tr>
-      <tr><td>Driver for the game</td><td>Any Android Turnip you install</td><td>Four Turnips built into the Proton, or an imported Linux driver</td></tr>
+      <tr><td>Driver for the game</td><td>Any Android Turnip you install</td><td>Eight Turnips built into the Proton, or an imported Linux driver</td></tr>
       <tr><td>Frame generation (LSFG Native, Win-FG)</td><td>Yes</td><td>Not wired yet</td></tr>
       <tr><td>Render scale (supersampling)</td><td>Yes</td><td>Not used</td></tr>
-      <tr><td>Keyboard layouts other than US</td><td>Yes</td><td>Names default to US until xkb data is bundled</td></tr>
+      <tr><td>Keyboard layouts other than US</td><td>Yes</td><td>Yes since pre-release 2, xkb data bundled in the layer</td></tr>
       <tr><td>Drag-and-drop, image clipboard</td><td>Partly</td><td>No, text only</td></tr>
       <tr><td>Window icons and decorations</td><td>Yes</td><td>Missing, cosmetic</td></tr>
-      <tr><td>Game on its own hardware layer</td><td>Impossible, the X server sits in between</td><td>Prototype behind a flag, hardware composition proven</td></tr>
+      <tr><td>Game on its own hardware layer, no copy</td><td>Impossible, the X server sits in between</td><td>Working behind a flag, measured above</td></tr>
     </tbody>
   </table></div>
 </section>
 
 <section class="slide" id="s5">
-  <div class="eyebrow">Slide 5 · What shipped in 3.1.2 Wayland pre-release 1</div>
+  <div class="eyebrow">Slide 5 · What shipped in pre-releases 1 and 2</div>
   <h2>Everything since 3.1.1</h2>
   <div class="grid3">
     <div class="tile"><h3>Wayland backend</h3><ul><li>Per container, with a per-game override: container default, force X11, force Wayland.</li><li>Only offered on a Proton that ships winewayland and its Wayland Turnip. Anything else falls back to X11 with a notice.</li><li>Settings tell the truth on Wayland: greyed controls show the reason, live ones apply.</li></ul></div>
     <div class="tile"><h3>Pointer lock</h3><ul><li>Pointer constraints and relative motion implemented in the compositor.</li><li>Touch drags, captured mouse and stick-as-mouse arrive as relative motion.</li><li>Half-Life 2 at 144 fps with touch mouse-look, full turn-around included.</li></ul></div>
     <div class="tile"><h3>Keyboard, clipboard, IME</h3><ul><li>Keyboard works on Wayland for the first time.</li><li>Copy in a Windows program, paste on Android, and back.</li><li>Soft keyboard opens when a Windows text field takes focus.</li></ul></div>
     <div class="tile"><h3>Screen and compositor</h3><ul><li>Off, Fit, Stretch, Fill and Integer modes plus alignment, with matching touch mapping.</li><li>No black frame on swapchain rebuild, exact FPS cap, resume after HOME, recovery on surface loss.</li><li>HUD sampling moved off the compositor thread.</li></ul></div>
-    <div class="tile"><h3>Four bundled drivers</h3><ul><li>Wayland game driver: Auto by GPU, plain, a7xx, a8xx Balanced, a8xx Performance.</li><li>Imported Linux drivers accepted as a zip.</li><li>Each pick verified to load its own driver.</li></ul></div>
-    <div class="tile"><h3>Experimental layer mode</h3><ul><li>BANNER_WAYLAND_ZERO_COPY=1 in Env Vars puts a fullscreen game on its own Android hardware layer.</li><li>Off by default. First half of the zero-copy work.</li><li>Two launch crashes on odd shortcut names fixed on the side.</li></ul></div>
+    <div class="tile"><h3>Eight bundled drivers</h3><ul><li>Auto by GPU, plain, Vauzi a7xx, WinNative Balanced and Performance, gen8, SMXZ, WHITE, upstream.</li><li>Imported Linux drivers accepted as a zip.</li><li>Each pick verified to load its own driver.</li></ul></div>
+    <div class="tile"><h3>Zero-copy and compressed buffers</h3><ul><li>BANNER_WAYLAND_ZERO_COPY=1: the game's own frames go to the display hardware, no compositor copy. Measured on slide 3.</li><li>Compressed (UBWC) game buffers accepted by default, BANNER_WAYLAND_UBWC=0 to force linear.</li><li>First-launch size and desktop-close bugs fixed; odd shortcut names no longer crash.</li></ul></div>
   </div>
 </section>
 
 <section class="slide" id="s6">
   <div class="eyebrow">Slide 6 · The drivers inside the Proton layer</div>
-  <h2>Four Turnips, four sources</h2>
+  <h2>Eight Turnips, six sources</h2>
   <div class="tablewrap"><table>
     <thead><tr><th>Picker choice</th><th>Built from</th><th>Mesa</th><th>Adreno target</th></tr></thead>
     <tbody>
       <tr><td>Bundled</td><td><a href="https://github.com/The412Banner/Banners-Turnip/tree/wayland">Banners-Turnip, wayland branch</a>, upstream Mesa with no device patches</td><td class="mono">7cda7850</td><td>6xx, 730, 740, 750</td></tr>
-      <tr><td>Bundled a7xx</td><td><a href="https://github.com/Vauzi-17/710/releases/tag/3.6">Vauzi-17 "710" v3.6</a> recipe, add_710_720_722</td><td class="mono">7631b525</td><td>710, 720, 722</td></tr>
-      <tr><td>Bundled a8xx</td><td><a href="https://github.com/WinNative-Emu/Drivers/releases/tag/v1.15">WinNative WN-Turnip 1.15</a>, Balanced recipe. Auto's pick on an 8xx</td><td class="mono">12b7b819</td><td>830, 840, plus 810, 825, 829</td></tr>
-      <tr><td>Bundled a8xx Performance</td><td><a href="https://github.com/WinNative-Emu/Drivers/releases/tag/v1.15">WinNative WN-Turnip 1.15</a>, Performance recipe, GPU held at PWR_MAX</td><td class="mono">12b7b819</td><td>same</td></tr>
+      <tr><td>Bundled a7xx</td><td><a href="https://github.com/Vauzi-17/710/releases/tag/3.6">Vauzi-17 "710" v3.6</a> recipe</td><td class="mono">7631b525</td><td>710, 720, 722</td></tr>
+      <tr><td>Bundled a8xx</td><td><a href="https://github.com/WinNative-Emu/Drivers/releases/tag/v1.15">WinNative WN-Turnip 1.15</a>, Balanced, Auto's pick on an 8xx</td><td class="mono">12b7b819</td><td>830, 840, plus 810, 825, 829</td></tr>
+      <tr><td>Bundled a8xx Performance</td><td><a href="https://github.com/WinNative-Emu/Drivers/releases/tag/v1.15">WinNative WN-Turnip 1.15</a>, Performance, GPU held at PWR_MAX</td><td class="mono">12b7b819</td><td>same</td></tr>
+      <tr><td>Bundled a8xx gen8</td><td><a href="https://github.com/The412Banner/Banners-Turnip">Banners-Turnip</a>'s own Android a8xx recipe</td><td class="mono">12b7b819</td><td>same</td></tr>
+      <tr><td>Bundled a8xx SMXZ</td><td><a href="https://github.com/StevenMXZ/Adreno-Tools-Drivers/releases/tag/v36">StevenMXZ Turnip Gen8 V36</a> recipe</td><td class="mono">c501e1d1</td><td>same</td></tr>
+      <tr><td>Bundled a8xx WHITE</td><td><a href="https://github.com/whitebelyash/freedreno_turnip-CI/releases/tag/tu_v31">whitebelyash Mainline Turnip v31</a> recipe</td><td class="mono">9c475fc3</td><td>same</td></tr>
+      <tr><td>Bundled a8xx upstream</td><td>pure <a href="https://gitlab.freedesktop.org/mesa/mesa">Mesa main</a>, no patches, 2026-09-13</td><td class="mono">bbc7792f</td><td>same</td></tr>
     </tbody>
   </table></div>
-  <p class="note">All four are rebuilt from those sources as Wayland, Linux drivers with the KGSL backend and Wayland WSI. The Android zips those projects publish cannot run inside Proton. Vauzi recommends TU_DEBUG=sysmem on 710, 720 and 722 if you see artifacts. The a7xx and a8xx builds are proven to load and render on the 750, not yet on their own silicon.</p>
+  <p class="note">All eight are rebuilt from those sources as Wayland, Linux drivers with the KGSL backend and Wayland WSI. The Android zips those projects publish cannot run inside Proton. Vauzi recommends TU_DEBUG=sysmem on 710, 720 and 722 if you see artifacts. All eight load and render on the 750; none has been run on its own 7xx or 8xx silicon yet.</p>
 </section>
 
 <section class="slide" id="s7">
@@ -250,21 +267,21 @@ th.num{text-align:right}
     <div class="col">
       <ol class="steps">
         <li><b>01</b><span>Install the APK for your flavour over 3.1.1. Data is kept, and versionCode stays 85 so you can go back or move on to the next stable.</span></li>
-        <li><b>02</b><span>Contents, Proton, Install from file: the wcp installs as Proton-11.0-2.1-arm64ec-3, its own layer line, never offered as an update to a normal 11.0-2 container.</span></li>
+        <li><b>02</b><span>Contents, Proton, Install from file: the wcp installs as Proton-11.0-2.1-arm64ec-5, its own layer line, never offered as an update to a normal 11.0-2 container.</span></li>
         <li><b>03</b><span>Have any recent Android Turnip installed from the in-app catalog. It serves the compositor. Never pick System.</span></li>
         <li><b>04</b><span>Container: that Proton, Display backend Wayland, Compositor driver your Turnip, Wayland game driver Auto, an installed FEXCore. DXVK, VKD3D, components and audio as on X11.</span></li>
-        <li><b>05</b><span>The first launch after installing the wcp comes up at 1024x768. Relaunch once.</span></li>
+        <li><b>05</b><span>Adreno 830/840 owners: try the a8xx choices one by one under Wayland game driver and report which runs best.</span></li>
       </ol>
     </div>
     <div class="col">
       <div class="files">
-        <div><span>Bannerlator-3.1.2-wayland-pre1-standard.apk</span><span>com.winlator.banner</span></div>
-        <div><span>Bannerlator-3.1.2-wayland-pre1-pubg.apk</span><span>com.tencent.ig</span></div>
-        <div><span>Bannerlator-3.1.2-wayland-pre1-ludashi.apk</span><span>Ludashi flavour</span></div>
-        <div><span>proton-11.0-2.1-arm64ec-wayland-v3.wcp</span><span>108.7 MB</span></div>
+        <div><span>Bannerlator-3.1.2-wayland-pre2-standard.apk</span><span>com.winlator.banner</span></div>
+        <div><span>Bannerlator-3.1.2-wayland-pre2-pubg.apk</span><span>com.tencent.ig</span></div>
+        <div><span>Bannerlator-3.1.2-wayland-pre2-ludashi.apk</span><span>Ludashi flavour</span></div>
+        <div><span>proton-11.0-2.1-arm64ec-wayland-v5.wcp</span><span>117.5 MB, eight drivers</span></div>
         <div><span>README-Wayland-test-kit.txt</span><span>setup notes</span></div>
       </div>
-      <p><a class="cta" href="https://github.com/The412Banner/Bannerlator/releases/tag/3.1.2-wayland-pre1">Open the pre-release on GitHub</a></p>
+      <p><a class="cta" href="https://github.com/The412Banner/Bannerlator/releases/tag/3.1.2-wayland-pre2">Open the pre-release on GitHub</a></p>
       <p class="note">Logs: Download/Wayland-logs for the compositor session, Download/bannerlator/&lt;game&gt;/wine_debug.log for Wine, DXVK and VKD3D.</p>
     </div>
   </div>
@@ -281,6 +298,8 @@ th.num{text-align:right}
     <li><b>Buffer churn</b><span>Destroying a committed buffer, which every swapchain rebuild does, produced a black frame and a window close and reopen. The compositor now keeps the last image until the next commit.</span></li>
     <li><b>Lock contention</b><span>Swapchain calls were held under the same lock the UI thread needs. Backgrounding mid-game risked a freeze; the UI thread now hands the surface over without waiting.</span></li>
     <li><b>Shortcut names</b><span>An executable without a folder or without .exe crashed the launch in two places. Fixed.</span></li>
+    <li><b>First launch</b><span>The first launch after installing a layer opened at 1024x768: Wine's prefix update ran inside the session's first process, its helper desktop was killed at once, and the display cache fell back to a default rectangle. The update now runs before the session.</span></li>
+    <li><b>Desktop close</b><span>Wine's desktop closed a second into a 32-bit game's startup: this Proton tree closes a desktop with zero grace instead of upstream's one second, and the thread count matched by coincidence. The grace is restored in the layer and every session process now starts on the game desktop.</span></li>
   </ul>
 </section>
 
@@ -288,13 +307,9 @@ th.num{text-align:right}
   <div class="eyebrow">Slide 9 · Fixes and performance, ranked</div>
   <h2>What is left</h2>
   <ol class="ranked">
-    <li><span><b>Close the frame-rate gap.</b> First advertise the Qualcomm compressed buffer format so game swapchains stop being forced linear, a one-line change to A/B. Then the zero-copy path: a swapchain change in our own Wayland Turnip so its images are Android buffers the layer path presents directly. About three to four days; the Android half is already in behind the flag.</span></li>
-    <li><span><b>First launch at 1024x768</b> after installing a wcp. Cosmetic, but every tester meets it.</span></li>
-    <li><span><b>Half-Life 2's launch closes Wine's desktop process</b> a second in. Fullscreen games do not care; windowed games launched the same way lose the taskbar.</span></li>
-    <li><span><b>Bundle xkeyboard-config</b> so non-US layouts get their names.</span></li>
-    <li><span><b>Real 710, 720, 722 and 8xx testing</b> of the bundled drivers. The most valuable thing a tester can send.</span></li>
-    <li><span><b>Refresh Zink and EGL</b> from the same run as the Turnips. Done in the v3 wcp.</span></li>
-    <li><span><b>Guest-side leak on every API switch</b>, a few dozen file descriptors and threads. X11 leaks more, so not Wayland-specific.</span></li>
+    <li><span><b>Turn zero-copy on by default</b> once more GPUs have run it, and measure it where it can show: a GPU-bound game and a large panel. Both performance paths are in and proven.</span></li>
+        <li><span><b>Real 710, 720, 722 and 8xx testing</b> of the eight bundled drivers. The most valuable thing a tester can send.</span></li>
+        <li><span><b>Guest-side leak on every API switch</b>, a few dozen file descriptors and threads. X11 leaks more, so not Wayland-specific.</span></li>
     <li><span><b>Frame generation on Wayland</b>, untested and still greyed.</span></li>
   </ol>
 </section>
@@ -303,7 +318,7 @@ th.num{text-align:right}
   <div class="eyebrow">Slide 10 · What Wayland can do that X11 never could</div>
   <h2>Future possibilities</h2>
   <div class="grid3">
-    <div class="tile"><h3>Zero-copy presentation</h3><p>Each window buffer becomes its own Android layer composed by the display hardware. Less GPU, lower latency, better battery. The device already composed Half-Life 2 this way at 144 Hz.</p></div>
+    <div class="tile"><h3>Zero-copy presentation</h3><p>Each window buffer becomes its own Android layer composed by the display hardware. Now working behind a flag: same frames, four points less GPU busy and three percent less power on a CPU-bound game.</p></div>
     <div class="tile"><h3>Even frame pacing</h3><p>The compositor already serves presentation feedback, so a game can learn when a frame hit the glass. The parked pacing work resumes on Wayland first.</p></div>
     <div class="tile"><h3>Tearing control</h3><p>Lowest-latency fullscreen on request, as a protocol rather than a hack.</p></div>
     <div class="tile"><h3>Native multi-touch</h3><p>Real touch events instead of touch-as-mouse.</p></div>
@@ -328,14 +343,14 @@ th.num{text-align:right}
     <div class="col">
       <span class="tag x11">It cannot yet</span>
       <ul>
-        <li>Beat X11 on frame rate. Expect a few percent either way in real games, and about 20 percent lower on synthetic Vulkan and D3D12 numbers.</li>
+        <li>Beat X11 on frame rate yet. Zero-copy saves GPU work, not frames, on a CPU-bound game; expect a few percent either way in real games and about 20 percent lower on synthetic Vulkan and D3D12 numbers with the default path.</li>
         <li>Promise anything on a GPU other than the Adreno 750 it was built on.</li>
-        <li>Do frame generation, non-US layout names, drag-and-drop, image clipboard, window decorations.</li>
+        <li>Do frame generation, drag-and-drop, image clipboard, window decorations.</li>
       </ul>
     </div>
   </div>
-  <div class="callout"><p>The honest pitch is latency, battery and headroom, not a headline frame rate. Once the zero-copy path lands, the gap should close and Wayland should pull slightly ahead, with lower input latency and a modest battery gain from one less copy and one less process.</p></div>
-  <p class="note">Pre-release, not offered by the in-app updater. 3.1.1 stays the stable release.</p>
+  <div class="callout"><p>The honest pitch is latency, battery and headroom, not a headline frame rate. The zero-copy path is in; on a GPU-bound game or a large panel that is where the gap should close, with lower input latency and a modest battery gain from one less copy and one less process.</p></div>
+  <p class="note">Pre-release 2, not offered by the in-app updater. 3.1.1 stays the stable release.</p>
 </section>
 
 </main>
