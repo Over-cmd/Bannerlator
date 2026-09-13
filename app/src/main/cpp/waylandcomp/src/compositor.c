@@ -207,7 +207,8 @@ struct surface {
     struct wl_list frames;                  /* frame callbacks for the next redraw */
     struct wl_list feedback;                /* presentation feedback for the current content */
     int drawn;                              /* part of the last rendered scene */
-    int64_t next_release_ns;                /* FPS limiter: when this surface's next buffer goes back */
+    int64_t next_release_ns;                /* FPS limiter: when this surface's last buffer goes back */
+    int releases_pending;                   /* FPS limiter: buffers of this surface still to be released */
 
     enum surface_role role;
     struct wl_resource *xdg_surface, *xdg_toplevel;
@@ -267,6 +268,7 @@ volatile int g_output_w, g_output_h;
 struct pending_release {
     struct wl_resource *buffer;
     struct wl_listener destroy;
+    struct surface *surface;                /* NULL once the surface is gone */
     int64_t at_ns;
     struct wl_list link;
 };
@@ -287,9 +289,17 @@ static int64_t now_ns(void) {
 /* ------------------------------------------------------------------ buffer release pacing */
 
 static void pending_release_free(struct pending_release *pr) {
+    if (pr->surface && pr->surface->releases_pending > 0) pr->surface->releases_pending--;
     wl_list_remove(&pr->destroy.link);
     wl_list_remove(&pr->link);
     free(pr);
+}
+
+/* A surface is going away: its queued releases still go out on time, they just stop counting. */
+static void pending_releases_forget_surface(struct surface *s) {
+    struct pending_release *pr;
+    wl_list_for_each(pr, &g_pending_releases, link)
+        if (pr->surface == s) pr->surface = NULL;
 }
 
 static void on_pending_release_buffer_destroyed(struct wl_listener *l, void *data) {
@@ -324,20 +334,34 @@ static int on_release_timer(int fd, uint32_t mask, void *data) {
     return 0;
 }
 
-/* Give a replaced buffer back to its client: now, or on the limiter's cadence. */
+/* Give a replaced buffer back to its client: now, or on the limiter's cadence.
+ *
+ * Each release takes the next slot of a per-surface cadence (one slot per interval), so a game
+ * gets one buffer back per interval however fast it commits. The schedule is kept honest at both
+ * ends: a slot in the past is brought to now (the game was slower than the cap, no catch-up burst
+ * is owed), and it never runs further ahead than the releases actually queued — with p releases
+ * still pending the new one lands at most (p + 1) intervals out, nothing pending means at most
+ * one interval. Without that bound the schedule kept slots that were consumed but never
+ * delivered (a swapchain rebuild destroys buffers with queued releases) or that a coarser earlier
+ * limit had spaced out, and the game's first frames after that waited on empty slots. */
 static void release_buffer(struct surface *s, struct wl_resource *buffer) {
     int limit = g_fps_limit;
     if (limit <= 0 || g_release_timer_fd < 0) { wl_buffer_send_release(buffer); return; }
     int64_t interval = 1000000000LL / limit, now = now_ns();
-    if (s->next_release_ns <= now - interval) s->next_release_ns = now + interval;
-    else s->next_release_ns += interval;
+    int64_t at = s->next_release_ns + interval;
+    int64_t latest = now + interval * (int64_t)(s->releases_pending + 1);
+    if (at < now) at = now;
+    if (at > latest) at = latest;
+    s->next_release_ns = at;
     struct pending_release *pr = calloc(1, sizeof(*pr));
     if (!pr) { wl_buffer_send_release(buffer); return; }
     pr->buffer = buffer;
-    pr->at_ns = s->next_release_ns;
+    pr->surface = s;
+    pr->at_ns = at;
     pr->destroy.notify = on_pending_release_buffer_destroyed;
     wl_resource_add_destroy_listener(buffer, &pr->destroy);
     wl_list_insert(g_pending_releases.prev, &pr->link);
+    s->releases_pending++;
     arm_release_timer();
 }
 
@@ -794,6 +818,7 @@ static void surface_resource_destroy(struct wl_resource *r) {
         child->parent = NULL;
     }
     if (s->pending_buffer) wl_list_remove(&s->pending_buffer_destroy.link);
+    pending_releases_forget_surface(s);
     drop_dmabuf(s, 0);
     vkp_image_destroy(s->shm_img);
     wl_resource_for_each_safe(cb, cbtmp, &s->pending_frames) wl_resource_destroy(cb);
