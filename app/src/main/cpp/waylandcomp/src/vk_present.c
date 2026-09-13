@@ -25,9 +25,9 @@ struct vkp_image {
     int in_general;           /* shm images: moved from PREINITIALIZED to GENERAL */
 };
 
-static ANativeWindow *g_window;
+static ANativeWindow *g_window;  /* the window frames go to; compositor thread only */
 static char *g_driver_path, *g_library_name, *g_native_lib_dir;
-static int g_dev_state;       /* 0 = not yet, 1 = ok, -1 = failed */
+static int g_dev_state;       /* 0 = not yet, 1 = ok, -1 = failed, -2 = lost (VK_ERROR_DEVICE_LOST) */
 static VkInstance g_inst;
 static VkPhysicalDevice g_pd;
 static VkDevice g_dev;
@@ -46,9 +46,32 @@ static uint32_t g_nimg;
 static VkExtent2D g_extent;
 
 static int g_first_frame_done; /* one-shot: fire banner_on_first_frame() on first present */
-/* The Android surface is replaced from the UI thread while the compositor thread renders:
- * frames and window changes are serialized so a frame never presents to a dead surface. */
-static pthread_mutex_t g_swap_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* The Android surface is created/destroyed on the app's UI thread while the compositor thread
+ * may be inside a WSI call (acquire and present can block for a refresh or more). The UI thread
+ * therefore never touches the swapchain: it leaves the new window here and returns at once; the
+ * compositor thread picks it up before its next frame (vkp_apply_window_request). g_req_lock is
+ * only ever held for these few assignments, never across a Vulkan call. */
+static pthread_mutex_t g_req_lock = PTHREAD_MUTEX_INITIALIZER;
+static ANativeWindow *g_req_window;
+static int g_req_pending;
+
+/* Scale mode + alignment (app values, see vk_present.h); written from any thread, read per frame. */
+static volatile int g_mode = VKP_MODE_STRETCH, g_align = VKP_ALIGN_CENTER;
+
+/* The scene -> output mapping of the last frame (compositor thread): scene pixel (x,y) lands at
+ * output (off_x + x * kx, off_y + y * ky), clipped to the region rectangle. */
+static struct {
+    int scene_w, scene_h, out_w, out_h, mode, align;
+    float kx, ky, off_x, off_y;
+    int rx, ry, rw, rh;                     /* region the picture may occupy */
+    int valid;
+} g_map;
+
+/* A failed swapchain creation is retried no sooner than this (the window may be mid-teardown),
+ * and the failure is logged once per streak instead of every frame. */
+static int64_t g_swap_retry_at_ns;
+static int g_swap_fail_logged;
 
 /* Implemented in waylandcomp_jni.c — notifies Java (dismiss launch overlay). */
 extern void banner_on_first_frame(void);
@@ -99,14 +122,128 @@ static void destroy_swapchain(void) {
 }
 
 void vk_present_set_window(ANativeWindow *window) {
-    pthread_mutex_lock(&g_swap_lock);
+    ANativeWindow *superseded = NULL;
+    pthread_mutex_lock(&g_req_lock);
+    /* Two requests before the compositor thread got to the first: the first window was never
+     * used, so its reference is dropped here. */
+    if (g_req_pending && g_req_window && g_req_window != window) superseded = g_req_window;
+    g_req_window = window;
+    g_req_pending = 1;
+    pthread_mutex_unlock(&g_req_lock);
+    if (superseded) ANativeWindow_release(superseded);
+}
+
+int vkp_apply_window_request(void) {
+    ANativeWindow *w;
+    pthread_mutex_lock(&g_req_lock);
+    if (!g_req_pending) { pthread_mutex_unlock(&g_req_lock); return 0; }
+    w = g_req_window;
+    g_req_window = NULL;
+    g_req_pending = 0;
+    pthread_mutex_unlock(&g_req_lock);
+    if (w == g_window) {
+        /* The same window handed over again (ANativeWindow_fromSurface adds a reference each time). */
+        if (w) ANativeWindow_release(w);
+        return 0;
+    }
     destroy_swapchain(); /* recreated against the new window on the next frame */
-    g_window = window;
-    pthread_mutex_unlock(&g_swap_lock);
+    if (g_window) ANativeWindow_release(g_window);
+    g_window = w;
+    g_swap_retry_at_ns = 0;
+    g_swap_fail_logged = 0;
+    banner_log("gpu", w ? "screen surface attached" : "screen surface gone: presenting paused");
+    return 1;
 }
 
 int vkp_has_window(void) {
-    return g_window != NULL;
+    int r;
+    pthread_mutex_lock(&g_req_lock);
+    r = g_req_pending ? g_req_window != NULL : g_window != NULL;
+    pthread_mutex_unlock(&g_req_lock);
+    return r;
+}
+
+int vkp_device_lost(void) { return g_dev_state == -2; }
+
+void vk_present_set_scale_mode(int mode, int alignment) {
+    if (mode < VKP_MODE_OFF || mode > VKP_MODE_INTEGER) mode = VKP_MODE_FIT;
+    if (alignment < VKP_ALIGN_CENTER || alignment > VKP_ALIGN_BOTTOM) alignment = VKP_ALIGN_CENTER;
+    g_mode = mode;
+    g_align = alignment;
+}
+
+static const char *mode_name(int m) {
+    switch (m) {
+    case VKP_MODE_OFF: return "off (letterbox)";
+    case VKP_MODE_FIT: return "fit";
+    case VKP_MODE_STRETCH: return "stretch";
+    case VKP_MODE_FILL: return "fill";
+    case VKP_MODE_INTEGER: return "integer";
+    default: return "?";
+    }
+}
+static const char *align_name(int a) {
+    switch (a) {
+    case VKP_ALIGN_TOP: return "top";
+    case VKP_ALIGN_BOTTOM: return "bottom";
+    default: return "center";
+    }
+}
+
+/* Mirror of ViewTransformation.update(outer = output, inner = scene, mode, alignment) — keep the
+ * arithmetic identical: the app maps touch input through that class with the same inputs, so any
+ * difference here puts the pointer beside what it is pointing at. OFF and FIT are both an
+ * aspect-preserving letterbox (OFF only differs in the app's fullscreen gates); TOP/BOTTOM confine
+ * the picture to the top/bottom half of the output (the app's handheld split, #413). */
+static void update_map(int scene_w, int scene_h) {
+    int mode = g_mode, align = g_align;
+    int W = (int)g_extent.width, H = (int)g_extent.height;
+    if (g_map.valid && g_map.scene_w == scene_w && g_map.scene_h == scene_h && g_map.out_w == W &&
+        g_map.out_h == H && g_map.mode == mode && g_map.align == align)
+        return;
+    g_map.scene_w = scene_w; g_map.scene_h = scene_h; g_map.out_w = W; g_map.out_h = H;
+    g_map.mode = mode; g_map.align = align;
+
+    int half = H / 2;
+    switch (align) {
+    case VKP_ALIGN_TOP:    g_map.rx = 0; g_map.ry = 0;    g_map.rw = W; g_map.rh = half; break;
+    case VKP_ALIGN_BOTTOM: g_map.rx = 0; g_map.ry = half; g_map.rw = W; g_map.rh = H - half; break;
+    default:               g_map.rx = 0; g_map.ry = 0;    g_map.rw = W; g_map.rh = H; break;
+    }
+    float sx = (float)g_map.rw / scene_w, sy = (float)g_map.rh / scene_h;
+    if (mode == VKP_MODE_STRETCH) {
+        g_map.kx = sx; g_map.ky = sy;
+        g_map.off_x = (float)g_map.rx; g_map.off_y = (float)g_map.ry;
+    } else {
+        float aspect;
+        if (mode == VKP_MODE_FILL) aspect = sx > sy ? sx : sy;
+        else if (mode == VKP_MODE_INTEGER) {
+            float m = sx < sy ? sx : sy;
+            aspect = (float)(int)m; /* floor for m >= 1 */
+            if (aspect < 1.0f) aspect = 1.0f;
+        } else aspect = sx < sy ? sx : sy;
+        g_map.kx = g_map.ky = aspect;
+        /* Same integer truncation as ViewTransformation's viewOffsetX/Y. */
+        g_map.off_x = (float)(g_map.rx + (int)((g_map.rw - scene_w * aspect) * 0.5f));
+        g_map.off_y = (float)(g_map.ry + (int)((g_map.rh - scene_h * aspect) * 0.5f));
+    }
+    g_map.valid = 1;
+    banner_log("screen", "%s, %s: %dx%d scene shown %dx%d at %d,%d on the %dx%d output",
+               mode_name(mode), align_name(align), scene_w, scene_h,
+               (int)(scene_w * g_map.kx + 0.5f), (int)(scene_h * g_map.ky + 0.5f),
+               (int)g_map.off_x, (int)g_map.off_y, W, H);
+}
+
+int vkp_output_to_scene(double ox, double oy, double *sx, double *sy) {
+    if (!g_map.valid || g_map.kx <= 0 || g_map.ky <= 0) return 0;
+    *sx = (ox - g_map.off_x) / g_map.kx;
+    *sy = (oy - g_map.off_y) / g_map.ky;
+    return 1;
+}
+
+void vkp_output_size(int *w, int *h) {
+    *w = (int)g_extent.width;
+    *h = (int)g_extent.height;
 }
 
 static int has_ext(VkExtensionProperties *e, uint32_t n, const char *name) {
@@ -208,17 +345,40 @@ static int dev_init(void) {
 
 int vkp_ready(void) { return dev_init(); }
 
+static int swap_init_locked(void);
+
 static int swap_init(void) {
+    struct timespec ts;
+    int64_t now;
     if (!g_window) return -1;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    now = (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+    if (now < g_swap_retry_at_ns) return -1;
+    if (swap_init_locked() == 0) {
+        g_swap_retry_at_ns = 0;
+        g_swap_fail_logged = 0;
+        return 0;
+    }
+    destroy_swapchain();
+    g_swap_retry_at_ns = now + 500000000LL;
+    if (!g_swap_fail_logged) {
+        g_swap_fail_logged = 1;
+        LOGE("present: no swapchain on the screen surface; retrying every 0.5 s");
+    }
+    return -1;
+}
+
+#define SWLOGE(...) do { if (!g_swap_fail_logged) LOGE(__VA_ARGS__); } while (0)
+static int swap_init_locked(void) {
 
     VkAndroidSurfaceCreateInfoKHR aci = {
         .sType = VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR, .window = g_window};
     if (g_vk.CreateAndroidSurfaceKHR(g_inst, &aci, NULL, &g_surface) != VK_SUCCESS) {
-        LOGE("present: create android surface failed"); return -1;
+        SWLOGE("present: create android surface failed"); return -1;
     }
     VkBool32 sup = VK_FALSE;
     g_vk.GetPhysicalDeviceSurfaceSupportKHR(g_pd, g_qfam, g_surface, &sup);
-    if (!sup) { LOGE("present: queue can't present to the window"); destroy_swapchain(); return -1; }
+    if (!sup) { SWLOGE("present: queue can't present to the window"); return -1; }
 
     VkSurfaceCapabilitiesKHR caps;
     g_vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(g_pd, g_surface, &caps);
@@ -253,8 +413,11 @@ static int swap_init(void) {
         .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE, .preTransform = pretrans,
         .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
         .presentMode = VK_PRESENT_MODE_FIFO_KHR, .clipped = VK_TRUE};
-    if (g_vk.CreateSwapchainKHR(g_dev, &sci, NULL, &g_swapchain) != VK_SUCCESS) {
-        LOGE("present: vkCreateSwapchainKHR failed"); destroy_swapchain(); return -1;
+    VkResult cr = g_vk.CreateSwapchainKHR(g_dev, &sci, NULL, &g_swapchain);
+    if (cr != VK_SUCCESS) {
+        g_swapchain = VK_NULL_HANDLE;
+        SWLOGE("present: vkCreateSwapchainKHR failed (%d)", (int)cr);
+        return -1;
     }
     g_vk.GetSwapchainImagesKHR(g_dev, g_swapchain, &g_nimg, NULL);
     g_images = calloc(g_nimg, sizeof(VkImage));
@@ -380,7 +543,7 @@ int vkp_image_height(const struct vkp_image *img) { return img ? img->h : 0; }
 
 void vkp_image_destroy(struct vkp_image *img) {
     if (!img) return;
-    if (g_dev_state == 1) {
+    if (g_dev) {
         if (img->map) g_vk.UnmapMemory(g_dev, img->mem);
         if (img->image) g_vk.DestroyImage(g_dev, img->image, NULL);
         if (img->mem) g_vk.FreeMemory(g_dev, img->mem, NULL);
@@ -388,19 +551,24 @@ void vkp_image_destroy(struct vkp_image *img) {
     free(img);
 }
 
-/* Map a draw into swapchain pixels, clipping the destination to the window and
- * trimming the source to match. Returns 0 if nothing is left to draw. */
-static int draw_to_blit(const struct vkp_draw *d, float kx, float ky, VkImageBlit *blit) {
-    float x0 = d->dx * kx, y0 = d->dy * ky;
-    float x1 = (d->dx + d->dw) * kx, y1 = (d->dy + d->dh) * ky;
+/* Map a draw into swapchain pixels through the scale mode, clipping the destination to the
+ * picture's region (the whole output, or its half on TOP/BOTTOM; FILL's overflow is cut here)
+ * and trimming the source to match. Returns 0 if nothing is left to draw. */
+static int draw_to_blit(const struct vkp_draw *d, VkImageBlit *blit) {
+    float kx = g_map.kx, ky = g_map.ky;
+    float x0 = g_map.off_x + d->dx * kx, y0 = g_map.off_y + d->dy * ky;
+    float x1 = g_map.off_x + (d->dx + d->dw) * kx, y1 = g_map.off_y + (d->dy + d->dh) * ky;
     float sx0 = d->sx, sy0 = d->sy, sx1 = d->sx + d->sw, sy1 = d->sy + d->sh;
-    float W = (float)g_extent.width, H = (float)g_extent.height;
+    float L = (float)g_map.rx, T = (float)g_map.ry;
+    float R = (float)(g_map.rx + g_map.rw), B = (float)(g_map.ry + g_map.rh);
+    if (R > (float)g_extent.width) R = (float)g_extent.width;
+    if (B > (float)g_extent.height) B = (float)g_extent.height;
 
     if (x1 <= x0 || y1 <= y0 || sx1 <= sx0 || sy1 <= sy0) return 0;
-    if (x0 < 0) { sx0 += (0 - x0) / (x1 - x0) * (sx1 - sx0); x0 = 0; }
-    if (y0 < 0) { sy0 += (0 - y0) / (y1 - y0) * (sy1 - sy0); y0 = 0; }
-    if (x1 > W) { sx1 -= (x1 - W) / (x1 - x0) * (sx1 - sx0); x1 = W; }
-    if (y1 > H) { sy1 -= (y1 - H) / (y1 - y0) * (sy1 - sy0); y1 = H; }
+    if (x0 < L) { sx0 += (L - x0) / (x1 - x0) * (sx1 - sx0); x0 = L; }
+    if (y0 < T) { sy0 += (T - y0) / (y1 - y0) * (sy1 - sy0); y0 = T; }
+    if (x1 > R) { sx1 -= (x1 - R) / (x1 - x0) * (sx1 - sx0); x1 = R; }
+    if (y1 > B) { sy1 -= (y1 - B) / (y1 - y0) * (sy1 - sy0); y1 = B; }
 
     int ix0 = (int)(x0 + 0.5f), iy0 = (int)(y0 + 0.5f), ix1 = (int)(x1 + 0.5f), iy1 = (int)(y1 + 0.5f);
     int isx0 = (int)sx0, isy0 = (int)sy0, isx1 = (int)(sx1 + 0.5f), isy1 = (int)(sy1 + 0.5f);
@@ -417,23 +585,65 @@ static int draw_to_blit(const struct vkp_draw *d, float kx, float ky, VkImageBli
     return 1;
 }
 
-static int render_locked(int scene_w, int scene_h, const struct vkp_draw *draws, int n);
-
-int vkp_render(int scene_w, int scene_h, const struct vkp_draw *draws, int n) {
-    pthread_mutex_lock(&g_swap_lock);
-    int ret = render_locked(scene_w, scene_h, draws, n);
-    pthread_mutex_unlock(&g_swap_lock);
-    return ret;
+/* VK_ERROR_DEVICE_LOST: nothing on this device works any more, and there is no way back short
+ * of a new session. Say so once and stop touching the swapchain; clients keep being paced by the
+ * compositor (see pace_without_output) so they don't wedge, they just aren't shown. */
+static void device_lost(const char *where) {
+    if (g_dev_state == -2) return;
+    g_dev_state = -2;
+    banner_log("error", "GPU device lost (VK_ERROR_DEVICE_LOST in %s): the compositor has stopped presenting; "
+               "restart the session", where);
+    if (g_swapchain) g_vk.DestroySwapchainKHR(g_dev, g_swapchain, NULL);
+    g_swapchain = VK_NULL_HANDLE;
+    if (g_surface) g_vk.DestroySurfaceKHR(g_inst, g_surface, NULL);
+    g_surface = VK_NULL_HANDLE;
+    free(g_images);
+    g_images = NULL;
+    g_nimg = 0;
 }
 
-static int render_locked(int scene_w, int scene_h, const struct vkp_draw *draws, int n) {
-    if (dev_init() != 0 || !g_window || scene_w <= 0 || scene_h <= 0) return -1;
-    if (!g_swapchain && swap_init() != 0) return -1;
+static const char *vk_result_name(VkResult r) {
+    switch (r) {
+    case VK_ERROR_OUT_OF_DATE_KHR: return "OUT_OF_DATE";
+    case VK_SUBOPTIMAL_KHR: return "SUBOPTIMAL";
+    case VK_ERROR_SURFACE_LOST_KHR: return "SURFACE_LOST";
+    case VK_ERROR_DEVICE_LOST: return "DEVICE_LOST";
+    case VK_TIMEOUT: return "TIMEOUT";
+    case VK_NOT_READY: return "NOT_READY";
+    default: return "error";
+    }
+}
 
+int vkp_render(int scene_w, int scene_h, const struct vkp_draw *draws, int n) {
+    vkp_apply_window_request();
+    if (g_dev_state == -2) return -1;
+    if (dev_init() != 0 || !g_window || scene_w <= 0 || scene_h <= 0) return -1;
+
+    /* Acquire, recreating the swapchain when the surface changed under us (OUT_OF_DATE after a
+     * resize/rotation, SURFACE_LOST when the window was torn down) — once, so a frame is not lost
+     * to a recreate that would have succeeded. */
     uint32_t img = 0;
-    VkResult ar = g_vk.AcquireNextImageKHR(g_dev, g_swapchain, UINT64_MAX, g_acq, VK_NULL_HANDLE, &img);
-    if (ar == VK_ERROR_OUT_OF_DATE_KHR) { destroy_swapchain(); return -1; }
-    if (ar != VK_SUCCESS && ar != VK_SUBOPTIMAL_KHR) return -1;
+    VkResult ar;
+    int attempt;
+    for (attempt = 0; ; attempt++) {
+        if (!g_swapchain && swap_init() != 0) return -1;
+        /* A bounded wait: a surface that went away without telling us must not park the
+         * compositor thread forever (clients are paced from this thread). */
+        ar = g_vk.AcquireNextImageKHR(g_dev, g_swapchain, 1000000000ULL, g_acq, VK_NULL_HANDLE, &img);
+        if (ar == VK_SUCCESS || ar == VK_SUBOPTIMAL_KHR) break;
+        if (ar == VK_ERROR_DEVICE_LOST) { device_lost("acquire"); return -1; }
+        if (ar == VK_ERROR_OUT_OF_DATE_KHR || ar == VK_ERROR_SURFACE_LOST_KHR) {
+            banner_log("gpu", "screen surface %s on acquire: rebuilding the swapchain", vk_result_name(ar));
+            destroy_swapchain();
+            if (attempt == 0) continue;
+            return -1;
+        }
+        banner_log("error", "present: acquire failed (%s %d)", vk_result_name(ar), (int)ar);
+        if (ar == VK_TIMEOUT || ar == VK_NOT_READY) return -1;
+        destroy_swapchain(); /* anything else: start over next frame */
+        return -1;
+    }
+    update_map(scene_w, scene_h);
 
     g_vk.ResetCommandBuffer(g_cmd, 0);
     VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -486,11 +696,10 @@ static int render_locked(int scene_w, int scene_h, const struct vkp_draw *draws,
                                 0, 1, &mb, 0, NULL, 0, NULL);
     }
 
-    float kx = (float)g_extent.width / scene_w, ky = (float)g_extent.height / scene_h;
     int drawn = 0;
     for (int i = 0; i < n; i++) {
         VkImageBlit blit;
-        if (!draws[i].img || !draw_to_blit(&draws[i], kx, ky, &blit)) continue;
+        if (!draws[i].img || !draw_to_blit(&draws[i], &blit)) continue;
         g_vk.CmdBlitImage(g_cmd, draws[i].img->image,
                           draws[i].img->dmabuf ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL : VK_IMAGE_LAYOUT_GENERAL,
                           g_images[img], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
@@ -511,14 +720,37 @@ static int render_locked(int scene_w, int scene_h, const struct vkp_draw *draws,
                        .pWaitSemaphores = &g_acq, .pWaitDstStageMask = &wait, .commandBufferCount = 1,
                        .pCommandBuffers = &g_cmd, .signalSemaphoreCount = 1, .pSignalSemaphores = &g_rnd};
     g_vk.ResetFences(g_dev, 1, &g_fence);
-    if (g_vk.QueueSubmit(g_queue, 1, &si, g_fence) != VK_SUCCESS) { LOGE("present: submit failed"); return -1; }
+    VkResult qr = g_vk.QueueSubmit(g_queue, 1, &si, g_fence);
+    if (qr != VK_SUCCESS) {
+        if (qr == VK_ERROR_DEVICE_LOST) device_lost("submit");
+        else LOGE("present: submit failed (%d)", (int)qr);
+        /* The acquired image is never presented; the swapchain would be stuck with it. */
+        if (g_dev_state != -2) destroy_swapchain();
+        return -1;
+    }
 
     VkPresentInfoKHR pi = {.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = 1,
                            .pWaitSemaphores = &g_rnd, .swapchainCount = 1,
                            .pSwapchains = &g_swapchain, .pImageIndices = &img};
     VkResult pr = g_vk.QueuePresentKHR(g_queue, &pi);
-    g_vk.WaitForFences(g_dev, 1, &g_fence, VK_TRUE, UINT64_MAX);
-    if (pr == VK_ERROR_OUT_OF_DATE_KHR) destroy_swapchain();
+    VkResult fr = g_vk.WaitForFences(g_dev, 1, &g_fence, VK_TRUE, UINT64_MAX);
+    if (fr == VK_ERROR_DEVICE_LOST || pr == VK_ERROR_DEVICE_LOST) { device_lost("present"); return -1; }
+    if (pr == VK_ERROR_OUT_OF_DATE_KHR || pr == VK_ERROR_SURFACE_LOST_KHR) {
+        /* The surface changed or went away under this frame: rebuild before the next one. */
+        banner_log("gpu", "screen surface %s on present: rebuilding the swapchain", vk_result_name(pr));
+        destroy_swapchain();
+        return -1;
+    } else if (pr == VK_SUBOPTIMAL_KHR || ar == VK_SUBOPTIMAL_KHR) {
+        /* Expected and harmless here: the swapchain uses IDENTITY preTransform on purpose (see
+         * swap_init), so a rotated panel reports SUBOPTIMAL on every frame. Rebuilding would change
+         * nothing (and a rebuild per frame would be far worse), so present as is; say so once. */
+        static int said;
+        if (!said) { said = 1; banner_log("gpu", "surface reports SUBOPTIMAL (panel rotation); presenting as is"); }
+    } else if (pr != VK_SUCCESS) {
+        banner_log("error", "present: vkQueuePresentKHR failed (%s %d)", vk_result_name(pr), (int)pr);
+        destroy_swapchain();
+        return -1;
+    }
 
     /* Signal the app once, on the first real client frame reaching the screen, so the
      * launch/preloader overlay can dismiss (wayland has no XServer window-content hook). */

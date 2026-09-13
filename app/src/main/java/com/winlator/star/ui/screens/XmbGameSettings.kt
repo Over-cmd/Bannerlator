@@ -244,11 +244,9 @@ private fun generalRows(xmb: XmbScope, p: XmbPrefs, host: XmbGameHost): List<Xmb
     val saValues = listOf("", "0", "1", "2")
     val saLabels = listOf(p.str(R.string.use_container_default), p.str(R.string.screen_alignment_center), p.str(R.string.screen_alignment_top), p.str(R.string.screen_alignment_bottom))
     val sa = p.ex("screenAlignment", "")
-    // Neither alignment nor fullscreen mode is wired to the Wayland compositor (it always scales the
-    // whole desktop): disabled there, displaying "Not used on Wayland"; stored values untouched.
-    val saShown = if (waylandGame) "Not used on Wayland" else saLabels[saValues.indexOf(sa).coerceAtLeast(0)]
-    rows += XmbRow.Choice("screenAlignment", "Screen alignment", Icons.Filled.DesktopWindows, if (waylandGame) listOf(saShown) else saLabels, saShown,
-        disabledReason = if (waylandGame) "Not used on Wayland: the compositor always scales the whole desktop to the screen; fullscreen modes and alignment are not wired to it yet" else null) { v ->
+    // Alignment and fullscreen mode apply on X11 and Wayland alike (the compositor fits the desktop
+    // with the same modes), so neither row is gated on the backend.
+    rows += XmbRow.Choice("screenAlignment", "Screen alignment", Icons.Filled.DesktopWindows, saLabels, saLabels[saValues.indexOf(sa).coerceAtLeast(0)]) { v ->
         xmb.set(p, "screenAlignment", saValues[saLabels.indexOf(v)].ifEmpty { null })
     }
     val fsLabels = listOf(p.str(R.string.fullscreen_mode_default), p.str(R.string.fullscreen_mode_off), p.str(R.string.fullscreen_mode_fit),
@@ -260,9 +258,7 @@ private fun generalRows(xmb: XmbScope, p: XmbPrefs, host: XmbGameHost): List<Xmb
         else -> -1
     }
     val fsIdx = if (fsOverride < 0) 0 else (fsOverride + 1).coerceIn(1, fsLabels.size - 1)
-    val fsShown = if (waylandGame) "Not used on Wayland" else fsLabels[fsIdx]
-    rows += XmbRow.Choice("fullscreen", "Fullscreen mode", Icons.Filled.DesktopWindows, if (waylandGame) listOf(fsShown) else fsLabels, fsShown,
-        disabledReason = if (waylandGame) "Not used on Wayland: the compositor always scales the whole desktop to the screen; fullscreen modes and alignment are not wired to it yet" else null) { v ->
+    rows += XmbRow.Choice("fullscreen", "Fullscreen mode", Icons.Filled.DesktopWindows, fsLabels, fsLabels[fsIdx]) { v ->
         val idx = fsLabels.indexOf(v)
         s.putExtra("fullscreenStretched", null)
         xmb.set(p, "fullscreenMode", if (idx <= 0) null else (idx - 1).toString())

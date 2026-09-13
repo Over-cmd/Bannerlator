@@ -1342,26 +1342,15 @@ private fun TopLevelFields(
             stringResource(R.string.fullscreen_mode_fill),
             stringResource(R.string.fullscreen_mode_integer)
         )
-        // Neither fullscreen mode nor alignment is wired to the Wayland compositor (its JNI surface
-        // has no setter for them; it always scales the whole desktop), so both are greyed there and
-        // DISPLAY "Not used on Wayland"; the stored values are untouched.
-        val fsAlignEnabled = !viewModel.isWaylandBackend
+        // Applies on both backends: the Wayland compositor fits the desktop with the same modes
+        // (WaylandCompositor.nativeSetScaleMode), so nothing is greyed here for Wayland.
         val fsSelIdx = viewModel.fullscreenMode.coerceIn(0, fullscreenModeLabels.size - 1)
-        val fsShown = if (fsAlignEnabled) fullscreenModeLabels[fsSelIdx] else "Not used on Wayland"
         LabeledDropdown(
             label = stringResource(R.string.fullscreen_mode),
-            options = if (fsAlignEnabled) fullscreenModeLabels else listOf(fsShown),
-            selectedOption = fsShown,
-            onSelect = { viewModel.fullscreenMode = fullscreenModeLabels.indexOf(it).coerceAtLeast(0) },
-            enabled = fsAlignEnabled
+            options = fullscreenModeLabels,
+            selectedOption = fullscreenModeLabels[fsSelIdx],
+            onSelect = { viewModel.fullscreenMode = fullscreenModeLabels.indexOf(it).coerceAtLeast(0) }
         )
-        if (!fsAlignEnabled) {
-            Text(
-                "Not used on Wayland: the Wayland compositor always scales the whole desktop to the screen; fullscreen modes and alignment are not wired to it yet.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
         Spacer(Modifier.height(8.dp))
 
         // Screen alignment (#413): Center / Top / Bottom on square-ish foldables. TOP/BOTTOM confine the
@@ -1374,21 +1363,12 @@ private fun TopLevelFields(
             stringResource(R.string.screen_alignment_bottom)
         )
         val alignSelIdx = viewModel.screenAlignment.coerceIn(0, screenAlignmentLabels.size - 1)
-        val alignShown = if (fsAlignEnabled) screenAlignmentLabels[alignSelIdx] else "Not used on Wayland"
         LabeledDropdown(
             label = stringResource(R.string.screen_alignment),
-            options = if (fsAlignEnabled) screenAlignmentLabels else listOf(alignShown),
-            selectedOption = alignShown,
-            onSelect = { viewModel.screenAlignment = screenAlignmentLabels.indexOf(it).coerceAtLeast(0) },
-            enabled = fsAlignEnabled
+            options = screenAlignmentLabels,
+            selectedOption = screenAlignmentLabels[alignSelIdx],
+            onSelect = { viewModel.screenAlignment = screenAlignmentLabels.indexOf(it).coerceAtLeast(0) }
         )
-        if (!fsAlignEnabled) {
-            Text(
-                "Not used on Wayland: the Wayland compositor always scales the whole desktop to the screen; fullscreen modes and alignment are not wired to it yet.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
         Spacer(Modifier.height(8.dp))
 
         // Frame Generation engine: Off / bionic-fg / lsfg-vk (mutually exclusive). lsfg-vk is grayed

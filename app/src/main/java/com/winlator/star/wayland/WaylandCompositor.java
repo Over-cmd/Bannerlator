@@ -119,6 +119,12 @@ public final class WaylandCompositor {
      *  list stops at the desktop size, as the X server's does on X11. Set before the compositor starts. */
     public static native void nativeSetOutputSize(int width, int height);
 
+    /** Fullscreen mode ({@code Container.FULLSCREEN_OFF/FIT/STRETCH/FILL/INTEGER}) and screen alignment
+     *  ({@code Container.ALIGN_CENTER/TOP/BOTTOM}): how the compositor fits the desktop onto the screen,
+     *  with the same arithmetic as {@code ViewTransformation} (which maps touch input), so the picture and
+     *  the pointer agree. OFF and FIT both letterbox. Callable any time; the next frame uses it. */
+    public static native void nativeSetScaleMode(int fullscreenMode, int screenAlignment);
+
     /** The in-game FPS limiter: frames per second, 0 = unlimited. Paces when replaced buffers go
      *  back to the game, like the X11 IdleNotify pacer, so the game itself slows to the cap. */
     public static native void nativeSetFpsLimit(int fps);

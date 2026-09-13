@@ -70,3 +70,36 @@ The staged `src/` here is that proven code, to grow into the app-embedded compos
 - Session log tag `pointer`: `lock requested by …`, `locked: … frozen at x,y`, `unlocked: … (why)`,
   `confined: …`, `unconfined: …`, `relative pointer created for …`, `position hint: …`.
   Test FIFO gained `rel DX DY`.
+
+## Screen surface, swapchain recovery (vk_present.c)
+- The app's UI thread never waits on the renderer: `vk_present_set_window()` only leaves the new
+  `ANativeWindow` (or NULL) in a request slot; the compositor thread applies it before its next
+  frame and on every vsync tick (`vkp_apply_window_request`), tearing the old swapchain down and
+  releasing the old window's reference. Acquire waits at most 1 s, never forever.
+- OUT_OF_DATE / SURFACE_LOST on acquire or present rebuild the swapchain (once inline on acquire, so
+  the frame isn't lost). SUBOPTIMAL is presented as is: the swapchain uses IDENTITY preTransform on
+  purpose, so a rotated panel reports it on every frame. DEVICE_LOST logs
+  `GPU device lost … the compositor has stopped presenting` once and stops touching the device;
+  clients keep being paced (`pace_without_output`) so they don't wedge.
+- A swapchain that can't be created is retried every 0.5 s and logged once per streak.
+
+## Buffer lifetime, FPS limiter (compositor.c)
+- `struct dmabuf_buffer` is reference counted: one ref for the wl_buffer resource, one per surface
+  showing it. Mesa destroys a swapchain's wl_buffers when the game rebuilds its swapchain, while the
+  last committed one is still on screen; the surface keeps the import (`s->dmabuf_buf`) until its
+  next commit, so the window neither blinks to black nor is unmapped/remapped ("closed"/"opened").
+- Surface destroy releases its buffer immediately (`drop_dmabuf(s, 0)`), replaced buffers go back on
+  the limiter's cadence. The per-surface release schedule is bounded: a slot in the past is brought
+  to now, and the schedule never runs further ahead than `(releases still pending + 1)` intervals.
+
+## Fullscreen mode + screen alignment
+- `WaylandCompositor.nativeSetScaleMode(fullscreenMode, screenAlignment)` takes the app's
+  `Container.FULLSCREEN_OFF/FIT/STRETCH/FILL/INTEGER` (0..4) and `ALIGN_CENTER/TOP/BOTTOM` (0..2),
+  any thread, any time (the drawer changes it live). `update_map()` in vk_present.c is a line-for-line
+  mirror of `ViewTransformation.update()`: OFF and FIT both letterbox (OFF only differs in the app's
+  fullscreen gates), TOP/BOTTOM confine the picture to the top/bottom half of the output (the
+  handheld split), FILL overflow is clipped to the region. The app maps touch through the same class
+  (TouchpadView → X server → input sink → scene input), the overlay arrow through
+  `waylandSceneToView`, and the SurfaceView's own INPUT_SPACE touches through `vkp_output_to_scene`.
+- Log tag `screen`: `<mode>, <alignment>: WxH scene shown WxH at x,y on the WxH output` whenever the
+  mapping changes (mode, alignment, scene or output size).

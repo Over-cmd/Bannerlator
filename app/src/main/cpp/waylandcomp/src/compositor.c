@@ -197,7 +197,8 @@ struct surface {
 
     /* Current content. */
     struct vkp_image *shm_img;              /* our copy of the last wl_shm buffer */
-    struct wl_resource *dmabuf;             /* current dmabuf buffer, held until replaced */
+    struct wl_resource *dmabuf;             /* current dmabuf wl_buffer (NULL once the client destroyed it) */
+    struct dmabuf_buffer *dmabuf_buf;       /* its imported image, kept until replaced or the surface goes */
     struct wl_listener dmabuf_destroy;
     int buf_w, buf_h, has_content;
     int src_set, dst_set;
@@ -206,7 +207,8 @@ struct surface {
     struct wl_list frames;                  /* frame callbacks for the next redraw */
     struct wl_list feedback;                /* presentation feedback for the current content */
     int drawn;                              /* part of the last rendered scene */
-    int64_t next_release_ns;                /* FPS limiter: when this surface's next buffer goes back */
+    int64_t next_release_ns;                /* FPS limiter: when this surface's last buffer goes back */
+    int releases_pending;                   /* FPS limiter: buffers of this surface still to be released */
 
     enum surface_role role;
     struct wl_resource *xdg_surface, *xdg_toplevel;
@@ -266,6 +268,7 @@ volatile int g_output_w, g_output_h;
 struct pending_release {
     struct wl_resource *buffer;
     struct wl_listener destroy;
+    struct surface *surface;                /* NULL once the surface is gone */
     int64_t at_ns;
     struct wl_list link;
 };
@@ -286,9 +289,17 @@ static int64_t now_ns(void) {
 /* ------------------------------------------------------------------ buffer release pacing */
 
 static void pending_release_free(struct pending_release *pr) {
+    if (pr->surface && pr->surface->releases_pending > 0) pr->surface->releases_pending--;
     wl_list_remove(&pr->destroy.link);
     wl_list_remove(&pr->link);
     free(pr);
+}
+
+/* A surface is going away: its queued releases still go out on time, they just stop counting. */
+static void pending_releases_forget_surface(struct surface *s) {
+    struct pending_release *pr;
+    wl_list_for_each(pr, &g_pending_releases, link)
+        if (pr->surface == s) pr->surface = NULL;
 }
 
 static void on_pending_release_buffer_destroyed(struct wl_listener *l, void *data) {
@@ -323,20 +334,34 @@ static int on_release_timer(int fd, uint32_t mask, void *data) {
     return 0;
 }
 
-/* Give a replaced buffer back to its client: now, or on the limiter's cadence. */
+/* Give a replaced buffer back to its client: now, or on the limiter's cadence.
+ *
+ * Each release takes the next slot of a per-surface cadence (one slot per interval), so a game
+ * gets one buffer back per interval however fast it commits. The schedule is kept honest at both
+ * ends: a slot in the past is brought to now (the game was slower than the cap, no catch-up burst
+ * is owed), and it never runs further ahead than the releases actually queued — with p releases
+ * still pending the new one lands at most (p + 1) intervals out, nothing pending means at most
+ * one interval. Without that bound the schedule kept slots that were consumed but never
+ * delivered (a swapchain rebuild destroys buffers with queued releases) or that a coarser earlier
+ * limit had spaced out, and the game's first frames after that waited on empty slots. */
 static void release_buffer(struct surface *s, struct wl_resource *buffer) {
     int limit = g_fps_limit;
     if (limit <= 0 || g_release_timer_fd < 0) { wl_buffer_send_release(buffer); return; }
     int64_t interval = 1000000000LL / limit, now = now_ns();
-    if (s->next_release_ns <= now - interval) s->next_release_ns = now + interval;
-    else s->next_release_ns += interval;
+    int64_t at = s->next_release_ns + interval;
+    int64_t latest = now + interval * (int64_t)(s->releases_pending + 1);
+    if (at < now) at = now;
+    if (at > latest) at = latest;
+    s->next_release_ns = at;
     struct pending_release *pr = calloc(1, sizeof(*pr));
     if (!pr) { wl_buffer_send_release(buffer); return; }
     pr->buffer = buffer;
-    pr->at_ns = s->next_release_ns;
+    pr->surface = s;
+    pr->at_ns = at;
     pr->destroy.notify = on_pending_release_buffer_destroyed;
     wl_resource_add_destroy_listener(buffer, &pr->destroy);
     wl_list_insert(g_pending_releases.prev, &pr->link);
+    s->releases_pending++;
     arm_release_timer();
 }
 
@@ -392,7 +417,20 @@ struct dmabuf_buffer {
     uint64_t modifier;
     struct vkp_image *img;                  /* imported once, reused for every frame */
     int import_failed;
+    /* One reference for the wl_buffer resource, one per surface showing the buffer. Mesa destroys
+     * a swapchain's wl_buffers the moment the game rebuilds its swapchain, i.e. while the last
+     * committed one is still what is on screen: the import (and the dma-buf memory it pins) stays
+     * until the surface commits something newer, so the picture never blinks to black. */
+    int refs;
 };
+
+static void dmabuf_buffer_unref(struct dmabuf_buffer *b) {
+    if (!b || --b->refs > 0) return;
+    vkp_image_destroy(b->img);
+    for (int i = 0; i < b->n_planes; i++)
+        if (b->fd[i] >= 0) close(b->fd[i]);
+    free(b);
+}
 
 static void dbuf_buffer_destroy_req(struct wl_client *c, struct wl_resource *r) {
     wl_resource_destroy(r);
@@ -470,20 +508,26 @@ static void unmap_toplevel(struct surface *s) {
     wl_list_init(&s->toplevel_link);
 }
 
-static void drop_dmabuf(struct surface *s, int release) {
-    if (!s->dmabuf) return;
-    wl_list_remove(&s->dmabuf_destroy.link);
-    if (release) release_buffer(s, s->dmabuf);
-    s->dmabuf = NULL;
+/* Let go of the surface's dmabuf content. paced = 1: the buffer was replaced, give it back on the
+ * limiter's cadence; paced = 0: the surface is going away, give it back at once (a buffer of a
+ * destroyed surface is not shown again and must not sit unreleased with the client). */
+static void drop_dmabuf(struct surface *s, int paced) {
+    if (s->dmabuf) {
+        wl_list_remove(&s->dmabuf_destroy.link);
+        if (paced) release_buffer(s, s->dmabuf);
+        else wl_buffer_send_release(s->dmabuf);
+        s->dmabuf = NULL;
+    }
+    dmabuf_buffer_unref(s->dmabuf_buf);
+    s->dmabuf_buf = NULL;
 }
 
+/* The client destroyed the wl_buffer we are showing (a swapchain rebuild): keep showing its
+ * image (s->dmabuf_buf holds it) until the next commit replaces it; only the resource is gone. */
 static void on_dmabuf_destroyed(struct wl_listener *l, void *data) {
     struct surface *s = wl_container_of(l, s, dmabuf_destroy);
     wl_list_remove(&s->dmabuf_destroy.link);
     s->dmabuf = NULL;
-    s->has_content = 0;
-    if (s->role == ROLE_TOPLEVEL) unmap_toplevel(s);
-    schedule_render();
 }
 
 static void on_pending_buffer_destroyed(struct wl_listener *l, void *data) {
@@ -534,9 +578,11 @@ extern void banner_on_game_surface(const char *window, const char *gpu); /* wind
 extern void banner_on_game_frame(void);
 
 static void take_dmabuf(struct surface *s, struct dmabuf_buffer *b, struct wl_resource *buffer) {
-    if (s->dmabuf != buffer) {
+    if (s->dmabuf != buffer || s->dmabuf_buf != b) {
         drop_dmabuf(s, 1);
         s->dmabuf = buffer;
+        s->dmabuf_buf = b;
+        b->refs++;
         s->dmabuf_destroy.notify = on_dmabuf_destroyed;
         wl_resource_add_destroy_listener(buffer, &s->dmabuf_destroy);
     }
@@ -772,6 +818,7 @@ static void surface_resource_destroy(struct wl_resource *r) {
         child->parent = NULL;
     }
     if (s->pending_buffer) wl_list_remove(&s->pending_buffer_destroy.link);
+    pending_releases_forget_surface(s);
     drop_dmabuf(s, 0);
     vkp_image_destroy(s->shm_img);
     wl_resource_for_each_safe(cb, cbtmp, &s->pending_frames) wl_resource_destroy(cb);
@@ -1141,12 +1188,7 @@ static void bind_desktop(struct wl_client *c, void *data, uint32_t ver, uint32_t
 /* ------------------------------------------------------------ zwp_linux_dmabuf_v1 */
 
 static void dbuf_buffer_resource_destroy(struct wl_resource *r) {
-    struct dmabuf_buffer *b = wl_resource_get_user_data(r);
-    if (!b) return;
-    vkp_image_destroy(b->img);
-    for (int i = 0; i < b->n_planes; i++)
-        if (b->fd[i] >= 0) close(b->fd[i]);
-    free(b);
+    dmabuf_buffer_unref(wl_resource_get_user_data(r));
 }
 
 static void params_destroy(struct wl_client *c, struct wl_resource *r) { wl_resource_destroy(r); }
@@ -1167,6 +1209,7 @@ static struct wl_resource *params_do_create(struct wl_client *c, struct wl_resou
     struct dmabuf_buffer *b = calloc(1, sizeof(*b));
     if (!b) return NULL;
     b->n_planes = p->n_planes;
+    b->refs = 1; /* the wl_buffer resource's */
     b->width = w; b->height = h; b->format = format;
     b->modifier = p->modifier[0];
     for (int i = 0; i < MAX_PLANES; i++) b->fd[i] = -1;
@@ -1261,8 +1304,7 @@ struct draw_list { struct vkp_draw *d; int n, cap; };
 static struct vkp_image *surface_image(struct surface *s) {
     if (!s->has_content) return NULL;
     if (s->shm_img) return s->shm_img;
-    struct dmabuf_buffer *b = get_dmabuf(s->dmabuf);
-    return b ? b->img : NULL;
+    return s->dmabuf_buf ? s->dmabuf_buf->img : NULL;
 }
 
 static void add_surface(struct draw_list *dl, struct surface *s, int ox, int oy) {
@@ -1340,7 +1382,8 @@ static void pace_without_output(void) {
 
 static int on_frame_timer(void *data) {
     pace_without_output();
-    if (!vkp_has_window() && g_frame_timer) wl_event_source_timer_update(g_frame_timer, 16);
+    if (vkp_has_window()) schedule_render(); /* it is back: draw the current scene */
+    else if (g_frame_timer) wl_event_source_timer_update(g_frame_timer, 16);
     return 0;
 }
 
@@ -1419,6 +1462,9 @@ static void on_vsync(int64_t frame_time_ns) {
     }
     g_last_vsync_ns = now;
     (void)frame_time_ns;
+    /* The app's surface may have been replaced or taken away since the last frame: apply that now
+     * (the app never waits for us), and redraw the scene onto a new one. */
+    if (vkp_apply_window_request()) g_dirty = 1;
     if (g_dirty) render_scene();
 }
 
@@ -2002,12 +2048,24 @@ static void pointer_button(uint32_t button, int pressed) {
     pointer_input(0, 0, 1, button, pressed);
 }
 
-/* Java touch events arrive in INPUT_SPACE over the whole output: action 0=press, 1=move, 2=release. */
+/* Java touch events arrive in INPUT_SPACE over the whole output: action 0=press, 1=move, 2=release.
+ * Output pixels go through the inverse of the scale mode's mapping (letterbox bars, FILL crop, a
+ * TOP/BOTTOM half), so the touch lands on the scene pixel that is drawn under the finger. */
 static void deliver_pointer(const struct input_msg *m) {
-    int w, h;
+    int w, h, ow, oh;
+    double x, y;
     scene_size(&w, &h);
-    pointer_event((double)m->p2 * w / INPUT_SPACE_W, (double)m->p3 * h / INPUT_SPACE_H,
-                  m->p1 == 1 ? 0 : BTN_LEFT, m->p1 == 0);
+    vkp_output_size(&ow, &oh);
+    if (ow <= 0 || oh <= 0 ||
+        !vkp_output_to_scene((double)m->p2 * ow / INPUT_SPACE_W, (double)m->p3 * oh / INPUT_SPACE_H, &x, &y)) {
+        x = (double)m->p2 * w / INPUT_SPACE_W; /* nothing drawn yet: plain stretch */
+        y = (double)m->p3 * h / INPUT_SPACE_H;
+    }
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    if (x > w - 1) x = w - 1;
+    if (y > h - 1) y = h - 1;
+    pointer_event(x, y, m->p1 == 1 ? 0 : BTN_LEFT, m->p1 == 0);
 }
 
 static void key_event(uint32_t evdev, int pressed);

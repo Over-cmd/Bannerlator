@@ -224,6 +224,14 @@ Java_com_winlator_star_wayland_WaylandCompositor_nativeSetOutputSize(JNIEnv *env
     g_output_h = h > 0 ? h : 0;
 }
 
+/* Fullscreen mode + screen alignment (Container.FULLSCREEN_* / ALIGN_* values): how the scene is
+ * fitted onto the output. Any thread, any time; the next frame uses it. */
+JNIEXPORT void JNICALL
+Java_com_winlator_star_wayland_WaylandCompositor_nativeSetScaleMode(JNIEnv *env, jclass clazz, jint mode, jint alignment) {
+    vk_present_set_scale_mode(mode, alignment);
+    __android_log_print(ANDROID_LOG_INFO, TAG, "scale mode %d alignment %d", mode, alignment);
+}
+
 /* The in-game FPS limiter: frames per second, 0 = unlimited. */
 JNIEXPORT void JNICALL
 Java_com_winlator_star_wayland_WaylandCompositor_nativeSetFpsLimit(JNIEnv *env, jclass clazz, jint fps) {

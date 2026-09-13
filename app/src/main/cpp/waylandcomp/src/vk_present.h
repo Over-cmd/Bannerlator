@@ -16,9 +16,26 @@
 void vk_present_set_driver(const char *driver_path, const char *library_name,
                            const char *native_lib_dir);
 
-// Set/replace the output window (from Surface via ANativeWindow_fromSurface).
-// NULL tears the swapchain down (surface destroyed); images and the device survive.
+// Set/replace the output window (from Surface via ANativeWindow_fromSurface; the backend
+// owns the reference from then on). NULL = the surface is gone. Callable from any thread
+// and never blocks: the request is applied by the compositor thread (vkp_render /
+// vkp_apply_window_request), which tears the old swapchain down and releases the old window.
 void vk_present_set_window(ANativeWindow *window);
+/* Compositor thread: apply a pending window change now. Returns 1 if the window changed. */
+int vkp_apply_window_request(void);
+
+/* How the scene is mapped onto the output (the app's Container.FULLSCREEN_* / ALIGN_* values,
+ * mirrored 1:1 from ViewTransformation.java so touch input, which is mapped by the app with
+ * that class, lands on the same pixels). Callable from any thread, applies on the next frame. */
+enum vkp_scale_mode { VKP_MODE_OFF = 0, VKP_MODE_FIT = 1, VKP_MODE_STRETCH = 2, VKP_MODE_FILL = 3,
+                      VKP_MODE_INTEGER = 4 };
+enum vkp_align { VKP_ALIGN_CENTER = 0, VKP_ALIGN_TOP = 1, VKP_ALIGN_BOTTOM = 2 };
+void vk_present_set_scale_mode(int mode, int alignment);
+/* Output pixel (0..output size) -> scene pixel through the current mapping (compositor thread).
+ * Returns 0 before the first frame has established a mapping (sx/sy untouched). */
+int vkp_output_to_scene(double ox, double oy, double *sx, double *sy);
+/* Output size in pixels (0x0 before the first swapchain). */
+void vkp_output_size(int *w, int *h);
 
 struct vkp_image;
 
@@ -36,7 +53,7 @@ int vkp_image_height(const struct vkp_image *img);
 void vkp_image_destroy(struct vkp_image *img);
 
 // One scene draw: the src rectangle of an image (image pixels) scaled into the dst
-// rectangle (scene pixels). The scene is stretched to fill the output window.
+// rectangle (scene pixels). The scene is mapped onto the output by the scale mode.
 struct vkp_draw {
     struct vkp_image *img;
     float sx, sy, sw, sh;
@@ -48,8 +65,10 @@ const char *vkp_gpu_name(void);
 
 // 0 if the renderer can create images (device up), -1 otherwise.
 int vkp_ready(void);
-/* Whether an output window is attached; without one vkp_render() draws nothing. */
+/* Whether an output window is attached (or requested); without one vkp_render() draws nothing. */
 int vkp_has_window(void);
+/* 1 once the Vulkan device was lost: nothing is presented any more (the session must restart). */
+int vkp_device_lost(void);
 
 // Clear to black, blit the draws in order (first = bottom) and present.
 // Returns 0 on success, -1 if nothing could be presented (no window yet, etc.).

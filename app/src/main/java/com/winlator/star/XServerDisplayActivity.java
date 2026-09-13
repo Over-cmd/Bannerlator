@@ -1357,6 +1357,18 @@ public class XServerDisplayActivity extends AppCompatActivity {
     // our embedded compositor instead of the X11 server. All branches are guarded by this flag,
     // so the X11 path is unchanged when it's false. See WAYLAND_RUNTIME.md.
     private boolean waylandMode = false;
+    // HUD metric sampling for wayland mode (see startWaylandCompositor): its own thread, never the
+    // compositor's. update() self-throttles to 500 ms and posts the view refresh to the UI thread.
+    private android.os.HandlerThread waylandHudThread;
+    private volatile android.os.Handler waylandHudSampler;
+    private final java.util.concurrent.atomic.AtomicBoolean waylandHudSampleQueued = new java.util.concurrent.atomic.AtomicBoolean(false);
+    private final Runnable waylandHudSample = () -> {
+        waylandHudSampleQueued.set(false);
+        if (frameRatingWindowId == -1 || !hudCounterEnabled) return;
+        if (frameRating != null) frameRating.update();
+        if (frameRatingHorizontal != null) frameRatingHorizontal.update();
+        if (perfHud != null) perfHud.update();
+    };
     private android.view.SurfaceView waylandSurfaceView;
     private android.widget.ImageView waylandCursorView;
     private float waylandCursorX = -1f, waylandCursorY = -1f; // touchpad cursor position (view px)
@@ -6251,6 +6263,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
             inGameControlsEditor = null;
         }
         waylandVsyncRunning = false;
+        if (waylandHudThread != null) { waylandHudThread.quitSafely(); waylandHudThread = null; waylandHudSampler = null; }
         super.onDestroy();
         // Power-user perf: stop the thermal watchdog and revert any privileged sysfs writes on game
         // exit (no-op unless a root toggle wrote something this session).
@@ -6704,13 +6717,21 @@ public class XServerDisplayActivity extends AppCompatActivity {
                 });
             }
             @Override public void onGameFrame() {
+                // Compositor (Wayland dispatch) thread: every client is stalled while this runs, so it
+                // only counts the frame. The HUD's own refresh (FrameRating/PerfHudView.update: sysfs
+                // temperature/GPU-load reads and BatteryManager binder calls, every 500 ms) runs on the
+                // sampler thread; one job is queued at a time, so a fast game can't pile them up.
                 if (frameRatingWindowId == -1 || !hudCounterEnabled) return;
                 fpsCounter.tick();
-                if (frameRating != null) frameRating.update();
-                if (frameRatingHorizontal != null) frameRatingHorizontal.update();
-                if (perfHud != null) perfHud.update();
+                android.os.Handler h = waylandHudSampler;
+                if (h != null && waylandHudSampleQueued.compareAndSet(false, true)) h.post(waylandHudSample);
             }
         });
+        if (waylandHudThread == null) {
+            waylandHudThread = new android.os.HandlerThread("wayland-hud-sampler");
+            waylandHudThread.start();
+            waylandHudSampler = new android.os.Handler(waylandHudThread.getLooper());
+        }
 
         // Relative-mode mouse input (Relative Mouse chip, captured mouse, stick-as-mouse) goes to the
         // compositor as deltas instead of the guest-side mouse_event: a program's pointer lock gets it
@@ -6745,8 +6766,9 @@ public class XServerDisplayActivity extends AppCompatActivity {
                     if (waylandSurfaceView == null || waylandCursorView == null) return;
                     int vw = waylandSurfaceView.getWidth(), vh = waylandSurfaceView.getHeight();
                     if (vw <= 0 || vh <= 0) return;
-                    waylandCursorX = (float) x * vw / xServer.screenInfo.width;
-                    waylandCursorY = (float) y * vh / xServer.screenInfo.height;
+                    float[] pos = waylandSceneToView(x, y, vw, vh);
+                    waylandCursorX = pos[0];
+                    waylandCursorY = pos[1];
                     waylandCursorView.setX(waylandCursorX);
                     waylandCursorView.setY(waylandCursorY);
                     if (waylandCursorView.getVisibility() != View.VISIBLE)
@@ -6875,6 +6897,22 @@ public class XServerDisplayActivity extends AppCompatActivity {
         });
         rootView.addView(waylandSurfaceView);
         rootView.addView(waylandCursorView); // the overlay pointer, on top of the compositor surface
+    }
+
+    /** Scene (virtual desktop) pixel -> view pixel through the fullscreen mode + alignment, with the
+     *  same ViewTransformation the touch map and the compositor use, so the overlay arrow sits on the
+     *  desktop pixel the compositor draws there (letterbox bars, FILL crop, TOP/BOTTOM half). */
+    private float[] waylandSceneToView(int x, int y, int vw, int vh) {
+        int sw = xServer.screenInfo.width, sh = xServer.screenInfo.height;
+        HostRenderer r = xServer.getRenderer();
+        int mode = r != null ? r.getFullscreenMode() : Container.FULLSCREEN_FIT;
+        int align = r != null ? r.getScreenAlignment() : Container.ALIGN_CENTER;
+        com.winlator.star.renderer.ViewTransformation vt = new com.winlator.star.renderer.ViewTransformation();
+        vt.update(vw, vh, sw, sh, mode, align);
+        if (mode != Container.FULLSCREEN_STRETCH)
+            return new float[]{vt.viewOffsetX + x * vt.aspect, vt.viewOffsetY + y * vt.aspect};
+        return new float[]{vt.regionOffsetX + (float) x * vt.regionWidth / sw,
+                           vt.regionOffsetY + (float) y * vt.regionHeight / sh};
     }
 
     /** Move the overlay pointer to the current touchpad position and send the guest a wl_pointer
@@ -8029,6 +8067,9 @@ public class XServerDisplayActivity extends AppCompatActivity {
         renderer.setScreenAlignment(screenAlignment);
         XServerDrawerState.INSTANCE.setScreenAlignment(screenAlignment);
         inputControlsView.setScreenAlignment(screenAlignment); // #413: size the OSC overlay to its half (TOP/BOTTOM)
+        // Wayland: the compositor fits the desktop with the same mode + alignment (the X renderer above
+        // is idle there, but the touch map still reads the mode from it, so both stay in step).
+        if (waylandMode) com.winlator.star.wayland.WaylandCompositor.nativeSetScaleMode(fullscreenMode, screenAlignment);
         // touchpadView.toggleFullscreen() just re-runs updateXform (it does NOT change the mode), so it
         // also picks up a non-center alignment. CENTER keeps the original OFF-only condition unchanged.
         if (fullscreenMode != Container.FULLSCREEN_OFF || screenAlignment != Container.ALIGN_CENTER) touchpadView.toggleFullscreen();
@@ -8073,6 +8114,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
         HostRenderer r = xServerView.getRenderer();
         r.setFullscreenMode(mode);
         touchpadView.toggleFullscreen();          // recompute touch->guest map for the new mode
+        if (waylandMode) com.winlator.star.wayland.WaylandCompositor.nativeSetScaleMode(mode, r.getScreenAlignment());
         XServerDrawerState.INSTANCE.setFullscreenMode(mode);
         if (shortcut != null) {
             shortcut.putExtra("fullscreenMode", String.valueOf(mode));
@@ -8091,6 +8133,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
         HostRenderer r = xServerView.getRenderer();
         r.setScreenAlignment(alignment);
         touchpadView.toggleFullscreen();          // recompute touch->guest map for the new alignment
+        if (waylandMode) com.winlator.star.wayland.WaylandCompositor.nativeSetScaleMode(r.getFullscreenMode(), alignment);
         XServerDrawerState.INSTANCE.setScreenAlignment(alignment);
         // #413: live-resize the OSC overlay to own its half (TOP/BOTTOM), or full screen (CENTER restores).
         if (inputControlsView != null) inputControlsView.setScreenAlignment(alignment);
