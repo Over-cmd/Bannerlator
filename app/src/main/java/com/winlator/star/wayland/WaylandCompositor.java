@@ -177,6 +177,11 @@ public final class WaylandCompositor {
      *  in the container's environment variables; see waylandcomp/ZERO_COPY_SPIKE.md. Set before start. */
     public static native void nativeSetZeroCopy(boolean on);
 
+    /** Zero-copy frames the compositor presented in its LAST completed 10 s stats window (the
+     *  "| N zero-copy frames" figure of its session-log stats line); 0 while zero-copy is off or
+     *  before the first window closes. Read-only, any thread — the in-game drawer polls it. */
+    public static native int nativeZeroCopyFrames();
+
     /** Compressed (UBWC) game buffers: the compositor advertises DRM_FORMAT_MOD_QCOM_COMPRESSED next to
      *  LINEAR on zwp_linux_dmabuf_v1 for every format its driver can import that way, so the game's
      *  Turnip allocates compressed swapchain images instead of resolving every frame to a linear copy.
