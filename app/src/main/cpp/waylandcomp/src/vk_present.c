@@ -794,6 +794,12 @@ int vkp_update_map(int scene_w, int scene_h) {
     return g_map.valid ? 0 : -1;
 }
 
+int vkp_map_rect(int img_w, int img_h, int scene_w, int scene_h, int out[8]) {
+    struct vkp_image tmp = {.w = img_w, .h = img_h}; /* only its size is looked at */
+    struct vkp_draw d = {&tmp, 0, 0, (float)img_w, (float)img_h, 0, 0, scene_w, scene_h};
+    return vkp_map_draw(&d, out);
+}
+
 int vkp_map_draw(const struct vkp_draw *d, int out[8]) {
     VkImageBlit blit;
     if (!d || !d->img || !g_map.valid || !draw_to_blit(d, &blit)) return 0;

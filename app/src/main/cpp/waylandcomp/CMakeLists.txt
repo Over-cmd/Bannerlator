@@ -9,6 +9,7 @@ add_library(bannerwayland SHARED
         src/vk_present.c
         src/vk_loader.c
         src/sc_layer.c
+        src/ahb_swapchain.c
         src/waylandcomp_jni.c
         src/banner_ext.c
         src/wl_clipboard.c
@@ -24,6 +25,7 @@ add_library(bannerwayland SHARED
         generated/wlr-data-control-unstable-v1-protocol.c
         generated/text-input-unstable-v3-protocol.c
         generated/xdg-toplevel-icon-v1-protocol.c
+        generated/banner-ahb-v1-protocol.c
 )
 target_include_directories(bannerwayland PRIVATE
         generated

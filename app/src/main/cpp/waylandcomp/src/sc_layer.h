@@ -16,6 +16,7 @@
  * only touch the pool under its mutex. Never called unless g_zero_copy is set.
  */
 #include <stdint.h>
+#include <android/hardware_buffer.h>
 
 struct vkp_image;
 
@@ -27,6 +28,16 @@ void sc_layer_probe_dmabuf_fd(int fd);
  * current fullscreen mode / alignment mapping. 0 = shown (or deliberately dropped: no free buffer),
  * -1 = the layer path is unavailable this frame and the caller must draw the old way. */
 int sc_layer_present(struct vkp_image *src, int scene_w, int scene_h);
+
+/* Zero-copy (ahb_swapchain.c): show the game's own w x h AHardwareBuffer on the layer, gated by
+ * acquire_fd (a sync_file the layer waits on before reading; owned by the callee, -1 = none).
+ * token identifies the buffer: once a later transaction replaces it (or the layer is hidden or
+ * retired), ahb_swapchain_layer_released(token, release_fd) reports SurfaceFlinger's release fence
+ * for it. Presenting the token already on the layer only updates the placement. 0 = on the layer,
+ * 1 = nothing of it is on screen (layer hidden, the buffer was not taken), -1 = unavailable this
+ * frame (the caller draws the old way). */
+int sc_layer_present_ahb(AHardwareBuffer *ahb, int w, int h, int acquire_fd, void *token,
+                         int scene_w, int scene_h);
 
 /* The scene is not a single fullscreen window this frame: hide the layer if it is up. */
 void sc_layer_hide(void);

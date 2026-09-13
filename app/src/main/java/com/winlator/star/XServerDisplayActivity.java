@@ -6675,6 +6675,20 @@ public class XServerDisplayActivity extends AppCompatActivity {
     // Bring up the embedded Wayland compositor into a full-screen SurfaceView. The socket is created
     // under the imagefs /tmp (XDG_RUNTIME_DIR = rootDir/tmp) so the guest — which sees the imagefs as
     // its root — finds it at /tmp/wayland-0 (matching the guest env in GuestProgramLauncherComponent).
+    /** BANNER_WAYLAND_ZERO_COPY=1 (or true) in the container's or the shortcut's environment variables:
+     *  the Wayland zero-copy layer mode (ZERO_COPY_SPIKE.md). One switch for both halves: the compositor
+     *  (nativeSetZeroCopy) and the guest's Wayland Turnip (BANNER_WSI_AHB=1, gralloc swapchain images). */
+    private boolean isWaylandZeroCopyRequested() {
+        if (container == null) return false;
+        String raw = container.getEnvVars();
+        if (shortcut != null) {
+            String sv = shortcut.getExtra("envVars", "");
+            if (sv != null && !sv.isEmpty()) raw = (raw == null ? "" : raw + " ") + sv;
+        }
+        String zc = raw != null && !raw.isEmpty() ? new EnvVars(raw).get("BANNER_WAYLAND_ZERO_COPY") : null;
+        return zc != null && (zc.equals("1") || zc.equalsIgnoreCase("true"));
+    }
+
     private void startWaylandCompositor(FrameLayout rootView) {
         // Wayland has no XServer onUpdateWindowContent hook to dismiss the launch overlay, so
         // dismiss on the compositor's FIRST presented client frame instead (mirrors the X11 grace
@@ -6893,15 +6907,10 @@ public class XServerDisplayActivity extends AppCompatActivity {
         final String nativeLibDir = getApplicationInfo().nativeLibraryDir;
         // Experimental layer mode (ZERO_COPY_SPIKE.md): BANNER_WAYLAND_ZERO_COPY=1 in the container's
         // (or the shortcut's) environment variables presents a fullscreen game on its own Android
-        // layer. Read here, before the compositor starts; nothing else looks at the variable.
+        // layer. Read here, before the compositor starts; the guest half of the same switch
+        // (BANNER_WSI_AHB=1) is exported in setupXEnvironment.
         try {
-            String raw = container.getEnvVars();
-            if (shortcut != null) {
-                String sv = shortcut.getExtra("envVars", "");
-                if (sv != null && !sv.isEmpty()) raw = (raw == null ? "" : raw + " ") + sv;
-            }
-            String zc = raw != null && !raw.isEmpty() ? new EnvVars(raw).get("BANNER_WAYLAND_ZERO_COPY") : null;
-            boolean zeroCopy = zc != null && (zc.equals("1") || zc.equalsIgnoreCase("true"));
+            boolean zeroCopy = isWaylandZeroCopyRequested();
             com.winlator.star.wayland.WaylandCompositor.nativeSetZeroCopy(zeroCopy);
             if (zeroCopy) Log.i("XServerDisplayActivity", "wayland: zero-copy layer mode requested");
         } catch (Exception e) {
@@ -7280,6 +7289,12 @@ public class XServerDisplayActivity extends AppCompatActivity {
             }
 
             if (shortcut != null) envVars.putAll(shortcut.getExtra("envVars"));
+
+            // Wayland zero-copy layer mode: the same BANNER_WAYLAND_ZERO_COPY=1 that puts the game on
+            // its own Android layer (startWaylandCompositor) also tells our Wayland Turnip's WSI to
+            // allocate the game's swapchain images as gralloc buffers and hand them to the compositor
+            // (banner_ahb_v1), so the layer shows the game's own buffer without a copy.
+            if (waylandMode && isWaylandZeroCopyRequested()) envVars.put("BANNER_WSI_AHB", "1");
 
             // Keep the lsfg-vk Vulkan layer INERT unless lsfg-vk is actually the engine.
             // Placed AFTER both user env merges (container above, shortcut just here) so
