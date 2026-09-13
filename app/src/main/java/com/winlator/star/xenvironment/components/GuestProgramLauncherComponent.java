@@ -624,6 +624,9 @@ public class GuestProgramLauncherComponent extends EnvironmentComponent {
             }
         }
 
+        // Wayland: bring the prefix up to date BEFORE the desktop session (see updatePrefixBeforeSession).
+        if (waylandMode) updatePrefixBeforeSession(envVars, winePath, rootDir, imageFs);
+
         return ProcessHelper.exec(command, envVars.toStringArray(), rootDir, (status) -> {
             synchronized (lock) {
                 pid = -1;
@@ -632,6 +635,77 @@ public class GuestProgramLauncherComponent extends EnvironmentComponent {
             if (terminationCallback != null)
                 terminationCallback.call(status);
         });
+    }
+
+    /**
+     * Wayland only: run Wine's prefix update (the wine.inf install ntdll triggers through
+     * {@code wineboot --init} in the FIRST process of a session) in a throwaway headless session,
+     * before the real launch, whenever the prefix is stale.
+     *
+     * Why: on the first launch after a layer install/repoint the prefix's {@code .update-timestamp}
+     * no longer matches the layer's {@code wine.inf} mtime, so ntdll blocks explorer (the session's
+     * first process) before its main() for the ~7 s install. wineboot's wait dialog then needs a
+     * desktop window while none exists, win32u auto-spawns {@code explorer.exe /desktop} on the
+     * "Default" desktop, that explorer is closed at once by the server's zero desktop-close timeout
+     * (Proton default), and the display cache our explorer builds afterwards carries monitors with
+     * no source - win32u's 1024x768 fallback rect - so the virtual desktop came up at 1024x768 (then
+     * 1024x1488) instead of the container size; the second launch, prefix now current, was right.
+     * Doing the update here, with no display driver at all, keeps it off the desktop's critical
+     * path, so the first launch takes the same path as the second.
+     *
+     * Same test as wineboot's update_timestamp(): the file holds wine.inf's mtime in seconds
+     * ("disable" opts out); {@code wineboot -h} exits at argument parsing, the update itself is done
+     * by the {@code --init} instance ntdll spawns for the first process. Afterwards the wineserver
+     * shuts down by itself (services only, 3 s master-socket timeout) and flushes the registry; we
+     * wait for that so the real launch starts from a clean prefix, and only force-terminate as a last
+     * resort. X11 launches are untouched (they keep the in-session update).
+     */
+    private void updatePrefixBeforeSession(EnvVars guestEnv, String winePath, File rootDir, ImageFs imageFs) {
+        final String tag = "GuestProgramLauncherComponent";
+        try {
+            File wineInf = new File(imageFs.getWinePath(), "share/wine/wine.inf");
+            File stamp = new File(rootDir, ImageFs.WINEPREFIX + "/.update-timestamp");
+            if (!wineInf.isFile()) return;
+            long infMtime = wineInf.lastModified() / 1000L;
+            String current = stamp.isFile() ? FileUtils.readString(stamp) : "";
+            if (current == null) current = "";
+            current = current.trim();
+            if (current.startsWith("disable")) return;
+            long stamped = -1;
+            int i = 0;
+            while (i < current.length() && Character.isDigit(current.charAt(i))) i++;
+            if (i > 0) {
+                try { stamped = Long.parseLong(current.substring(0, i)); } catch (NumberFormatException ignored) {}
+            }
+            if (stamped == infMtime) return;
+
+            Log.i(tag, "wayland: prefix .update-timestamp \"" + current + "\" != wine.inf mtime " + infMtime
+                    + " (" + wineInf.getPath() + "); running Wine's prefix update before the session");
+            EnvVars env = new EnvVars();
+            env.putAll(guestEnv);
+            // No display for this session: wineboot's wait dialog and the explorer win32u spawns for it
+            // run on the null driver instead of connecting to the compositor. libwayland falls back to
+            // "wayland-0" under XDG_RUNTIME_DIR when WAYLAND_DISPLAY is unset, so drop both.
+            env.remove("WAYLAND_DISPLAY");
+            env.remove("XDG_RUNTIME_DIR");
+            env.remove("DISPLAY");
+            long t0 = System.currentTimeMillis();
+            int status = ProcessHelper.execAndWait(winePath + "/wine wineboot -h", env.toStringArray(), rootDir, 180_000);
+            // Let the wineserver wind down on its own (it flushes the registry on exit).
+            long deadline = System.currentTimeMillis() + 30_000;
+            while (!ProcessHelper.listRunningWineProcesses().isEmpty() && System.currentTimeMillis() < deadline) {
+                try { Thread.sleep(200); } catch (InterruptedException e) { Thread.currentThread().interrupt(); break; }
+            }
+            if (!ProcessHelper.listRunningWineProcesses().isEmpty()) {
+                Log.w(tag, "wayland: wine processes still alive after the prefix update; terminating them");
+                ProcessHelper.terminateAllWineProcessesAndWait(3000, true);
+            }
+            String after = stamp.isFile() ? FileUtils.readString(stamp) : "";
+            Log.i(tag, "wayland: prefix update finished in " + (System.currentTimeMillis() - t0) + " ms (wineboot exit "
+                    + status + "), .update-timestamp now \"" + (after == null ? "" : after.trim()) + "\"");
+        } catch (Throwable t) {
+            Log.w(tag, "wayland: prefix update before the session failed; launching anyway", t);
+        }
     }
 
     private void addBox64EnvVars(EnvVars envVars, boolean enableLogs) {
