@@ -146,6 +146,9 @@ internal fun xmbGeneralMenu(xmb: XmbScope, p: XmbPrefs, host: XmbGameHost): XmbM
 // the first build launches it and refreshes when done; imported ids are re-read on every build.
 private var xmbBundledDriverVersions: List<String>? = null
 private var xmbBundledDriverVersionsLoading = false
+// Same once-per-process pattern for the variant "Auto" resolves to (native renderer probe) — the
+// "Auto (by GPU: …)" label of the Wayland game driver row; WaylandGameDriver caches the answer.
+private var xmbWaylandAutoLoading = false
 
 private fun generalRows(xmb: XmbScope, p: XmbPrefs, host: XmbGameHost): List<XmbRow> {
     val s = p.shortcut
@@ -317,9 +320,8 @@ private fun generalRows(xmb: XmbScope, p: XmbPrefs, host: XmbGameHost): List<Xmb
             }
         }
         val turnips = ((xmbBundledDriverVersions ?: emptyList()) + importedDriverVersions(p.context)).distinct()
-        rows += XmbRow.Info("gfxGameDriver", "Game driver", Icons.Filled.Memory, "Wayland Turnip bundled with this Proton")
         rows += XmbRow.Choice("gfxDriver", "Compositor driver", Icons.Filled.Memory, turnips, if (compositorVersion in turnips) compositorVersion else "",
-            subtitle = "Used by the Wayland compositor to put frames on screen; the game renders on the Turnip bundled with the Proton.") { v ->
+            subtitle = "Used by the Wayland compositor to put frames on screen; the game renders on the Wayland game driver below.") { v ->
             xmb.set(p, "graphicsDriverConfig", withGraphicsDriverVersion(gdc, v))
         }
         // "System"/empty falls back to the system libvulkan, which can't import the game's dmabufs
@@ -327,6 +329,31 @@ private fun generalRows(xmb: XmbScope, p: XmbPrefs, host: XmbGameHost): List<Xmb
         if (compositorVersion.isEmpty() || compositorVersion == "System") {
             rows += XmbRow.Info("gfxSystemWarn", "Compositor driver is \"System\"", Icons.Filled.Info,
                 subtitle = """Wayland needs a Turnip driver here. "System" cannot import the game's frames and shows a black screen.""")
+        }
+        // Wayland game driver (per-game override of the container's waylandGameDriver; "" = container
+        // default): Auto / the bundled Turnip variants / imported Linux ICDs — same options and labels
+        // as the pop-up editors (WaylandGameDriver). A stored imported:<id> whose import is gone stays
+        // listed (labelled missing); launch uses Auto for it.
+        val wgdAuto = com.winlator.star.core.WaylandGameDriver.autoVariantIfKnown()
+        if (wgdAuto == null && !xmbWaylandAutoLoading) {
+            xmbWaylandAutoLoading = true
+            xmb.scope.launch {
+                waylandAutoVariant(p.context)
+                xmbWaylandAutoLoading = false
+                xmb.refresh()
+            }
+        }
+        val wgdOverride = p.ex("waylandGameDriver", "")
+        val wgdInstalled = com.winlator.star.core.WaylandGameDriver.optionValues(p.context)
+        val wgdValues = listOf("") + (if (wgdOverride.isEmpty() || wgdOverride in wgdInstalled) wgdInstalled else wgdInstalled + wgdOverride)
+        val wgdLabels = wgdValues.map {
+            if (it.isEmpty()) "Container default (" + com.winlator.star.core.WaylandGameDriver.optionLabel(p.context, c.waylandGameDriver, wgdAuto) + ")"
+            else com.winlator.star.core.WaylandGameDriver.optionLabel(p.context, it, wgdAuto)
+        }
+        rows += XmbRow.Choice("waylandGameDriver", "Wayland game driver", Icons.Filled.Memory, wgdLabels,
+            wgdLabels[wgdValues.indexOf(wgdOverride).coerceAtLeast(0)],
+            subtitle = com.winlator.star.core.WaylandGameDriver.HELP_TEXT) { v ->
+            xmb.set(p, "waylandGameDriver", wgdValues[wgdLabels.indexOf(v)].ifEmpty { null })
         }
     } else {
         rows += XmbRow.Choice("gfxDriver", p.str(R.string.graphics_driver), Icons.Filled.Memory, gfxEntries, p.labelFor(gfxEntries, gfxId)) { v ->

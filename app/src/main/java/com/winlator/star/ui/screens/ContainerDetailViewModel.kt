@@ -146,6 +146,10 @@ class ContainerDetailViewModel(app: Application) : AndroidViewModel(app) {
     var displayBackend by mutableStateOf(Container.DISPLAY_BACKEND_X11)
     val isWaylandStored get() = displayBackend == Container.DISPLAY_BACKEND_WAYLAND
     val isWaylandBackend get() = isWaylandStored && isWineWaylandCapable(selectedWineVersion)
+    // Wayland GAME driver (extra "waylandGameDriver": auto | bundled | bundled-a7xx | bundled-a8xx |
+    // imported:<id>). Only shown/used on the Wayland backend; kept as stored on X11 so flipping the
+    // backend back and forth doesn't lose it. See core.WaylandGameDriver.
+    var waylandGameDriver by mutableStateOf(Container.WAYLAND_GAME_DRIVER_AUTO)
 
     // Whether the given wine/Proton layer ships winewayland.so + its bundled Wayland Turnip. Same
     // early-composition caveat as isWineXrandrCapable, but the conservative default is NOT capable:
@@ -557,6 +561,7 @@ class ContainerDetailViewModel(app: Application) : AndroidViewModel(app) {
         rendererSwapRB           = seed?.getRendererSwapRB() ?: false
         rendererSfCompatMode     = seed?.getRendererSfCompatMode() ?: true
         displayBackend           = seed?.getDisplayBackend() ?: Container.DISPLAY_BACKEND_X11
+        waylandGameDriver        = seed?.getWaylandGameDriver() ?: Container.WAYLAND_GAME_DRIVER_AUTO
         renderScale              = seed?.getExtra("renderScale", "1.0") ?: "1.0"
         autoCloseOnExit          = (seed?.getExtra("autoCloseOnExit", "1") ?: "1") == "1"
         selectedDXWrapper        = identifierToDisplay(seed?.getDXWrapper() ?: Container.DEFAULT_DXWRAPPER, dxWrapperEntries)
@@ -1048,6 +1053,7 @@ class ContainerDetailViewModel(app: Application) : AndroidViewModel(app) {
             // Persist the EFFECTIVE backend: a stored "wayland" on a layer that can no longer drive it
             // displayed as X11 in the editor, so X11 is what gets saved.
             c.setDisplayBackend(if (isWaylandBackend) Container.DISPLAY_BACKEND_WAYLAND else Container.DISPLAY_BACKEND_X11)
+            c.setWaylandGameDriver(waylandGameDriver)   // "auto" clears the extra
             c.putExtra("renderScale", if (renderScale == "1.0") null else renderScale)
             c.putExtra("autoCloseOnExit", if (autoCloseOnExit) null else "0")  // default ON
             c.setInputType(inputType)

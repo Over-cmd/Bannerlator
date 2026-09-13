@@ -6251,6 +6251,9 @@ internal fun ShortcutSettingsDialogScreen(
         Container.DISPLAY_BACKEND_X11 -> false
         else -> containerWaylandDefault
     }
+    // Wayland GAME driver override (per-game, same extra name as the container's): "" = the
+    // container's choice. Only shown when the effective backend is Wayland; see core.WaylandGameDriver.
+    var waylandGameDriverOverride by remember { mutableStateOf(shortcut.getExtra("waylandGameDriver", "")) }
 
     // Gyro (motion aim) per-game overrides — seeded from the shortcut extra, falling back to the
     // container's value. Only the game-facing half lives here (deadzone/smoothing stay container-wide,
@@ -6712,6 +6715,8 @@ internal fun ShortcutSettingsDialogScreen(
             putExtra("displayBackend",
                 if (displayBackendOverride == Container.DISPLAY_BACKEND_WAYLAND && !containerWaylandCapable) Container.DISPLAY_BACKEND_X11
                 else displayBackendOverride.ifEmpty { null })
+            // Wayland game driver override: "" clears the extra (container default).
+            putExtra("waylandGameDriver", waylandGameDriverOverride.ifEmpty { null })
             putExtra("renderer", StringUtils.parseIdentifier(selectedRenderer))
             putExtra("sfCompatMode", if (sfCompatMode) "1" else "0")
             // Gyro per-game overrides (read by the launch resolver in XServerDisplayActivity).
@@ -6812,6 +6817,7 @@ internal fun ShortcutSettingsDialogScreen(
                 if (selectedScreenSize == "Custom") { add("customW"); add("customH") }
                 add("screenAlignment")
                 add("selectIcon"); add("displayBackend"); add("gfxDriver")
+                if (effectiveWaylandShortcut) add("waylandGameDriver")
                 if (!effectiveWaylandShortcut) { add("gfxWrapper"); add("gfxConfig") } // hidden on Wayland (X11 shims/tuning)
                 add("dxWrapper"); add("dxConfig"); add("renderer")
                 if (!effectiveWaylandShortcut && selectedRenderer == "SurfaceFlinger") add("sfCompat")
@@ -7231,17 +7237,17 @@ internal fun ShortcutSettingsDialogScreen(
                     var showWrapperManager by remember { mutableStateOf(false) }
                     val gfxContext = LocalContext.current
                     var compositorChoices by remember { mutableStateOf<List<String>>(emptyList()) }
+                    // Wayland GAME driver choices + the variant Auto resolves to (native probe, off-main
+                    // under graphicsProbeMutex with the compositor choices; cached after the first run).
+                    var waylandGameDriverValues by remember { mutableStateOf<List<String>>(emptyList()) }
+                    var waylandAutoPick by remember { mutableStateOf(com.winlator.star.core.WaylandGameDriver.autoVariantIfKnown()) }
                     LaunchedEffect(effectiveWaylandShortcut) {
                         if (!effectiveWaylandShortcut) return@LaunchedEffect
                         compositorChoices = compositorDriverChoices(gfxContext) // same source as the config dialog
+                        waylandGameDriverValues = com.winlator.star.core.WaylandGameDriver.optionValues(gfxContext)
+                        waylandAutoPick = waylandAutoVariant(gfxContext)
                     }
                     val compositorVersion = GraphicsDriverConfigDialog.getVersion(graphicsDriverConfig) ?: ""
-                    if (effectiveWaylandShortcut) {
-                        Text(
-                            "Game driver: Wayland Turnip bundled with this Proton",
-                            style = MaterialTheme.typography.bodySmall
-                        )
-                    }
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                         if (effectiveWaylandShortcut) {
                             DpDrop(
@@ -7299,10 +7305,37 @@ internal fun ShortcutSettingsDialogScreen(
                             )
                         }
                         Text(
-                            "Used by the Wayland compositor to put frames on screen; the game renders on the Turnip bundled with the Proton.",
+                            "Used by the Wayland compositor to put frames on screen; the game renders on the Wayland game driver below.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
+                        Spacer(Modifier.height(8.dp))
+                        // Wayland game driver (per-game): "Use container default (<its label>)" first,
+                        // then Auto / bundled variants / imported Linux ICDs. A stored imported:<id>
+                        // whose import is gone stays listed (labelled missing); launch uses Auto for it.
+                        run {
+                            val containerChoice = shortcut.container.waylandGameDriver
+                            val values = listOf("") + (
+                                if (waylandGameDriverOverride.isEmpty() || waylandGameDriverOverride in waylandGameDriverValues) waylandGameDriverValues
+                                else waylandGameDriverValues + waylandGameDriverOverride)
+                            val labels = values.map {
+                                if (it.isEmpty()) "Use container default (" + com.winlator.star.core.WaylandGameDriver.optionLabel(gfxContext, containerChoice, waylandAutoPick) + ")"
+                                else com.winlator.star.core.WaylandGameDriver.optionLabel(gfxContext, it, waylandAutoPick)
+                            }
+                            DpDrop(
+                                dp, "waylandGameDriver",
+                                label = "Wayland game driver",
+                                options = labels,
+                                selected = labels[values.indexOf(waylandGameDriverOverride).coerceAtLeast(0)],
+                                onSelect = { waylandGameDriverOverride = values[labels.indexOf(it)] },
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                            Text(
+                                com.winlator.star.core.WaylandGameDriver.HELP_TEXT,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
                     }
 
                     // DX Wrapper
