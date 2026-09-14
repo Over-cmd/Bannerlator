@@ -495,6 +495,18 @@ public class Container {
         putExtra("waylandGlSafeMode", enabled ? "1" : "0");
     }
 
+    // --- HDR output (per-container), stored in extraData. Wayland sessions only. ---
+    // Games that support HDR10 get it on a screen that reports HDR10 (display.WaylandHdr, the
+    // compositor's wl_color_mgmt.c). Default OFF (absent). A shortcut overrides with the same-named
+    // extra ("1" / "0"; absent or "" = this). BANNER_WAYLAND_HDR in the env vars still overrides both.
+    public boolean isWaylandHdr() {
+        return getExtra(com.winlator.star.display.WaylandHdr.EXTRA, "0").equals("1");
+    }
+
+    public void setWaylandHdr(boolean enabled) {
+        putExtra(com.winlator.star.display.WaylandHdr.EXTRA, enabled ? "1" : null);
+    }
+
     // --- Wayland game driver (per-container), stored in extraData ---
     // On Wayland the GAME renders on a Vulkan driver the Proton layer picks (winewayland sets
     // VK_ICD_FILENAMES), not on the compositor's Turnip. The layer bundles three Wayland Turnip
