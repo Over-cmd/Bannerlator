@@ -305,11 +305,15 @@ void banner_color_stats_tick(void) {
     log_verdict(0);
 }
 
+static _Atomic int g_session_ended;
+
 void banner_color_session_end(void) {
-    static _Atomic int done;
-    if (atomic_exchange(&done, 1)) return;
+    if (atomic_exchange(&g_session_ended, 1)) return;
     if (atomic_load(&g_gate) < 0) return;
-    log_verdict(1);
+    pthread_mutex_lock(&g_mu);
+    int asked = g_req.mode != 0;
+    pthread_mutex_unlock(&g_mu);
+    if (asked) log_verdict(1); /* nobody asked for HDR: no summary to write */
 }
 
 /* ---------------------------------------------------------------- image descriptions */
@@ -758,7 +762,7 @@ static void bind_cm(struct wl_client *c, void *data, uint32_t ver, uint32_t id) 
 }
 
 void banner_color_client_gone(struct wl_client *client) {
-    if (atomic_load(&g_gate) != 1) return;
+    if (atomic_load(&g_gate) != 1 || atomic_load(&g_session_ended)) return;
     /* A program that presented HDR has left: say where the session stands now, while it is fresh. */
     const char *name = banner_client_name(client);
     int mine;
@@ -818,10 +822,13 @@ void banner_color_init(struct wl_display *display) {
                 banner_log(TAG, "DXVK_HDR=1 is set: DXGI will still claim an HDR display that no swapchain can get here "
                            "(games that check fall back to SDR; some show washed-out colours) - remove it on this display");
             log_verdict(1);
-        } else {
-            banner_log(TAG, "HDR output off for this session (BANNER_WAYLAND_HDR not set): the compositor offers games "
-                       "no colour management%s", dxvk_hdr ? " - but DXVK_HDR=1 is set, so DXGI claims an HDR display "
-                       "the game cannot get a swapchain for" : "");
+        } else if (dxvk_hdr || (known && hdr10)) {
+            /* Off, and silent unless it is worth a line: a display that could show HDR10, or a DXVK
+             * switch that promises games an HDR display they cannot get. */
+            banner_log(TAG, "HDR output off for this session (BANNER_WAYLAND_HDR not set)%s%s",
+                       (known && hdr10) ? " - this display lists HDR10, so BANNER_WAYLAND_HDR=1 would offer it to games" : "",
+                       dxvk_hdr ? " - but DXVK_HDR=1 is set, so DXGI claims an HDR display the game cannot get a "
+                                  "swapchain for" : "");
         }
         return;
     }

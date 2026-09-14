@@ -4883,6 +4883,11 @@ public class XServerDisplayActivity extends AppCompatActivity {
         eaRefusalHandler.removeCallbacks(eaRefusalWatchRunnable);
         if (exiting) return;
         exiting = true;
+        // Wayland HDR output: the session's "HDR on screen: ..." line, written while the game is still
+        // connected (the compositor writes it once; onDestroy's call is the fallback).
+        if (waylandMode) {
+            try { com.winlator.star.wayland.WaylandCompositor.nativeHdrSessionEnd(); } catch (Throwable ignored) {}
+        }
         // A frozen (SIGSTOP'd) guest can't act on the SIGTERM below — resume before tearing down so
         // graceful termination isn't stuck waiting on a suspended process (any pending pulse aside).
         reshadePulseInProgress = false;
@@ -6867,6 +6872,66 @@ public class XServerDisplayActivity extends AppCompatActivity {
         return zc != null && (zc.equals("1") || zc.equalsIgnoreCase("true"));
     }
 
+    /** The effective env (container first, shortcut second, so the shortcut wins), or null. */
+    private EnvVars effectiveUserEnv() {
+        if (container == null) return null;
+        String raw = container.getEnvVars();
+        if (shortcut != null) {
+            String sv = shortcut.getExtra("envVars", "");
+            if (sv != null && !sv.isEmpty()) raw = (raw == null ? "" : raw + " ") + sv;
+        }
+        return raw != null && !raw.isEmpty() ? new EnvVars(raw) : null;
+    }
+
+    /** BANNER_WAYLAND_HDR in the container's or the shortcut's environment variables: the opt-in for the
+     *  Wayland compositor's HDR10 output (waylandcomp/src/banner_color.h). 1/true/on = on (only on a
+     *  display that lists HDR10), force = on whatever the display says (testing the negotiation on an SDR
+     *  panel), anything else = off. */
+    private int resolvedWaylandHdrMode() {
+        EnvVars env = effectiveUserEnv();
+        String v = env != null ? env.get("BANNER_WAYLAND_HDR") : null;
+        if (v == null) return com.winlator.star.wayland.WaylandCompositor.HDR_MODE_OFF;
+        v = v.trim();
+        if (v.equalsIgnoreCase("force")) return com.winlator.star.wayland.WaylandCompositor.HDR_MODE_FORCE;
+        if (v.equals("1") || v.equalsIgnoreCase("true") || v.equalsIgnoreCase("on"))
+            return com.winlator.star.wayland.WaylandCompositor.HDR_MODE_ON;
+        return com.winlator.star.wayland.WaylandCompositor.HDR_MODE_OFF;
+    }
+
+    /** Where BANNER_WAYLAND_HDR came from, for the session log. */
+    private String waylandHdrSource() {
+        if (shortcut != null) {
+            String sv = shortcut.getExtra("envVars", "");
+            if (sv != null && !sv.isEmpty() && new EnvVars(sv).has("BANNER_WAYLAND_HDR")) return "shortcut env";
+        }
+        return "container env";
+    }
+
+    /** DXVK_HDR=1 in the effective env: DXVK then reports an HDR display through DXGI. */
+    private boolean isDxvkHdrEnvOn() {
+        EnvVars env = effectiveUserEnv();
+        String v = env != null ? env.get("DXVK_HDR") : null;
+        return v != null && (v.equals("1") || v.equalsIgnoreCase("true"));
+    }
+
+    /** Set in startWaylandCompositor: the HDR opt-in turned zero-copy presentation on for this session
+     *  (the guest half, BANNER_WSI_AHB=1, is exported in setupXEnvironment, which runs after it). */
+    private volatile boolean waylandHdrZeroCopyForced = false;
+    /** The HDR opt-in mode this session started with (the ratio sampler runs only when it is on). */
+    private int waylandHdrMode = com.winlator.star.wayland.WaylandCompositor.HDR_MODE_OFF;
+
+    /** Tell the compositor what the game's display reports (the HDR gate's input; logged on change). */
+    private void pushWaylandHdrDisplay(com.winlator.star.display.DisplayHdrInfo d) {
+        if (!waylandMode || d == null) return;
+        try {
+            com.winlator.star.wayland.WaylandCompositor.nativeSetHdrDisplay(d.displayId, d.displayName, d.formats,
+                    d.supportsHdr10, d.maxLuminance, d.maxAverageLuminance, d.minLuminance,
+                    d.hdrSdrRatioAvailable, d.hdrSdrRatio, android.os.Build.VERSION.SDK_INT);
+        } catch (Throwable t) {
+            Log.w("XServerDisplayActivity", "wayland: HDR display push failed", t);
+        }
+    }
+
     /** The in-game drawer's Wayland rows (Graphics tab): seed the Zero-copy toggle from the effective
      *  env and wire its live switch + writer + the frame-count poll. Runs from setupUI, after the
      *  container and shortcut are resolved and after the drawer's reset() in onCreate. */
@@ -6975,12 +7040,87 @@ public class XServerDisplayActivity extends AppCompatActivity {
             Log.w("XServerDisplayActivity", "HDR: display listener unavailable", t);
         }
         reportHdrCapability("session start");
+        if (waylandMode && waylandHdrMode != com.winlator.star.wayland.WaylandCompositor.HDR_MODE_OFF)
+            startHdrRatioSampler();
     }
 
     private void stopHdrCapabilityReport() {
+        stopHdrRatioSampler();
+        if (waylandMode) {
+            // The compositor's "HDR on screen: ..." summary (once; a no-op when HDR was never asked for).
+            try { com.winlator.star.wayland.WaylandCompositor.nativeHdrSessionEnd(); } catch (Throwable ignored) {}
+        }
         if (hdrDisplayManager == null) return;
         try { hdrDisplayManager.unregisterDisplayListener(hdrDisplayListener); } catch (Throwable ignored) {}
         hdrDisplayManager = null;
+    }
+
+    // ───── HDR evidence on Wayland: the display's live HDR/SDR ratio (API 34+) ─────
+    // The one platform reading that says an HDR layer is really being SHOWN as HDR: 1.0 while only SDR
+    // is on screen, above 1.0 once the display grants the picture HDR headroom. The compositor tags the
+    // game's frames and counts them; this feeds it what the display did with them, so the session log
+    // (and its "HDR on screen: ..." line) can tell "tagged" from "shown". Runs only while the HDR switch
+    // is on, stops by itself when the compositor reports the gate closed, and never throws.
+    private final android.os.Handler hdrRatioHandler = new android.os.Handler(android.os.Looper.getMainLooper());
+    private Runnable hdrRatioSampler;
+    private java.util.function.Consumer<android.view.Display> hdrRatioListener;
+    private android.view.Display hdrRatioDisplay;
+
+    private void startHdrRatioSampler() {
+        if (hdrRatioSampler != null) return;
+        hdrRatioSampler = new Runnable() {
+            @Override public void run() {
+                if (hdrRatioSampler != this) return;
+                int gate;
+                try { gate = com.winlator.star.wayland.WaylandCompositor.nativeHdrGateState(); }
+                catch (Throwable t) { gate = 0; }
+                if (gate == 0) { stopHdrRatioSampler(); return; }  // closed: nothing to prove this session
+                if (gate == 1) {
+                    android.view.Display d = hdrTargetDisplay();
+                    armHdrRatioListener(d);
+                    float ratio = com.winlator.star.display.DisplayHdrInfo.liveHdrSdrRatio(d);
+                    try { com.winlator.star.wayland.WaylandCompositor.nativeHdrSdrRatioSample(ratio, false); }
+                    catch (Throwable ignored) {}
+                }
+                hdrRatioHandler.postDelayed(this, 1000);
+            }
+        };
+        hdrRatioHandler.postDelayed(hdrRatioSampler, 1000);
+    }
+
+    /** Register the display's own ratio listener (changes arrive at once, not a second later); moves with
+     *  the game to another display. Silently nothing where the display has no ratio (API < 34 / SDR). */
+    private void armHdrRatioListener(android.view.Display d) {
+        if (android.os.Build.VERSION.SDK_INT < 34 || d == null || d == hdrRatioDisplay) return;
+        disarmHdrRatioListener();
+        try {
+            if (!d.isHdrSdrRatioAvailable()) { hdrRatioDisplay = d; return; }
+            hdrRatioListener = disp -> {
+                float r = com.winlator.star.display.DisplayHdrInfo.liveHdrSdrRatio(disp);
+                try { com.winlator.star.wayland.WaylandCompositor.nativeHdrSdrRatioSample(r, true); }
+                catch (Throwable ignored) {}
+            };
+            d.registerHdrSdrRatioListener(hdrRatioHandler::post, hdrRatioListener);
+            hdrRatioDisplay = d;
+        } catch (Throwable t) {
+            hdrRatioListener = null;
+            hdrRatioDisplay = d; // do not retry every second
+            Log.w("XServerDisplayActivity", "HDR: ratio listener unavailable", t);
+        }
+    }
+
+    private void disarmHdrRatioListener() {
+        if (android.os.Build.VERSION.SDK_INT >= 34 && hdrRatioDisplay != null && hdrRatioListener != null) {
+            try { hdrRatioDisplay.unregisterHdrSdrRatioListener(hdrRatioListener); } catch (Throwable ignored) {}
+        }
+        hdrRatioListener = null;
+        hdrRatioDisplay = null;
+    }
+
+    private void stopHdrRatioSampler() {
+        if (hdrRatioSampler != null) hdrRatioHandler.removeCallbacks(hdrRatioSampler);
+        hdrRatioSampler = null;
+        disarmHdrRatioListener();
     }
 
     /** The display the game is on: the TV when it has been moved there, else this activity's. */
@@ -7009,6 +7149,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
             if (waylandMode) {
                 try { com.winlator.star.wayland.WaylandCompositor.nativeLogDisplay(line); }
                 catch (Throwable t) { Log.w("XServerDisplayActivity", "HDR: session-log write failed", t); }
+                if (!first) pushWaylandHdrDisplay(now); // the HDR output hears about a new display too
             }
             // The Task Manager header is built once at launch; refresh it so a screen plugged in
             // mid-game updates the row instead of showing the handheld's answer for ever.
@@ -7304,6 +7445,28 @@ public class XServerDisplayActivity extends AppCompatActivity {
             }
             EnvVars env = raw != null && !raw.isEmpty() ? new EnvVars(raw) : null;
             boolean zeroCopy = isWaylandZeroCopyRequested();
+            // HDR10 output (opt-in, BANNER_WAYLAND_HDR): the compositor decides the gate when it starts,
+            // from this request plus the display the game is on. An HDR frame is only right on the
+            // game's own display layer (everything the compositor draws itself is 8-bit sRGB), so when
+            // HDR can be on, zero-copy presentation is turned on for this session too. Without the
+            // switch, or on a display without HDR10, nothing here changes anything.
+            waylandHdrMode = resolvedWaylandHdrMode();
+            com.winlator.star.display.DisplayHdrInfo hdrDisp =
+                    com.winlator.star.display.DisplayHdrInfo.read(hdrTargetDisplay());
+            boolean hdrPossible = waylandHdrMode == com.winlator.star.wayland.WaylandCompositor.HDR_MODE_FORCE
+                    || (waylandHdrMode == com.winlator.star.wayland.WaylandCompositor.HDR_MODE_ON && hdrDisp.supportsHdr10);
+            waylandHdrZeroCopyForced = hdrPossible && !zeroCopy;
+            if (waylandHdrZeroCopyForced) {
+                zeroCopy = true;
+                XServerDrawerState.INSTANCE.setWaylandZeroCopyRequested(true);
+                Log.i("XServerDisplayActivity", "wayland: HDR output requested on an HDR10 display - zero-copy on for this session");
+            }
+            pushWaylandHdrDisplay(hdrDisp);
+            com.winlator.star.wayland.WaylandCompositor.nativeSetHdrRequest(waylandHdrMode, waylandHdrSource(),
+                    isDxvkHdrEnvOn(), waylandHdrZeroCopyForced);
+            if (waylandHdrMode != com.winlator.star.wayland.WaylandCompositor.HDR_MODE_OFF)
+                Log.i("XServerDisplayActivity", "wayland: BANNER_WAYLAND_HDR mode " + waylandHdrMode + " on \""
+                        + hdrDisp.displayName + "\" (HDR types " + hdrDisp.formats + ", HDR10 " + hdrDisp.supportsHdr10 + ")");
             com.winlator.star.wayland.WaylandCompositor.nativeSetZeroCopy(zeroCopy);
             XServerDrawerState.INSTANCE.setWaylandZeroCopyActive(zeroCopy);
             if (zeroCopy) Log.i("XServerDisplayActivity", "wayland: zero-copy layer mode requested");
@@ -7706,7 +7869,8 @@ public class XServerDisplayActivity extends AppCompatActivity {
             // its own Android layer (startWaylandCompositor) also tells our Wayland Turnip's WSI to
             // allocate the game's swapchain images as gralloc buffers and hand them to the compositor
             // (banner_ahb_v1), so the layer shows the game's own buffer without a copy.
-            if (waylandMode && isWaylandZeroCopyRequested()) envVars.put("BANNER_WSI_AHB", "1");
+            // The HDR opt-in (startWaylandCompositor, which runs first) can turn zero-copy on too.
+            if (waylandMode && (isWaylandZeroCopyRequested() || waylandHdrZeroCopyForced)) envVars.put("BANNER_WSI_AHB", "1");
 
             // OpenGL safe mode (Wayland only, default ON): GALLIUM_THREAD=0 removes Mesa's
             // u_threaded_context helper thread. That thread is a plain pthread with no Wine TEB, so a

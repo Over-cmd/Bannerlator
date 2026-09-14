@@ -225,6 +225,40 @@ public final class WaylandCompositor {
      *  list stops at the desktop size, as the X server's does on X11. Set before the compositor starts. */
     public static native void nativeSetOutputSize(int width, int height);
 
+    // ── HDR10 output, round 1 (waylandcomp/src/banner_color.h, wl_color_mgmt.c) ─────────────────
+    // Opt-in: BANNER_WAYLAND_HDR=1 in the container's or shortcut's env vars. The compositor offers
+    // games HDR10 (wp_color_manager_v1 + 10-bit buffers, frames tagged BT2020_PQ on the game's own
+    // display layer) only when the game's display lists HDR10 as well; otherwise nothing changes and
+    // the session log says why. Not the drawer's "HDR" effect, which is an SDR bloom/contrast filter.
+
+    /** HDR_MODE_OFF / HDR_MODE_ON (BANNER_WAYLAND_HDR=1) / HDR_MODE_FORCE (=force: skip the display
+     *  check, for testing the negotiation on an SDR panel). */
+    public static final int HDR_MODE_OFF = 0, HDR_MODE_ON = 1, HDR_MODE_FORCE = 2;
+
+    /** The opt-in: mode, where it came from ("container env" / "shortcut env"), whether DXVK_HDR=1 is
+     *  in the game's environment, and whether the app turned zero-copy on for this session because HDR
+     *  needs it. Set before the compositor starts. */
+    public static native void nativeSetHdrRequest(int mode, String source, boolean dxvkHdr, boolean zeroCopyForced);
+
+    /** The game's display as {@code android.view.Display} reports it. Before the compositor starts (it
+     *  feeds the gate) and again whenever it changes (logged; the gate is decided once per session). */
+    public static native void nativeSetHdrDisplay(int displayId, String name, String formats, boolean hdr10,
+                                                  float maxLuminance, float maxAverageLuminance, float minLuminance,
+                                                  boolean hdrSdrRatioAvailable, float hdrSdrRatio, int apiLevel);
+
+    /** One {@code Display.getHdrSdrRatio()} reading ({@code < 0} = not available); {@code listener} = it
+     *  came from the display's ratio listener rather than the periodic sampler. Any thread. */
+    public static native void nativeHdrSdrRatioSample(float ratio, boolean listener);
+
+    /** Milliseconds since an HDR frame last reached a display layer; -1 = none this session. Any thread. */
+    public static native int nativeHdrLastFrameAgeMs();
+
+    /** -1 = the compositor has not decided the HDR gate yet, 0 = closed, 1 = open. Any thread. */
+    public static native int nativeHdrGateState();
+
+    /** The session is ending: the compositor writes its "HDR on screen: …" summary line. Once. */
+    public static native void nativeHdrSessionEnd();
+
     /** Fullscreen mode ({@code Container.FULLSCREEN_OFF/FIT/STRETCH/FILL/INTEGER}) and screen alignment
      *  ({@code Container.ALIGN_CENTER/TOP/BOTTOM}): how the compositor fits the desktop onto the screen,
      *  with the same arithmetic as {@code ViewTransformation} (which maps touch input), so the picture and
