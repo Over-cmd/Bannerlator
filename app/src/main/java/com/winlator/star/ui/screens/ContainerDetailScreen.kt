@@ -1440,16 +1440,16 @@ private fun TopLevelFields(
         // FG's present-mode/mailbox delivery only exists on the Vulkan host renderer; OpenGL (GLRenderer)
         // and SurfaceFlinger (ASR) have no present-mode control, so FG is unsupported there — gate the
         // whole dropdown on Vulkan and grey it out otherwise (combined with the lsfg-DLL option gate).
-        // On Wayland the renderer gate is meaningless (the compositor is Vulkan) — FG is simply not
-        // wired to the compositor yet, so it is disabled with that reason and DISPLAYS it; the stored
-        // engine is untouched and comes back with the X11 backend.
+        // On Wayland the renderer gate does not apply: frame generation runs inside the compositor,
+        // which is always Vulkan, and the in-game drawer arms the engine picked here
+        // (resolvedFrameGenEngine), so the picker is live on both backends.
         val fgWayland = viewModel.isWaylandBackend
-        val fgVulkan = !fgWayland && viewModel.selectedRenderer == "Vulkan"
-        val fgShown = if (fgWayland) "Not available on Wayland yet" else fgEngineLabels[fgSelIdx]
+        val fgVulkan = fgWayland || viewModel.selectedRenderer == "Vulkan"
+        val fgShown = fgEngineLabels[fgSelIdx]
         Row(verticalAlignment = Alignment.CenterVertically) {
             LabeledDropdown(
                 label = stringResource(R.string.frame_generation),
-                options = if (fgWayland) listOf(fgShown) else fgEngineLabels,
+                options = fgEngineLabels,
                 selectedOption = fgShown,
                 onSelect = { viewModel.frameGenEngine = fgEngines[fgEngineLabels.indexOf(it)] },
                 enabled = fgVulkan,
@@ -1462,7 +1462,7 @@ private fun TopLevelFields(
         }
         if (!fgVulkan) {
             Text(
-                text = if (fgWayland) "Not available on Wayland yet (frame generation has not been wired to the Wayland compositor)" else stringResource(R.string.frame_generation_requires_vulkan),
+                text = stringResource(R.string.frame_generation_requires_vulkan),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(start = 52.dp, top = 2.dp, bottom = 4.dp)
@@ -1578,7 +1578,9 @@ private fun TopLevelFields(
                     color = MaterialTheme.colorScheme.primary
                 )
             }
-            // Same Wayland gate as Frame Generation above (LSFG Native isn't wired to the compositor).
+            // X11 only: this compat mode is handed to the X11 Vulkan renderer (setLsfgVk11Compat). On
+            // Wayland LSFG Native runs on the compositor's own device, which is always a modern Turnip,
+            // so the mode is neither read nor needed there.
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = if (fgWayland) Modifier.alpha(0.5f) else Modifier
@@ -1592,7 +1594,7 @@ private fun TopLevelFields(
                 Text(stringResource(R.string.lsfg_vk11_compat), modifier = Modifier.weight(1f))
             }
             Text(
-                text = if (fgWayland) "Not available on Wayland yet (frame generation has not been wired to the Wayland compositor)" else stringResource(R.string.lsfg_vk11_compat_hint),
+                text = if (fgWayland) "Not used on Wayland: frame generation runs in the compositor on your Turnip driver, which does not need this compatibility mode." else stringResource(R.string.lsfg_vk11_compat_hint),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(start = 52.dp, top = 2.dp, bottom = 4.dp)

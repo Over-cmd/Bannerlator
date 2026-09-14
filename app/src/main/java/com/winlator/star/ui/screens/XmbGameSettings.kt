@@ -427,14 +427,13 @@ private fun generalRows(xmb: XmbScope, p: XmbPrefs, host: XmbGameHost): List<Xmb
     val fgLabels = listOf(p.str(R.string.frame_generation_off), p.str(R.string.frame_generation_bionic), p.str(R.string.frame_generation_lsfg_native))
     val fg = p.ex("frameGenEngine", c.frameGenEngine).let { if (it == "lsfg") "lsfg-native" else it }
     val lsfgDll = File(p.context.filesDir, "lsfg-vk/Lossless.dll").isFile
-    // On Wayland FG is simply not wired to the compositor yet (the X11 renderer gate doesn't apply);
-    // disabled with that reason and displaying it, stored engine untouched.
-    val fgShown = if (waylandGame) "Not available on Wayland yet" else fgLabels[fgEngines.indexOf(fg).coerceAtLeast(0)]
-    rows += XmbRow.Choice("frameGen", "Frame generation", Icons.Filled.Speed, if (waylandGame) listOf(fgShown) else fgLabels, fgShown,
+    // On Wayland the X11 renderer gate does not apply: FG runs inside the compositor (always Vulkan)
+    // and the in-game drawer arms the engine picked here.
+    val fgShown = fgLabels[fgEngines.indexOf(fg).coerceAtLeast(0)]
+    rows += XmbRow.Choice("frameGen", "Frame generation", Icons.Filled.Speed, fgLabels, fgShown,
         subtitle = if (!lsfgDll) "Import a Lossless.dll in Settings to enable LSFG" else null,
         disabledReason = when {
-            waylandGame -> "Not available on Wayland yet (frame generation has not been wired to the Wayland compositor)"
-            rend != "Vulkan" -> "Frame generation requires the Vulkan renderer"
+            !waylandGame && rend != "Vulkan" -> "Frame generation requires the Vulkan renderer"
             else -> null
         },
         disabledOptions = if (lsfgDll) emptySet() else setOf(fgLabels[2])) { v -> xmb.set(p, "frameGenEngine", fgEngines[fgLabels.indexOf(v)]) }

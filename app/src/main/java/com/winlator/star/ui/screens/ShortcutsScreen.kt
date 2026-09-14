@@ -7600,15 +7600,15 @@ internal fun ShortcutSettingsDialogScreen(
                         // FG's mailbox/present-mode delivery only exists on the Vulkan host renderer, so
                         // gate the whole dropdown on Vulkan (grey it out otherwise) — combined with the
                         // existing lsfg-DLL option gate. See ContainerDetailScreen for the rationale.
-                        // On Wayland FG is simply not wired to the compositor yet: disabled with that
-                        // reason and displaying it (stored engine untouched). See ContainerDetailScreen.
-                        val fgVulkan = !effectiveWaylandShortcut && selectedRenderer == "Vulkan"
-                        val fgShown = if (effectiveWaylandShortcut) "Not available on Wayland yet" else fgLabels[fgIdx]
+                        // On Wayland the renderer gate does not apply: FG runs inside the compositor
+                        // (always Vulkan) and the drawer arms the engine picked here. See ContainerDetailScreen.
+                        val fgVulkan = effectiveWaylandShortcut || selectedRenderer == "Vulkan"
+                        val fgShown = fgLabels[fgIdx]
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             DpDrop(
                                 dp, "frameGen",
                                 label = stringResource(R.string.frame_generation),
-                                options = if (effectiveWaylandShortcut) listOf(fgShown) else fgLabels,
+                                options = fgLabels,
                                 selected = fgShown,
                                 onSelect = { frameGenEngine = fgEngines[fgLabels.indexOf(it)] },
                                 enabled = fgVulkan,
@@ -7624,7 +7624,7 @@ internal fun ShortcutSettingsDialogScreen(
                         }
                         if (!fgVulkan) {
                             Text(
-                                text = if (effectiveWaylandShortcut) "Not available on Wayland yet (frame generation has not been wired to the Wayland compositor)" else stringResource(R.string.frame_generation_requires_vulkan),
+                                text = stringResource(R.string.frame_generation_requires_vulkan),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
