@@ -276,16 +276,18 @@ app window ....... Compose UI, the in-game drawer, the perf HUD, the on-screen c
 - **What can be on the game layer**, cheapest first: the game's own gralloc buffer (zero-copy, no
   copy anywhere — `ahb_swapchain.c`); one blit of the game's frame into a compositor buffer
   (`sc_layer_present`); or, with screen effects on, the compositor pass's **result** blitted into
-  such a buffer (`sc_layer_present_pass` → `vkp_pass_present_layer`). The last one is what keeps a
-  Look from dropping the session back to the app's swapchain: the scene → output mapping
-  (Fullscreen Mode / Alignment, and the scaling a mode like FSR asks for) is then done by the
-  display through `setGeometry` instead of by a second full-screen GPU blit. That pass records the
-  composite, the chain, the copy into the layer buffer **and** the black frame for the base surface
-  into ONE command buffer, one submit and one present — the same cost shape as the copy path. (The
-  first shape used two submits with a CPU fence wait between them and measured ~13 % slower than the
-  copy path with the same Look on the Pocket FIT; one submit is what makes the layer path worth
-  taking.) `vkp_pass_target_size()` (→ `vkp_effects_chain_size()`) gives the buffer size before
-  anything is recorded, so the copy is 1:1.
+  such a buffer (`sc_layer_present_pass` → `vkp_pass_begin` / `vkp_pass_copy_to`). The last one is
+  what keeps a Look from dropping the session back to the app's swapchain: the scene → output
+  mapping (Fullscreen Mode / Alignment, and the scaling a mode like FSR asks for) is then done by
+  the display through `setGeometry` instead of by a second full-screen GPU blit.
+- **Present order matters, and it was measured.** The layers go up first; the base surface's black
+  frame is presented *after* the layer transaction, and the effects chain runs in its own submit
+  with **no swapchain image acquired**. A present holds an acquired image and the acquire semaphore
+  is a vblank gate: folding the chain into that submit (one command buffer, one present — the
+  shape that looks cheaper) put the whole 13-pass chain behind a vblank and measured **72 fps**
+  against **111 fps** for the split shape, on HL2 + Retro CRT at 1920x1080 on the Pocket FIT (the
+  copy path is 129 fps on the same scene). Anyone tempted to "optimise" this into one submit should
+  read this paragraph first.
 - **What goes on the overlay layer**: exactly one draw above the game — a second Wayland toplevel
   (a launcher or settings window, a message box), copied 1:1 into the overlay pool and then
   *cropped and placed* by the display through the same `vkp_map_draw` mapping the copy path uses.

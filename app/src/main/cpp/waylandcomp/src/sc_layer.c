@@ -579,13 +579,13 @@ int sc_layer_present_pass(const struct vkp_draw *draws, int n, int scene_w, int 
     int rw = 0, rh = 0, r[8];
     if (!draws || n <= 0 || ensure_sc(l) != 0) return -1;
     if (vkp_update_map(scene_w, scene_h) != 0) return -1;
-    /* The chain's result size (a scaling mode resizes to the scene's mapped output size) decides
-     * how big the layer buffer has to be, so it is asked for before anything is recorded. */
-    if (vkp_pass_target_size(scene_w, scene_h, &rw, &rh) != 0) return -1;
-    if (!vkp_map_rect(rw, rh, scene_w, scene_h, r)) { sc_layer_hide(); return 0; }
+    /* Compose + run the effects chain first: the chain's result size (a scaling mode resizes to
+     * the scene's mapped output size) decides how big the layer buffer has to be. */
+    if (vkp_pass_begin(scene_w, scene_h, draws, n, &rw, &rh) != 0) return -1;
+    if (!vkp_map_rect(rw, rh, scene_w, scene_h, r)) { vkp_pass_abort(); sc_layer_hide(); return 0; }
     int idx = take_free_slot(l, rw, rh);
-    if (idx < 0) { log_drop(l); return 0; }
-    if (vkp_pass_present_layer(scene_w, scene_h, draws, n, l->slots[idx].img) != 0) return -1;
+    if (idx < 0) { vkp_pass_abort(); log_drop(l); return 0; }
+    if (vkp_pass_copy_to(l->slots[idx].img) != 0) return -1;
     if (present_slot(l, idx, r) != 0) return -1;
     if (!l->first_logged) {
         l->first_logged = 1;

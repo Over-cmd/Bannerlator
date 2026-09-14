@@ -1584,32 +1584,39 @@ static void render_scene(void) {
          * of the game's own AHardwareBuffers (zero-copy, ahb_swapchain.c), through the effects
          * chain's result when a Look is on, else through one blit into the pool. If a layer can't
          * take its frame, the whole scene is drawn the usual way. */
-        rendered = vkp_render(w, h, NULL, 0) == 0;
-        if (rendered) {
-            int r = -1;
-            /* The game's own buffer can only go on the layer AS IS - with a Look on, the frame has
-             * to go through the chain first, so the raw buffer is skipped in favour of the pass
-             * (a frame this renderer could not import has no draw, li < 0, and stays zero-copy
-             * with the effects skipped, said once above). */
-            if (!(fx_on && li >= 0) && ls && ls->dmabuf_buf && ahb_swapchain_has_ahb(ls->dmabuf_buf))
-                r = ahb_swapchain_present(ls->dmabuf_buf, ls, w, h);
-            if (r != 0 && li >= 0)
-                r = fx_on ? sc_layer_present_pass(&dl.d[li], 1, w, h)
-                          : sc_layer_present(dl.d[li].img, w, h);
-            if (r == 0) {
-                if (ls) ls->drawn = 1;
-                /* The one window above the game keeps the game off the copy path entirely: it goes
-                 * on its own layer, cropped and placed by the display. */
-                int go[8], ov = 0;
-                if (over == 1 && li >= 0 && vkp_map_draw(&dl.d[li + 1], go))
-                    ov = sc_layer_present_overlay(dl.d[li + 1].img, go) == 0 ? 1 : -1;
-                if (ov <= 0) sc_layer_hide_overlay();
-                if (ov < 0) { /* the overlay layer refused it: draw the whole scene the old way */
-                    sc_layer_hide();
-                    rendered = vkp_render(w, h, dl.d, dl.n) == 0;
-                }
-            } else rendered = vkp_render(w, h, dl.d, dl.n) == 0;
-        }
+        /* The layers go up FIRST and the base surface's black frame is presented after them. The
+         * order matters: a present holds an acquired swapchain image, and the acquire semaphore is
+         * a vblank gate - putting the effects chain or the layer transaction behind it costs a
+         * whole refresh (measured on the Pocket FIT: 72 fps that way, 111 fps this way, with Retro
+         * CRT at 1920x1080). The window request the app may have left is applied here instead,
+         * since vkp_render no longer runs before the layer path. */
+        vkp_apply_window_request();
+        int r = -1;
+        /* The game's own buffer can only go on the layer AS IS - with a Look on, the frame has to
+         * go through the chain first, so the raw buffer is skipped in favour of the pass (a frame
+         * this renderer could not import has no draw, li < 0, and stays zero-copy with the effects
+         * skipped, said once above). */
+        if (!(fx_on && li >= 0) && ls && ls->dmabuf_buf && ahb_swapchain_has_ahb(ls->dmabuf_buf))
+            r = ahb_swapchain_present(ls->dmabuf_buf, ls, w, h);
+        if (r != 0 && li >= 0)
+            r = fx_on ? sc_layer_present_pass(&dl.d[li], 1, w, h)
+                      : sc_layer_present(dl.d[li].img, w, h);
+        if (r == 0) {
+            if (ls) ls->drawn = 1;
+            /* The one window above the game keeps the game off the copy path entirely: it goes on
+             * its own layer, cropped and placed by the display. */
+            int go[8], ov = 0;
+            if (over == 1 && li >= 0 && vkp_map_draw(&dl.d[li + 1], go))
+                ov = sc_layer_present_overlay(dl.d[li + 1].img, go) == 0 ? 1 : -1;
+            if (ov <= 0) sc_layer_hide_overlay();
+            if (ov < 0) { /* the overlay layer refused it: draw the whole scene the old way */
+                sc_layer_hide();
+                rendered = vkp_render(w, h, dl.d, dl.n) == 0;
+            } else {
+                /* Black under the opaque layers, and the vsync tick that paces this loop. */
+                rendered = vkp_render(w, h, NULL, 0) == 0;
+            }
+        } else rendered = vkp_render(w, h, dl.d, dl.n) == 0;
     } else {
         sc_layer_hide();
         rendered = vkp_render(w, h, dl.d, dl.n) == 0;
