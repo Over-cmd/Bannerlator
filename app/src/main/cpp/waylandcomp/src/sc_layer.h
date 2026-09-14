@@ -45,10 +45,12 @@
  * HOME + resume re-creates the app's whole window and SurfaceView (`VRI[XServerDisplayActivity]#0`
  * becomes `#4`), not just this child layer — so the sticky state belongs to the parent surface or
  * the display. Re-creating the parent would cost a real black frame and a swapchain rebuild, which
- * is worse than the few percent of GPU that client composition costs. The cure that would actually
- * keep the win is PREVENTION: do not put a second display layer up at all when the game layer is
- * rotated and scaled, and send the window above the game down the copy path instead (what the
- * pre-phase-4 code did). Not implemented — it is a behaviour change, not a bug fix.
+ * is worse than the few percent of GPU that client composition costs. The cure that actually keeps
+ * the win is PREVENTION, and it IS implemented: sc_layer_overlay_affordable() declines the second
+ * layer when the game layer is both rotated and scaled, and the window above the game goes down the
+ * copy path instead (what the pre-phase-4 code did) — one blit SurfaceFlinger would have done
+ * anyway, and the session keeps DEVICE composition throughout. Where a second layer costs nothing,
+ * nothing changes.
  *
  * What can be on the game layer, cheapest first:
  *   - the game's own gralloc buffer (ahb_swapchain.c, true zero-copy: no copy anywhere);
@@ -109,6 +111,17 @@ int sc_layer_present_ahb(AHardwareBuffer *ahb, int w, int h, int acquire_fd, voi
  * transaction, and re-applies it whenever a SurfaceControl is re-created. A no-op on devices whose
  * libandroid has no ASurfaceTransaction_setFrameRate. */
 void sc_layer_set_frame_rate(float fps);
+
+/* Is a SECOND display layer worth raising on THIS display? Ask before committing the game to its
+ * layer, not after: on a display where the answer is no, the whole scene must go down the copy path
+ * from the start, or the game layer would be shown and hidden again on every frame.
+ *
+ * The answer is computed from what the layer path knows — the rotation the presentation engine
+ * applies to everything we hand it (VkSurfaceCapabilitiesKHR::currentTransform) and the game
+ * layer's own src -> dst rectangles — and never from a device or panel allowlist. ROTATED AND
+ * SCALED is the combination measured to cost hardware composition (below); either alone is fine.
+ * The reason is written to the session log once, and again if the answer changes. */
+int sc_layer_overlay_affordable(void);
 
 /* OVERLAY layer: show `src` (one window's imported frame) above the game layer, at the placement
  * `geo` = {src x0,y0,x1,y1 in image pixels, dst x0,y0,x1,y1 in output pixels} from vkp_map_draw.

@@ -454,8 +454,15 @@ static int layer_geometry(int w, int h, int scene_w, int scene_h, int r[8]) {
     return vkp_map_rect(w, h, scene_w, scene_h, r) ? 1 : 0;
 }
 
+/* The GAME layer's last placement, kept across SurfaceControl retires and swaps (l->geo_valid is
+ * per-SurfaceControl and is cleared by both). This is the src -> dst the display actually works
+ * with, and it is what decides whether a second layer is affordable — see overlay_affordable(). */
+static ARect g_game_src, g_game_dst;
+static int g_game_geo_known;
+
 static void apply_geometry(ASurfaceTransaction *tx, struct layer *l, const int r[8]) {
     ARect srcR = {r[0], r[1], r[2], r[3]}, dstR = {r[4], r[5], r[6], r[7]};
+    if (l == &g_layers[SC_LAYER_GAME]) { g_game_src = srcR; g_game_dst = dstR; g_game_geo_known = 1; }
     if (!l->geo_valid || memcmp(&srcR, &l->geo_src, sizeof(srcR)) || memcmp(&dstR, &l->geo_dst, sizeof(dstR))) {
         api.setGeometry(tx, l->sc, &srcR, &dstR, 0 /* no transform: the DPU scales, never rotates */);
         l->geo_src = srcR; l->geo_dst = dstR; l->geo_valid = 1;
@@ -672,9 +679,70 @@ int sc_layer_present_pass(const struct vkp_draw *draws, int n, int scene_w, int 
     return 0;
 }
 
+/* ---- is a SECOND display layer affordable on this display? -----------------------------------
+ * MEASURED on the Pocket FIT (2026-09-14, three times): while a second layer is up, this hardware
+ * composer hands the WHOLE frame back to the GPU (`DEVICE/CLIENT`), and nothing short of re-creating
+ * the app's window brings it back — so on this display the overlay layer costs more than it saves,
+ * every time, for the rest of the session. Where it costs nothing it is still the better path (the
+ * game keeps copy-free frames with a window on top), so this is a GATE, not a removal.
+ *
+ * The gate is read from what the layer path actually knows, never from a device or panel list:
+ *   - rotation: vkp_surface_rotation_degrees(), i.e. VkSurfaceCapabilitiesKHR::currentTransform —
+ *     what the presentation engine says it does to every layer we hand it;
+ *   - scale: the GAME layer's own src -> dst rectangles, the ones passed to setGeometry.
+ * Rotated AND scaled is the combination that was measured to cost composition (the DPU's rotator
+ * has to take a scaled source); either alone, or neither, is left as it was.
+ *
+ * Why not just measure the composition type after raising the layer and back out if it comes back
+ * CLIENT — which would beat predicting? Because no app can read it. The composition type lives in
+ * the Composer HAL; ASurfaceTransactionStats exposes latch time and fences and nothing else, and
+ * the only place the value is published is `dumpsys android.hardware.graphics.composer3.IComposer`,
+ * which needs android.permission.DUMP and string-parsing. It would also arrive at least a frame
+ * late, so backing out would itself be the visible change we are avoiding. Hence the rule. */
+static int overlay_affordable(int *deg, int sw[2], int dw[2]) {
+    *deg = vkp_surface_rotation_degrees();
+    sw[0] = sw[1] = dw[0] = dw[1] = 0;
+    if (!g_game_geo_known) return 1;    /* the game has never been placed: nothing to weigh against */
+    if (*deg <= 0) return 1;            /* unknown (-1) or upright: leave today's behaviour alone */
+    sw[0] = g_game_src.right - g_game_src.left; sw[1] = g_game_src.bottom - g_game_src.top;
+    dw[0] = g_game_dst.right - g_game_dst.left; dw[1] = g_game_dst.bottom - g_game_dst.top;
+    if (sw[0] <= 0 || sw[1] <= 0) return 1;
+    return !(dw[0] != sw[0] || dw[1] != sw[1]); /* rotated AND scaled -> not affordable */
+}
+
+/* -1 = not decided yet, 0 = raising the overlay, 1 = declining it. Logged on every change, so a
+ * tester's log says why they are seeing the copy path instead of two layers — and says it again if
+ * the placement changes the answer (e.g. a fullscreen mode that stops scaling the game). */
+static int g_overlay_declined = -1;
+
+int sc_layer_overlay_affordable(void) {
+    layers_init();
+    int deg, sr[2], ds[2];
+    int ok = overlay_affordable(&deg, sr, ds);
+    int want = ok ? 0 : 1;
+    if (want != g_overlay_declined) {
+        int first = g_overlay_declined < 0;
+        g_overlay_declined = want;
+        if (want)
+            banner_log("layer", "overlay layer declined: this display rotates every layer %d° and the game "
+                       "layer is scaled %dx%d -> %dx%d, and on that combination a second layer drops the "
+                       "whole frame to GPU composition for the rest of the session (measured). The window "
+                       "above the game goes on the copy path instead - same picture, one blit.",
+                       deg, sr[0], sr[1], ds[0], ds[1]);
+        else if (!first)
+            banner_log("layer", "overlay layer allowed again: the game layer is no longer both rotated and "
+                       "scaled, so a second display layer costs nothing here");
+    }
+    return ok;
+}
+
 int sc_layer_present_overlay(struct vkp_image *src, const int geo[8]) {
     struct layer *l = layer_of(SC_LAYER_OVERLAY);
-    if (!src || !geo || ensure_sc(l) != 0) return -1;
+    if (!src || !geo) return -1;
+    /* The caller decides with sc_layer_overlay_affordable() BEFORE it commits the game to a layer;
+     * this is only a guard so the layer can never go up behind that decision's back. */
+    if (!sc_layer_overlay_affordable()) return -1;
+    if (ensure_sc(l) != 0) return -1;
     int sw = vkp_image_width(src), sh = vkp_image_height(src);
     if (sw <= 0 || sh <= 0) return -1;
     int idx = take_free_slot(l, sw, sh);

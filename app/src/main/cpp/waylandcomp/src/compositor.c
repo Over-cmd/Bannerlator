@@ -1724,13 +1724,23 @@ static void render_scene(void) {
     int over = li >= 0 ? dl.n - 1 - li : 0; /* draws above the fullscreen game (0 or 1) */
     const int fx_blocks = (li >= 0 && fx_on && over > 0);
     if (fx_blocks) { li = -1; over = 0; }
-    const int blocked = framegen ? 1 : (fx_blocks ? 2 : 0);
+    /* A window above the game needs a SECOND display layer, and on some displays that costs the
+     * hardware composition the first layer was worth having (sc_layer_overlay_affordable). Where it
+     * does, the whole scene goes down the copy path exactly as it did before the layer set existed.
+     * Decided HERE, before the game is committed to a layer: deciding it after the present would
+     * show the game layer and hide it again on every frame. */
+    const int ov_blocks = (li >= 0 && over > 0 && !fx_blocks && !sc_layer_overlay_affordable());
+    if (ov_blocks) { li = -1; over = 0; }
+    const int blocked = framegen ? 1 : (fx_blocks ? 2 : (ov_blocks ? 3 : 0));
     if (g_zero_copy && blocked != g_zero_copy_paused) {
         g_zero_copy_paused = blocked;
         if (blocked == 1)
             banner_log("framegen", "zero-copy paused: frame generation needs the compositor pass");
         else if (blocked == 2)
             banner_log("effects", "zero-copy paused: a window above the game needs the compositor pass for the whole scene");
+        else if (blocked == 3)
+            banner_log("layer", "zero-copy paused: a window above the game would need a second display layer, "
+                                "which this display cannot compose in hardware - whole scene on the copy path");
         else
             banner_log("effects", "zero-copy resumed: the game is back on its own display layer");
     }
