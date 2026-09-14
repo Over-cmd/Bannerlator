@@ -67,6 +67,16 @@ int banner_color_last_frame_age_ms(void);
 int banner_color_gate_state(void);
 /* The session is ending: write the summary line ("HDR on screen: …"). */
 void banner_color_session_end(void);
+/* 1 while HDR frames are really on screen: a frame tagged BT2020_PQ reached a display layer or the HDR
+ * swapchain in the last 1.5 s AND, where the display reports an HDR/SDR ratio, its last reading is
+ * above 1.01 (the HUD badge). */
+int banner_color_hdr_on_screen(void);
+/* Nits SDR content is placed at inside an HDR picture (default 203, BT.2408); any thread. */
+void banner_color_set_sdr_white(float nits);
+float banner_color_sdr_white(void);
+/* The HDR session was asked for (BANNER_WAYLAND_HDR / the setting resolved on or force) — known before
+ * the compositor starts, so the Vulkan instance can enable VK_EXT_swapchain_colorspace for it. */
+int banner_color_requested(void);
 
 /* ---- compositor.c -> here */
 /* Decide the gate (call after ahb_swapchain_init) and create the global when it is open. */

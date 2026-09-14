@@ -315,6 +315,31 @@ void banner_color_stats_tick(void) {
     log_verdict(0);
 }
 
+int banner_color_hdr_on_screen(void) {
+    if (atomic_load(&g_gate) != 1) return 0;
+    int age = banner_color_last_frame_age_ms();
+    if (age < 0 || age >= 1500) return 0;
+    pthread_mutex_lock(&g_mu);
+    int confirmed = !g_hdr.ratio_n || g_hdr.ratio_last > 1.01f; /* no ratio on this display: the tag is all there is */
+    pthread_mutex_unlock(&g_mu);
+    return confirmed;
+}
+
+static _Atomic int g_sdr_white_x100 = 20300;
+void banner_color_set_sdr_white(float nits) {
+    if (!(nits >= 10.0f && nits <= 2000.0f)) return;
+    atomic_store(&g_sdr_white_x100, (int)(nits * 100.0f + 0.5f));
+    banner_log(TAG, "SDR content inside an HDR picture is placed at %.0f nits (BANNER_WAYLAND_HDR_SDR_NITS)", nits);
+}
+float banner_color_sdr_white(void) { return atomic_load(&g_sdr_white_x100) / 100.0f; }
+
+int banner_color_requested(void) {
+    pthread_mutex_lock(&g_mu);
+    int m = g_req.mode;
+    pthread_mutex_unlock(&g_mu);
+    return m != 0;
+}
+
 static _Atomic int g_session_ended;
 
 void banner_color_session_end(void) {

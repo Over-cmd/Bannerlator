@@ -422,6 +422,26 @@ Java_com_winlator_star_wayland_WaylandCompositor_nativeHdrSessionEnd(JNIEnv *env
     banner_color_session_end();
 }
 
+/* HDR frames really on screen right now (the HUD badge). Any thread. */
+JNIEXPORT jboolean JNICALL
+Java_com_winlator_star_wayland_WaylandCompositor_nativeHdrOnScreen(JNIEnv *env, jclass clazz) {
+    return banner_color_hdr_on_screen() ? JNI_TRUE : JNI_FALSE;
+}
+
+/* One "color" line in the session log from Java. */
+JNIEXPORT void JNICALL
+Java_com_winlator_star_wayland_WaylandCompositor_nativeLogColor(JNIEnv *env, jclass clazz, jstring message) {
+    char *s = dup_jstr(env, message);
+    if (s) banner_log("color", "%s", s);
+    free(s);
+}
+
+/* SDR content's level inside an HDR picture, in nits (default 203). */
+JNIEXPORT void JNICALL
+Java_com_winlator_star_wayland_WaylandCompositor_nativeSetHdrSdrWhite(JNIEnv *env, jclass clazz, jfloat nits) {
+    banner_color_set_sdr_white((float)nits);
+}
+
 /* The Look the controls currently match (null = Custom) — only named in the session log. */
 JNIEXPORT void JNICALL
 Java_com_winlator_star_wayland_WaylandCompositor_nativeSetLookName(JNIEnv *env, jclass clazz, jstring name) {

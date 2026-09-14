@@ -259,6 +259,17 @@ public final class WaylandCompositor {
     /** The session is ending: the compositor writes its "HDR on screen: …" summary line. Once. */
     public static native void nativeHdrSessionEnd();
 
+    /** True while HDR frames are really on screen: frames tagged BT2020_PQ reached the display in the
+     *  last 1.5 s and, where the display reports an HDR/SDR ratio, it is above 1 (the HUD's badge). */
+    public static native boolean nativeHdrOnScreen();
+
+    /** One "color" line in the session log, from Java (the HDR environment, the DXVK warning). */
+    public static native void nativeLogColor(String message);
+
+    /** Nits at which SDR content is placed when the compositor composes an HDR picture (a window over
+     *  an HDR game, the desktop around a windowed one). Default 203 (BT.2408). Before the start. */
+    public static native void nativeSetHdrSdrWhite(float nits);
+
     /** Fullscreen mode ({@code Container.FULLSCREEN_OFF/FIT/STRETCH/FILL/INTEGER}) and screen alignment
      *  ({@code Container.ALIGN_CENTER/TOP/BOTTOM}): how the compositor fits the desktop onto the screen,
      *  with the same arithmetic as {@code ViewTransformation} (which maps touch input), so the picture and
