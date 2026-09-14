@@ -707,7 +707,14 @@ private fun ContainerItem(
     val (dxvkVersion, vkd3dVersion) = parseDxwrapperConfig(container.getDXWrapperConfig())
     val driverCfg = container.getGraphicsDriverConfig()
     val driverLabel = if (driverCfg.isNotEmpty()) GraphicsDriverConfigDialog.getVersion(driverCfg) else ""
-    val rendererLabel = rendererLabelOf(container.renderer)
+    // Renderer chip: a Wayland container renders through the compositor, so its stored renderer id
+    // is the X11 setting and nothing runs it. Same effective-backend rule as the editors, keyed on
+    // the inputs of that rule so the layer probe runs once per card.
+    val cardContext = LocalContext.current
+    val waylandContainer = remember(container.wineVersion, container.displayBackend) {
+        com.winlator.star.core.WineWaylandSupport.runsOnWayland(cardContext, container)
+    }
+    val rendererLabel = rendererLabelOf(container.renderer, waylandContainer)
     val frameGenLabel = frameGenLabelOf(container.frameGenEngine)
     val backendLabel = run {
         val id = container.emulator

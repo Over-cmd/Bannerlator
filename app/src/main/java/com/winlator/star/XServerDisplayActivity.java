@@ -714,6 +714,61 @@ public class XServerDisplayActivity extends AppCompatActivity {
         return null;
     }
 
+    /**
+     * P4 on WAYLAND: is the game rendering with native Vulkan or native OpenGL? Asked of the one
+     * process that can answer — the game's own — and answered from what it has actually mapped.
+     *
+     * <p>{@link #detectActiveDxApi} deliberately refuses to separate the two on X11, where guest-side
+     * Zink makes a GL title map vulkan-1.dll as well; it also ORs its flags over EVERY wine process,
+     * so explorer.exe's modules count as the game's. Neither works here. On Wayland the GL stack sits
+     * on the HOST side of winewayland.drv (wine's unix libEGL -> Zink -> Turnip), and — device-measured
+     * on this layer — it is mapped into a process only when that process really takes the GL path:
+     * <ul>
+     *   <li><b>OpenGL</b>: the layer's own {@code lib/libEGL.so.1} / {@code libgallium-*.so} /
+     *       {@code libwayland-egl.so} appear in the game's maps. Measured against the counter-example:
+     *       a D3D11-on-DXVK title (Titanfall 2, live Wayland session) maps NONE of them.</li>
+     *   <li><b>Vulkan</b> (native, or DXVK/VKD3D on top): {@code winevulkan.so}, the unix half of
+     *       winevulkan.dll, which only loads when the guest itself uses Vulkan.</li>
+     * </ul>
+     * Those are real ELF libraries out of the layer, so they are file-backed in
+     * {@code /proc/<pid>/maps} even on arm64ec, where the PE-only DLLs are invisible to a module scan.
+     * Costs one maps read per 2s poll (detectActiveDxApi reads every process's).
+     *
+     * <p>GL evidence is weighed FIRST because it is the specific signal: loading the GL stack means a
+     * GL context was created, while winevulkan says nothing about what is layered on top of it.
+     * {@code opengl32.so} is deliberately NOT evidence — the same Titanfall 2 session maps it while
+     * rendering D3D11, so wine's GL DLL being resident proves nothing (the X11 resolver's note about
+     * opengl32 being loaded proactively holds here too).
+     *
+     * <p>Returns null — not a guess — when the game pid isn't up yet or nothing is mapped; the caller
+     * then leaves the neutral "Vulkan" (the compositor, true of every Wayland session) on the HUD. The
+     * HUD must never name an API, or a wrapper, that nothing proves.
+     */
+    private String resolveWaylandNativeApi() {
+        try {
+            String pid = findRunningGamePid();
+            if (pid == null) return null;
+            boolean gl = false, vulkan = false;
+            try (java.io.BufferedReader r = new java.io.BufferedReader(
+                    new java.io.FileReader(new java.io.File("/proc/" + pid + "/maps")))) {
+                String line;
+                while ((line = r.readLine()) != null) {
+                    if (line.indexOf('/') < 0) continue;          // anonymous mapping — no module name
+                    line = line.toLowerCase();
+                    // The layer's Mesa EGL/Zink. "libegl.so.1" is Mesa's soname — Android's platform
+                    // EGL is /system/lib64/libEGL.so (no ".1"), so this can't match the host's.
+                    if (line.indexOf("libegl.so.1") >= 0 || line.indexOf("libgallium") >= 0
+                            || line.indexOf("libwayland-egl.so") >= 0) { gl = true; break; }
+                    if (line.indexOf("winevulkan.so") >= 0 || line.indexOf("winevulkan.dll") >= 0
+                            || line.indexOf("vulkan-1.dll") >= 0) vulkan = true;
+                }
+            }
+            if (gl) return "OpenGL";
+            if (vulkan) return "Vulkan";
+        } catch (Exception ignore) {}
+        return null;
+    }
+
     // Cache for resolveDualApiFromEngineLog: Player.log is near-static once the device is created,
     // so we only re-parse when its mtime/length changes — keeps the 2s poll cheap on a chatty log.
     private long lastEngineLogMtime = -1;
@@ -1243,12 +1298,23 @@ public class XServerDisplayActivity extends AppCompatActivity {
         hudCounterEnabled = fpsConfig.get("hudEnabled", "1").equals("1");
         String hudStyle = fpsConfig.get("hudStyle", "fusion");
 
+        // Host renderer side. On Wayland the container's renderer setting picks an X11 present path
+        // that this session never runs: the game's frames land in the embedded compositor, which is
+        // always Vulkan (the drawer and Task Manager say "Vulkan (Wayland compositor)"; the HUD line
+        // has room for one word). X11 keeps reading its configured renderer, as before.
         String resolvedR = resolvedRenderer();
-        String rendererMode = "vulkan".equals(resolvedR) ? "Vulkan"
+        String rendererMode = waylandMode ? "Vulkan"
+            : "vulkan".equals(resolvedR) ? "Vulkan"
             : "surfaceflinger".equals(resolvedR) ? "SurfaceFlinger" : "OpenGL";
+        // The configured wrapper NAMES what a D3D game would load here — it is not evidence that THIS
+        // game loads one: a native OpenGL or Vulkan title never touches DXVK. It stays the tag for a
+        // D3D API the resolvers actually prove (startDxApiDetection's fallback arg) and, on X11, the
+        // launch-time seed it has always been. On Wayland the label instead starts at the one thing
+        // true of every session — the compositor's Vulkan — and upgrades to "D3D9 · DXVK" / "OpenGL"
+        // when an evidence resolver sees the real API (see startDxApiDetection).
         String dxName = dxwrapper.contains("dxvk") ? "DXVK" : dxwrapper.contains("vegas") ? "VEGAS" : "WineD3D";
-        hudRendererLabel = rendererMode + " | " + dxName;
-        hudEngineShort = dxName;
+        hudRendererLabel = waylandMode ? rendererMode : rendererMode + " | " + dxName;
+        hudEngineShort = waylandMode ? rendererMode : dxName;
 
         // Build whichever HUD the config selected. The other styles are created on demand if the user
         // swaps hudStyle in the in-game drawer (see buildPerfHud/buildClassicHud/buildGameNativeHud).
@@ -1319,7 +1385,18 @@ public class XServerDisplayActivity extends AppCompatActivity {
                 String api = readAppDeclaredApi();                                  // P1
                 if (api == null) api = resolveApiFromEngineLogTopLevel(fallback);   // P2
                 if (api == null) api = resolveApiFromWrapperLogs(fallback);         // P3
-                if (api == null) api = detectActiveDxApi(fallback);                 // P4
+                if (api == null && waylandMode) {
+                    // P4 on Wayland: the game's OWN process says whether it is native Vulkan or
+                    // native OpenGL. detectActiveDxApi's native branch can't answer it here — it ORs
+                    // its flags over every wine process and reasons about the X11 topology — so only
+                    // its D3D verdict (file-backed DX DLLs, i.e. a non-arm64ec layer) is still worth
+                    // taking. No evidence => no api => the neutral compositor label stands.
+                    api = resolveWaylandNativeApi();
+                    if (api == null) {
+                        String dx = detectActiveDxApi(fallback);
+                        if (dx != null && dx.startsWith("D3D")) api = dx;
+                    }
+                } else if (api == null) api = detectActiveDxApi(fallback);          // P4
                 if (api != null && !api.equals(lastApi)) {
                     lastApi = api;
                     // Classic FrameRating renderer line = "<host renderer> | <api>". Skip the prefix
@@ -2470,7 +2547,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
             preloaderDialog.show(container.getName(), null, null);
         else {
             preloaderDialog.show(shortcut.name, shortcut.icon, shortcut.getCoverArt(),
-                com.winlator.star.ui.screens.LaunchSpecBuilderKt.buildLaunchSpec(shortcut, getResources()),
+                com.winlator.star.ui.screens.LaunchSpecBuilderKt.buildLaunchSpec(shortcut, this),
                 com.winlator.star.ui.screens.LaunchSpecBuilderKt.buildLaunchDetails(shortcut));
         }
         preloaderDialog.step(1, "Preparing container…");

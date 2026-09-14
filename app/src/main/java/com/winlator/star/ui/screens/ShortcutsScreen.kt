@@ -5125,11 +5125,11 @@ private fun ShortcutItemLayoutL(
     onBackupSaves: (() -> Unit)? = null,
     onRestoreSaves: (() -> Unit)? = null,
 ) {
-    val res = LocalContext.current.resources
+    val context = LocalContext.current
 
     // Resolved component metadata (shortcut override → container default). Shared with the launch
     // overlay via buildLaunchSpec() so the card and the launch screen can never drift.
-    val spec = buildLaunchSpec(shortcut, res)
+    val spec = buildLaunchSpec(shortcut, context)
     val rendererLabel = spec.rendererLabel
     val dxvkVersion = spec.dxvkVersion
     val vkd3dVersion = spec.vkd3dVersion
