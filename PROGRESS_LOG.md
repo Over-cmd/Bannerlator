@@ -1,6 +1,6 @@
 # Star-Compose — Progress Log
 
-## 2026-09-14 09:20 — 🧪 **No more Wine Mono download prompt on first boot or after a layer switch — every layer** (`fix/wine-mono-prompt`, building; device test pending)
+## 2026-09-14 09:20 — 🧪 **No more Wine Mono download prompt on first boot or after a layer switch — every layer** (`fix/wine-mono-prompt` `83c28493`, run 34847411880 green, headSha verified, pubg `e6b37f4e…`; device test in progress)
 
 > **The bug.** A new container's first boot, and the first launch after a container's layer changed, opened Wine's "Wine Mono Installer" dialog (Cancel / Install = download from winehq.org). Seen today on `Proton-11.0-2.1-arm64ec-7` (Wayland session logs 07:17 and 08:06, and 09-13 15:22 where Install was clicked).
 >
