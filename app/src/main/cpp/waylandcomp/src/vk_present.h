@@ -111,6 +111,19 @@ ANativeWindow *vkp_window(void);
 /* Fire the one-shot first-frame notification (layer mode presents outside vkp_render). */
 void vkp_signal_first_frame(void);
 
+/* ---- the compositor pass into a layer buffer (sc_layer.c; compositor thread) ----
+ * Screen effects on the game's own Android layer: compose `draws` into the scene image and run the
+ * effects chain WITHOUT presenting, then copy the result into a gralloc layer buffer. Three steps
+ * because the chain's result size (a scaling mode resizes to the scene's mapped output size) is
+ * only known once the chain has run, and the layer buffer is allocated from it.
+ * begin: 0 = a pass is in progress, its result is *rw x *rh; -1 = not possible (draw the old way).
+ * Exactly one of copy_to (blit into dst, submit, wait; 0 = done) / abort (drop it unsubmitted)
+ * must follow a successful begin. The chain deliberately runs with NO swapchain image acquired -
+ * see the comment in vk_present.c. Frame generation is not run here (see WAYLAND_RUNTIME.md). */
+int vkp_pass_begin(int scene_w, int scene_h, const struct vkp_draw *draws, int n, int *rw, int *rh);
+int vkp_pass_copy_to(struct vkp_image *dst);
+void vkp_pass_abort(void);
+
 // Session log (compositor.c): one line to Download/Wayland-logs and logcat.
 void banner_log(const char *tag, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 

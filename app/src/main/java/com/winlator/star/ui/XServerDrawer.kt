@@ -1397,11 +1397,12 @@ private fun WaylandZeroCopyRow(state: XServerDrawerState, effectsAvailable: Bool
             delay(1000)
         }
     }
-    // Any effect that needs the compositor pass forces the blit path until it is off again.
+    // Screen effects no longer take the layer away: their result is drawn into the game's own
+    // display layer, so the frames are not copy-free any more but the game stays hardware-composed.
     val effectsOn = effectsAvailable && waylandCompositorEffectsOn()
     HelperText(
         when {
-            checked && effectsOn  -> "Paused while screen effects are on; resumes when they are off."
+            checked && effectsOn  -> "On: screen effects are drawn into the game's display layer, so it keeps hardware composition."
             checked && !live      -> "Switching on… the game is rebuilding its swapchain on display buffers."
             checked && frames > 0 -> "On: $frames zero-copy frames in the last 10 s"
             checked               -> "On: frames are going straight to the display layer."

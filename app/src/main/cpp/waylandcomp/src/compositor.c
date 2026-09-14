@@ -31,6 +31,8 @@
 #include <stdarg.h>
 #include <errno.h>
 #include <sys/timerfd.h>
+#include <sys/syscall.h>
+#include <sys/sysmacros.h>
 #include <android/log.h>
 #include <wayland-server.h>
 
@@ -1313,9 +1315,14 @@ static void dmabuf_create_params(struct wl_client *c, struct wl_resource *r, uin
     if (!pr) { free(p); wl_client_post_no_memory(c); return; }
     wl_resource_set_implementation(pr, &params_impl, p, params_resource_destroy);
 }
+static void dmabuf_get_default_feedback(struct wl_client *c, struct wl_resource *r, uint32_t id);
+static void dmabuf_get_surface_feedback(struct wl_client *c, struct wl_resource *r, uint32_t id,
+                                        struct wl_resource *surface);
 static const struct zwp_linux_dmabuf_v1_interface dmabuf_impl = {
     .destroy = dmabuf_destroy,
     .create_params = dmabuf_create_params,
+    .get_default_feedback = dmabuf_get_default_feedback,
+    .get_surface_feedback = dmabuf_get_surface_feedback,
 };
 /* The advertised format/modifier table, built at the first bind from what the renderer's driver
  * can import (vkp_dmabuf_modifiers). INVALID is always offered too (Mesa drops it; other clients
@@ -1325,6 +1332,7 @@ static const struct zwp_linux_dmabuf_v1_interface dmabuf_impl = {
 static struct { uint32_t fmt; uint64_t mods[DMABUF_NMOD]; int n; } g_dmabuf_fmts[DMABUF_NFMT] = {
     {DRM_ARGB8888}, {DRM_XRGB8888}, {DRM_ABGR8888}, {DRM_XBGR8888}};
 static int g_dmabuf_fmts_ready;
+static void dmabuf_build_feedback(void);
 
 static void dmabuf_build_formats(void) {
     char line[256];
@@ -1357,12 +1365,148 @@ static void dmabuf_build_formats(void) {
     if (g_ubwc && !compressed)
         banner_log("dmabuf", "the compositor's driver (%s) reports no importable qcom_compressed layout: "
                    "game swapchains stay linear", vkp_gpu_name());
+    dmabuf_build_feedback();
+}
+
+/* ---- dmabuf feedback (zwp_linux_dmabuf_v1 version 4)
+ *
+ * Turnip's Vulkan WSI is happy with the version 3 format/modifier events, so every Vulkan game
+ * worked while we only advertised 3. Mesa's EGL is not: its Wayland platform only takes the GPU
+ * (kopper/Zink) path when it can bind this interface with FEEDBACK, and with 3 it silently drops
+ * to its wl_shm software path. On this Proton layer that path has no software rasteriser to fall
+ * back to (the gallium build is zink+kopper+swrast, no llvmpipe), so the shm buffer it commits is
+ * never written: a native OpenGL window came out solid black, ~30 shm commits/s and no GPU frame
+ * at all (Wizardry: The Labyrinth of Lost Souls). Feedback is what makes that path work.
+ *
+ * What a client needs from us is one tranche describing "everything the compositor can import":
+ * a format table it mmaps read-only, the device to allocate on, and the indices it may use.
+ * Clients binding versions 1-3 keep getting the old format/modifier events instead. */
+
+#ifndef MFD_CLOEXEC
+#define MFD_CLOEXEC 0x0001U
+#endif
+#ifndef MFD_ALLOW_SEALING
+#define MFD_ALLOW_SEALING 0x0002U
+#endif
+#ifndef F_ADD_SEALS
+#define F_ADD_SEALS 1033
+#define F_SEAL_SEAL 0x0001
+#define F_SEAL_SHRINK 0x0002
+#define F_SEAL_GROW 0x0004
+#define F_SEAL_WRITE 0x0008
+#endif
+
+struct dmabuf_fmt_entry { uint32_t format; uint32_t pad; uint64_t modifier; }; /* the wire layout */
+
+static int g_fmt_table_fd = -1;         /* sealed read-only memfd of dmabuf_fmt_entry[] */
+static size_t g_fmt_table_size;
+static uint16_t g_fmt_table_n;          /* entries, == the indices a tranche may name */
+static dev_t g_main_device;             /* the render node clients should allocate on */
+
+/* The GPU we import through is reached with KGSL, not DRM, so there is no render node of our own
+ * to name. Clients only use main_device to match "the same device as the compositor" and to pick
+ * a driver; the one DRM render node this platform has is the right answer, and Zink ignores it
+ * anyway (it renders on the Vulkan device it already has). 0 if the platform has none. */
+static dev_t dmabuf_render_node(void) {
+    static const char *nodes[] = {"/dev/dri/renderD128", "/dev/dri/renderD129", "/dev/dri/card0"};
+    struct stat st;
+    for (size_t i = 0; i < sizeof(nodes) / sizeof(nodes[0]); i++)
+        if (!stat(nodes[i], &st) && S_ISCHR(st.st_mode)) return st.st_rdev;
+    return 0;
+}
+
+static void dmabuf_build_feedback(void) {
+    struct dmabuf_fmt_entry entries[DMABUF_NFMT * DMABUF_NMOD];
+    int n = 0;
+
+    g_main_device = dmabuf_render_node();
+    for (int f = 0; f < DMABUF_NFMT; f++)
+        for (int m = 0; m < g_dmabuf_fmts[f].n; m++) {
+            if (g_dmabuf_fmts[f].mods[m] == MOD_INVALID) continue; /* never offer INVALID here */
+            entries[n].format = g_dmabuf_fmts[f].fmt;
+            entries[n].pad = 0;
+            entries[n].modifier = g_dmabuf_fmts[f].mods[m];
+            n++;
+        }
+    if (!n) return;
+
+    int fd = (int)syscall(__NR_memfd_create, "banner-dmabuf-formats",
+                          MFD_CLOEXEC | MFD_ALLOW_SEALING);
+    if (fd < 0) { WLOGE("dmabuf feedback: memfd_create failed (%s)", strerror(errno)); return; }
+    size_t size = (size_t)n * sizeof(entries[0]);
+    if (write(fd, entries, size) != (ssize_t)size) {
+        WLOGE("dmabuf feedback: could not write the format table (%s)", strerror(errno));
+        close(fd);
+        return;
+    }
+    /* The client mmaps this read-only and trusts it not to change under it. */
+    fcntl(fd, F_ADD_SEALS, F_SEAL_SEAL | F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE);
+    g_fmt_table_fd = fd;
+    g_fmt_table_size = size;
+    g_fmt_table_n = (uint16_t)n;
+    banner_log("dmabuf", "feedback ready: %d format/modifier pairs, main device %u:%u",
+               n, (unsigned)major(g_main_device), (unsigned)minor(g_main_device));
+}
+
+/* One tranche: our device, every pair in the table, no scanout flag. */
+static void dmabuf_feedback_send(struct wl_resource *fb) {
+    struct wl_array dev, idx;
+    uint16_t *ind;
+
+    if (g_fmt_table_fd < 0) { zwp_linux_dmabuf_feedback_v1_send_done(fb); return; }
+
+    zwp_linux_dmabuf_feedback_v1_send_format_table(fb, g_fmt_table_fd, (uint32_t)g_fmt_table_size);
+
+    wl_array_init(&dev);
+    memcpy(wl_array_add(&dev, sizeof(dev_t)), &g_main_device, sizeof(dev_t));
+    zwp_linux_dmabuf_feedback_v1_send_main_device(fb, &dev);
+    zwp_linux_dmabuf_feedback_v1_send_tranche_target_device(fb, &dev);
+    wl_array_release(&dev);
+
+    wl_array_init(&idx);
+    ind = wl_array_add(&idx, (size_t)g_fmt_table_n * sizeof(uint16_t));
+    if (ind) for (uint16_t i = 0; i < g_fmt_table_n; i++) ind[i] = i;
+    zwp_linux_dmabuf_feedback_v1_send_tranche_formats(fb, &idx);
+    wl_array_release(&idx);
+
+    zwp_linux_dmabuf_feedback_v1_send_tranche_flags(fb, 0);
+    zwp_linux_dmabuf_feedback_v1_send_tranche_done(fb);
+    zwp_linux_dmabuf_feedback_v1_send_done(fb);
+}
+
+static void dmabuf_feedback_destroy(struct wl_client *c, struct wl_resource *r) {
+    wl_resource_destroy(r);
+}
+static const struct zwp_linux_dmabuf_feedback_v1_interface dmabuf_feedback_impl = {
+    .destroy = dmabuf_feedback_destroy,
+};
+
+static void dmabuf_new_feedback(struct wl_client *c, struct wl_resource *parent, uint32_t id) {
+    struct wl_resource *fb = wl_resource_create(c, &zwp_linux_dmabuf_feedback_v1_interface,
+                                                wl_resource_get_version(parent), id);
+    if (!fb) { wl_client_post_no_memory(c); return; }
+    wl_resource_set_implementation(fb, &dmabuf_feedback_impl, NULL, NULL);
+    if (!g_dmabuf_fmts_ready) dmabuf_build_formats();
+    dmabuf_feedback_send(fb);
+}
+
+static void dmabuf_get_default_feedback(struct wl_client *c, struct wl_resource *r, uint32_t id) {
+    dmabuf_new_feedback(c, r, id);
+}
+/* Per-surface feedback would let us hint a different tranche for a window on its own display
+ * layer; we have nothing better to say per surface, so it is the default one. */
+static void dmabuf_get_surface_feedback(struct wl_client *c, struct wl_resource *r, uint32_t id,
+                                        struct wl_resource *surface) {
+    dmabuf_new_feedback(c, r, id);
 }
 
 static void bind_dmabuf(struct wl_client *c, void *data, uint32_t ver, uint32_t id) {
     struct wl_resource *r = wl_resource_create(c, &zwp_linux_dmabuf_v1_interface, ver, id);
     wl_resource_set_implementation(r, &dmabuf_impl, NULL, NULL);
     if (!g_dmabuf_fmts_ready) dmabuf_build_formats();
+    /* From version 4 the format and modifier events are gone: the client asks for feedback
+     * instead, and sending both would only confuse it about which list is authoritative. */
+    if (ver >= 4) return;
     for (int f = 0; f < DMABUF_NFMT; f++) {
         zwp_linux_dmabuf_v1_send_format(r, g_dmabuf_fmts[f].fmt);
         if (ver >= 3)
@@ -1479,16 +1623,20 @@ static int on_frame_timer(void *data) {
     return 0;
 }
 
-/* Layer mode: the index of a draw that is the topmost one and shows a whole client GPU frame
- * over the whole scene (one fullscreen game, nothing above it), or -1. */
+/* Layer mode: the index of a draw that shows a whole client GPU frame over the whole scene (one
+ * fullscreen game), or -1. Only the top two positions are looked at: the game must be the topmost
+ * draw, or have exactly ONE draw above it, which then goes on the overlay layer (sc_layer.h).
+ * Anything deeper would need more display layers than HWC will compose. */
 static int layer_candidate(const struct draw_list *dl, int scene_w, int scene_h) {
-    if (dl->n <= 0) return -1;
-    const struct vkp_draw *d = &dl->d[dl->n - 1];
-    if (!vkp_image_is_dmabuf(d->img)) return -1;
-    if (d->dx != 0 || d->dy != 0 || d->dw != scene_w || d->dh != scene_h) return -1;
-    if (d->sx != 0 || d->sy != 0 || (int)d->sw != vkp_image_width(d->img) ||
-        (int)d->sh != vkp_image_height(d->img)) return -1;
-    return dl->n - 1;
+    for (int i = dl->n - 1; i >= 0 && i >= dl->n - 2; i--) {
+        const struct vkp_draw *d = &dl->d[i];
+        if (!vkp_image_is_dmabuf(d->img)) continue;
+        if (d->dx != 0 || d->dy != 0 || d->dw != scene_w || d->dh != scene_h) continue;
+        if (d->sx != 0 || d->sy != 0 || (int)d->sw != vkp_image_width(d->img) ||
+            (int)d->sh != vkp_image_height(d->img)) continue;
+        return i;
+    }
+    return -1;
 }
 
 /* Zero-copy: the surface whose current GPU frame `img` is (layer_candidate found the draw). */
@@ -1538,24 +1686,32 @@ static void render_scene(void) {
     }
 
     int rendered;
-    /* Screen effects (effects_chain.c) and frame generation (framegen_bridge.c) both run in the
-     * compositor pass, which the layer path bypasses: while either is on, a fullscreen game goes
-     * through the copy path instead, and the layer resumes once both are off again. Said once per
-     * transition, by whichever needs the pass. */
     const int fx_on = vkp_effects_active();
     const int framegen = vkp_framegen_active();
+    /* What still forces the whole scene back through the compositor pass (and so through the app's
+     * own swapchain), and what no longer does:
+     *   - frame generation ALWAYS does: its extra frames each need a present of their own on
+     *     consecutive vblanks, and a display layer latches one buffer per refresh;
+     *   - screen effects do NOT any more when the game is alone on screen - the chain runs and its
+     *     result is copied into the game layer's own gralloc buffer (sc_layer_present_pass), so the
+     *     game keeps its layer and the display does the scene -> output mapping;
+     *   - screen effects DO when a window is drawn above the game: the chain has to see the whole
+     *     scene to look the way it does on the copy path, and here the game is only part of it. */
     const int pass_on = fx_on || framegen;
-    const int layer_ok = g_zero_copy && !pass_on;
-    if (g_zero_copy && pass_on != g_zero_copy_paused) {
-        g_zero_copy_paused = pass_on;
-        if (framegen)
+    int li = (g_zero_copy && !framegen) ? layer_candidate(&dl, w, h) : -1;
+    int over = li >= 0 ? dl.n - 1 - li : 0; /* draws above the fullscreen game (0 or 1) */
+    const int fx_blocks = (li >= 0 && fx_on && over > 0);
+    if (fx_blocks) { li = -1; over = 0; }
+    const int blocked = framegen ? 1 : (fx_blocks ? 2 : 0);
+    if (g_zero_copy && blocked != g_zero_copy_paused) {
+        g_zero_copy_paused = blocked;
+        if (blocked == 1)
             banner_log("framegen", "zero-copy paused: frame generation needs the compositor pass");
-        else if (fx_on)
-            banner_log("effects", "zero-copy paused: screen effects need the compositor pass");
+        else if (blocked == 2)
+            banner_log("effects", "zero-copy paused: a window above the game needs the compositor pass for the whole scene");
         else
-            banner_log("effects", "zero-copy resumed: screen effects and frame generation are off");
+            banner_log("effects", "zero-copy resumed: the game is back on its own display layer");
     }
-    int li = layer_ok ? layer_candidate(&dl, w, h) : -1;
     struct surface *ls = li >= 0 ? surface_for_image(dl.d[li].img) : NULL;
     /* A frame this renderer could not import can only be shown on the layer, effects or not. */
     if (li < 0) ls = ahb_layer_only_candidate(w, h);
@@ -1566,20 +1722,45 @@ static void render_scene(void) {
                    framegen ? "frame generation" : "effects");
     }
     if (li >= 0 || ls) {
-        /* Layer mode: the fullscreen window goes to its own Android layer; whatever is under it is
-         * hidden by it, so the screen surface only needs to be black. The frame goes on the layer
-         * as is when it is one of the game's own AHardwareBuffers (zero-copy, ahb_swapchain.c),
-         * else through one blit into the pool. If the layer can't take the frame, draw it the
-         * usual way. */
-        rendered = vkp_render(w, h, NULL, 0) == 0;
-        if (rendered) {
-            int r = -1;
-            if (ls && ls->dmabuf_buf && ahb_swapchain_has_ahb(ls->dmabuf_buf))
-                r = ahb_swapchain_present(ls->dmabuf_buf, ls, w, h);
-            if (r != 0 && li >= 0) r = sc_layer_present(dl.d[li].img, w, h);
-            if (r == 0) { if (ls) ls->drawn = 1; }
-            else rendered = vkp_render(w, h, dl.d, dl.n) == 0;
-        }
+        /* Layer mode: the fullscreen window goes on the game layer and (at most) one window above
+         * it on the overlay layer; whatever is under the game is hidden by it, so the screen
+         * surface only needs to be black. The game's frame goes on its layer as is when it is one
+         * of the game's own AHardwareBuffers (zero-copy, ahb_swapchain.c), through the effects
+         * chain's result when a Look is on, else through one blit into the pool. If a layer can't
+         * take its frame, the whole scene is drawn the usual way. */
+        /* The layers go up FIRST and the base surface's black frame is presented after them. The
+         * order matters: a present holds an acquired swapchain image, and the acquire semaphore is
+         * a vblank gate - putting the effects chain or the layer transaction behind it costs a
+         * whole refresh (measured on the Pocket FIT: 72 fps that way, 111 fps this way, with Retro
+         * CRT at 1920x1080). The window request the app may have left is applied here instead,
+         * since vkp_render no longer runs before the layer path. */
+        vkp_apply_window_request();
+        int r = -1;
+        /* The game's own buffer can only go on the layer AS IS - with a Look on, the frame has to
+         * go through the chain first, so the raw buffer is skipped in favour of the pass (a frame
+         * this renderer could not import has no draw, li < 0, and stays zero-copy with the effects
+         * skipped, said once above). */
+        if (!(fx_on && li >= 0) && ls && ls->dmabuf_buf && ahb_swapchain_has_ahb(ls->dmabuf_buf))
+            r = ahb_swapchain_present(ls->dmabuf_buf, ls, w, h);
+        if (r != 0 && li >= 0)
+            r = fx_on ? sc_layer_present_pass(&dl.d[li], 1, w, h)
+                      : sc_layer_present(dl.d[li].img, w, h);
+        if (r == 0) {
+            if (ls) ls->drawn = 1;
+            /* The one window above the game keeps the game off the copy path entirely: it goes on
+             * its own layer, cropped and placed by the display. */
+            int go[8], ov = 0;
+            if (over == 1 && li >= 0 && vkp_map_draw(&dl.d[li + 1], go))
+                ov = sc_layer_present_overlay(dl.d[li + 1].img, go) == 0 ? 1 : -1;
+            if (ov <= 0) sc_layer_hide_overlay();
+            if (ov < 0) { /* the overlay layer refused it: draw the whole scene the old way */
+                sc_layer_hide();
+                rendered = vkp_render(w, h, dl.d, dl.n) == 0;
+            } else {
+                /* Black under the opaque layers, and the vsync tick that paces this loop. */
+                rendered = vkp_render(w, h, NULL, 0) == 0;
+            }
+        } else rendered = vkp_render(w, h, dl.d, dl.n) == 0;
     } else {
         sc_layer_hide();
         rendered = vkp_render(w, h, dl.d, dl.n) == 0;
@@ -2392,14 +2573,19 @@ static int on_stats_timer(void *data) {
     struct surface *s;
     wl_list_for_each(s, &g_toplevels, toplevel_link) windows++;
     unsigned zero_copy = ahb_swapchain_stats_take();
+    unsigned layer_frames = sc_layer_frames_take();
     g_zero_copy_last = zero_copy;
     /* Interpolated frames the compositor added (framegen_bridge.c). They are on screen, so they
      * count there; they are NOT GPU frames from games and never inflate that number. */
     unsigned generated = vkp_framegen_stats_take();
     if (g_stat_frames || g_stat_dmabuf || g_stat_shm || generated) {
-        char extra[96] = "";
+        char extra[160] = "";
         int off = 0;
         if (g_zero_copy || zero_copy) off += snprintf(extra + off, sizeof(extra) - (size_t)off, " | %u zero-copy frames", zero_copy);
+        /* Frames the compositor put on a display layer through one of its OWN gralloc buffers (the
+         * plain layer blit, or the effects chain's result): still hardware-composed, but not
+         * zero-copy, so they are counted apart from the line above. */
+        if (layer_frames) off += snprintf(extra + off, sizeof(extra) - (size_t)off, " | %u layer frames", layer_frames);
         if (generated) snprintf(extra + off, sizeof(extra) - (size_t)off, " | %u generated frames", generated);
         banner_log("stats", "last 10 s: %u frames on screen (%.1f fps) | %u GPU frames from games | %u window redraws | %d windows open%s",
                    g_stat_frames + generated, (g_stat_frames + generated) / 10.0, g_stat_dmabuf, g_stat_shm, windows, extra);
@@ -2530,7 +2716,7 @@ int banner_wayland_run(void) {
     wl_display_init_shm(display); /* wl_shm global + pool/buffer handling */
     wl_global_create(display, &wl_output_interface, 2, NULL, bind_output);
     wl_global_create(display, &xdg_wm_base_interface, 1, NULL, bind_xdg_wm_base);
-    wl_global_create(display, &zwp_linux_dmabuf_v1_interface, 3, NULL, bind_dmabuf);
+    wl_global_create(display, &zwp_linux_dmabuf_v1_interface, 4, NULL, bind_dmabuf);
     wl_global_create(display, &wl_seat_interface, 5, NULL, bind_seat);
     wl_global_create(display, &banner_desktop_v1_interface, 1, NULL, bind_desktop);
     wl_global_create(display, &wp_presentation_interface, 2, NULL, bind_presentation);

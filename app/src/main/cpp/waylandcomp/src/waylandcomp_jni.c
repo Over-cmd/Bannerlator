@@ -14,6 +14,7 @@
 #include "vk_present.h"
 #include "banner_ext.h"
 #include "ahb_swapchain.h"
+#include "sc_layer.h"
 #include "effects_chain.h"
 
 extern int banner_wayland_run(void);
@@ -279,6 +280,16 @@ JNIEXPORT void JNICALL
 Java_com_winlator_star_wayland_WaylandCompositor_nativeSetUbwc(JNIEnv *env, jclass clazz, jboolean on) {
     g_ubwc = on ? 1 : 0;
     __android_log_print(ANDROID_LOG_INFO, TAG, "compressed (UBWC) game buffers %s", on ? "on" : "off");
+}
+
+/* VRR / refresh-rate matching: the rate the app is voting for the panel, mirrored onto the game's
+ * own SurfaceControl layer. Under zero-copy the game's frames bypass the app's surface entirely, so
+ * without this SurfaceFlinger never sees the game's cadence. 0 = clear the vote. Any thread, any
+ * time; the compositor applies it with its next layer transaction and logs the change. */
+JNIEXPORT void JNICALL
+Java_com_winlator_star_wayland_WaylandCompositor_nativeSetLayerFrameRate(JNIEnv *env, jclass clazz, jfloat hz) {
+    (void)env; (void)clazz;
+    sc_layer_set_frame_rate((float)hz);
 }
 
 /* The panel's refresh rate (Hz) for the advertised wl_output mode. Set before the compositor starts. */

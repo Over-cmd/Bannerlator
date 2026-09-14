@@ -251,6 +251,108 @@ again on every flip. The compositor owns the state:
   buffers, plus `banner-ahb: compositor wants gralloc|standard swapchain images` and `banner-ahb:
   zero-copy switched on|off: retiring the WxH swapchain …` on a live flip.
 
+## Multi-layer presentation (feat/wayland-multilayer, `src/sc_layer.c`)
+Layer mode hands the scene to SurfaceFlinger as a small, deliberately ordered **set** of Android
+display layers instead of one. The whole model, top to bottom:
+
+```
+app window ....... Compose UI, the in-game drawer, the perf HUD, the on-screen controls, the
+                   pointer arrow - ordinary Android views in the activity's window, ALWAYS on top
++-- SurfaceView .. the compositor's Vulkan swapchain (black while layer mode is up)
+     +-- z=1  "banner_wayland_game" ...... the one fullscreen game window
+     +-- z=2  "banner_wayland_overlay" ... at most ONE window drawn above the game
+```
+
+- **Two layers is the hard cap** (`SC_LAYER_COUNT`). HWC composes only a few layers before
+  SurfaceFlinger falls back to GPU client composition, which would throw the whole benefit away, so
+  the compositor never asks for a third: a scene with two or more windows above the game goes back
+  to the copy path. The count is said out loud the first time the overlay goes up (`layer`: `2
+  display layers in use: "banner_wayland_game" (z=1) and "banner_wayland_overlay" (z=2) above it …`).
+- **Who owns what.** Each layer has its own `ASurfaceControl`, its own gralloc buffer pool (3
+  buffers each), its own geometry and its own lifetime; `struct layer`
+  in `sc_layer.c` holds all of it and the z-order is fixed by the id (nothing is re-ordered at
+  runtime). The SurfaceControls are children of the SurfaceView's surface, created on first use and
+  retired together when the output window changes or goes away.
+- **What can be on the game layer**, cheapest first: the game's own gralloc buffer (zero-copy, no
+  copy anywhere — `ahb_swapchain.c`); one blit of the game's frame into a compositor buffer
+  (`sc_layer_present`); or, with screen effects on, the compositor pass's **result** blitted into
+  such a buffer (`sc_layer_present_pass` → `vkp_pass_begin` / `vkp_pass_copy_to`). The last one is
+  what keeps a Look from dropping the session back to the app's swapchain: the scene → output
+  mapping (Fullscreen Mode / Alignment, and the scaling a mode like FSR asks for) is then done by
+  the display through `setGeometry` instead of by a second full-screen GPU blit.
+- **Present order matters, and it was measured.** The layers go up first; the base surface's black
+  frame is presented *after* the layer transaction, and the effects chain runs in its own submit
+  with **no swapchain image acquired**. A present holds an acquired image and the acquire semaphore
+  is a vblank gate: folding the chain into that submit (one command buffer, one present — the
+  shape that looks cheaper) put the whole 13-pass chain behind a vblank and measured **72 fps**
+  against **111 fps** for the split shape, on HL2 + Retro CRT at 1920x1080 on the Pocket FIT (the
+  copy path is 129 fps on the same scene). Anyone tempted to "optimise" this into one submit should
+  read this paragraph first.
+- **What goes on the overlay layer**: exactly one draw above the game — a second Wayland toplevel
+  (a launcher or settings window, a message box), copied 1:1 into the overlay pool and then
+  *cropped and placed* by the display through the same `vkp_map_draw` mapping the copy path uses.
+  The point is what does **not** happen: the game's frames are no longer copied through the
+  compositor's swapchain just because something small sits on top of them.
+- **Transparency.** The compositor composes with blits, which overwrite — it never alpha-blends,
+  on either path — so every layer is marked `ASC_TRANSPARENCY_OPAQUE` and the overlay layer is
+  cropped to the window it carries. There is no blending to get wrong: no black box over the game,
+  no double-darkening, and the picture is the copy path's, pixel for pixel.
+- **Input is untouched.** An `ASurfaceControl` has no input channel, so neither layer can take a
+  touch: everything still reaches the app's `SurfaceView` (and the views above it) exactly as
+  before, and the scene mapping touch goes through (`vkp_output_to_scene` / `ViewTransformation`)
+  is the same one the layers are placed with, so the cursor still lands where it is pointing. The
+  SurfaceView is not Z-on-top, so its whole subtree — both layers included — stays under the
+  activity's own window: the drawer, the HUD and every Compose dialog draw above them.
+- **What cannot be layered, and why.**
+  - *Frame generation*: each generated frame needs a present of its own on consecutive vblanks, and
+    a display layer latches one buffer per refresh — pacing that is the swapchain's job. While an
+    engine is armed the whole scene takes the copy path (unchanged).
+  - *Effects with a window above the game*: the chain has to see the whole scene to look the way it
+    does on the copy path (and on X11), and the game layer only carries the game. Copy path.
+  - *Two or more draws above the game* (several windows, or a window with subsurfaces): a third
+    layer is not worth the client-composition risk. Copy path.
+- **Lifecycle.** Hiding is top-down so nothing is uncovered for a frame; a hidden or retired layer
+  gets the shared 16x16 blank buffer so SurfaceFlinger really lets go of the game's buffer (and
+  reports a release fence for it) instead of holding it while invisible. `sc_layer_hide()` takes
+  every layer down (scene no longer a fullscreen game, zero-copy switched off live, session end),
+  `sc_layer_hide_overlay()` is used when only the window above the game closed, and
+  `sc_layer_window_gone()` retires both SurfaceControls and drains both pools on a surface loss /
+  HOME / resume. **The overlay layer is always RETIRED, never merely hidden** (both paths) — see
+  the HWC note below: a live second SurfaceControl keeps SurfaceFlinger composing on the GPU even
+  when it is invisible. The game layer keeps its SurfaceControl through a hide, because it goes up
+  and down with every effects / frame-generation toggle.
+- **The display frame-rate vote belongs to one layer.** The refresh-rate stream's
+  `sc_layer_set_frame_rate()` (the game's cadence, the same value the app votes on its own surface)
+  is carried **only** by the layer the game presents on — the game layer. The overlay layer is
+  explicitly voted `0`, so a window that redraws once a second can never hold the panel at the
+  game's cadence, nor drag the game's cadence down to its own. Each layer remembers what its live
+  SurfaceControl carries (`fps_applied`) and re-applies on the next transaction, and a retired
+  SurfaceControl resets it so a re-created layer is re-voted from scratch. Log: `display frame-rate
+  vote on banner_wayland_game: 60.00 Hz`.
+- **Stats.** The 10 s `stats` line now ends with `| N zero-copy frames` (the game's own buffers) and
+  `| N layer frames` (frames the compositor put on a layer through one of its own buffers — the
+  plain layer blit or the effects result). Both are hardware-composed; only the first is copy-free.
+- **Measured on the Pocket FIT (Adreno 750, portrait panel, landscape session → every layer is
+  ROT_90 + scaled), `dumpsys android.hardware.graphics.composer3.IComposer/default`:** one layer is
+  `composition: DEVICE/DEVICE` (game's own gralloc buffer scanned out by the DPU), with effects on
+  the layer it stays `DEVICE/DEVICE`, but **two** layers flip the whole frame to `DEVICE/CLIENT` —
+  SurfaceFlinger composes it on the GPU — **and it does not come back when the overlay goes away**:
+  retiring the overlay's SurfaceControl (which the compositor now does rather than merely hiding
+  it) leaves the frame in client composition; only re-creating the *game* layer's SurfaceControl
+  clears it (HOME + resume does, reproduced twice). Retiring is still right — one fewer live layer,
+  and it leaves the HWC list — it is just not the whole cure; the open follow-up is to retire and
+  immediately re-create the game layer when the overlay goes, which would cost one black frame
+  unless the new SurfaceControl is shown before the old one is dropped. The likely mechanism is the
+  DPU's rotator budget (one rotated+scaled layer), not the layer count as such, so a device or
+  orientation that needs no rotation may well take both on the DPU. Even in client composition the
+  overlay layer is not a loss (SurfaceFlinger does the one blit the compositor would have done), but
+  the hardware-composition win is only real for the single-layer cases. Note `VRI[ScreenDecorHwcOverlay]`
+  is always `DISPLAY_DECORATION/CLIENT` (the system's rounded corners) — that is why SurfaceFlinger's
+  `clientCompositionFrames` counter reads 100 % on this device in every state and is useless here.
+- **Not done yet:** a second toplevel that is itself rendering into gralloc buffers could go on the
+  overlay layer zero-copy too (the token machinery in `ahb_swapchain.c` is already per-buffer, not
+  per-layer); today the overlay always costs one small blit.
+
 ## Screen effects (feat/wayland-effects, `src/effects_chain.c`)
 The X11 renderer's screen-effect chain, run by the compositor between the composited scene and the
 output. Same SPIR-V as the X11 Vulkan renderer (`winlator/*_frag.h`, made by `winlator/gen_shaders.sh`
@@ -292,13 +394,15 @@ them logs an `error` and effects stay off for the session). The app wires the dr
 post-chain block (`XServerDialogState.on*Apply`) to these in `XServerDisplayActivity.initWaylandEffects`
 and remembers the same per-game keys as the Vulkan path (#382).
 
-**Zero-copy interplay:** the layer path (`sc_layer.c` / `ahb_swapchain.c`) bypasses the compositor
-pass, so while any effect (or frame generation) is on a fullscreen game is presented through the
-copy path instead (`effects  zero-copy paused: screen effects need the compositor pass` /
-`framegen  zero-copy paused: frame generation needs the compositor pass`) and the layer resumes once
-both are off (`effects  zero-copy resumed: screen effects and frame generation are off`). A frame this
-renderer could not import (layer-only candidate) still goes on the layer, effects/frame generation
-skipped, said once.
+**Zero-copy interplay:** the chain's result no longer has to land in the app's swapchain — with a
+fullscreen game alone on screen it is copied into the game layer's own gralloc buffer and the game
+**stays on its display layer** while a Look is applied (see "Multi-layer presentation" below). It
+still takes the copy path when a window is drawn above the game (the chain has to see the whole
+scene to look as it does on X11) — `effects  zero-copy paused: a window above the game needs the
+compositor pass for the whole scene` — and always while frame generation is armed
+(`framegen  zero-copy paused: frame generation needs the compositor pass`); the layer comes back with
+`effects  zero-copy resumed: the game is back on its own display layer`. A frame this renderer could
+not import (layer-only candidate) still goes on the layer, effects/frame generation skipped, said once.
 
 ## Frame generation (feat/wayland-framegen, `src/framegen_bridge.c`)
 The two **native** engines the X11 renderer hosts inside `libwinlator`'s compositor run inside the
