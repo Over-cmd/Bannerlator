@@ -817,6 +817,7 @@ static int draw_to_scene_blit(const struct vkp_draw *d, int scene_w, int scene_h
 }
 
 static void destroy_scene_image(void) {
+    if (g_scene.img) hdrc_forget_image(g_scene.img); /* the HDR pass may have drawn into it */
     if (g_scene.img) g_vk.DestroyImage(g_dev, g_scene.img, NULL);
     if (g_scene.mem) g_vk.FreeMemory(g_dev, g_scene.mem, NULL);
     memset(&g_scene, 0, sizeof(g_scene));
@@ -853,6 +854,7 @@ static int ensure_scene_image(int w, int h) {
 /* One of the HDR composition's device-local images at this size and format. 0 = ready. */
 static int ensure_img(struct vkp_img_slot *s, int w, int h, VkFormat fmt, VkImageUsageFlags usage, const char *what) {
     if (s->img && s->w == w && s->h == h && s->fmt == fmt) return 0;
+    if (s->img) hdrc_forget_image(s->img);
     if (s->img) g_vk.DestroyImage(g_dev, s->img, NULL);
     if (s->mem) g_vk.FreeMemory(g_dev, s->mem, NULL);
     memset(s, 0, sizeof(*s));

@@ -57,6 +57,12 @@ static void dst_release(int i) {
     memset(&g_dst[i], 0, sizeof(g_dst[i]));
 }
 
+void hdrc_forget_image(VkImage img) {
+    if (!g_dev || !img) return;
+    if (g_src.img == img) src_release();
+    for (int i = 0; i < NOUT; i++) if (g_dst[i].img == img) dst_release(i);
+}
+
 void hdrc_destroy(void) {
     if (!g_dev) return;
     src_release();

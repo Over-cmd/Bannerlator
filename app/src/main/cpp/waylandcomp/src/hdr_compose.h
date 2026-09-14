@@ -37,6 +37,10 @@ struct hdrc_params {
 void hdrc_bind_device(VkDevice dev, const VkPhysicalDeviceMemoryProperties *memprops);
 /* Device teardown. */
 void hdrc_destroy(void);
+/* vk_present is about to destroy `img` (a resize of the mixed / scene / picture image): drop the view,
+ * descriptor and framebuffer cached for it, so a later image that happens to reuse the handle value is
+ * never drawn through a view of the destroyed one. */
+void hdrc_forget_image(VkImage img);
 
 /* Record the encode: `mixed` (w x h, VK_FORMAT_A2B10G10R10_UNORM_PACK32, in TRANSFER_DST_OPTIMAL after
  * the composite blits) -> `out` (w x h, out_fmt, created with COLOR_ATTACHMENT + SAMPLED usage), which
