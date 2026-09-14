@@ -25,6 +25,9 @@
 #define FOURCC(a, b, c, d) \
     ((uint32_t)(a) | ((uint32_t)(b) << 8) | ((uint32_t)(c) << 16) | ((uint32_t)(d) << 24))
 #define DRM_ABGR8888 FOURCC('A', 'B', '2', '4')   /* R,G,B,A in memory = AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM */
+#define DRM_ABGR2101010 FOURCC('A', 'B', '3', '0') /* = AHARDWAREBUFFER_FORMAT_R10G10B10A2_UNORM (VK A2B10G10R10) */
+#define AHB_RGBA8 AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM
+#define AHB_RGB10A2 AHARDWAREBUFFER_FORMAT_R10G10B10A2_UNORM
 #define MOD_LINEAR 0ULL
 #define MOD_QCOM_COMPRESSED 0x0500000000000001ULL /* DRM_FORMAT_MOD_QCOM_COMPRESSED (UBWC) */
 
@@ -152,6 +155,7 @@ struct slot {
     AHardwareBuffer *ahb;
     struct vkp_image *img;      /* the AHB imported into the compositor's Turnip as a blit target */
     int w, h;
+    uint32_t fmt;               /* AHARDWAREBUFFER_FORMAT_*: RGBA8888, or RGBA1010102 for an HDR picture */
     int release_fd;             /* SurfaceFlinger's release fence: signals when it stopped reading; -1 = none */
     int busy;                   /* set on the layer, or still referenced by SurfaceFlinger */
 };
@@ -358,18 +362,22 @@ static int sniff_modifier(const struct banner_native_handle *h, uint64_t *mod) {
     return 1;
 }
 
-static int alloc_slot(struct layer *l, struct slot *s, int w, int h) {
+static int g_alloc_failed; /* set by alloc_slot when gralloc or the import refused a buffer */
+
+static int alloc_slot(struct layer *l, struct slot *s, int w, int h, uint32_t fmt) {
+    g_alloc_failed = 0;
     for (int attempt = 0; attempt < 2; attempt++) {
         AHardwareBuffer_Desc d = {
             .width = (uint32_t)w, .height = (uint32_t)h, .layers = 1,
-            .format = AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM,
+            .format = fmt,
             /* GPU render target (the blit writes it) + sampled (SurfaceFlinger's GPU fallback reads
              * it). A CPU usage bit makes QTI gralloc allocate linear instead of UBWC. */
             .usage = AHARDWAREBUFFER_USAGE_GPU_COLOR_OUTPUT | AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE |
                      (l->linear ? AHARDWAREBUFFER_USAGE_CPU_READ_RARELY : 0)};
         AHardwareBuffer *ahb = NULL;
         if (AHardwareBuffer_allocate(&d, &ahb) != 0 || !ahb) {
-            banner_log("error", "layer: %s: AHardwareBuffer_allocate %dx%d failed", l->name, w, h);
+            banner_log("error", "layer: %s: AHardwareBuffer_allocate %dx%d (format %#x) failed", l->name, w, h, fmt);
+            g_alloc_failed = 1;
             return -1;
         }
         AHardwareBuffer_Desc got; AHardwareBuffer_describe(ahb, &got);
@@ -386,26 +394,30 @@ static int alloc_slot(struct layer *l, struct slot *s, int w, int h) {
             mod = MOD_LINEAR;
         }
         int fd = (nh && nh->numFds > 0) ? nh->data[0] : -1;
-        struct vkp_image *img = fd >= 0 ? vkp_image_import_dmabuf(fd, DRM_ABGR8888, mod, w, h, got.stride * 4, 0, 1) : NULL;
+        struct vkp_image *img = fd >= 0 ? vkp_image_import_dmabuf(fd, fmt == AHB_RGB10A2 ? DRM_ABGR2101010 : DRM_ABGR8888,
+                                                                  mod, w, h, got.stride * 4, 0, 1) : NULL;
         if (!img) {
             banner_log("layer", "%s: import of a %s %dx%d pool buffer (stride %u px) into the compositor's Turnip failed",
                        l->name, mod == MOD_QCOM_COMPRESSED ? "UBWC" : "linear", w, h, got.stride);
             AHardwareBuffer_release(ahb);
             if (!l->linear) { l->linear = 1; continue; } /* retry once with a linear buffer */
+            g_alloc_failed = 1;
             return -1;
         }
-        s->ahb = ahb; s->img = img; s->w = w; s->h = h; s->release_fd = -1; s->busy = 0;
+        s->ahb = ahb; s->img = img; s->w = w; s->h = h; s->fmt = fmt; s->release_fd = -1; s->busy = 0;
         l->pool_modifier = mod;
-        banner_log("layer", "%s: pool buffer %dx%d %s, stride %u px (gralloc handle %d fds / %d ints)",
+        banner_log("layer", "%s: pool buffer %dx%d %s%s, stride %u px (gralloc handle %d fds / %d ints)",
                    l->name, w, h, mod == MOD_QCOM_COMPRESSED ? "UBWC (QCOM_COMPRESSED)" : "linear",
+                   fmt == AHB_RGB10A2 ? " 10-bit RGBA1010102" : "",
                    got.stride, nh ? nh->numFds : -1, nh ? nh->numInts : -1);
         return 0;
     }
     return -1;
 }
 
-/* A slot SurfaceFlinger is done with (waits briefly on its release fence). -1 = none free. */
-static int take_free_slot(struct layer *l, int w, int h) {
+/* A slot SurfaceFlinger is done with (waits briefly on its release fence), holding a w x h buffer of
+ * AHB format fmt. -1 = none free (or the buffer could not be made). */
+static int take_free_slot(struct layer *l, int w, int h, uint32_t fmt) {
     int idx = -1, fd = -1;
     pthread_mutex_lock(&g_lock);
     for (int i = 0; i < l->pool_n; i++) {
@@ -423,12 +435,12 @@ static int take_free_slot(struct layer *l, int w, int h) {
         if (r == 0) return -1; /* still read by the display: leave it, drop this frame */
     }
     struct slot *s = &l->slots[idx];
-    if (s->ahb && (s->w != w || s->h != h)) {
-        /* Size change: this slot is free, so it can be replaced at once. */
+    if (s->ahb && (s->w != w || s->h != h || s->fmt != fmt)) {
+        /* Size or format change: this slot is free, so it can be replaced at once. */
         vkp_image_destroy(s->img); AHardwareBuffer_release(s->ahb);
         memset(s, 0, sizeof(*s)); s->release_fd = -1;
     }
-    if (!s->ahb && alloc_slot(l, s, w, h) != 0) return -1;
+    if (!s->ahb && alloc_slot(l, s, w, h, fmt) != 0) return -1;
     return idx;
 }
 
@@ -713,7 +725,7 @@ int sc_layer_present_ahb(AHardwareBuffer *ahb, int w, int h, int acquire_fd, voi
     l->cur_token = token;
     if (!l->shown) { l->shown = 1; banner_log("layer", "%s: layer shown", l->name); }
     if (!l->first_logged) { l->first_logged = 1; vkp_signal_first_frame(); }
-    if (color && color->dataspace) banner_color_frame_on_layer(color, 1, ahb_format);
+    if (color && color->dataspace) banner_color_frame_shown(color, BANNER_HDR_ZERO_COPY, ahb_format);
     return 0;
 unavailable:
     if (acquire_fd >= 0) close(acquire_fd);
@@ -729,11 +741,11 @@ int sc_layer_present(struct vkp_image *src, int scene_w, int scene_h, const stru
     if (g < 0) return -1;
     if (g == 0) { sc_layer_hide(); return 0; } /* nothing of it is on screen */
 
-    int idx = take_free_slot(l, sw, sh);
+    int idx = take_free_slot(l, sw, sh, AHB_RGBA8);
     if (idx < 0) { log_drop(l); return 0; }
     if (vkp_blit_image(src, l->slots[idx].img) != 0) return -1;
     if (present_slot(l, idx, r, color) != 0) return -1;
-    if (color && color->dataspace) banner_color_frame_on_layer(color, 0, AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM);
+    if (color && color->dataspace) banner_color_frame_shown(color, BANNER_HDR_LAYER_COPY, AHB_RGBA8);
     if (!l->first_logged) {
         l->first_logged = 1;
         banner_log("layer", "presenting %dx%d game frames on their own SurfaceControl layer (%s pool, %d buffers); "
@@ -753,7 +765,7 @@ int sc_layer_present_pass(const struct vkp_draw *draws, int n, int scene_w, int 
      * the scene's mapped output size) decides how big the layer buffer has to be. */
     if (vkp_pass_begin(scene_w, scene_h, draws, n, &rw, &rh) != 0) return -1;
     if (!vkp_map_rect(rw, rh, scene_w, scene_h, r)) { vkp_pass_abort(); sc_layer_hide(); return 0; }
-    int idx = take_free_slot(l, rw, rh);
+    int idx = take_free_slot(l, rw, rh, AHB_RGBA8);
     if (idx < 0) { vkp_pass_abort(); log_drop(l); return 0; }
     if (vkp_pass_copy_to(l->slots[idx].img) != 0) return -1;
     if (present_slot(l, idx, r, NULL) != 0) return -1; /* the effects chain's result is 8-bit sRGB */
@@ -764,6 +776,46 @@ int sc_layer_present_pass(const struct vkp_draw *draws, int n, int scene_w, int 
                    l->pool_modifier == MOD_QCOM_COMPRESSED ? "UBWC" : "linear", l->pool_n);
         vkp_signal_first_frame();
     }
+    return 0;
+}
+
+/* ---- the HDR picture (hdr_compose.h) ------------------------------------------------------------
+ * An HDR game that cannot be alone on its layer: the WHOLE scene, composed into one 10-bit PQ BT.2020
+ * picture with the effects applied, goes onto the game layer - one layer, tagged BT2020_PQ with the
+ * game's metadata, so the display composes it as HDR (and a window above the game never needs the
+ * second layer that costs this panel its hardware composition). 10-bit buffers; if gralloc or the
+ * import refuses those, 8-bit ones carry the same tagged picture (colours right, precision less). */
+static uint32_t g_hdr_pool_fmt = AHB_RGB10A2;
+
+int sc_layer_present_hdr_scene(const struct vkp_draw *draws, int n, const struct vkp_hdr_frame *hf,
+                               int scene_w, int scene_h, const struct banner_color *color) {
+    struct layer *l = layer_of(SC_LAYER_GAME);
+    int rw = 0, rh = 0, r[8];
+    if (!draws || n <= 0 || !hf || ensure_sc(l) != 0) return -1;
+    if (vkp_update_map(scene_w, scene_h) != 0) return -1;
+    if (vkp_pass_begin_hdr(scene_w, scene_h, draws, n, hf, &rw, &rh) != 0) return -1;
+    if (!vkp_map_rect(rw, rh, scene_w, scene_h, r)) { vkp_pass_abort(); sc_layer_hide(); return 0; }
+    g_alloc_failed = 0;
+    int idx = take_free_slot(l, rw, rh, g_hdr_pool_fmt);
+    if (idx < 0 && g_alloc_failed && g_hdr_pool_fmt == AHB_RGB10A2) {
+        g_hdr_pool_fmt = AHB_RGBA8;
+        banner_log("color", "%s: this device will not make a 10-bit layer buffer (RGBA1010102): the HDR picture goes "
+                   "on 8-bit buffers instead (still tagged BT2020_PQ; less precision)", l->name);
+        idx = take_free_slot(l, rw, rh, g_hdr_pool_fmt);
+    }
+    if (idx < 0) { vkp_pass_abort(); log_drop(l); return 0; }
+    if (vkp_pass_copy_to(l->slots[idx].img) != 0) return -1;
+    if (present_slot(l, idx, r, color) != 0) return -1;
+    if (color && color->dataspace) banner_color_frame_shown(color, BANNER_HDR_COMPOSED, g_hdr_pool_fmt);
+    static int said;
+    if (!said) {
+        said = 1;
+        banner_log("color", "HDR picture on its own display layer: %dx%d, %s %s buffers, tagged %s", rw, rh,
+                   l->pool_modifier == MOD_QCOM_COMPRESSED ? "UBWC" : "linear",
+                   g_hdr_pool_fmt == AHB_RGB10A2 ? "10-bit" : "8-bit",
+                   color && color->dataspace == BANNER_ADATASPACE_BT2020_PQ ? "BT2020_PQ" : "HDR");
+    }
+    if (!l->first_logged) { l->first_logged = 1; vkp_signal_first_frame(); }
     return 0;
 }
 
@@ -833,7 +885,7 @@ int sc_layer_present_overlay(struct vkp_image *src, const int geo[8]) {
     if (ensure_sc(l) != 0) return -1;
     int sw = vkp_image_width(src), sh = vkp_image_height(src);
     if (sw <= 0 || sh <= 0) return -1;
-    int idx = take_free_slot(l, sw, sh);
+    int idx = take_free_slot(l, sw, sh, AHB_RGBA8);
     if (idx < 0) { log_drop(l); return 0; }
     /* The window is copied into the layer buffer 1:1; `geo` crops it and places it, so the layer
      * is exactly the window's rectangle on screen and nothing else is blended anywhere. */

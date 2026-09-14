@@ -6,6 +6,8 @@
 #include "sc_layer.h"
 #include "effects_chain.h"
 #include "framegen_bridge.h"
+#include "hdr_compose.h"
+#include "banner_color.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -71,6 +73,22 @@ static int g_first_frame_done; /* one-shot: fire banner_on_first_frame() on firs
  * screen-effect chain (effects_chain.c) — and of frame generation once that lands. Recreated on a
  * scene size change; frames are fenced, so never while the GPU reads it. */
 static struct { VkImage img; VkDeviceMemory mem; int w, h; } g_scene;
+
+/* HDR composition (hdr_compose.h): the 10-bit image every draw is blitted into 1:1 in its own encoding
+ * ("mixed"), and the 10-bit HDR picture the encode pass makes of it for the game's display layer. Only
+ * ever created while an HDR game shares the scene with something the display layer cannot show alone. */
+struct vkp_img_slot { VkImage img; VkDeviceMemory mem; int w, h; VkFormat fmt; };
+static struct vkp_img_slot g_mixed, g_hdrscene;
+#define HDR_FMT VK_FORMAT_A2B10G10R10_UNORM_PACK32
+
+/* HDR10 swapchain (frame generation with an HDR game): VK_EXT_swapchain_colorspace is enabled on the
+ * instance only when the session asked for HDR; the swapchain is built as A2B10G10R10 + HDR10_ST2084
+ * while such frames are being presented and the Android surface lists that pair (its WSI then sets the
+ * surface dataspace to BT2020_PQ). */
+static int g_colorspace_ext;       /* the instance has VK_EXT_swapchain_colorspace */
+static int g_swap_hdr_want;        /* the next swapchain should be HDR10 */
+static int g_swap_is_hdr;          /* the live swapchain is HDR10 */
+static int g_swap_hdr_unavailable; /* this surface lists no HDR10 format: tone-map instead (said once) */
 static const char *vk_result_name(VkResult r);
 
 /* The Android surface is created/destroyed on the app's UI thread while the compositor thread
@@ -189,6 +207,7 @@ int vkp_apply_window_request(void) {
     }
     sc_layer_window_gone();  /* the layer (if any) belongs to the old window */
     destroy_swapchain(); /* recreated against the new window on the next frame */
+    g_swap_hdr_unavailable = 0; /* a new surface (another display, say) may offer HDR10 */
     if (g_window) ANativeWindow_release(g_window);
     g_window = w;
     g_swap_retry_at_ns = 0;
@@ -303,8 +322,29 @@ static int dev_init(void) {
         LOGE("present: vk_loader_open failed"); g_dev_state = -1; return -1;
     }
 
-    const char *inst_exts[] = {VK_KHR_SURFACE_EXTENSION_NAME,
-                               VK_KHR_ANDROID_SURFACE_EXTENSION_NAME};
+    const char *inst_exts[3] = {VK_KHR_SURFACE_EXTENSION_NAME,
+                                VK_KHR_ANDROID_SURFACE_EXTENSION_NAME, NULL};
+    uint32_t n_inst_exts = 2;
+    /* HDR sessions only (banner_color.h): the colour-space extension lets the swapchain carry HDR10 for
+     * frame generation. Asked for only when the loader has it, and only when HDR was asked for, so
+     * every other session creates exactly the instance it always did. */
+    if (banner_color_requested() && g_vk.EnumerateInstanceExtensionProperties) {
+        uint32_t ne = 0;
+        g_vk.EnumerateInstanceExtensionProperties(NULL, &ne, NULL);
+        VkExtensionProperties *ie = ne ? calloc(ne, sizeof(*ie)) : NULL;
+        if (ie && g_vk.EnumerateInstanceExtensionProperties(NULL, &ne, ie) == VK_SUCCESS) {
+            for (uint32_t i = 0; i < ne; i++)
+                if (!strcmp(ie[i].extensionName, VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME)) {
+                    inst_exts[n_inst_exts++] = VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME;
+                    g_colorspace_ext = 1;
+                    break;
+                }
+        }
+        free(ie);
+        banner_log("color", "compositor instance %s VK_EXT_swapchain_colorspace (an HDR10 swapchain for frame "
+                   "generation %s)", g_colorspace_ext ? "enables" : "has no",
+                   g_colorspace_ext ? "is possible where the screen surface offers one" : "is not possible: tone-mapped instead");
+    }
     /* 1.3 like the X11 renderer's instance: the frame-generation probe (framegen_engine.cpp)
      * queries VkPhysicalDeviceVulkan12Features, and a 1.1 instance may be answered as 1.1. */
     VkApplicationInfo app = {.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
@@ -312,7 +352,7 @@ static int dev_init(void) {
                              .apiVersion = VK_API_VERSION_1_3};
     VkInstanceCreateInfo ici = {.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
                                 .pApplicationInfo = &app,
-                                .enabledExtensionCount = 2,
+                                .enabledExtensionCount = n_inst_exts,
                                 .ppEnabledExtensionNames = inst_exts};
     if (g_vk.CreateInstance(&ici, NULL, &g_inst) != VK_SUCCESS) {
         LOGE("present: vkCreateInstance failed"); g_dev_state = -1; return -1;
@@ -394,6 +434,7 @@ static int dev_init(void) {
     g_vk.CreateFence(g_dev, &fci, NULL, &g_fence);
 
     vkp_effects_bind_device(g_dev, g_pd, &g_memprops);
+    hdrc_bind_device(g_dev, &g_memprops);
     g_dev_state = 1;
     reset_sync();
     vkp_framegen_device_ready(g_dev, g_queue, g_qfam, fg_features != NULL);
@@ -450,6 +491,33 @@ static int swap_init_locked(void) {
     VkSurfaceFormatKHR fmts[32]; if (nfmt > 32) nfmt = 32;
     g_vk.GetPhysicalDeviceSurfaceFormatsKHR(g_pd, g_surface, &nfmt, fmts);
     VkSurfaceFormatKHR chosen = fmts[0];
+    /* HDR10 for frame generation with an HDR game (render_impl sets g_swap_hdr_want): the first
+     * A2B10G10R10 (else FP16) entry the surface lists with VK_COLOR_SPACE_HDR10_ST2084_EXT. None listed
+     * -> the frames are tone-mapped into the ordinary swapchain, and that is said once. */
+    g_swap_is_hdr = 0;
+    if (g_swap_hdr_want) {
+        int pick = -1;
+        char seen[160] = "";
+        int pos = 0;
+        for (uint32_t i = 0; i < nfmt; i++) {
+            if (pos < (int)sizeof(seen) - 16)
+                pos += snprintf(seen + pos, sizeof(seen) - (size_t)pos, "%s%d/%d", i ? " " : "",
+                                (int)fmts[i].format, (int)fmts[i].colorSpace);
+            if (fmts[i].colorSpace != VK_COLOR_SPACE_HDR10_ST2084_EXT) continue;
+            if (fmts[i].format == VK_FORMAT_A2B10G10R10_UNORM_PACK32) { pick = (int)i; break; }
+            if (fmts[i].format == VK_FORMAT_R16G16B16A16_SFLOAT && pick < 0) pick = (int)i;
+        }
+        if (pick >= 0) {
+            chosen = fmts[pick];
+            g_swap_is_hdr = 1;
+            banner_log("color", "screen swapchain built as HDR10 (format %d, HDR10_ST2084): frame-generated HDR frames "
+                       "reach the display as PQ BT.2020", (int)chosen.format);
+        } else {
+            g_swap_hdr_unavailable = 1;
+            banner_log("color", "the screen surface lists no HDR10 swapchain format (format/colour-space pairs: %s): "
+                       "frames with frame generation are tone-mapped to SDR instead", seen);
+        }
+    }
 
     g_extent = caps.currentExtent;
     if (g_extent.width == 0xFFFFFFFF) {
@@ -763,7 +831,8 @@ static int ensure_scene_image(int w, int h) {
         .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
         .format = VK_FORMAT_R8G8B8A8_UNORM, .extent = {(uint32_t)w, (uint32_t)h, 1}, .mipLevels = 1, .arrayLayers = 1,
         .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
-        .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+        .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                 VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, /* the HDR encode pass writes it (frame generation) */
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
     VkResult r = g_vk.CreateImage(g_dev, &ici, NULL, &g_scene.img);
     if (r != VK_SUCCESS) { LOGE("effects: scene image %dx%d: vkCreateImage %s", w, h, vk_result_name(r)); g_scene.img = VK_NULL_HANDLE; return -1; }
@@ -779,6 +848,96 @@ static int ensure_scene_image(int w, int h) {
     g_scene.w = w; g_scene.h = h;
     banner_log("effects", "scene image %dx%d for the effect chain", w, h);
     return 0;
+}
+
+/* One of the HDR composition's device-local images at this size and format. 0 = ready. */
+static int ensure_img(struct vkp_img_slot *s, int w, int h, VkFormat fmt, VkImageUsageFlags usage, const char *what) {
+    if (s->img && s->w == w && s->h == h && s->fmt == fmt) return 0;
+    if (s->img) g_vk.DestroyImage(g_dev, s->img, NULL);
+    if (s->mem) g_vk.FreeMemory(g_dev, s->mem, NULL);
+    memset(s, 0, sizeof(*s));
+    VkImageCreateInfo ici = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = fmt,
+        .extent = {(uint32_t)w, (uint32_t)h, 1}, .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT,
+        .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = usage, .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
+    VkResult r = g_vk.CreateImage(g_dev, &ici, NULL, &s->img);
+    if (r != VK_SUCCESS) { LOGE("color: %s image %dx%d: vkCreateImage %s", what, w, h, vk_result_name(r)); s->img = VK_NULL_HANDLE; return -1; }
+    VkMemoryRequirements req;
+    g_vk.GetImageMemoryRequirements(g_dev, s->img, &req);
+    int idx = memory_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (idx < 0) idx = memory_type(req.memoryTypeBits, 0);
+    VkMemoryAllocateInfo mai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = req.size,
+                                .memoryTypeIndex = (uint32_t)(idx < 0 ? 0 : idx)};
+    r = g_vk.AllocateMemory(g_dev, &mai, NULL, &s->mem);
+    if (r != VK_SUCCESS) {
+        LOGE("color: %s image %dx%d: vkAllocateMemory %s", what, w, h, vk_result_name(r));
+        g_vk.DestroyImage(g_dev, s->img, NULL);
+        memset(s, 0, sizeof(*s));
+        return -1;
+    }
+    g_vk.BindImageMemory(g_dev, s->img, s->mem, 0);
+    s->w = w; s->h = h; s->fmt = fmt;
+    banner_log("color", "%s image %dx%d (10-bit)", what, w, h);
+    return 0;
+}
+
+/* The HDR composition (hdr_compose.h): clear the mixed image, blit every draw into it 1:1 in its own
+ * encoding, then encode it into `out` (left in TRANSFER_DST_OPTIMAL). The caller has already taken the
+ * draws' images (queue-family acquire / host-write barriers). Which rectangles are HDR comes from
+ * hf->is_hdr: listed top draw first, down to the lowest HDR draw (everything under that is SDR).
+ * 0 = done, -1 = the HDR pass is unavailable (nothing was recorded into `out`). */
+static int compose_hdr(VkCommandBuffer cmd, const struct vkp_draw *draws, int n, const struct vkp_hdr_frame *hf,
+                       int scene_w, int scene_h, VkImage out, VkFormat out_fmt, enum hdrc_mode mode) {
+    if (!hf || !hf->is_hdr || n <= 0) return -1;
+    if (ensure_img(&g_mixed, scene_w, scene_h, HDR_FMT,
+                   VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                   "HDR composition (mixed)") != 0)
+        return -1;
+    VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    VkImageMemoryBarrier b = {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                              .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                              .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                              .image = g_mixed.img, .subresourceRange = range,
+                              .srcAccessMask = VK_ACCESS_SHADER_READ_BIT, .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT};
+    g_vk.CmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                            0, 0, NULL, 0, NULL, 1, &b);
+    VkClearColorValue black = {.float32 = {0.0f, 0.0f, 0.0f, 1.0f}};
+    g_vk.CmdClearColorImage(cmd, g_mixed.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &range);
+    VkMemoryBarrier mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+                          .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT};
+    g_vk.CmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+
+    struct hdrc_params p = {.mode = mode, .sdr_white_nits = banner_color_sdr_white(),
+                            .peak_nits = hf->peak_nits > 0.0f ? hf->peak_nits : 1000.0f};
+    int lowest_hdr = -1;
+    for (int i = 0; i < n; i++) {
+        VkImageBlit blit;
+        if (!draws[i].img || !draw_to_scene_blit(&draws[i], scene_w, scene_h, &blit)) continue;
+        /* A blit converts UNORM to UNORM by value: 8-bit sRGB and 10-bit PQ both land unchanged. */
+        g_vk.CmdBlitImage(cmd, draws[i].img->image,
+                          draws[i].img->dmabuf ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL : VK_IMAGE_LAYOUT_GENERAL,
+                          g_mixed.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
+        if (hf->is_hdr[i] && lowest_hdr < 0) lowest_hdr = i;
+    }
+    static int truncated_said;
+    if (lowest_hdr >= 0) {
+        int i;
+        for (i = n - 1; i >= lowest_hdr && p.count < HDRC_MAX_RECTS; i--) {
+            VkImageBlit blit;
+            if (!draws[i].img || !draw_to_scene_blit(&draws[i], scene_w, scene_h, &blit)) continue;
+            p.rects[p.count][0] = (float)blit.dstOffsets[0].x; p.rects[p.count][1] = (float)blit.dstOffsets[0].y;
+            p.rects[p.count][2] = (float)blit.dstOffsets[1].x; p.rects[p.count][3] = (float)blit.dstOffsets[1].y;
+            if (hf->is_hdr[i]) p.hdr_mask |= 1u << p.count;
+            p.count++;
+        }
+        if (i >= lowest_hdr && !truncated_said) {
+            truncated_said = 1;
+            banner_log("color", "HDR composition: more than %d windows are stacked over the HDR game - the lowest "
+                       "ones are treated as SDR", HDRC_MAX_RECTS);
+        }
+    }
+    return hdrc_encode(cmd, g_mixed.img, out, out_fmt, scene_w, scene_h, &p);
 }
 
 /* VK_ERROR_DEVICE_LOST: nothing on this device works any more, and there is no way back short
@@ -902,7 +1061,11 @@ int vkp_render_plain(int scene_w, int scene_h) {
     return r;
 }
 
-int vkp_render(int scene_w, int scene_h, const struct vkp_draw *draws, int n) {
+/* The whole present: vkp_render (hf == NULL, exactly as it always was) and vkp_render_hdr (a scene with
+ * HDR draws: composed into one encoding, hdr_compose.h). */
+static int render_impl(int scene_w, int scene_h, const struct vkp_draw *draws, int n,
+                       const struct vkp_hdr_frame *hf, int *how) {
+    if (how) *how = 0;
     vkp_apply_window_request();
     if (g_dev_state == -2) return -1;
     if (dev_init() != 0 || !g_window || scene_w <= 0 || scene_h <= 0) return -1;
@@ -914,6 +1077,15 @@ int vkp_render(int scene_w, int scene_h, const struct vkp_draw *draws, int n) {
                    1 + vkp_framegen_extra_images(), vkp_framegen_extra_images() ? "s" : "");
         destroy_swapchain();
     }
+    /* HDR frames presented here (frame generation with an HDR game) want an HDR10 swapchain; nothing
+     * else does. A change of that rebuilds the swapchain (only in HDR sessions: g_colorspace_ext). */
+    const int want_hdr = hf && g_colorspace_ext && !g_swap_hdr_unavailable;
+    if (g_swapchain && want_hdr != g_swap_is_hdr) {
+        banner_log("color", want_hdr ? "HDR frames with frame generation: rebuilding the screen swapchain as HDR10"
+                                     : "no HDR frames through the screen swapchain any more: rebuilding it as SDR");
+        destroy_swapchain();
+    }
+    g_swap_hdr_want = want_hdr;
 
     uint32_t img = 0;
     VkResult ar;
@@ -927,7 +1099,9 @@ int vkp_render(int scene_w, int scene_h, const struct vkp_draw *draws, int n) {
      * blit filter follows the scaling mode. */
     const int fx = !g_plain_frame && vkp_effects_active();
     const int fg = !g_plain_frame && vkp_framegen_active();
-    const int pass = (fx || fg) && ensure_scene_image(scene_w, scene_h) == 0;
+    /* An HDR scene always takes the pass: its draws are composed into one encoding first. */
+    const int pass = (fx || fg || (hf && n > 0)) && ensure_scene_image(scene_w, scene_h) == 0;
+    vkp_effects_set_formats(VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM); /* this path's scene is 8-bit */
     const VkFilter blit_filter = vkp_effects_blit_filter();
 
     VkCommandBuffer cmd = g_cmds[0];
@@ -989,9 +1163,19 @@ int vkp_render(int scene_w, int scene_h, const struct vkp_draw *draws, int n) {
                                 0, 1, &mb, 0, NULL, 0, NULL);
     }
 
-    /* 1. Scene: the draws in order, 1:1 into the scene image (pass) or mapped onto the output. */
+    /* 1. Scene: the draws in order, 1:1 into the scene image (pass) or mapped onto the output. An HDR
+     *    scene is composed into ONE encoding instead (hdr_compose.h): PQ BT.2020 for an HDR10
+     *    swapchain, tone-mapped sRGB for an ordinary one; the scene image comes back in
+     *    TRANSFER_DST_OPTIMAL like the blits leave it. If that pass is unavailable, the blits below. */
     int drawn = 0;
-    for (int i = 0; i < n; i++) {
+    int hdr_how = 0;
+    if (hf && pass && n > 0 &&
+        compose_hdr(cmd, draws, n, hf, scene_w, scene_h, g_scene.img, VK_FORMAT_R8G8B8A8_UNORM,
+                    g_swap_is_hdr ? HDRC_OUT_PQ : HDRC_OUT_SDR) == 0) {
+        hdr_how = g_swap_is_hdr ? 1 : 2;
+        drawn = n;
+    }
+    for (int i = 0; i < n && !hdr_how; i++) {
         VkImageBlit blit;
         if (!draws[i].img) continue;
         if (pass ? !draw_to_scene_blit(&draws[i], scene_w, scene_h, &blit) : !draw_to_blit(&draws[i], &blit)) continue;
@@ -1127,7 +1311,17 @@ int vkp_render(int scene_w, int scene_h, const struct vkp_draw *draws, int n) {
         g_first_frame_done = 1;
         banner_on_first_frame();
     }
+    if (how) *how = hdr_how;
     return 0;
+}
+
+int vkp_render(int scene_w, int scene_h, const struct vkp_draw *draws, int n) {
+    return render_impl(scene_w, scene_h, draws, n, NULL, NULL);
+}
+
+int vkp_render_hdr(int scene_w, int scene_h, const struct vkp_draw *draws, int n,
+                   const struct vkp_hdr_frame *hf, int *how) {
+    return render_impl(scene_w, scene_h, draws, n, hf, how);
 }
 
 /* ---------------------------------------------------------------- layer mode helpers */
@@ -1266,13 +1460,36 @@ static struct {
     int rw, rh;
 } g_pass;
 
+static int pass_begin_impl(int scene_w, int scene_h, const struct vkp_draw *draws, int n,
+                           const struct vkp_hdr_frame *hf, int *rw, int *rh);
+
 int vkp_pass_begin(int scene_w, int scene_h, const struct vkp_draw *draws, int n, int *rw, int *rh) {
+    return pass_begin_impl(scene_w, scene_h, draws, n, NULL, rw, rh);
+}
+
+int vkp_pass_begin_hdr(int scene_w, int scene_h, const struct vkp_draw *draws, int n,
+                       const struct vkp_hdr_frame *hf, int *rw, int *rh) {
+    if (!hf) return -1;
+    return pass_begin_impl(scene_w, scene_h, draws, n, hf, rw, rh);
+}
+
+/* The off-screen pass for a layer: the SDR one (hf == NULL: composite into the 8-bit scene image, the
+ * effects in 8-bit - unchanged) or the HDR one (the draws composed into one 10-bit PQ BT.2020 picture,
+ * the effects run on it in 10-bit). */
+static int pass_begin_impl(int scene_w, int scene_h, const struct vkp_draw *draws, int n,
+                           const struct vkp_hdr_frame *hf, int *rw, int *rh) {
     if (g_pass.active) vkp_pass_abort();
     if (g_dev_state == -2 || dev_init() != 0 || !g_window || scene_w <= 0 || scene_h <= 0) return -1;
     if (!g_swapchain && swap_init() != 0) return -1; /* the mapping is in output pixels */
     update_map(scene_w, scene_h);
     if (!g_map.valid) return -1;
-    if (ensure_scene_image(scene_w, scene_h) != 0) return -1;
+    if (hf) {
+        if (ensure_img(&g_hdrscene, scene_w, scene_h, HDR_FMT,
+                       VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                       VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                       "HDR composition (picture)") != 0)
+            return -1;
+    } else if (ensure_scene_image(scene_w, scene_h) != 0) return -1;
 
     VkCommandBuffer cmd = g_cmds[0];
     g_vk.ResetCommandBuffer(cmd, 0);
@@ -1286,11 +1503,12 @@ int vkp_pass_begin(int scene_w, int scene_h, const struct vkp_draw *draws, int n
     VkImageMemoryBarrier *bars = calloc((size_t)n + 1, sizeof(*bars));
     if (!bars) { g_vk.EndCommandBuffer(cmd); return -1; }
     int nb = 0;
+    VkImage scene_img = hf ? g_hdrscene.img : g_scene.img;
     bars[nb++] = (VkImageMemoryBarrier){
         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
         .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .image = g_scene.img, .subresourceRange = range, .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT};
+        .image = scene_img, .subresourceRange = range, .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT};
     for (int i = 0; i < n; i++) {
         struct vkp_image *im = draws[i].img;
         int seen = 0;
@@ -1317,24 +1535,34 @@ int vkp_pass_begin(int scene_w, int scene_h, const struct vkp_draw *draws, int n
                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, (uint32_t)nb, bars);
     free(bars);
 
-    VkClearColorValue black = {.float32 = {0.0f, 0.0f, 0.0f, 1.0f}};
-    g_vk.CmdClearColorImage(cmd, g_scene.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &range);
-    VkMemoryBarrier mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
-                          .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
-                          .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT};
-    g_vk.CmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                            0, 1, &mb, 0, NULL, 0, NULL);
-    for (int i = 0; i < n; i++) {
-        VkImageBlit blit;
-        if (!draws[i].img || !draw_to_scene_blit(&draws[i], scene_w, scene_h, &blit)) continue;
-        g_vk.CmdBlitImage(cmd, draws[i].img->image,
-                          draws[i].img->dmabuf ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL : VK_IMAGE_LAYOUT_GENERAL,
-                          g_scene.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
+    if (hf) {
+        /* HDR: every draw into the mixed image, then ONE encoding (PQ BT.2020, 10-bit) into the picture. */
+        if (compose_hdr(cmd, draws, n, hf, scene_w, scene_h, g_hdrscene.img, HDR_FMT, HDRC_OUT_PQ) != 0) {
+            g_vk.EndCommandBuffer(cmd); /* never submitted; reset before its next use */
+            return -1;
+        }
+        vkp_effects_set_formats(HDR_FMT, HDR_FMT);
+    } else {
+        VkClearColorValue black = {.float32 = {0.0f, 0.0f, 0.0f, 1.0f}};
+        g_vk.CmdClearColorImage(cmd, g_scene.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &range);
+        VkMemoryBarrier mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                              .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+                              .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT};
+        g_vk.CmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                0, 1, &mb, 0, NULL, 0, NULL);
+        for (int i = 0; i < n; i++) {
+            VkImageBlit blit;
+            if (!draws[i].img || !draw_to_scene_blit(&draws[i], scene_w, scene_h, &blit)) continue;
+            g_vk.CmdBlitImage(cmd, draws[i].img->image,
+                              draws[i].img->dmabuf ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL : VK_IMAGE_LAYOUT_GENERAL,
+                              g_scene.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
+        }
+        vkp_effects_set_formats(VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM);
     }
 
     int mapped_w = (int)(scene_w * g_map.kx + 0.5f), mapped_h = (int)(scene_h * g_map.ky + 0.5f);
     g_pass.rw = scene_w; g_pass.rh = scene_h;
-    g_pass.result = vkp_effects_run(cmd, g_scene.img, scene_w, scene_h, mapped_w, mapped_h,
+    g_pass.result = vkp_effects_run(cmd, scene_img, scene_w, scene_h, mapped_w, mapped_h,
                                     &g_pass.rw, &g_pass.rh);
     g_pass.active = 1;
     if (rw) *rw = g_pass.rw;

@@ -95,11 +95,16 @@ void banner_color_stats_tick(void);
  * (who = the window, reason = why it did not get the display layer). Shown untone-mapped. */
 void banner_color_frame_copied(const char *who, const char *reason);
 
-/* ---- sc_layer.c -> here */
-/* A NEW frame of an HDR-described surface went onto a display layer tagged with c's dataspace.
- * zero_copy = the game's own buffer (else the compositor's 8-bit layer copy); ahb_format = its
- * AHardwareBuffer format. */
-void banner_color_frame_on_layer(const struct banner_color *c, int zero_copy, uint32_t ahb_format);
+/* ---- sc_layer.c / compositor.c -> here: a NEW frame of an HDR-described surface was shown, and how */
+enum banner_hdr_path {
+    BANNER_HDR_ZERO_COPY = 0,   /* the game's own gralloc buffer on its display layer, tagged */
+    BANNER_HDR_LAYER_COPY,      /* one 8-bit copy of the game's frame on its layer, tagged */
+    BANNER_HDR_COMPOSED,        /* the whole scene composed into one PQ picture on the game layer (hdr_compose.h) */
+    BANNER_HDR_SWAPCHAIN,       /* composed into PQ and presented through an HDR10 swapchain (frame generation) */
+    BANNER_HDR_TONEMAPPED,      /* composed and tone-mapped to SDR (a present that cannot carry HDR) - NOT HDR */
+};
+/* ahb_format = the buffer's AHARDWAREBUFFER_FORMAT_* where one exists (0 otherwise). */
+void banner_color_frame_shown(const struct banner_color *c, int path, uint32_t ahb_format);
 /* "RGBA1010102 (10-bit)" etc. for an AHARDWAREBUFFER_FORMAT_* value (static buffer). */
 const char *banner_ahb_format_name(uint32_t format);
 

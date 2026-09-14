@@ -106,6 +106,15 @@ int sc_layer_present(struct vkp_image *src, int scene_w, int scene_h, const stru
  * vkp_pass_begin) and put its result on the layer. Same return values as sc_layer_present. */
 int sc_layer_present_pass(const struct vkp_draw *draws, int n, int scene_w, int scene_h);
 
+/* GAME layer, HDR (hdr_compose.h): the whole scene - `draws`, hf->is_hdr marking the HDR ones - composed
+ * into one 10-bit PQ BT.2020 picture with the effects applied (vkp_pass_begin_hdr), copied into a
+ * 10-bit layer buffer (8-bit where gralloc refuses those) and shown tagged with `color` (the topmost HDR
+ * draw's description). The overlay layer is not used: the picture already holds what is above the game.
+ * Same return values as sc_layer_present. */
+struct vkp_hdr_frame;
+int sc_layer_present_hdr_scene(const struct vkp_draw *draws, int n, const struct vkp_hdr_frame *hf,
+                               int scene_w, int scene_h, const struct banner_color *color);
+
 /* GAME layer, zero-copy (ahb_swapchain.c): show the game's own w x h AHardwareBuffer, gated by
  * acquire_fd (a sync_file the layer waits on before reading; owned by the callee, -1 = none).
  * token identifies the buffer: once a later transaction replaces it (or the layer is hidden or

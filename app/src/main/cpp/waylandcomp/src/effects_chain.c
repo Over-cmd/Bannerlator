@@ -26,7 +26,12 @@
 #include "crt_frag.h"
 #include "deband_frag.h"
 
-#define FX_FORMAT VK_FORMAT_R8G8B8A8_UNORM
+#define FX_FORMAT VK_FORMAT_R8G8B8A8_UNORM /* the default: every SDR frame */
+/* The chain's target format and the scene's view format. R8G8B8A8 always, except while an HDR scene
+ * runs through the chain (hdr_compose.h): then the scene and the targets are A2B10G10R10, so a PQ
+ * picture keeps 10 bits through every pass. A change rebuilds the chain's objects once
+ * (vkp_effects_set_formats). */
+static VkFormat g_fx_fmt = FX_FORMAT, g_scene_fmt = FX_FORMAT;
 #define FX_MAX_DIM 4096 /* a FILL-mapped scene can exceed the panel; cap the chain resolution */
 
 /* ------------------------------------------------------------------ settings */
@@ -226,10 +231,10 @@ static VkDescriptorSet alloc_ds(VkImageView view) {
     return ds;
 }
 
-static VkImageView make_view(VkImage img) {
+static VkImageView make_view(VkImage img, VkFormat fmt) {
     VkImageView v = VK_NULL_HANDLE;
     VkImageViewCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = img,
-                                .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = FX_FORMAT,
+                                .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = fmt,
                                 .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
     if (g_vk.CreateImageView(g_dev, &ci, NULL, &v) != VK_SUCCESS) return VK_NULL_HANDLE;
     return v;
@@ -251,7 +256,7 @@ static int target_ensure(struct fx_target *t, int w, int h, const char *what) {
     if (t->img && t->w == w && t->h == h) return 0;
     target_destroy(t);
     VkImageCreateInfo ii = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
-                            .format = FX_FORMAT, .extent = {(uint32_t)w, (uint32_t)h, 1}, .mipLevels = 1,
+                            .format = g_fx_fmt, .extent = {(uint32_t)w, (uint32_t)h, 1}, .mipLevels = 1,
                             .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
                             .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
                                      VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
@@ -271,7 +276,7 @@ static int target_ensure(struct fx_target *t, int w, int h, const char *what) {
         target_destroy(t); return -1;
     }
     g_vk.BindImageMemory(g_dev, t->img, t->mem, 0);
-    if (!(t->view = make_view(t->img))) { target_destroy(t); return -1; }
+    if (!(t->view = make_view(t->img, g_fx_fmt))) { target_destroy(t); return -1; }
     VkFramebufferCreateInfo fi = {.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO, .renderPass = g_rp,
                                   .attachmentCount = 1, .pAttachments = &t->view, .width = (uint32_t)w,
                                   .height = (uint32_t)h, .layers = 1};
@@ -290,7 +295,7 @@ static void scene_release(void) {
 static int scene_ensure(VkImage img, int w, int h) {
     if (g_scene.img == img && g_scene.w == w && g_scene.h == h && g_scene.ds) return 0;
     scene_release();
-    if (!(g_scene.view = make_view(img))) return -1;
+    if (!(g_scene.view = make_view(img, g_scene_fmt))) return -1;
     if (!(g_scene.ds = alloc_ds(g_scene.view))) { scene_release(); return -1; }
     g_scene.img = img; g_scene.w = w; g_scene.h = h;
     return 0;
@@ -355,6 +360,21 @@ static void objects_destroy(void) {
 
 void vkp_effects_destroy(void) { objects_destroy(); g_dev = VK_NULL_HANDLE; }
 
+void vkp_effects_set_formats(VkFormat scene_fmt, VkFormat target_fmt) {
+    if (target_fmt != g_fx_fmt) {
+        /* The render pass, the pipelines and the targets are built for one format: start over. */
+        if (g_ready) objects_destroy();
+        g_fx_fmt = target_fmt;
+        g_scene_fmt = scene_fmt;
+        if (g_dev)
+            banner_log("effects", "chain now works in %s (%s)", target_fmt == FX_FORMAT ? "8-bit RGBA" : "10-bit RGB",
+                       target_fmt == FX_FORMAT ? "SDR frames" : "an HDR picture: the effects run on its PQ signal");
+    } else if (scene_fmt != g_scene_fmt) {
+        scene_release();
+        g_scene_fmt = scene_fmt;
+    }
+}
+
 /* Build every device object once, on the first active frame. 0 = ok, -1 = the chain is
  * unavailable for this session (logged once; frames fall back to the plain blit). */
 static int objects_ensure(void) {
@@ -363,7 +383,7 @@ static int objects_ensure(void) {
     /* Render pass: one colour target, overwritten whole (DONT_CARE), left SHADER_READ_ONLY for the
      * next pass. The dependencies order this pass after whoever read the target last (previous
      * pass / previous frame's blit) and before whoever samples or blits it next. */
-    VkAttachmentDescription att = {.format = FX_FORMAT, .samples = VK_SAMPLE_COUNT_1_BIT,
+    VkAttachmentDescription att = {.format = g_fx_fmt, .samples = VK_SAMPLE_COUNT_1_BIT,
                                    .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE, .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
                                    .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE, .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
                                    .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED, .finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};

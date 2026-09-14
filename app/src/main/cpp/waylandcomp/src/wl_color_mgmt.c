@@ -142,8 +142,9 @@ static struct {
     unsigned descs;                 /* HDR image descriptions made ready */
     unsigned applied;               /* commits that made one current on a surface */
     char applied_who[160];          /* the last surface that got one */
-    uint64_t layer_frames, layer_10bit, layer_copy8, copy_frames;
-    unsigned win_layer, win_copy, win_copy8;
+    uint64_t layer_frames, layer_10bit, layer_copy8, copy_frames; /* layer_frames = every frame shown AS HDR */
+    uint64_t composed, swapchain, tonemapped;
+    unsigned win_layer, win_copy, win_copy8, win_zc, win_composed, win_swapchain, win_tonemapped;
     char copy_reason[160];
     char layer_fmt[48];
     int ratio_n, win_ratio_n, ratio_live_n;
@@ -168,10 +169,12 @@ static void verdict_locked(char *out, size_t size) {
     if (gate == 0) { snprintf(out, size, "no, because %s", g_gate_why); return; }
     if (g_hdr.layer_frames) {
         const char *who = g_hdr.applied_who[0] ? g_hdr.applied_who : "the game";
-        char frames[240];
-        snprintf(frames, sizeof(frames), "%llu frames of %s reached the display tagged BT2020_PQ (%llu of them 10-bit "
-                 "zero-copy, %llu through the 8-bit layer copy)", (unsigned long long)g_hdr.layer_frames, who,
-                 (unsigned long long)g_hdr.layer_10bit, (unsigned long long)g_hdr.layer_copy8);
+        char frames[300];
+        snprintf(frames, sizeof(frames), "%llu frames of %s reached the display as BT2020_PQ (%llu 10-bit zero-copy, "
+                 "%llu 8-bit layer copy, %llu composed HDR picture, %llu HDR10 swapchain; %llu more tone-mapped to SDR)",
+                 (unsigned long long)g_hdr.layer_frames, who, (unsigned long long)g_hdr.layer_10bit,
+                 (unsigned long long)g_hdr.layer_copy8, (unsigned long long)g_hdr.composed,
+                 (unsigned long long)g_hdr.swapchain, (unsigned long long)g_hdr.tonemapped);
         /* Only readings taken while HDR frames were on screen count: the ratio says what the display did
          * with THEM, not with whatever else was up at another moment. */
         if (g_hdr.ratio_live_n && g_hdr.ratio_live_max > 1.01f)
@@ -189,7 +192,11 @@ static void verdict_locked(char *out, size_t size) {
         return;
     }
     if (g_hdr.applied || g_hdr.descs) {
-        if (g_hdr.copy_frames)
+        if (g_hdr.tonemapped)
+            snprintf(out, size, "no - %s's HDR frames were shown tone-mapped to SDR (%llu frames: frame generation "
+                     "through a screen surface that offers no HDR10 swapchain) - correct colours, no HDR brightness",
+                     g_hdr.applied_who[0] ? g_hdr.applied_who : "the game", (unsigned long long)g_hdr.tonemapped);
+        else if (g_hdr.copy_frames)
             snprintf(out, size, "no, because %s asked for HDR but all %llu of its HDR frames went through the "
                      "compositor's 8-bit SDR copy (%s) and were shown without tone mapping",
                      g_hdr.applied_who[0] ? g_hdr.applied_who : "the game", (unsigned long long)g_hdr.copy_frames,
@@ -215,16 +222,36 @@ static void log_verdict(int force) {
     if (changed || force) banner_log(TAG, "HDR on screen: %s", v);
 }
 
-void banner_color_frame_on_layer(const struct banner_color *c, int zero_copy, uint32_t ahb_format) {
+void banner_color_frame_shown(const struct banner_color *c, int path, uint32_t ahb_format) {
     if (!c || !c->dataspace) return;
     int first8 = 0;
     pthread_mutex_lock(&g_mu);
+    switch (path) {
+    case BANNER_HDR_ZERO_COPY:
+        if (ahb_format == 0x2b) g_hdr.layer_10bit++;
+        g_hdr.win_zc++;
+        snprintf(g_hdr.layer_fmt, sizeof(g_hdr.layer_fmt), "%s", banner_ahb_format_name(ahb_format));
+        break;
+    case BANNER_HDR_LAYER_COPY:
+        if (!g_hdr.layer_copy8) first8 = 1;
+        g_hdr.layer_copy8++; g_hdr.win_copy8++;
+        snprintf(g_hdr.layer_fmt, sizeof(g_hdr.layer_fmt), "RGBA8888 layer copy");
+        break;
+    case BANNER_HDR_COMPOSED:
+        g_hdr.composed++; g_hdr.win_composed++;
+        snprintf(g_hdr.layer_fmt, sizeof(g_hdr.layer_fmt), "composed %s", banner_ahb_format_name(ahb_format));
+        break;
+    case BANNER_HDR_SWAPCHAIN:
+        g_hdr.swapchain++; g_hdr.win_swapchain++;
+        snprintf(g_hdr.layer_fmt, sizeof(g_hdr.layer_fmt), "HDR10 swapchain");
+        break;
+    default: /* BANNER_HDR_TONEMAPPED: shown, but not as HDR */
+        g_hdr.tonemapped++; g_hdr.win_tonemapped++;
+        pthread_mutex_unlock(&g_mu);
+        return;
+    }
     g_hdr.layer_frames++;
     g_hdr.win_layer++;
-    if (zero_copy && ahb_format == 0x2b) g_hdr.layer_10bit++;
-    if (!zero_copy) { if (!g_hdr.layer_copy8) first8 = 1; g_hdr.layer_copy8++; g_hdr.win_copy8++; }
-    snprintf(g_hdr.layer_fmt, sizeof(g_hdr.layer_fmt), "%s", zero_copy ? banner_ahb_format_name(ahb_format)
-                                                                     : "RGBA8888 layer copy");
     pthread_mutex_unlock(&g_mu);
     atomic_store(&g_last_frame_ns, now_ns());
     if (first8)
@@ -295,20 +322,23 @@ void banner_color_ratio_sample(float ratio, int listener) {
 
 void banner_color_stats_tick(void) {
     if (atomic_load(&g_gate) != 1) return;
-    char line[400];
+    char line[480];
     int any;
     pthread_mutex_lock(&g_mu);
-    any = g_hdr.win_layer || g_hdr.win_copy; /* the ratio alone is logged when it moves, not every 10 s */
+    any = g_hdr.win_layer || g_hdr.win_copy || g_hdr.win_tonemapped; /* the ratio alone is logged when it moves */
     if (any) {
         char ratio[96] = "no HDR/SDR ratio reading";
         if (g_hdr.win_ratio_n)
             snprintf(ratio, sizeof(ratio), "display HDR/SDR ratio %.2f-%.2f (now %.2f)", g_hdr.win_ratio_min,
                      g_hdr.win_ratio_max, g_hdr.ratio_last);
-        snprintf(line, sizeof(line), "HDR last 10 s: %u frames on the display layer tagged BT2020_PQ (%u of them "
-                 "through the 8-bit layer copy; buffer %s) | %u HDR frames through the SDR copy path | %s",
-                 g_hdr.win_layer, g_hdr.win_copy8, g_hdr.layer_fmt[0] ? g_hdr.layer_fmt : "-", g_hdr.win_copy, ratio);
+        snprintf(line, sizeof(line), "HDR last 10 s: %u frames shown as BT2020_PQ (zero-copy %u, 8-bit layer copy %u, "
+                 "composed picture %u, HDR10 swapchain %u; last buffer %s) | %u tone-mapped to SDR | %u washed-out "
+                 "copies | %s",
+                 g_hdr.win_layer, g_hdr.win_zc, g_hdr.win_copy8, g_hdr.win_composed, g_hdr.win_swapchain,
+                 g_hdr.layer_fmt[0] ? g_hdr.layer_fmt : "-", g_hdr.win_tonemapped, g_hdr.win_copy, ratio);
     }
     g_hdr.win_layer = g_hdr.win_copy = g_hdr.win_copy8 = 0;
+    g_hdr.win_zc = g_hdr.win_composed = g_hdr.win_swapchain = g_hdr.win_tonemapped = 0;
     g_hdr.win_ratio_n = 0;
     pthread_mutex_unlock(&g_mu);
     if (any) banner_log(TAG, "%s", line);
