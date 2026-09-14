@@ -1027,7 +1027,10 @@ private fun TopLevelFields(
                     }
                 }
                 viewModel.compositorDriverAutoPicked == compositorVersion -> Text(
-                    "Picked for you: the newest installed Turnip that can import the game's frames.",
+                    if (viewModel.compositorDriverPickedFromDefaults)
+                        "Picked for you: the driver in your New Container Defaults."
+                    else
+                        "Picked for you: the newest installed Turnip that can import the game's frames.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -2933,23 +2936,31 @@ private val compositorDriverVerdicts = HashMap<String, CompositorDriverVerdict>(
  *     the config dialog's rule: proprietary blobs are never probed in-process;
  *  3. every other candidate is probed like the config dialog's extension list: it must load itself
  *     (no silent fall-back to the system ICD) and list all of [COMPOSITOR_IMPORT_EXTENSIONS];
- *  4. of those, the one reporting the highest Vulkan version (the newest Mesa) wins; a tie keeps
+ *  4. [preferred] — the driver the user's own New Container Defaults name — wins when it passes;
+ *     otherwise the one reporting the highest Vulkan version (the newest Mesa) does, a tie keeping
  *     the picker's order.
  * The Turnip bundled with the app goes through the same test, so a user who never imported a
  * driver still gets it when it passes.
  */
-internal suspend fun defaultCompositorDriver(context: Context): String? {
+internal suspend fun defaultCompositorDriver(context: Context, preferred: String? = null): String? {
     val choices = compositorDriverChoices(context)   // takes graphicsProbeMutex itself
     return withContext(Dispatchers.IO) {
         val mgr = AdrenotoolsManager(context)
         val imported = importedDriverVersions(context).toSet()
         graphicsProbeMutex.withLock {
-            choices.map { it to compositorDriverVerdict(context, mgr, it, it in imported) }
+            val usable = choices.map { it to compositorDriverVerdict(context, mgr, it, it in imported) }
                 .filter { it.second.usable }
-                .maxWithOrNull(Comparator { a, b -> compareVulkanVersions(a.second.vulkanVersion, b.second.vulkanVersion) })
-                ?.first
+            usable.firstOrNull { it.first == preferred }?.first
+                ?: usable.maxWithOrNull(Comparator { a, b -> compareVulkanVersions(a.second.vulkanVersion, b.second.vulkanVersion) })
+                    ?.first
         }
-    }.also { android.util.Log.i("CompositorDriver", "default for a Wayland form: ${it ?: "none (no installed driver can import the game's frames)"}") }
+    }.also {
+        android.util.Log.i("CompositorDriver", "default for a Wayland form: " + when {
+            it == null -> "none (no installed driver can import the game's frames)"
+            it == preferred -> "$it (the New Container Defaults driver)"
+            else -> "$it (newest usable" + (if (preferred != null) "; New Container Defaults names $preferred, not usable" else "") + ")"
+        })
+    }
 }
 
 private fun compositorDriverVerdict(context: Context, mgr: AdrenotoolsManager, id: String, imported: Boolean): CompositorDriverVerdict {

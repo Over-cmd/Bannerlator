@@ -160,6 +160,8 @@ class ContainerDetailViewModel(app: Application) : AndroidViewModel(app) {
     // saves what the field shows. An explicit value is never replaced, and going back to X11 before
     // saving restores the value from before the fill (the same key is the X11 game driver's version).
     var compositorDriverAutoPicked by mutableStateOf<String?>(null); private set
+    // The pick came from the user's own New Container Defaults rather than "newest usable".
+    var compositorDriverPickedFromDefaults by mutableStateOf(false); private set
     var compositorDriverSearching by mutableStateOf(false); private set
     // A search ran on Wayland and no installed driver can import the game's frames.
     var compositorDriverNoneUsable by mutableStateOf(false); private set
@@ -761,7 +763,28 @@ class ContainerDetailViewModel(app: Application) : AndroidViewModel(app) {
         compositorDriverSearching = false
         compositorDriverNoneUsable = false
         compositorDriverAutoPicked = null
+        compositorDriverPickedFromDefaults = false
         versionBeforeCompositorFill = null
+    }
+
+    /**
+     * The driver version the user's own New Container Defaults name for this form's architecture —
+     * their stated preference, tried first by [defaultCompositorDriver]. Read from the profile
+     * directly because the create form seeds its arch-agnostic fields from the FIRST wine entry's
+     * arch: with an x86_64 Wine listed first and only an arm64ec profile saved, that profile never
+     * reaches an arm64ec container's graphicsDriverConfig.
+     */
+    private fun defaultsProfileCompositorDriver(): String? {
+        val arch = when {
+            defaultsMode -> defaultsArch
+            isArm64EC -> NewContainerDefaults.ARCH_ARM64EC
+            else -> NewContainerDefaults.ARCH_X86_64
+        }
+        val json = NewContainerDefaults.load(context, arch) ?: return null
+        val v = runCatching {
+            GraphicsDriverConfigDialog.getVersion(JSONObject(json).optString("graphicsDriverConfig", ""))
+        }.getOrNull() ?: return null
+        return v.takeIf { it.isNotEmpty() && it != "System" }
     }
 
     /**
@@ -782,9 +805,10 @@ class ContainerDetailViewModel(app: Application) : AndroidViewModel(app) {
         val current = compositorVersion()
         if ((current.isNotEmpty() && current != "System") || compositorFillJob?.isActive == true) return
         compositorDriverSearching = true
+        val preferred = defaultsProfileCompositorDriver()
         compositorFillJob = viewModelScope.launch {
             // A cancelled older search must not clear the flag of the one that replaced it.
-            val pick = try { defaultCompositorDriver(context) }
+            val pick = try { defaultCompositorDriver(context, preferred) }
                        finally { if (compositorFillJob === coroutineContext[Job]) compositorDriverSearching = false }
             val now = compositorVersion()
             if (!isWaylandBackend || (now.isNotEmpty() && now != "System")) return@launch
@@ -792,6 +816,7 @@ class ContainerDetailViewModel(app: Application) : AndroidViewModel(app) {
             versionBeforeCompositorFill = now
             graphicsDriverConfig = withGraphicsDriverVersion(graphicsDriverConfig, pick)
             compositorDriverAutoPicked = pick
+            compositorDriverPickedFromDefaults = pick == preferred
         }
     }
 
@@ -913,7 +938,6 @@ class ContainerDetailViewModel(app: Application) : AndroidViewModel(app) {
         coerceAudioDriverForWine()      // a switch to an unsupported layer drops a stale DirectAudio pick
         // Wayland is only offered on a layer that ships winewayland + its Wayland Turnip: snap back to X11.
         if (isWaylandStored && !isWineWaylandCapable(version)) displayBackend = Container.DISPLAY_BACKEND_X11
-        syncCompositorDriverWithBackend() // a stored Wayland becomes effective on a capable layer
         refreshWineDependent(version)   // updates isArm64EC + swaps the box64/wowbox64 list
 
         // CREATE mode only: a wine change can FLIP the architecture. applyArch() swapped the box64 list
@@ -925,6 +949,9 @@ class ContainerDetailViewModel(app: Application) : AndroidViewModel(app) {
             val arch = if (isArm64EC) NewContainerDefaults.ARCH_ARM64EC else NewContainerDefaults.ARCH_X86_64
             seedArchDependentDefaults(arch)
         }
+        // A stored Wayland becomes effective on a capable layer (or stops being so): after the arch
+        // refresh, so the New Container Defaults preference is read for the NEW arch.
+        syncCompositorDriverWithBackend()
     }
 
     /**
