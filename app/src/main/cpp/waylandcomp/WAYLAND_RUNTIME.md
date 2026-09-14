@@ -336,8 +336,13 @@ app window ....... Compose UI, the in-game drawer, the perf HUD, the on-screen c
   ROT_90 + scaled), `dumpsys android.hardware.graphics.composer3.IComposer/default`:** one layer is
   `composition: DEVICE/DEVICE` (game's own gralloc buffer scanned out by the DPU), with effects on
   the layer it stays `DEVICE/DEVICE`, but **two** layers flip the whole frame to `DEVICE/CLIENT` —
-  SurfaceFlinger composes it on the GPU. It does not recover while the second SurfaceControl exists,
-  which is why `sc_layer_hide_overlay()` retires rather than hides. The likely mechanism is the
+  SurfaceFlinger composes it on the GPU — **and it does not come back when the overlay goes away**:
+  retiring the overlay's SurfaceControl (which the compositor now does rather than merely hiding
+  it) leaves the frame in client composition; only re-creating the *game* layer's SurfaceControl
+  clears it (HOME + resume does, reproduced twice). Retiring is still right — one fewer live layer,
+  and it leaves the HWC list — it is just not the whole cure; the open follow-up is to retire and
+  immediately re-create the game layer when the overlay goes, which would cost one black frame
+  unless the new SurfaceControl is shown before the old one is dropped. The likely mechanism is the
   DPU's rotator budget (one rotated+scaled layer), not the layer count as such, so a device or
   orientation that needs no rotation may well take both on the DPU. Even in client composition the
   overlay layer is not a loss (SurfaceFlinger does the one blit the compositor would have done), but
