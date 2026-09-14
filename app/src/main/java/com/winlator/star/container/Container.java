@@ -477,6 +477,24 @@ public class Container {
         return DISPLAY_BACKEND_WAYLAND.equals(getDisplayBackend());
     }
 
+    // --- OpenGL safe mode (per-container), stored in extraData. Wayland sessions only. ---
+    // Native OpenGL games on the Wayland backend render through Mesa (Zink on Turnip). Mesa's
+    // u_threaded_context helper thread ("gdrv0") can fault inside libgallium, and because that is a
+    // plain pthread with no Wine TEB, Wine's own SIGSEGV handler faults again on it: the kernel then
+    // kills the process outright. The game VANISHES - no crash dump, no dialog, no log line.
+    // GALLIUM_THREAD=0 removes that thread; the cost is that OpenGL draw submission stops being
+    // pipelined onto a second core, i.e. a little CPU-side throughput on GL titles and nothing at
+    // all on Vulkan ones (DXVK/VKD3D never load a gallium driver). Default ON because a silent
+    // disappearance is far worse than a few percent of CPU throughput.
+    // A shortcut may override per game with the same-named extra.
+    public boolean isWaylandGlSafeMode() {
+        return getExtra("waylandGlSafeMode", "1").equals("1");
+    }
+
+    public void setWaylandGlSafeMode(boolean enabled) {
+        putExtra("waylandGlSafeMode", enabled ? "1" : "0");
+    }
+
     // --- Wayland game driver (per-container), stored in extraData ---
     // On Wayland the GAME renders on a Vulkan driver the Proton layer picks (winewayland sets
     // VK_ICD_FILENAMES), not on the compositor's Turnip. The layer bundles three Wayland Turnip
@@ -1453,7 +1471,20 @@ public class Container {
 
             if (data.has("envVars") && data.has("extraData")) {
                 JSONObject extraData = data.getJSONObject("extraData");
-                int appVersion = Integer.parseInt(extraData.optString("appVersion", "0"));
+                // Back-fill env vars added since app version 16, but ONLY onto a container that
+                // really carries an old stamp. An ABSENT appVersion means "never booted", not
+                // "written by app version 0": it is what a container the editor just wrote looks
+                // like, and what the New Container Defaults profile always looks like. Treating
+                // that as legacy re-added every DEFAULT_ENV_VARS entry the user had deliberately
+                // deleted, silently undoing their edit. (Parsing defensively also keeps a junk
+                // stamp from throwing NumberFormatException straight out of loadData, which no
+                // caller catches.)
+                String stamp = extraData.optString("appVersion", "");
+                int appVersion = Integer.MAX_VALUE;
+                if (!stamp.isEmpty()) {
+                    try { appVersion = Integer.parseInt(stamp); }
+                    catch (NumberFormatException e) { appVersion = 0; }
+                }
                 if (appVersion < 16) {
                     EnvVars defaultEnvVars = new EnvVars(DEFAULT_ENV_VARS);
                     EnvVars envVars = new EnvVars(data.getString("envVars"));

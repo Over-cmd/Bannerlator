@@ -2,6 +2,8 @@ package com.winlator.star.core;
 
 import android.content.Context;
 
+import com.winlator.star.container.Container;
+import com.winlator.star.container.Shortcut;
 import com.winlator.star.contents.ContentsManager;
 
 import java.io.File;
@@ -71,6 +73,32 @@ public final class WineWaylandSupport {
         } catch (Exception e) {
             return false;
         }
+    }
+
+    /**
+     * Does this CONTAINER effectively run on Wayland? It selected the Wayland backend AND its layer
+     * can drive it. Same rule the container editor shows (ContainerDetailViewModel.isWaylandBackend)
+     * and the launch path enforces — kept here in one place so read-only surfaces (the container and
+     * game cards) can't drift from the editors and print the X11 setting as if it were fact.
+     */
+    public static boolean runsOnWayland(Context context, Container container) {
+        if (container == null) return false;
+        return container.isWaylandBackend() && isWaylandCapable(context, container.getWineVersion());
+    }
+
+    /**
+     * Does this SHORTCUT effectively run on Wayland? Its own "displayBackend" override decides, else
+     * the container's choice, gated by the same layer capability — mirrors the shortcut editor's
+     * {@code effectiveWaylandShortcut} and XmbGameSettings' {@code waylandGame}.
+     */
+    public static boolean runsOnWayland(Context context, Shortcut shortcut) {
+        if (shortcut == null) return false;
+        Container container = shortcut.container;
+        if (container == null) return false;
+        String backend = shortcut.getExtra("displayBackend", "");
+        if (backend.isEmpty()) return runsOnWayland(context, container);
+        return Container.DISPLAY_BACKEND_WAYLAND.equals(backend)
+                && isWaylandCapable(context, container.getWineVersion());
     }
 
     /** Drop every cached verdict — call after a layer is installed or removed. */

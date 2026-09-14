@@ -22,13 +22,35 @@
  * MEASURED on the Pocket FIT (Adreno 750, portrait panel + landscape session, so every layer is
  * ROT_90 + scaled), `dumpsys android.hardware.graphics.composer3.IComposer/default`: one layer is
  * `composition: DEVICE/DEVICE`, effects on the layer keep it DEVICE/DEVICE — but a SECOND layer
- * flips the whole frame to `DEVICE/CLIENT`. It does not come back when the overlay goes away; only
- * re-creating the GAME layer's SurfaceControl clears it (HOME + resume does, reproduced twice).
+ * flips the whole frame to `DEVICE/CLIENT`. It does not come back when the overlay goes away.
  * The overlay layer is retired rather than hidden for that reason, but the fallback outlives it.
  * The likely mechanism is the DPU's rotator budget (one rotated+scaled layer), not the layer count
  * as such, so a device or orientation needing no rotation may well take both on the DPU. Even in
  * client composition the overlay layer is not a loss — SurfaceFlinger does the one blit the
  * compositor would have done — but the hardware-composition win is only real for one layer.
+ *
+ * COMPOSITION RECOVERY (sc_layer.c, swap_sc_begin): retiring the overlay arms the game layer, and
+ * the NEXT frame is presented on a brand-new SurfaceControl while the old one is hidden and
+ * unparented in the SAME transaction. SurfaceFlinger applies a transaction atomically, so no
+ * composited frame is ever missing the game — no black frame, no dropped frame beyond the layer
+ * creation itself. One `layer` line is written when it happens.
+ *
+ * ⚠️ It does NOT restore hardware composition on this panel, and that was measured, not assumed
+ * (2026-09-14, Wizardry on the game layer + Wine's Task Manager on the overlay, reproduced twice):
+ *   - two layers                                  -> DEVICE/CLIENT
+ *   - overlay retired + fresh game SurfaceControl -> still DEVICE/CLIENT, 24 s later too
+ *   - layer path dropped entirely and re-created  -> still DEVICE/CLIENT
+ *   - drawer opened and closed, no second window  -> DEVICE/DEVICE (control: the drawer is not the cause)
+ *   - HOME + resume                               -> DEVICE/DEVICE
+ * HOME + resume re-creates the app's whole window and SurfaceView (`VRI[XServerDisplayActivity]#0`
+ * becomes `#4`), not just this child layer — so the sticky state belongs to the parent surface or
+ * the display. Re-creating the parent would cost a real black frame and a swapchain rebuild, which
+ * is worse than the few percent of GPU that client composition costs. The cure that actually keeps
+ * the win is PREVENTION, and it IS implemented: sc_layer_overlay_affordable() declines the second
+ * layer when the game layer is both rotated and scaled, and the window above the game goes down the
+ * copy path instead (what the pre-phase-4 code did) — one blit SurfaceFlinger would have done
+ * anyway, and the session keeps DEVICE composition throughout. Where a second layer costs nothing,
+ * nothing changes.
  *
  * What can be on the game layer, cheapest first:
  *   - the game's own gralloc buffer (ahb_swapchain.c, true zero-copy: no copy anywhere);
@@ -90,6 +112,17 @@ int sc_layer_present_ahb(AHardwareBuffer *ahb, int w, int h, int acquire_fd, voi
  * libandroid has no ASurfaceTransaction_setFrameRate. */
 void sc_layer_set_frame_rate(float fps);
 
+/* Is a SECOND display layer worth raising on THIS display? Ask before committing the game to its
+ * layer, not after: on a display where the answer is no, the whole scene must go down the copy path
+ * from the start, or the game layer would be shown and hidden again on every frame.
+ *
+ * The answer is computed from what the layer path knows — the rotation the presentation engine
+ * applies to everything we hand it (VkSurfaceCapabilitiesKHR::currentTransform) and the game
+ * layer's own src -> dst rectangles — and never from a device or panel allowlist. ROTATED AND
+ * SCALED is the combination measured to cost hardware composition (below); either alone is fine.
+ * The reason is written to the session log once, and again if the answer changes. */
+int sc_layer_overlay_affordable(void);
+
 /* OVERLAY layer: show `src` (one window's imported frame) above the game layer, at the placement
  * `geo` = {src x0,y0,x1,y1 in image pixels, dst x0,y0,x1,y1 in output pixels} from vkp_map_draw.
  * 0 = shown or dropped, -1 = unavailable (the caller must fall back to the copy path). */
@@ -97,7 +130,9 @@ int sc_layer_present_overlay(struct vkp_image *src, const int geo[8]);
 
 /* The scene is not a single fullscreen window this frame: hide every layer that is up. */
 void sc_layer_hide(void);
-/* Only the overlay layer: nothing is above the game any more (the game keeps its layer). */
+/* Only the overlay layer: nothing is above the game any more. The game keeps its layer, but its
+ * SurfaceControl is swapped for a fresh one on the next frame (composition recovery, above — which
+ * on this panel does not in fact win hardware composition back; see the measurement there). */
 void sc_layer_hide_overlay(void);
 
 /* The output window changed or went away (compositor thread, from vkp_apply_window_request). */

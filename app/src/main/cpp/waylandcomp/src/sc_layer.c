@@ -155,6 +155,8 @@ struct layer {
     int64_t drop_logged_ns;
     int votes_rate;             /* 1: this layer carries the game's cadence (the game layer) */
     float fps_applied;          /* the vote the live SurfaceControl already carries (-1 = none yet) */
+    int recreate_pending;       /* composition recovery: swap this layer's SurfaceControl for a fresh
+                                 * one inside the next frame's transaction (see swap_sc_begin) */
 };
 
 static struct layer g_layers[SC_LAYER_COUNT];
@@ -218,16 +220,24 @@ static void on_complete(void *context, ASurfaceTransactionStats *stats) {
     free(ctx);
 }
 
-static int add_complete(ASurfaceTransaction *tx, struct layer *l, int prev_slot, void *prev_token, int retire) {
+/* `sc` is the SurfaceControl the REPLACED buffer sits on, which is not always l->sc: during a
+ * composition-recovery swap the outgoing buffer belongs to the old SurfaceControl, and both its
+ * release fence and its release must be taken from that one. */
+static int add_complete_on(ASurfaceTransaction *tx, struct layer *l, ASurfaceControl *sc,
+                           int prev_slot, void *prev_token, int retire) {
     struct complete_ctx *ctx = calloc(1, sizeof(*ctx));
     if (!ctx) return -1;
-    ctx->sc = l->sc; ctx->layer = (int)(l - g_layers); ctx->prev_slot = prev_slot;
+    ctx->sc = sc; ctx->layer = (int)(l - g_layers); ctx->prev_slot = prev_slot;
     ctx->prev_token = prev_token; ctx->retire = retire;
     pthread_mutex_lock(&g_lock);
     g_pending_cb++;
     pthread_mutex_unlock(&g_lock);
     api.setOnComplete(tx, ctx, on_complete);
     return 0;
+}
+
+static int add_complete(ASurfaceTransaction *tx, struct layer *l, int prev_slot, void *prev_token, int retire) {
+    return add_complete_on(tx, l, l->sc, prev_slot, prev_token, retire);
 }
 
 /* The stand-in buffer for a hidden/retired layer (allocated once, black, shared by both layers). */
@@ -254,15 +264,22 @@ static void replace_with_blank(ASurfaceTransaction *tx, struct layer *l) {
     if (b) api.setBuffer(tx, l->sc, b, -1);
 }
 
+/* Everything a SurfaceControl needs on its way out, as transaction ops: give the buffer back (so
+ * SurfaceFlinger releases the game's, with a fence), hide it, unparent it. */
+static void retire_ops(ASurfaceTransaction *tx, ASurfaceControl *sc) {
+    AHardwareBuffer *b = blank_buffer();
+    if (b) api.setBuffer(tx, sc, b, -1);
+    api.setVisibility(tx, sc, ASC_VISIBILITY_HIDE);
+    api.reparent(tx, sc, NULL);
+}
+
 /* Hide + detach one layer; the SurfaceControl is released from the transaction's callback (the
  * buffer on it stays referenced by SurfaceFlinger until then). */
 static void retire_sc(struct layer *l) {
     if (!l->sc) return;
     ASurfaceTransaction *tx = api.txCreate();
     if (tx) {
-        replace_with_blank(tx, l);
-        api.setVisibility(tx, l->sc, ASC_VISIBILITY_HIDE);
-        api.reparent(tx, l->sc, NULL);
+        retire_ops(tx, l->sc);
         if (add_complete(tx, l, l->cur_slot, l->cur_token, 1) != 0) api.release(l->sc);
         api.txApply(tx);
         api.txDelete(tx);
@@ -274,6 +291,7 @@ static void retire_sc(struct layer *l) {
     l->sc = NULL; l->win = NULL;
     l->shown = 0; l->cur_slot = -1; l->cur_token = NULL; l->geo_valid = 0;
     l->fps_applied = -1.0f; /* the next SurfaceControl carries no vote until it is re-applied */
+    l->recreate_pending = 0; /* a fresh SurfaceControl is coming anyway */
 }
 
 /* Wait (bounded) for SurfaceFlinger to finish with every pool buffer of every layer, then free
@@ -436,8 +454,15 @@ static int layer_geometry(int w, int h, int scene_w, int scene_h, int r[8]) {
     return vkp_map_rect(w, h, scene_w, scene_h, r) ? 1 : 0;
 }
 
+/* The GAME layer's last placement, kept across SurfaceControl retires and swaps (l->geo_valid is
+ * per-SurfaceControl and is cleared by both). This is the src -> dst the display actually works
+ * with, and it is what decides whether a second layer is affordable — see overlay_affordable(). */
+static ARect g_game_src, g_game_dst;
+static int g_game_geo_known;
+
 static void apply_geometry(ASurfaceTransaction *tx, struct layer *l, const int r[8]) {
     ARect srcR = {r[0], r[1], r[2], r[3]}, dstR = {r[4], r[5], r[6], r[7]};
+    if (l == &g_layers[SC_LAYER_GAME]) { g_game_src = srcR; g_game_dst = dstR; g_game_geo_known = 1; }
     if (!l->geo_valid || memcmp(&srcR, &l->geo_src, sizeof(srcR)) || memcmp(&dstR, &l->geo_dst, sizeof(dstR))) {
         api.setGeometry(tx, l->sc, &srcR, &dstR, 0 /* no transform: the DPU scales, never rotates */);
         l->geo_src = srcR; l->geo_dst = dstR; l->geo_valid = 1;
@@ -478,11 +503,59 @@ static void log_layer_count(void) {
                g_layers[SC_LAYER_OVERLAY].name, (int)g_layers[SC_LAYER_OVERLAY].z, SC_LAYER_COUNT);
 }
 
+/* ---- composition recovery ---------------------------------------------------------------------
+ * When the overlay is retired and the scene is one fullscreen window again, the game layer is
+ * marked for a swap and the swap rides the NEXT frame: a fresh SurfaceControl is created here, the
+ * frame is put on it, and the old one is hidden and unparented IN THE SAME TRANSACTION. Because
+ * SurfaceFlinger applies a transaction atomically there is never a composited frame with neither
+ * layer on it — no black frame, and no dropped frame beyond the one layer creation. The outgoing
+ * buffer is released through the OLD SurfaceControl's callback, which also releases it.
+ *
+ * ⚠️ MEASURED 2026-09-14, and the news is bad: on the Pocket FIT this does NOT bring hardware
+ * composition back. The swap fires 6 ms after the overlay goes, SurfaceFlinger really does hand out
+ * a new layer (its id changes), the game never drops a frame — and the composer still reports
+ * `DEVICE/CLIENT` 24 s later. Neither does dropping the layer path entirely and re-creating the
+ * SurfaceControl after a gap. The ONE thing that clears it is HOME + resume, which re-creates the
+ * app's whole window and SurfaceView (`VRI[XServerDisplayActivity]#0` becomes `#4`) — so the sticky
+ * client-composition state belongs to the PARENT surface (or the display), not to this child layer.
+ * The phase-4 note that "only re-creating the GAME layer's SurfaceControl clears it" was inferred
+ * from HOME + resume and is wrong; see sc_layer.h. The swap is kept because it is free and correct
+ * and the mechanism may differ on hardware that does not rotate every layer — but do not claim it
+ * restores DEVICE composition, and do not log as if it did.
+ *
+ * Returns the old SurfaceControl (the caller must add retire_ops for it to the same transaction and
+ * name it in add_complete_on), or NULL when no swap is due. Compositor thread. */
+static ASurfaceControl *swap_sc_begin(struct layer *l) {
+    if (!l->recreate_pending) return NULL;
+    l->recreate_pending = 0;
+    if (!l->sc) return NULL;                 /* nothing to swap; ensure_sc made a fresh one already */
+    ANativeWindow *win = vkp_window();
+    if (!win || win != l->win) return NULL;  /* the window changed: ensure_sc re-creates it anyway */
+    ASurfaceControl *fresh = api.createFromWindow(win, l->name);
+    if (!fresh) {
+        banner_log("error", "layer: %s: composition recovery could not create a new SurfaceControl", l->name);
+        return NULL;
+    }
+    ASurfaceControl *old = l->sc;
+    l->sc = fresh;
+    /* These describe the SurfaceControl, not the layer: the new one carries none of them yet.
+     * cur_slot / cur_token are deliberately NOT cleared — they name the buffer still on the OLD
+     * SurfaceControl, which is what the caller passes to add_complete_on as the one being replaced. */
+    l->shown = 0;
+    l->geo_valid = 0;
+    l->fps_applied = -1.0f;
+    banner_log("layer", "composition recovery: %s got a fresh SurfaceControl now that nothing is above "
+               "the game (measured on this panel: hardware composition does NOT return from this alone)", l->name);
+    return old;
+}
+
 /* The transaction that puts pool slot `idx` of layer `l` on screen at `r`. 0 = applied. */
 static int present_slot(struct layer *l, int idx, const int r[8]) {
     struct slot *s = &l->slots[idx];
     ASurfaceTransaction *tx = api.txCreate();
     if (!tx) return -1;
+    ASurfaceControl *old = swap_sc_begin(l); /* this frame carries the recovery swap, if one is due */
+    if (old) api.setZOrder(tx, l->sc, l->z);
     /* The blit was waited for on the CPU, so no acquire fence is needed (-1). */
     api.setBuffer(tx, l->sc, s->ahb, -1);
     /* The compositor composes with blits, which overwrite: nothing is ever alpha-blended on the
@@ -491,7 +564,9 @@ static int present_slot(struct layer *l, int idx, const int r[8]) {
     apply_geometry(tx, l, r);
     apply_frame_rate(tx, l);
     if (!l->shown) api.setVisibility(tx, l->sc, ASC_VISIBILITY_SHOW);
-    add_complete(tx, l, l->cur_slot, l->cur_token, 0);
+    if (old) retire_ops(tx, old);
+    if (add_complete_on(tx, l, old ? old : l->sc, l->cur_slot, l->cur_token, old ? 1 : 0) != 0 && old)
+        api.release(old); /* no callback to retire it from (out of memory): let it go here */
     pthread_mutex_lock(&g_lock);
     s->busy = 1;
     pthread_mutex_unlock(&g_lock);
@@ -520,7 +595,7 @@ int sc_layer_present_ahb(AHardwareBuffer *ahb, int w, int h, int acquire_fd, voi
     int g = layer_geometry(w, h, scene_w, scene_h, r);
     if (g < 0) goto unavailable;
     if (g == 0) { if (acquire_fd >= 0) close(acquire_fd); sc_layer_hide(); return 1; }
-    if (token == l->cur_token && l->shown) {
+    if (token == l->cur_token && l->shown && !l->recreate_pending) {
         /* The same frame again (the scene was redrawn for another reason): the display already
          * has it; only the placement may have changed. */
         if (acquire_fd >= 0) close(acquire_fd);
@@ -530,13 +605,20 @@ int sc_layer_present_ahb(AHardwareBuffer *ahb, int w, int h, int acquire_fd, voi
     }
     ASurfaceTransaction *tx = api.txCreate();
     if (!tx) goto unavailable;
+    ASurfaceControl *old = swap_sc_begin(l); /* this frame carries the recovery swap, if one is due */
+    if (old) api.setZOrder(tx, l->sc, l->z);
     api.setBuffer(tx, l->sc, ahb, acquire_fd); /* the transaction owns the fence */
     api.setBufferTransparency(tx, l->sc, ASC_TRANSPARENCY_OPAQUE);
     apply_geometry(tx, l, r);
     apply_frame_rate(tx, l);
     if (!l->shown) api.setVisibility(tx, l->sc, ASC_VISIBILITY_SHOW);
-    if (add_complete(tx, l, l->cur_slot, l->cur_token == token ? NULL : l->cur_token, 0) != 0) {
+    if (old) retire_ops(tx, old);
+    /* Same buffer, new SurfaceControl: it is NOT free, so no release is reported for it — the swap
+     * moved it rather than taking it off screen. */
+    if (add_complete_on(tx, l, old ? old : l->sc, l->cur_slot,
+                        l->cur_token == token ? NULL : l->cur_token, old ? 1 : 0) != 0) {
         api.txDelete(tx); /* the fence went with the transaction */
+        if (old) api.release(old);
         return -1;
     }
     api.txApply(tx);
@@ -597,9 +679,70 @@ int sc_layer_present_pass(const struct vkp_draw *draws, int n, int scene_w, int 
     return 0;
 }
 
+/* ---- is a SECOND display layer affordable on this display? -----------------------------------
+ * MEASURED on the Pocket FIT (2026-09-14, three times): while a second layer is up, this hardware
+ * composer hands the WHOLE frame back to the GPU (`DEVICE/CLIENT`), and nothing short of re-creating
+ * the app's window brings it back — so on this display the overlay layer costs more than it saves,
+ * every time, for the rest of the session. Where it costs nothing it is still the better path (the
+ * game keeps copy-free frames with a window on top), so this is a GATE, not a removal.
+ *
+ * The gate is read from what the layer path actually knows, never from a device or panel list:
+ *   - rotation: vkp_surface_rotation_degrees(), i.e. VkSurfaceCapabilitiesKHR::currentTransform —
+ *     what the presentation engine says it does to every layer we hand it;
+ *   - scale: the GAME layer's own src -> dst rectangles, the ones passed to setGeometry.
+ * Rotated AND scaled is the combination that was measured to cost composition (the DPU's rotator
+ * has to take a scaled source); either alone, or neither, is left as it was.
+ *
+ * Why not just measure the composition type after raising the layer and back out if it comes back
+ * CLIENT — which would beat predicting? Because no app can read it. The composition type lives in
+ * the Composer HAL; ASurfaceTransactionStats exposes latch time and fences and nothing else, and
+ * the only place the value is published is `dumpsys android.hardware.graphics.composer3.IComposer`,
+ * which needs android.permission.DUMP and string-parsing. It would also arrive at least a frame
+ * late, so backing out would itself be the visible change we are avoiding. Hence the rule. */
+static int overlay_affordable(int *deg, int sw[2], int dw[2]) {
+    *deg = vkp_surface_rotation_degrees();
+    sw[0] = sw[1] = dw[0] = dw[1] = 0;
+    if (!g_game_geo_known) return 1;    /* the game has never been placed: nothing to weigh against */
+    if (*deg <= 0) return 1;            /* unknown (-1) or upright: leave today's behaviour alone */
+    sw[0] = g_game_src.right - g_game_src.left; sw[1] = g_game_src.bottom - g_game_src.top;
+    dw[0] = g_game_dst.right - g_game_dst.left; dw[1] = g_game_dst.bottom - g_game_dst.top;
+    if (sw[0] <= 0 || sw[1] <= 0) return 1;
+    return !(dw[0] != sw[0] || dw[1] != sw[1]); /* rotated AND scaled -> not affordable */
+}
+
+/* -1 = not decided yet, 0 = raising the overlay, 1 = declining it. Logged on every change, so a
+ * tester's log says why they are seeing the copy path instead of two layers — and says it again if
+ * the placement changes the answer (e.g. a fullscreen mode that stops scaling the game). */
+static int g_overlay_declined = -1;
+
+int sc_layer_overlay_affordable(void) {
+    layers_init();
+    int deg, sr[2], ds[2];
+    int ok = overlay_affordable(&deg, sr, ds);
+    int want = ok ? 0 : 1;
+    if (want != g_overlay_declined) {
+        int first = g_overlay_declined < 0;
+        g_overlay_declined = want;
+        if (want)
+            banner_log("layer", "overlay layer declined: this display rotates every layer %d° and the game "
+                       "layer is scaled %dx%d -> %dx%d, and on that combination a second layer drops the "
+                       "whole frame to GPU composition for the rest of the session (measured). The window "
+                       "above the game goes on the copy path instead - same picture, one blit.",
+                       deg, sr[0], sr[1], ds[0], ds[1]);
+        else if (!first)
+            banner_log("layer", "overlay layer allowed again: the game layer is no longer both rotated and "
+                       "scaled, so a second display layer costs nothing here");
+    }
+    return ok;
+}
+
 int sc_layer_present_overlay(struct vkp_image *src, const int geo[8]) {
     struct layer *l = layer_of(SC_LAYER_OVERLAY);
-    if (!src || !geo || ensure_sc(l) != 0) return -1;
+    if (!src || !geo) return -1;
+    /* The caller decides with sc_layer_overlay_affordable() BEFORE it commits the game to a layer;
+     * this is only a guard so the layer can never go up behind that decision's back. */
+    if (!sc_layer_overlay_affordable()) return -1;
+    if (ensure_sc(l) != 0) return -1;
     int sw = vkp_image_width(src), sh = vkp_image_height(src);
     if (sw <= 0 || sh <= 0) return -1;
     int idx = take_free_slot(l, sw, sh);
@@ -654,6 +797,9 @@ void sc_layer_hide_overlay(void) {
     if (l->shown) hide_layer(l);
     retire_sc(l);
     banner_log("layer", "%s: gone (nothing is above the game any more)", l->name);
+    /* ...and that is the half the measurement said is not enough: arm the game layer's
+     * SurfaceControl swap, which the next frame performs (swap_sc_begin). */
+    if (g_layers[SC_LAYER_GAME].sc) g_layers[SC_LAYER_GAME].recreate_pending = 1;
 }
 
 void sc_layer_window_gone(void) {

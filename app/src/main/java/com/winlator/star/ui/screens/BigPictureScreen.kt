@@ -656,7 +656,7 @@ fun BigPictureScreen(navController: NavController) {
                 // Per-game spec = the SAME resolved settings the game cards and the pre-launch screen
                 // show (buildLaunchSpec: renderer / driver / DXVK / VKD3D / frame-gen / x86 backend),
                 // so Big Picture matches the rest of the app instead of the old wrapper/box64 chips.
-                val spec = selected?.let { buildLaunchSpec(it, context.resources) }
+                val spec = selected?.let { buildLaunchSpec(it, context) }
                 val chips = spec?.let {
                     listOf(
                         "Renderer" to it.rendererLabel,

@@ -107,6 +107,12 @@ int vkp_map_draw(const struct vkp_draw *d, int out[8]);
 /* The same for a bare w x h buffer shown over the whole scene (no vkp_image: zero-copy layers). */
 int vkp_map_rect(int img_w, int img_h, int scene_w, int scene_h, int out[8]);
 /* The output window frames go to (NULL = none); compositor thread. */
+/* Degrees the display rotates every layer we present by (0/90/180/270), -1 before the swapchain
+ * exists. From VkSurfaceCapabilitiesKHR::currentTransform, i.e. what the presentation engine says
+ * it does — never a device allowlist. The layer path uses it to decide whether a SECOND display
+ * layer is affordable on this display (sc_layer_present_overlay). */
+int vkp_surface_rotation_degrees(void);
+
 ANativeWindow *vkp_window(void);
 /* Fire the one-shot first-frame notification (layer mode presents outside vkp_render). */
 void vkp_signal_first_frame(void);

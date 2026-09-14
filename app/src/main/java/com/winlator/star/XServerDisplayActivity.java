@@ -714,6 +714,61 @@ public class XServerDisplayActivity extends AppCompatActivity {
         return null;
     }
 
+    /**
+     * P4 on WAYLAND: is the game rendering with native Vulkan or native OpenGL? Asked of the one
+     * process that can answer — the game's own — and answered from what it has actually mapped.
+     *
+     * <p>{@link #detectActiveDxApi} deliberately refuses to separate the two on X11, where guest-side
+     * Zink makes a GL title map vulkan-1.dll as well; it also ORs its flags over EVERY wine process,
+     * so explorer.exe's modules count as the game's. Neither works here. On Wayland the GL stack sits
+     * on the HOST side of winewayland.drv (wine's unix libEGL -> Zink -> Turnip), and — device-measured
+     * on this layer — it is mapped into a process only when that process really takes the GL path:
+     * <ul>
+     *   <li><b>OpenGL</b>: the layer's own {@code lib/libEGL.so.1} / {@code libgallium-*.so} /
+     *       {@code libwayland-egl.so} appear in the game's maps. Measured against the counter-example:
+     *       a D3D11-on-DXVK title (Titanfall 2, live Wayland session) maps NONE of them.</li>
+     *   <li><b>Vulkan</b> (native, or DXVK/VKD3D on top): {@code winevulkan.so}, the unix half of
+     *       winevulkan.dll, which only loads when the guest itself uses Vulkan.</li>
+     * </ul>
+     * Those are real ELF libraries out of the layer, so they are file-backed in
+     * {@code /proc/<pid>/maps} even on arm64ec, where the PE-only DLLs are invisible to a module scan.
+     * Costs one maps read per 2s poll (detectActiveDxApi reads every process's).
+     *
+     * <p>GL evidence is weighed FIRST because it is the specific signal: loading the GL stack means a
+     * GL context was created, while winevulkan says nothing about what is layered on top of it.
+     * {@code opengl32.so} is deliberately NOT evidence — the same Titanfall 2 session maps it while
+     * rendering D3D11, so wine's GL DLL being resident proves nothing (the X11 resolver's note about
+     * opengl32 being loaded proactively holds here too).
+     *
+     * <p>Returns null — not a guess — when the game pid isn't up yet or nothing is mapped; the caller
+     * then leaves the neutral "Vulkan" (the compositor, true of every Wayland session) on the HUD. The
+     * HUD must never name an API, or a wrapper, that nothing proves.
+     */
+    private String resolveWaylandNativeApi() {
+        try {
+            String pid = findRunningGamePid();
+            if (pid == null) return null;
+            boolean gl = false, vulkan = false;
+            try (java.io.BufferedReader r = new java.io.BufferedReader(
+                    new java.io.FileReader(new java.io.File("/proc/" + pid + "/maps")))) {
+                String line;
+                while ((line = r.readLine()) != null) {
+                    if (line.indexOf('/') < 0) continue;          // anonymous mapping — no module name
+                    line = line.toLowerCase();
+                    // The layer's Mesa EGL/Zink. "libegl.so.1" is Mesa's soname — Android's platform
+                    // EGL is /system/lib64/libEGL.so (no ".1"), so this can't match the host's.
+                    if (line.indexOf("libegl.so.1") >= 0 || line.indexOf("libgallium") >= 0
+                            || line.indexOf("libwayland-egl.so") >= 0) { gl = true; break; }
+                    if (line.indexOf("winevulkan.so") >= 0 || line.indexOf("winevulkan.dll") >= 0
+                            || line.indexOf("vulkan-1.dll") >= 0) vulkan = true;
+                }
+            }
+            if (gl) return "OpenGL";
+            if (vulkan) return "Vulkan";
+        } catch (Exception ignore) {}
+        return null;
+    }
+
     // Cache for resolveDualApiFromEngineLog: Player.log is near-static once the device is created,
     // so we only re-parse when its mtime/length changes — keeps the 2s poll cheap on a chatty log.
     private long lastEngineLogMtime = -1;
@@ -1243,12 +1298,23 @@ public class XServerDisplayActivity extends AppCompatActivity {
         hudCounterEnabled = fpsConfig.get("hudEnabled", "1").equals("1");
         String hudStyle = fpsConfig.get("hudStyle", "fusion");
 
+        // Host renderer side. On Wayland the container's renderer setting picks an X11 present path
+        // that this session never runs: the game's frames land in the embedded compositor, which is
+        // always Vulkan (the drawer and Task Manager say "Vulkan (Wayland compositor)"; the HUD line
+        // has room for one word). X11 keeps reading its configured renderer, as before.
         String resolvedR = resolvedRenderer();
-        String rendererMode = "vulkan".equals(resolvedR) ? "Vulkan"
+        String rendererMode = waylandMode ? "Vulkan"
+            : "vulkan".equals(resolvedR) ? "Vulkan"
             : "surfaceflinger".equals(resolvedR) ? "SurfaceFlinger" : "OpenGL";
+        // The configured wrapper NAMES what a D3D game would load here — it is not evidence that THIS
+        // game loads one: a native OpenGL or Vulkan title never touches DXVK. It stays the tag for a
+        // D3D API the resolvers actually prove (startDxApiDetection's fallback arg) and, on X11, the
+        // launch-time seed it has always been. On Wayland the label instead starts at the one thing
+        // true of every session — the compositor's Vulkan — and upgrades to "D3D9 · DXVK" / "OpenGL"
+        // when an evidence resolver sees the real API (see startDxApiDetection).
         String dxName = dxwrapper.contains("dxvk") ? "DXVK" : dxwrapper.contains("vegas") ? "VEGAS" : "WineD3D";
-        hudRendererLabel = rendererMode + " | " + dxName;
-        hudEngineShort = dxName;
+        hudRendererLabel = waylandMode ? rendererMode : rendererMode + " | " + dxName;
+        hudEngineShort = waylandMode ? rendererMode : dxName;
 
         // Build whichever HUD the config selected. The other styles are created on demand if the user
         // swaps hudStyle in the in-game drawer (see buildPerfHud/buildClassicHud/buildGameNativeHud).
@@ -1319,7 +1385,18 @@ public class XServerDisplayActivity extends AppCompatActivity {
                 String api = readAppDeclaredApi();                                  // P1
                 if (api == null) api = resolveApiFromEngineLogTopLevel(fallback);   // P2
                 if (api == null) api = resolveApiFromWrapperLogs(fallback);         // P3
-                if (api == null) api = detectActiveDxApi(fallback);                 // P4
+                if (api == null && waylandMode) {
+                    // P4 on Wayland: the game's OWN process says whether it is native Vulkan or
+                    // native OpenGL. detectActiveDxApi's native branch can't answer it here — it ORs
+                    // its flags over every wine process and reasons about the X11 topology — so only
+                    // its D3D verdict (file-backed DX DLLs, i.e. a non-arm64ec layer) is still worth
+                    // taking. No evidence => no api => the neutral compositor label stands.
+                    api = resolveWaylandNativeApi();
+                    if (api == null) {
+                        String dx = detectActiveDxApi(fallback);
+                        if (dx != null && dx.startsWith("D3D")) api = dx;
+                    }
+                } else if (api == null) api = detectActiveDxApi(fallback);          // P4
                 if (api != null && !api.equals(lastApi)) {
                     lastApi = api;
                     // Classic FrameRating renderer line = "<host renderer> | <api>". Skip the prefix
@@ -2470,7 +2547,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
             preloaderDialog.show(container.getName(), null, null);
         else {
             preloaderDialog.show(shortcut.name, shortcut.icon, shortcut.getCoverArt(),
-                com.winlator.star.ui.screens.LaunchSpecBuilderKt.buildLaunchSpec(shortcut, getResources()),
+                com.winlator.star.ui.screens.LaunchSpecBuilderKt.buildLaunchSpec(shortcut, this),
                 com.winlator.star.ui.screens.LaunchSpecBuilderKt.buildLaunchDetails(shortcut));
         }
         preloaderDialog.step(1, "Preparing container…");
@@ -6393,6 +6470,8 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // Hide the drawer's Friends tab source + leave any in-game chat thread (the full Friends
         // screen's own open/close is untouched).
         try { com.winlator.star.store.InGameFriendsSource.INSTANCE.disarm(); } catch (Throwable ignored) {}
+        // The HDR capability report watches the same DisplayManager; drop its listener too.
+        stopHdrCapabilityReport();
         // Version-A spike: unregister the display listener, dismiss the Presentation, and pull the
         // game back to the phone so nothing leaks a window on the external display.
         if (externalDisplayController != null) {
@@ -6833,6 +6912,29 @@ public class XServerDisplayActivity extends AppCompatActivity {
                 Log.e("XServerDisplayActivity", "wayland: zero-copy env write failed", e);
             }
         };
+        // OpenGL safe mode. GALLIUM_THREAD is read by Mesa when the GL driver comes up inside the
+        // guest, so unlike zero-copy there is nothing to flip live: the switch is the DEFAULT for the
+        // next launch of this game, and the row says so. Written to the SAME owner
+        // resolvedWaylandGlSafeMode() reads from (shortcut on a shortcut launch, else the container),
+        // so the toggle can never be inert.
+        state.setWaylandGlSafeMode(resolvedWaylandGlSafeMode());
+        state.onWaylandGlSafeModeToggle = on -> {
+            try {
+                if (shortcut != null) {
+                    shortcut.putExtra("waylandGlSafeMode", on ? "1" : "0");
+                    shortcut.saveData();
+                } else {
+                    container.setWaylandGlSafeMode(on);
+                    container.saveData();
+                }
+                Log.i("XServerDisplayActivity", "wayland: OpenGL safe mode " + (on ? "on" : "off")
+                        + " saved to " + (shortcut != null ? "shortcut" : "container")
+                        + " - applies at the next launch (GALLIUM_THREAD is read when Mesa starts)");
+            } catch (Exception e) {
+                Log.e("XServerDisplayActivity", "wayland: OpenGL safe mode write failed", e);
+            }
+        };
+
         // Last-10-s zero-copy frame count, straight from the compositor's stats window, plus whether
         // a zero-copy frame reached the display layer just now. The 10 s counter cannot show a switch
         // that happened two seconds ago; the age can, so the row says "switching..." only for as long
@@ -6842,6 +6944,86 @@ public class XServerDisplayActivity extends AppCompatActivity {
             int age = com.winlator.star.wayland.WaylandCompositor.nativeZeroCopyLastFrameAgeMs();
             state.setWaylandZeroCopyLive(age >= 0 && age < 1500);
         };
+    }
+
+    // ───── HDR capability reporting (both backends; reporting only, nothing turns HDR on) ─────
+    // We have exactly one data point on HDR hardware (this device: none) and no idea what testers'
+    // phones report, so every session records the real platform answer. It is deliberately NOT a
+    // toggle: the compositor emits no colour metadata at all, so a switch would promise output we do
+    // not produce.
+    //
+    // Capability belongs to the DISPLAY, not the device - it comes from that connector's EDID - and
+    // the game can move onto an external screen at runtime (ExternalDisplayController + Presentation).
+    // So it is read live for the display the game is on, and re-read whenever the display set changes.
+    private com.winlator.star.display.DisplayHdrInfo hdrInfo;
+    private android.hardware.display.DisplayManager hdrDisplayManager;
+    private final android.hardware.display.DisplayManager.DisplayListener hdrDisplayListener =
+            new android.hardware.display.DisplayManager.DisplayListener() {
+        @Override public void onDisplayAdded(int displayId)   { reportHdrCapability("display added"); }
+        @Override public void onDisplayRemoved(int displayId) { reportHdrCapability("display removed"); }
+        @Override public void onDisplayChanged(int displayId) { reportHdrCapability("display changed"); }
+    };
+
+    private void startHdrCapabilityReport() {
+        try {
+            hdrDisplayManager = (android.hardware.display.DisplayManager)
+                    getSystemService(android.content.Context.DISPLAY_SERVICE);
+            if (hdrDisplayManager != null)
+                hdrDisplayManager.registerDisplayListener(hdrDisplayListener,
+                        new android.os.Handler(getMainLooper()));
+        } catch (Throwable t) {
+            Log.w("XServerDisplayActivity", "HDR: display listener unavailable", t);
+        }
+        reportHdrCapability("session start");
+    }
+
+    private void stopHdrCapabilityReport() {
+        if (hdrDisplayManager == null) return;
+        try { hdrDisplayManager.unregisterDisplayListener(hdrDisplayListener); } catch (Throwable ignored) {}
+        hdrDisplayManager = null;
+    }
+
+    /** The display the game is on: the TV when it has been moved there, else this activity's. */
+    private android.view.Display hdrTargetDisplay() {
+        try {
+            if (externalDisplayController != null) {
+                android.view.Display d = externalDisplayController.getExternalGameDisplay();
+                if (d != null) return d;
+            }
+        } catch (Throwable ignored) {}
+        try { return getWindowManager().getDefaultDisplay(); } catch (Throwable ignored) { return null; }
+    }
+
+    /** Read the capability now and record it: one "display" line in the Wayland session log (only
+     *  when the answer actually changed, so a chatty DisplayManager cannot flood it) and the value
+     *  the Task Manager's CONTAINER block shows. Never throws. */
+    private void reportHdrCapability(String why) {
+        try {
+            com.winlator.star.display.DisplayHdrInfo now =
+                    com.winlator.star.display.DisplayHdrInfo.read(hdrTargetDisplay());
+            boolean first = hdrInfo == null;
+            if (!first && now.sameAs(hdrInfo)) return;
+            hdrInfo = now;
+            String line = now.logLine() + " [" + why + "]";
+            Log.i("XServerDisplayActivity", "HDR: " + line);
+            if (waylandMode) {
+                try { com.winlator.star.wayland.WaylandCompositor.nativeLogDisplay(line); }
+                catch (Throwable t) { Log.w("XServerDisplayActivity", "HDR: session-log write failed", t); }
+            }
+            // The Task Manager header is built once at launch; refresh it so a screen plugged in
+            // mid-game updates the row instead of showing the handheld's answer for ever.
+            if (!first) runOnUiThread(() ->
+                    XServerDialogState.INSTANCE.setTmContainerInfo(buildTmContainerInfo()));
+        } catch (Throwable t) {
+            Log.w("XServerDisplayActivity", "HDR: capability read failed", t);
+        }
+    }
+
+    /** Short HDR value for the Task Manager's CONTAINER block ("none - panel 500 nits"). */
+    private String hdrRowValue() {
+        com.winlator.star.display.DisplayHdrInfo info = hdrInfo;
+        if (info == null) info = com.winlator.star.display.DisplayHdrInfo.read(hdrTargetDisplay());
+        return info.shortSummary();
     }
 
     private static boolean isZeroCopyEnvOn(String raw) {
@@ -7519,6 +7701,29 @@ public class XServerDisplayActivity extends AppCompatActivity {
             // (banner_ahb_v1), so the layer shows the game's own buffer without a copy.
             if (waylandMode && isWaylandZeroCopyRequested()) envVars.put("BANNER_WSI_AHB", "1");
 
+            // OpenGL safe mode (Wayland only, default ON): GALLIUM_THREAD=0 removes Mesa's
+            // u_threaded_context helper thread. That thread is a plain pthread with no Wine TEB, so a
+            // fault on it makes Wine's SIGSEGV handler fault again and the kernel kills the process
+            // with NO tombstone, NO Wine exception and NO log line - the game just disappears
+            // (proved on Wizardry: 2 swaps and gone, vs 2862 swaps with the thread off).
+            // It only reaches Mesa's gallium drivers, i.e. the OpenGL/Zink path; a DXVK/VKD3D game
+            // goes straight to Turnip's Vulkan driver and never loads one, so this is inert for it.
+            // Both user env strings (container, then shortcut) are already merged above, so an
+            // explicit GALLIUM_THREAD the user typed themselves still wins.
+            if (waylandMode) {
+                if (!resolvedWaylandGlSafeMode()) {
+                    Log.i("XServerDisplayActivity", "wayland: OpenGL safe mode is OFF for this launch"
+                            + " - Mesa's threaded context stays on");
+                } else if (envVars.has("GALLIUM_THREAD")) {
+                    Log.i("XServerDisplayActivity", "wayland: OpenGL safe mode on, but GALLIUM_THREAD="
+                            + envVars.get("GALLIUM_THREAD") + " is already set in the environment variables"
+                            + " - leaving the user's value alone");
+                } else {
+                    envVars.put("GALLIUM_THREAD", "0");
+                    Log.i("XServerDisplayActivity", "wayland: OpenGL safe mode on - exporting GALLIUM_THREAD=0");
+                }
+            }
+
             // Keep the lsfg-vk Vulkan layer INERT unless lsfg-vk is actually the engine.
             // Placed AFTER both user env merges (container above, shortcut just here) so
             // nothing the user carries over can re-enable it. The layer's manifest honours
@@ -8055,6 +8260,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // Wayland mode: overlay the embedded compositor's SurfaceView on top of the (idle) X view,
         // and start the compositor rendering into it. winewayland.drv connects to its socket.
         if (waylandMode) startWaylandCompositor(rootView);
+        startHdrCapabilityReport();
 
         // Version A: watch for an external (TV) display and reparent the game onto it, using the
         // handheld as the controller. The listener updates the in-game TV tab + raises Compose toasts.
@@ -11577,6 +11783,21 @@ return true;
         return container.isMatchRefreshRate();
     }
 
+    // Per-game override for OpenGL safe mode (shortcut wins over the container default), Wayland only.
+    // Default ON (Container.isWaylandGlSafeMode). Read and WRITTEN through the same owner: when a
+    // shortcut is launched the value lives on the shortcut, otherwise on the container -- so the
+    // in-game toggle is never inert. (resolvedMatchRefreshRate() has exactly that bug: it prefers a
+    // shortcut extra while the drawer writes the container, so a shortcut carrying its own value
+    // swallows the toggle. Do not copy that shape.)
+    private boolean resolvedWaylandGlSafeMode() {
+        if (container == null) return true;
+        if (shortcut != null) {
+            return shortcut.getExtra("waylandGlSafeMode",
+                container.isWaylandGlSafeMode() ? "1" : "0").equals("1");
+        }
+        return container.isWaylandGlSafeMode();
+    }
+
     // Per-game override for the manual refresh-rate lock (shortcut wins over the container default).
     // Mirrors resolvedMatchRefreshRate(). 0 = no manual lock. Null-safe for early calls.
     // Per-game override for the guest-side refresh ceiling (shortcut wins over the container
@@ -13097,7 +13318,7 @@ return true;
             return new XServerDialogState.TmContainerInfo(
                 wine, dxwrapper, resolvedRenderer(),
                 waylandMode ? waylandDriverSummary() : graphicsDriver, res, device,
-                waylandMode ? "Wayland" : "X11");
+                waylandMode ? "Wayland" : "X11", hdrRowValue());
         } catch (Exception e) {
             return null;
         }

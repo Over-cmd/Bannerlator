@@ -56,6 +56,11 @@ static VkPhysicalDeviceMemoryProperties g_memprops;
 
 static VkSurfaceKHR g_surface;
 static VkSwapchainKHR g_swapchain;
+/* The display's own rotation of everything we present (VkSurfaceCapabilitiesKHR::currentTransform),
+ * captured when the swapchain is built. Not a panel or device allowlist: it is what the presentation
+ * engine says it will do to our layers. */
+static VkSurfaceTransformFlagBitsKHR g_surface_transform;
+static int g_surface_transform_known;
 static VkImage *g_images;
 static uint32_t g_nimg;
 static VkExtent2D g_extent;
@@ -434,6 +439,12 @@ static int swap_init_locked(void) {
 
     VkSurfaceCapabilitiesKHR caps;
     g_vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(g_pd, g_surface, &caps);
+    /* Remembered for the layer path: currentTransform is the rotation the presentation engine (and
+     * therefore SurfaceFlinger and the DPU) applies to everything we put on this display. Anything
+     * but IDENTITY means every display layer we hand over is a ROTATED layer. sc_layer.c needs that
+     * to decide whether a second layer is affordable — see sc_layer_present_overlay(). */
+    g_surface_transform = caps.currentTransform;
+    g_surface_transform_known = 1;
     uint32_t nfmt = 0;
     g_vk.GetPhysicalDeviceSurfaceFormatsKHR(g_pd, g_surface, &nfmt, NULL);
     VkSurfaceFormatKHR fmts[32]; if (nfmt > 32) nfmt = 32;
@@ -1109,6 +1120,19 @@ int vkp_render(int scene_w, int scene_h, const struct vkp_draw *draws, int n) {
 }
 
 /* ---------------------------------------------------------------- layer mode helpers */
+
+/* Degrees the display rotates our layers by: 0, 90, 180 or 270; -1 before the swapchain exists.
+ * Read from the surface, so it follows the panel's install orientation and the session's own
+ * orientation together, on any device. */
+int vkp_surface_rotation_degrees(void) {
+    if (!g_surface_transform_known) return -1;
+    switch (g_surface_transform) {
+        case VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR:  return 90;
+        case VK_SURFACE_TRANSFORM_ROTATE_180_BIT_KHR: return 180;
+        case VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR: return 270;
+        default: return 0; /* IDENTITY, and the mirrored forms we never see here */
+    }
+}
 
 ANativeWindow *vkp_window(void) { return g_window; }
 
