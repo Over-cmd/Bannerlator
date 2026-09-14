@@ -701,10 +701,13 @@ static void take_dmabuf(struct surface *s, struct dmabuf_buffer *b, struct wl_re
         uint32_t af = ahb_swapchain_ahb_format(b);
         int ten = b->format == FOURCC('A', 'B', '3', '0') || b->format == FOURCC('X', 'B', '3', '0');
         describe(s, name, sizeof(name));
-        banner_log("color", "%s presents %dx%d buffers in %c%c%c%c (%s), %s%s%s", name, b->width, b->height,
+        banner_log("color", "%s presents %dx%d buffers in %c%c%c%c (%s), %s%s%s; %s", name, b->width, b->height,
                    b->format & 0xff, (b->format >> 8) & 0xff, (b->format >> 16) & 0xff, (b->format >> 24) & 0xff,
                    ten ? "10-bit A2B10G10R10" : "8-bit", vkp_modifier_name(b->modifier),
-                   af ? ", gralloc " : ", no gralloc buffer (copy path only)", af ? banner_ahb_format_name(af) : "");
+                   af ? ", gralloc " : ", no gralloc buffer (copy path only)", af ? banner_ahb_format_name(af) : "",
+                   b->img ? "the compositor imported it"
+                          : af ? "the compositor's driver could NOT import it (display layer only, fullscreen)"
+                               : "the compositor's driver could NOT import it (nothing can show it)");
         s->hdr_fmt_logged = b->format;
     }
     if (s == g_hud_surface && (b->img || ahb_swapchain_has_ahb(b))) banner_on_game_frame();
@@ -1634,12 +1637,38 @@ static struct vkp_image *surface_image(struct surface *s) {
     return s->dmabuf_buf ? s->dmabuf_buf->img : NULL;
 }
 
+/* HDR (gate open) only: the scene's HDR surface whose current frame is one of the game's gralloc buffers
+ * that the compositor's own driver could NOT import (a 10-bit UBWC layout it does not take, say). Such a
+ * frame has no draw, so neither layer_candidate() nor ahb_layer_only_candidate() (toplevels only) can
+ * find it - and a Vulkan game's swapchain is a SUBSURFACE of its window. Remembered here while the scene
+ * is built so it can still go on the display layer, which never needed the import. Reset per scene;
+ * never set while the HDR gate is closed. */
+static struct surface *g_hdr_unimported;
+static int g_hdr_unimported_rect[4], g_hdr_unimported_below; /* scene x,y,w,h; draws under it */
+
+static void note_hdr_unimported(const struct draw_list *dl, struct surface *s, int ox, int oy) {
+    if (!s->dmabuf_buf || s->dmabuf_buf->img || !ahb_swapchain_has_ahb(s->dmabuf_buf)) return;
+    const struct banner_color *c = banner_color_of(s->resource);
+    if (!c || !c->dataspace) return;
+    if (s->src_set && (s->src[0] != 0 || s->src[1] != 0 || (int)(s->src[2] + 0.5f) != s->buf_w ||
+                       (int)(s->src[3] + 0.5f) != s->buf_h)) return; /* cropped: the layer shows whole buffers */
+    int dw, dh;
+    surface_size(s, &dw, &dh);
+    g_hdr_unimported = s;
+    g_hdr_unimported_rect[0] = ox; g_hdr_unimported_rect[1] = oy;
+    g_hdr_unimported_rect[2] = dw; g_hdr_unimported_rect[3] = dh;
+    g_hdr_unimported_below = dl->n;
+}
+
 static void add_surface(struct draw_list *dl, struct surface *s, int ox, int oy) {
     struct vkp_image *img = surface_image(s);
     float sx = 0, sy = 0, sw = (float)s->buf_w, sh = (float)s->buf_h;
     int dw, dh;
 
-    if (!img) return;
+    if (!img) {
+        if (g_zero_copy && banner_color_hdr_open()) note_hdr_unimported(dl, s, ox, oy);
+        return;
+    }
     if (s->src_set) { sx = s->src[0]; sy = s->src[1]; sw = s->src[2]; sh = s->src[3]; }
     surface_size(s, &dw, &dh);
     if (dw <= 0 || dh <= 0 || sw <= 0 || sh <= 0) return;
@@ -1764,11 +1793,21 @@ static struct surface *ahb_layer_only_candidate(int scene_w, int scene_h) {
  * a display that cannot compose a second layer, a game that is not fullscreen, zero-copy switched off -
  * goes down the copy path untone-mapped, and every such scene is counted and its reason logged. */
 
+/* The HDR surface note_hdr_unimported() saw in THIS scene, when it covers the whole scene at 0,0 and
+ * nothing is drawn above it: the display layer is the only place its frame can be shown. */
+static struct surface *hdr_unimported_fullscreen(const struct draw_list *dl, int w, int h) {
+    if (!g_hdr_unimported || g_hdr_unimported_below != dl->n) return NULL;
+    if (g_hdr_unimported_rect[0] != 0 || g_hdr_unimported_rect[1] != 0 ||
+        g_hdr_unimported_rect[2] != w || g_hdr_unimported_rect[3] != h) return NULL;
+    return g_hdr_unimported;
+}
+
 /* The fullscreen window about to be put on the game layer, if its current image description is HDR. */
 static struct surface *hdr_fullscreen_surface(const struct draw_list *dl, int w, int h) {
     if (!g_zero_copy || !banner_color_hdr_open()) return NULL;
     int i = layer_candidate(dl, w, h);
     struct surface *s = i >= 0 ? surface_for_image(dl->d[i].img) : ahb_layer_only_candidate(w, h);
+    if (!s) s = hdr_unimported_fullscreen(dl, w, h);
     if (!s) return NULL;
     const struct banner_color *c = banner_color_of(s->resource);
     return (c && c->dataspace) ? s : NULL;
@@ -1817,6 +1856,7 @@ static void render_scene(void) {
     int w, h;
 
     g_dirty = 0;
+    g_hdr_unimported = NULL; /* found again while the scene is built (HDR gate open only) */
     wl_list_for_each(s, &g_surfaces, link) s->drawn = 0;
     scene_size(&w, &h);
     if (w != g_scene_w || h != g_scene_h) {
@@ -1879,6 +1919,9 @@ static void render_scene(void) {
     struct surface *ls = li >= 0 ? surface_for_image(dl.d[li].img) : NULL;
     /* A frame this renderer could not import can only be shown on the layer, effects or not. */
     if (li < 0) ls = ahb_layer_only_candidate(w, h);
+    /* HDR: the same, for a game's SUBSURFACE swapchain whose 10-bit frame the compositor could not
+     * import (NULL whenever the HDR gate is closed - nothing is ever noted then). */
+    if (li < 0 && !ls) ls = hdr_unimported_fullscreen(&dl, w, h);
     if (ls && pass_on && li < 0 && !g_zero_copy_fx_skip_said) {
         g_zero_copy_fx_skip_said = 1;
         banner_log(framegen ? "framegen" : "effects",
