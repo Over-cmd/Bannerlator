@@ -1201,3 +1201,152 @@ int vkp_blit_image(struct vkp_image *src, struct vkp_image *dst) {
     if (fr != VK_SUCCESS) { LOGE("layer: blit fence wait -> %s", vk_result_name(fr)); return -1; }
     return 0;
 }
+
+/* ---------------------------------------------------------------- the compositor pass, off-screen
+ *
+ * Layer mode with screen effects on: the game's frame still has to go through the compositor pass
+ * (scene image -> effects chain), but the RESULT does not have to end up in the app's swapchain —
+ * it can be copied into a gralloc buffer and put on the game's own Android layer, so hardware
+ * composition (and the DPU's scaling, which replaces record_screen_blit's mapping blit) stays
+ * alive while a Look is applied. sc_layer.c drives it in three steps because the chain's result
+ * size is only known once the chain has run, and the destination buffer is sized from it:
+ *     vkp_pass_begin()  -> records composite + effects into the frame's command buffer
+ *     vkp_pass_copy_to()-> appends the copy into the layer buffer, submits, waits
+ *     vkp_pass_abort()  -> drops it unsubmitted (no free layer buffer this frame)
+ * Frame generation is NOT run here: its extra frames need a present each, on consecutive vblanks,
+ * which one buffer per layer transaction cannot pace (see WAYLAND_RUNTIME.md). */
+
+static struct {
+    int active;
+    VkImage result;   /* in TRANSFER_SRC_OPTIMAL */
+    int rw, rh;
+} g_pass;
+
+int vkp_pass_begin(int scene_w, int scene_h, const struct vkp_draw *draws, int n, int *rw, int *rh) {
+    if (g_pass.active) vkp_pass_abort();
+    if (g_dev_state == -2 || dev_init() != 0 || !g_window || scene_w <= 0 || scene_h <= 0) return -1;
+    if (!g_swapchain && swap_init() != 0) return -1; /* the mapping is in output pixels */
+    update_map(scene_w, scene_h);
+    if (!g_map.valid) return -1;
+    if (ensure_scene_image(scene_w, scene_h) != 0) return -1;
+
+    VkCommandBuffer cmd = g_cmds[0];
+    g_vk.ResetCommandBuffer(cmd, 0);
+    VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                                   .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
+    g_vk.BeginCommandBuffer(cmd, &bi);
+    VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+    /* Same acquisition as vkp_render's compositor pass: the sources come from the client's queue
+     * family (dmabuf) or from a host write (shm), the scene image is the transfer destination. */
+    VkImageMemoryBarrier *bars = calloc((size_t)n + 1, sizeof(*bars));
+    if (!bars) { g_vk.EndCommandBuffer(cmd); return -1; }
+    int nb = 0;
+    bars[nb++] = (VkImageMemoryBarrier){
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = g_scene.img, .subresourceRange = range, .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT};
+    for (int i = 0; i < n; i++) {
+        struct vkp_image *im = draws[i].img;
+        int seen = 0;
+        for (int j = 0; j < i; j++) if (draws[j].img == im) { seen = 1; break; }
+        if (seen || !im) continue;
+        if (im->dmabuf) {
+            bars[nb++] = (VkImageMemoryBarrier){
+                .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_FOREIGN_EXT, .dstQueueFamilyIndex = g_qfam,
+                .image = im->image, .subresourceRange = range, .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT};
+        } else if (!im->in_general) {
+            bars[nb++] = (VkImageMemoryBarrier){
+                .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .oldLayout = VK_IMAGE_LAYOUT_PREINITIALIZED,
+                .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .image = im->image, .subresourceRange = range,
+                .srcAccessMask = VK_ACCESS_HOST_WRITE_BIT, .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT};
+            im->in_general = 1;
+        }
+    }
+    g_vk.CmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT |
+                                 VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                            VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, (uint32_t)nb, bars);
+    free(bars);
+
+    VkClearColorValue black = {.float32 = {0.0f, 0.0f, 0.0f, 1.0f}};
+    g_vk.CmdClearColorImage(cmd, g_scene.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &range);
+    VkMemoryBarrier mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                          .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+                          .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT};
+    g_vk.CmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                            0, 1, &mb, 0, NULL, 0, NULL);
+    for (int i = 0; i < n; i++) {
+        VkImageBlit blit;
+        if (!draws[i].img || !draw_to_scene_blit(&draws[i], scene_w, scene_h, &blit)) continue;
+        g_vk.CmdBlitImage(cmd, draws[i].img->image,
+                          draws[i].img->dmabuf ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL : VK_IMAGE_LAYOUT_GENERAL,
+                          g_scene.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
+    }
+
+    int mapped_w = (int)(scene_w * g_map.kx + 0.5f), mapped_h = (int)(scene_h * g_map.ky + 0.5f);
+    g_pass.rw = scene_w; g_pass.rh = scene_h;
+    g_pass.result = vkp_effects_run(cmd, g_scene.img, scene_w, scene_h, mapped_w, mapped_h,
+                                    &g_pass.rw, &g_pass.rh);
+    g_pass.active = 1;
+    if (rw) *rw = g_pass.rw;
+    if (rh) *rh = g_pass.rh;
+    return 0;
+}
+
+int vkp_pass_copy_to(struct vkp_image *dst) {
+    if (!g_pass.active) return -1;
+    g_pass.active = 0;
+    VkCommandBuffer cmd = g_cmds[0];
+    if (!dst || !dst->blit_dst || g_dev_state == -2) { g_vk.EndCommandBuffer(cmd); return -1; }
+    VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+    VkImageMemoryBarrier acq = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, .srcQueueFamilyIndex = VK_QUEUE_FAMILY_FOREIGN_EXT,
+        .dstQueueFamilyIndex = g_qfam, .image = dst->image, .subresourceRange = range,
+        .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT};
+    g_vk.CmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                            0, 0, NULL, 0, NULL, 1, &acq);
+    /* The result stands for the whole scene, and so does the layer buffer (the DPU maps it onto
+     * the output), so this is 1:1 whenever the buffer was allocated at the size begin() reported;
+     * a stale-sized buffer is resampled rather than shown wrong. */
+    VkImageBlit blit = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                        .srcOffsets = {{0, 0, 0}, {g_pass.rw, g_pass.rh, 1}},
+                        .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                        .dstOffsets = {{0, 0, 0}, {dst->w, dst->h, 1}}};
+    g_vk.CmdBlitImage(cmd, g_pass.result, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst->image,
+                      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
+                      (g_pass.rw == dst->w && g_pass.rh == dst->h) ? VK_FILTER_NEAREST : VK_FILTER_LINEAR);
+    VkImageMemoryBarrier rel = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        .newLayout = VK_IMAGE_LAYOUT_GENERAL, .srcQueueFamilyIndex = g_qfam,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_FOREIGN_EXT, .image = dst->image, .subresourceRange = range,
+        .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT};
+    g_vk.CmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                            0, 0, NULL, 0, NULL, 1, &rel);
+    g_vk.EndCommandBuffer(cmd);
+
+    VkSubmitInfo si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &cmd};
+    g_vk.ResetFences(g_dev, 1, &g_fence);
+    VkResult qr = g_vk.QueueSubmit(g_queue, 1, &si, g_fence);
+    if (qr != VK_SUCCESS) {
+        if (qr == VK_ERROR_DEVICE_LOST) device_lost("layer pass");
+        else LOGE("layer: effects pass submit failed (%d)", (int)qr);
+        return -1;
+    }
+    VkResult fr = g_vk.WaitForFences(g_dev, 1, &g_fence, VK_TRUE, 1000000000ULL);
+    if (fr == VK_ERROR_DEVICE_LOST) { device_lost("layer pass"); return -1; }
+    if (fr != VK_SUCCESS) { LOGE("layer: effects pass fence wait -> %s", vk_result_name(fr)); return -1; }
+    return 0;
+}
+
+void vkp_pass_abort(void) {
+    if (!g_pass.active) return;
+    g_pass.active = 0;
+    g_vk.EndCommandBuffer(g_cmds[0]); /* never submitted; the buffer is reset before its next use */
+}

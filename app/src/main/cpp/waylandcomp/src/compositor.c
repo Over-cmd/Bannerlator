@@ -1479,16 +1479,20 @@ static int on_frame_timer(void *data) {
     return 0;
 }
 
-/* Layer mode: the index of a draw that is the topmost one and shows a whole client GPU frame
- * over the whole scene (one fullscreen game, nothing above it), or -1. */
+/* Layer mode: the index of a draw that shows a whole client GPU frame over the whole scene (one
+ * fullscreen game), or -1. Only the top two positions are looked at: the game must be the topmost
+ * draw, or have exactly ONE draw above it, which then goes on the overlay layer (sc_layer.h).
+ * Anything deeper would need more display layers than HWC will compose. */
 static int layer_candidate(const struct draw_list *dl, int scene_w, int scene_h) {
-    if (dl->n <= 0) return -1;
-    const struct vkp_draw *d = &dl->d[dl->n - 1];
-    if (!vkp_image_is_dmabuf(d->img)) return -1;
-    if (d->dx != 0 || d->dy != 0 || d->dw != scene_w || d->dh != scene_h) return -1;
-    if (d->sx != 0 || d->sy != 0 || (int)d->sw != vkp_image_width(d->img) ||
-        (int)d->sh != vkp_image_height(d->img)) return -1;
-    return dl->n - 1;
+    for (int i = dl->n - 1; i >= 0 && i >= dl->n - 2; i--) {
+        const struct vkp_draw *d = &dl->d[i];
+        if (!vkp_image_is_dmabuf(d->img)) continue;
+        if (d->dx != 0 || d->dy != 0 || d->dw != scene_w || d->dh != scene_h) continue;
+        if (d->sx != 0 || d->sy != 0 || (int)d->sw != vkp_image_width(d->img) ||
+            (int)d->sh != vkp_image_height(d->img)) continue;
+        return i;
+    }
+    return -1;
 }
 
 /* Zero-copy: the surface whose current GPU frame `img` is (layer_candidate found the draw). */
@@ -1538,24 +1542,32 @@ static void render_scene(void) {
     }
 
     int rendered;
-    /* Screen effects (effects_chain.c) and frame generation (framegen_bridge.c) both run in the
-     * compositor pass, which the layer path bypasses: while either is on, a fullscreen game goes
-     * through the copy path instead, and the layer resumes once both are off again. Said once per
-     * transition, by whichever needs the pass. */
     const int fx_on = vkp_effects_active();
     const int framegen = vkp_framegen_active();
+    /* What still forces the whole scene back through the compositor pass (and so through the app's
+     * own swapchain), and what no longer does:
+     *   - frame generation ALWAYS does: its extra frames each need a present of their own on
+     *     consecutive vblanks, and a display layer latches one buffer per refresh;
+     *   - screen effects do NOT any more when the game is alone on screen - the chain runs and its
+     *     result is copied into the game layer's own gralloc buffer (sc_layer_present_pass), so the
+     *     game keeps its layer and the display does the scene -> output mapping;
+     *   - screen effects DO when a window is drawn above the game: the chain has to see the whole
+     *     scene to look the way it does on the copy path, and here the game is only part of it. */
     const int pass_on = fx_on || framegen;
-    const int layer_ok = g_zero_copy && !pass_on;
-    if (g_zero_copy && pass_on != g_zero_copy_paused) {
-        g_zero_copy_paused = pass_on;
-        if (framegen)
+    int li = (g_zero_copy && !framegen) ? layer_candidate(&dl, w, h) : -1;
+    int over = li >= 0 ? dl.n - 1 - li : 0; /* draws above the fullscreen game (0 or 1) */
+    const int fx_blocks = (li >= 0 && fx_on && over > 0);
+    if (fx_blocks) { li = -1; over = 0; }
+    const int blocked = framegen ? 1 : (fx_blocks ? 2 : 0);
+    if (g_zero_copy && blocked != g_zero_copy_paused) {
+        g_zero_copy_paused = blocked;
+        if (blocked == 1)
             banner_log("framegen", "zero-copy paused: frame generation needs the compositor pass");
-        else if (fx_on)
-            banner_log("effects", "zero-copy paused: screen effects need the compositor pass");
+        else if (blocked == 2)
+            banner_log("effects", "zero-copy paused: a window above the game needs the compositor pass for the whole scene");
         else
-            banner_log("effects", "zero-copy resumed: screen effects and frame generation are off");
+            banner_log("effects", "zero-copy resumed: the game is back on its own display layer");
     }
-    int li = layer_ok ? layer_candidate(&dl, w, h) : -1;
     struct surface *ls = li >= 0 ? surface_for_image(dl.d[li].img) : NULL;
     /* A frame this renderer could not import can only be shown on the layer, effects or not. */
     if (li < 0) ls = ahb_layer_only_candidate(w, h);
@@ -1566,19 +1578,37 @@ static void render_scene(void) {
                    framegen ? "frame generation" : "effects");
     }
     if (li >= 0 || ls) {
-        /* Layer mode: the fullscreen window goes to its own Android layer; whatever is under it is
-         * hidden by it, so the screen surface only needs to be black. The frame goes on the layer
-         * as is when it is one of the game's own AHardwareBuffers (zero-copy, ahb_swapchain.c),
-         * else through one blit into the pool. If the layer can't take the frame, draw it the
-         * usual way. */
+        /* Layer mode: the fullscreen window goes on the game layer and (at most) one window above
+         * it on the overlay layer; whatever is under the game is hidden by it, so the screen
+         * surface only needs to be black. The game's frame goes on its layer as is when it is one
+         * of the game's own AHardwareBuffers (zero-copy, ahb_swapchain.c), through the effects
+         * chain's result when a Look is on, else through one blit into the pool. If a layer can't
+         * take its frame, the whole scene is drawn the usual way. */
         rendered = vkp_render(w, h, NULL, 0) == 0;
         if (rendered) {
             int r = -1;
-            if (ls && ls->dmabuf_buf && ahb_swapchain_has_ahb(ls->dmabuf_buf))
+            /* The game's own buffer can only go on the layer AS IS - with a Look on, the frame has
+             * to go through the chain first, so the raw buffer is skipped in favour of the pass
+             * (a frame this renderer could not import has no draw, li < 0, and stays zero-copy
+             * with the effects skipped, said once above). */
+            if (!(fx_on && li >= 0) && ls && ls->dmabuf_buf && ahb_swapchain_has_ahb(ls->dmabuf_buf))
                 r = ahb_swapchain_present(ls->dmabuf_buf, ls, w, h);
-            if (r != 0 && li >= 0) r = sc_layer_present(dl.d[li].img, w, h);
-            if (r == 0) { if (ls) ls->drawn = 1; }
-            else rendered = vkp_render(w, h, dl.d, dl.n) == 0;
+            if (r != 0 && li >= 0)
+                r = fx_on ? sc_layer_present_pass(&dl.d[li], 1, w, h)
+                          : sc_layer_present(dl.d[li].img, w, h);
+            if (r == 0) {
+                if (ls) ls->drawn = 1;
+                /* The one window above the game keeps the game off the copy path entirely: it goes
+                 * on its own layer, cropped and placed by the display. */
+                int go[8], ov = 0;
+                if (over == 1 && li >= 0 && vkp_map_draw(&dl.d[li + 1], go))
+                    ov = sc_layer_present_overlay(dl.d[li + 1].img, go) == 0 ? 1 : -1;
+                if (ov <= 0) sc_layer_hide_overlay();
+                if (ov < 0) { /* the overlay layer refused it: draw the whole scene the old way */
+                    sc_layer_hide();
+                    rendered = vkp_render(w, h, dl.d, dl.n) == 0;
+                }
+            } else rendered = vkp_render(w, h, dl.d, dl.n) == 0;
         }
     } else {
         sc_layer_hide();
@@ -2392,14 +2422,19 @@ static int on_stats_timer(void *data) {
     struct surface *s;
     wl_list_for_each(s, &g_toplevels, toplevel_link) windows++;
     unsigned zero_copy = ahb_swapchain_stats_take();
+    unsigned layer_frames = sc_layer_frames_take();
     g_zero_copy_last = zero_copy;
     /* Interpolated frames the compositor added (framegen_bridge.c). They are on screen, so they
      * count there; they are NOT GPU frames from games and never inflate that number. */
     unsigned generated = vkp_framegen_stats_take();
     if (g_stat_frames || g_stat_dmabuf || g_stat_shm || generated) {
-        char extra[96] = "";
+        char extra[160] = "";
         int off = 0;
         if (g_zero_copy || zero_copy) off += snprintf(extra + off, sizeof(extra) - (size_t)off, " | %u zero-copy frames", zero_copy);
+        /* Frames the compositor put on a display layer through one of its OWN gralloc buffers (the
+         * plain layer blit, or the effects chain's result): still hardware-composed, but not
+         * zero-copy, so they are counted apart from the line above. */
+        if (layer_frames) off += snprintf(extra + off, sizeof(extra) - (size_t)off, " | %u layer frames", layer_frames);
         if (generated) snprintf(extra + off, sizeof(extra) - (size_t)off, " | %u generated frames", generated);
         banner_log("stats", "last 10 s: %u frames on screen (%.1f fps) | %u GPU frames from games | %u window redraws | %d windows open%s",
                    g_stat_frames + generated, (g_stat_frames + generated) / 10.0, g_stat_dmabuf, g_stat_shm, windows, extra);
