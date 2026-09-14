@@ -31,6 +31,8 @@
 #include <stdarg.h>
 #include <errno.h>
 #include <sys/timerfd.h>
+#include <sys/syscall.h>
+#include <sys/sysmacros.h>
 #include <android/log.h>
 #include <wayland-server.h>
 
@@ -1313,9 +1315,14 @@ static void dmabuf_create_params(struct wl_client *c, struct wl_resource *r, uin
     if (!pr) { free(p); wl_client_post_no_memory(c); return; }
     wl_resource_set_implementation(pr, &params_impl, p, params_resource_destroy);
 }
+static void dmabuf_get_default_feedback(struct wl_client *c, struct wl_resource *r, uint32_t id);
+static void dmabuf_get_surface_feedback(struct wl_client *c, struct wl_resource *r, uint32_t id,
+                                        struct wl_resource *surface);
 static const struct zwp_linux_dmabuf_v1_interface dmabuf_impl = {
     .destroy = dmabuf_destroy,
     .create_params = dmabuf_create_params,
+    .get_default_feedback = dmabuf_get_default_feedback,
+    .get_surface_feedback = dmabuf_get_surface_feedback,
 };
 /* The advertised format/modifier table, built at the first bind from what the renderer's driver
  * can import (vkp_dmabuf_modifiers). INVALID is always offered too (Mesa drops it; other clients
@@ -1325,6 +1332,7 @@ static const struct zwp_linux_dmabuf_v1_interface dmabuf_impl = {
 static struct { uint32_t fmt; uint64_t mods[DMABUF_NMOD]; int n; } g_dmabuf_fmts[DMABUF_NFMT] = {
     {DRM_ARGB8888}, {DRM_XRGB8888}, {DRM_ABGR8888}, {DRM_XBGR8888}};
 static int g_dmabuf_fmts_ready;
+static void dmabuf_build_feedback(void);
 
 static void dmabuf_build_formats(void) {
     char line[256];
@@ -1357,12 +1365,148 @@ static void dmabuf_build_formats(void) {
     if (g_ubwc && !compressed)
         banner_log("dmabuf", "the compositor's driver (%s) reports no importable qcom_compressed layout: "
                    "game swapchains stay linear", vkp_gpu_name());
+    dmabuf_build_feedback();
+}
+
+/* ---- dmabuf feedback (zwp_linux_dmabuf_v1 version 4)
+ *
+ * Turnip's Vulkan WSI is happy with the version 3 format/modifier events, so every Vulkan game
+ * worked while we only advertised 3. Mesa's EGL is not: its Wayland platform only takes the GPU
+ * (kopper/Zink) path when it can bind this interface with FEEDBACK, and with 3 it silently drops
+ * to its wl_shm software path. On this Proton layer that path has no software rasteriser to fall
+ * back to (the gallium build is zink+kopper+swrast, no llvmpipe), so the shm buffer it commits is
+ * never written: a native OpenGL window came out solid black, ~30 shm commits/s and no GPU frame
+ * at all (Wizardry: The Labyrinth of Lost Souls). Feedback is what makes that path work.
+ *
+ * What a client needs from us is one tranche describing "everything the compositor can import":
+ * a format table it mmaps read-only, the device to allocate on, and the indices it may use.
+ * Clients binding versions 1-3 keep getting the old format/modifier events instead. */
+
+#ifndef MFD_CLOEXEC
+#define MFD_CLOEXEC 0x0001U
+#endif
+#ifndef MFD_ALLOW_SEALING
+#define MFD_ALLOW_SEALING 0x0002U
+#endif
+#ifndef F_ADD_SEALS
+#define F_ADD_SEALS 1033
+#define F_SEAL_SEAL 0x0001
+#define F_SEAL_SHRINK 0x0002
+#define F_SEAL_GROW 0x0004
+#define F_SEAL_WRITE 0x0008
+#endif
+
+struct dmabuf_fmt_entry { uint32_t format; uint32_t pad; uint64_t modifier; }; /* the wire layout */
+
+static int g_fmt_table_fd = -1;         /* sealed read-only memfd of dmabuf_fmt_entry[] */
+static size_t g_fmt_table_size;
+static uint16_t g_fmt_table_n;          /* entries, == the indices a tranche may name */
+static dev_t g_main_device;             /* the render node clients should allocate on */
+
+/* The GPU we import through is reached with KGSL, not DRM, so there is no render node of our own
+ * to name. Clients only use main_device to match "the same device as the compositor" and to pick
+ * a driver; the one DRM render node this platform has is the right answer, and Zink ignores it
+ * anyway (it renders on the Vulkan device it already has). 0 if the platform has none. */
+static dev_t dmabuf_render_node(void) {
+    static const char *nodes[] = {"/dev/dri/renderD128", "/dev/dri/renderD129", "/dev/dri/card0"};
+    struct stat st;
+    for (size_t i = 0; i < sizeof(nodes) / sizeof(nodes[0]); i++)
+        if (!stat(nodes[i], &st) && S_ISCHR(st.st_mode)) return st.st_rdev;
+    return 0;
+}
+
+static void dmabuf_build_feedback(void) {
+    struct dmabuf_fmt_entry entries[DMABUF_NFMT * DMABUF_NMOD];
+    int n = 0;
+
+    g_main_device = dmabuf_render_node();
+    for (int f = 0; f < DMABUF_NFMT; f++)
+        for (int m = 0; m < g_dmabuf_fmts[f].n; m++) {
+            if (g_dmabuf_fmts[f].mods[m] == MOD_INVALID) continue; /* never offer INVALID here */
+            entries[n].format = g_dmabuf_fmts[f].fmt;
+            entries[n].pad = 0;
+            entries[n].modifier = g_dmabuf_fmts[f].mods[m];
+            n++;
+        }
+    if (!n) return;
+
+    int fd = (int)syscall(__NR_memfd_create, "banner-dmabuf-formats",
+                          MFD_CLOEXEC | MFD_ALLOW_SEALING);
+    if (fd < 0) { WLOGE("dmabuf feedback: memfd_create failed (%s)", strerror(errno)); return; }
+    size_t size = (size_t)n * sizeof(entries[0]);
+    if (write(fd, entries, size) != (ssize_t)size) {
+        WLOGE("dmabuf feedback: could not write the format table (%s)", strerror(errno));
+        close(fd);
+        return;
+    }
+    /* The client mmaps this read-only and trusts it not to change under it. */
+    fcntl(fd, F_ADD_SEALS, F_SEAL_SEAL | F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE);
+    g_fmt_table_fd = fd;
+    g_fmt_table_size = size;
+    g_fmt_table_n = (uint16_t)n;
+    banner_log("dmabuf", "feedback ready: %d format/modifier pairs, main device %u:%u",
+               n, (unsigned)major(g_main_device), (unsigned)minor(g_main_device));
+}
+
+/* One tranche: our device, every pair in the table, no scanout flag. */
+static void dmabuf_feedback_send(struct wl_resource *fb) {
+    struct wl_array dev, idx;
+    uint16_t *ind;
+
+    if (g_fmt_table_fd < 0) { zwp_linux_dmabuf_feedback_v1_send_done(fb); return; }
+
+    zwp_linux_dmabuf_feedback_v1_send_format_table(fb, g_fmt_table_fd, (uint32_t)g_fmt_table_size);
+
+    wl_array_init(&dev);
+    memcpy(wl_array_add(&dev, sizeof(dev_t)), &g_main_device, sizeof(dev_t));
+    zwp_linux_dmabuf_feedback_v1_send_main_device(fb, &dev);
+    zwp_linux_dmabuf_feedback_v1_send_tranche_target_device(fb, &dev);
+    wl_array_release(&dev);
+
+    wl_array_init(&idx);
+    ind = wl_array_add(&idx, (size_t)g_fmt_table_n * sizeof(uint16_t));
+    if (ind) for (uint16_t i = 0; i < g_fmt_table_n; i++) ind[i] = i;
+    zwp_linux_dmabuf_feedback_v1_send_tranche_formats(fb, &idx);
+    wl_array_release(&idx);
+
+    zwp_linux_dmabuf_feedback_v1_send_tranche_flags(fb, 0);
+    zwp_linux_dmabuf_feedback_v1_send_tranche_done(fb);
+    zwp_linux_dmabuf_feedback_v1_send_done(fb);
+}
+
+static void dmabuf_feedback_destroy(struct wl_client *c, struct wl_resource *r) {
+    wl_resource_destroy(r);
+}
+static const struct zwp_linux_dmabuf_feedback_v1_interface dmabuf_feedback_impl = {
+    .destroy = dmabuf_feedback_destroy,
+};
+
+static void dmabuf_new_feedback(struct wl_client *c, struct wl_resource *parent, uint32_t id) {
+    struct wl_resource *fb = wl_resource_create(c, &zwp_linux_dmabuf_feedback_v1_interface,
+                                                wl_resource_get_version(parent), id);
+    if (!fb) { wl_client_post_no_memory(c); return; }
+    wl_resource_set_implementation(fb, &dmabuf_feedback_impl, NULL, NULL);
+    if (!g_dmabuf_fmts_ready) dmabuf_build_formats();
+    dmabuf_feedback_send(fb);
+}
+
+static void dmabuf_get_default_feedback(struct wl_client *c, struct wl_resource *r, uint32_t id) {
+    dmabuf_new_feedback(c, r, id);
+}
+/* Per-surface feedback would let us hint a different tranche for a window on its own display
+ * layer; we have nothing better to say per surface, so it is the default one. */
+static void dmabuf_get_surface_feedback(struct wl_client *c, struct wl_resource *r, uint32_t id,
+                                        struct wl_resource *surface) {
+    dmabuf_new_feedback(c, r, id);
 }
 
 static void bind_dmabuf(struct wl_client *c, void *data, uint32_t ver, uint32_t id) {
     struct wl_resource *r = wl_resource_create(c, &zwp_linux_dmabuf_v1_interface, ver, id);
     wl_resource_set_implementation(r, &dmabuf_impl, NULL, NULL);
     if (!g_dmabuf_fmts_ready) dmabuf_build_formats();
+    /* From version 4 the format and modifier events are gone: the client asks for feedback
+     * instead, and sending both would only confuse it about which list is authoritative. */
+    if (ver >= 4) return;
     for (int f = 0; f < DMABUF_NFMT; f++) {
         zwp_linux_dmabuf_v1_send_format(r, g_dmabuf_fmts[f].fmt);
         if (ver >= 3)
@@ -2572,7 +2716,7 @@ int banner_wayland_run(void) {
     wl_display_init_shm(display); /* wl_shm global + pool/buffer handling */
     wl_global_create(display, &wl_output_interface, 2, NULL, bind_output);
     wl_global_create(display, &xdg_wm_base_interface, 1, NULL, bind_xdg_wm_base);
-    wl_global_create(display, &zwp_linux_dmabuf_v1_interface, 3, NULL, bind_dmabuf);
+    wl_global_create(display, &zwp_linux_dmabuf_v1_interface, 4, NULL, bind_dmabuf);
     wl_global_create(display, &wl_seat_interface, 5, NULL, bind_seat);
     wl_global_create(display, &banner_desktop_v1_interface, 1, NULL, bind_desktop);
     wl_global_create(display, &wp_presentation_interface, 2, NULL, bind_presentation);

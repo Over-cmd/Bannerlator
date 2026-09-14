@@ -1,5 +1,62 @@
 # Star-Compose — Progress Log
 
+## 2026-09-13 22:20-23:05 — 🌊🖼️ **Wizardry black screen on Wayland: native OpenGL windows have never presented — Mesa's EGL needs `zwp_linux_dmabuf_v1` v4 feedback** (`fix/wayland-gl-wizardry`)
+
+> **Symptom.** "Wizardry: The Labyrinth of Lost Souls" (`LoLS_win32.exe`, 32-bit x86 under FEX) on container 7 / Wayland / `Proton-11.0-2.1-arm64ec-6`: sound plays, the window opens, input works, the screen is solid black and the perf HUD never appears.
+
+> **What the evidence said, in order.**
+>
+> **1. It is a native OpenGL game, and it is broken on X11 too.** Wine log: `winewayland: OpenGL through …/libEGL.so.1 (Zink)`, no DXVK/VKD3D init anywhere, six `ATTENTION: default value of option mesa_glthread overridden by environment` (a GL-only driconf option). A copy of the shortcut forced to `displayBackend=x11` (22:35) shows the game's own error box — screenshot in the report — reading:
+> ```
+> Failed to create OpenGL context.
+> Please ensure your graphics card drivers are up to date.
+> Could not create GL context: Invalid window handle.
+> ```
+> with `Mesa: warning: Window 4194306 has no colormap!` in its log. So **the game does not run on either backend today**; Wayland gets strictly further (context created, game running, audio, input).
+>
+> **2. The compositor is not dropping the frames — it is drawing them, and they are black.** The 10 s stats read `0 GPU frames from games | ~294 window redraws` (≈30 shm commits/s). Wine's own GDI path cannot be the source: with `WINEDEBUG=+waylanddrv` the whole run has **13** `wayland_surface_attach_shm` calls, while `wayland_surface_ensure_contents … needs_contents=0` fires 1082 times and returns immediately (`if (!needs_contents) return;`). The ~30/s commits are Mesa's.
+>
+> **3. `WAYLAND_DEBUG=1` names the culprit.** Mesa's EGL runs its **software** platform:
+> ```
+> [1763276.706] {mesa egl swrast display queue}  -> wl_display#1.get_registry(new id wl_registry#24)
+> [1763279.983] {mesa egl swrast display queue} wl_registry#24.global(7, "zwp_linux_dmabuf_v1", 3)
+> [1763279.967] {mesa egl swrast display queue}  -> wl_registry#24.bind(4, "wl_shm", 1, new id [unknown]#26)
+> [1763279.992] {mesa egl swrast display queue}  -> wl_registry#24.bind(10, "wp_presentation", 1, new id [unknown]#27)
+> ```
+> Every other global it wants gets a `bind` on the next line. **`zwp_linux_dmabuf_v1` is announced at version 3 and never bound** — which is also why no session log for this game ever carries our `dmabuf  formats: …` line, while a working Vulkan session does (21:42:43.563, Half-Life 2). The swrast queue is the *first* Mesa queue in the trace: the platform was chosen before the registry was even walked.
+>
+> The GL surface itself is set up correctly — this is not a placement or a subsurface bug:
+> ```
+> -> wl_compositor#4.create_surface(new id wl_surface#45)
+> -> wl_subcompositor#5.get_subsurface(new id wl_subsurface#55, wl_surface#45, wl_surface#34)
+> -> wl_subsurface#55.set_position(3, 29)     -> wp_viewport#47.set_destination(1280, 720)
+> {mesa egl swrast display queue} -> wl_shm_pool#38.create_buffer(new id wl_buffer#39, 0, 1280, 720, 5120, 0)
+> {mesa egl surface queue} -> wl_surface#45.attach(wl_buffer#39, 0, 0) / damage_buffer / commit
+> ```
+> A full-size ARGB8888 buffer on a subsurface at 3,29 of a window placed at -3,-29 — i.e. exactly 0,0 on the 1280x720 desktop.
+>
+> **4. The buffer is empty.** Mesa's shm pools are `rw-s` mappings of `…/.wayland-rt/mesa-shared-*` in the compositor process. Dumped both live, 3 686 400 B each (1280×720×4):
+> ```
+> == 7722af4000: 3686400 bytes, 0 non-zero bytes (0.00%)   px 00000000 × 921600
+> == 77267e0000: 3686400 bytes, 0 non-zero bytes (0.00%)   px 00000000 × 921600
+> ```
+> The compositor uploads and blits them faithfully (`take_shm` → `vkCmdBlitImage`, no blending anywhere), which is why the window is black rather than absent, and why there is no dmabuf ⇒ `0 GPU frames` ⇒ `banner_on_game_surface` never fires ⇒ **no HUD**.
+>
+> **5. Why the software path cannot draw.** The Proton layer's gallium build contains only `zink`, `kopper` and `swrast` — `strings libgallium-26.3.0-devel.so` has no `llvmpipe`. There is no software rasteriser for the shm path to fall back to, so nothing ever writes those pages.
+>
+> **6. The AIO Graphics Test was never a control.** The premise "AIO's OpenGL path works at ~230 fps on this compositor, so GL through Zink is fine" does not hold. Traced with `WAYLAND_DEBUG=1` and switched to its OpenGL backend via the compositor's `test-input` FIFO, AIO's queues are:
+> ```
+> 117809 {mesa vk display queue}      58859 {mesa vk surface 24 swapchain 1 queue}
+>    552 {mesa formats query}           276 {mesa image count query}
+> ```
+> **Zero `{mesa egl …}` queues.** AIO presents every backend — OpenGL included — through a Vulkan swapchain, and the compositor keeps reporting `17516 GPU frames / 1 window redraw` while the GL cube spins at 260 fps. It never exercises winewayland's GL window path at all. The same claim is written into the Wine side as justification (`dlls/winewayland.drv/waylanddrv_main.c`: *"the AIO Graphics Test runs OpenGL at ~230 fps"*). **Wizardry is the first real native-GL window on this compositor, and that path has never worked.**
+
+> **Root cause.** Ours, in the compositor, and it is a protocol gap rather than a rendering bug. We advertise `zwp_linux_dmabuf_v1` at **version 3** and no `wl_drm`. Turnip's Vulkan WSI is happy with v3's `format`/`modifier` events, so every Vulkan/DXVK game works. Mesa's **EGL** Wayland platform is not: without dmabuf **feedback** (v4) it will not bind the interface, so it takes its `wl_shm` software path — which on this Mesa build has no rasteriser behind it and leaves every buffer zero-filled.
+
+> **Fix** (`app/src/main/cpp/waylandcomp/`, app-side only — no `.wcp` change):
+> - `protocols/linux-dmabuf-v1.xml` replaced with upstream (version 6, adds `zwp_linux_dmabuf_feedback_v1`); `generated/linux-dmabuf-v1-{server-protocol.h,client-protocol.h,protocol.c}` regenerated with the same `wayland-scanner 1.24.0` the tree already used.
+> - `src/compositor.c`: the global goes out at **version 4**; `get_default_feedback` / `get_surface_feedback` implemented. `dmabuf_build_feedback()` writes the advertised format/modifier pairs into a sealed `memfd` format table once, alongside the `dev_t` of the one DRM render node this platform has. Each feedback object gets `format_table` → `main_device` → one tranche (`tranche_target_device`, all indices, `flags 0`) → `tranche_done` → `done`. Clients binding versions 1-3 keep the old `format`/`modifier` events untouched; from version 4 those events are not sent, as the protocol requires.
+
 ## 2026-09-13 (later) — 🌊🖥️ **Wayland VRR: the refresh-rate vote now rides the surface that presents, plus a frame-rate hint on the zero-copy game layer** (`feat/wayland-vrr` `60c61b55`)
 > **The premise I was given did not hold, and the honest version is below.** The brief said `applyVrr()` returns early on Wayland because `xServerView == null`. It is not null: `setupUI()` builds an `XServerView` and `rootView.addView(xServerView)` runs in a Wayland session too (the compositor's SurfaceView is overlaid on top of it). So `applyVrr` never early-returned, `applyWindowPreferredRefreshRate()` and the drawer's `displayTargetHz` were already running, and on the Pocket FIT **refresh-rate matching on Wayland was already moving the panel**. Measured on the installed pre-release 4 (`abbe1028…`) before touching anything, container 7 + Half-Life 2 + Wayland, all foregrounded:
 > - 20:11:32 Auto + 60 cap → `refreshRate=60.000004`, `setFrameRate=(uid, frameRate)={10249, 60.00 Hz}`
