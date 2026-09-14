@@ -630,13 +630,13 @@ static void hide_layer(struct layer *l) {
 
 void sc_layer_hide(void) {
     layers_init();
-    int said = 0;
-    /* Top down, so nothing of the scene is ever uncovered for a frame. */
-    for (int i = SC_LAYER_COUNT - 1; i >= 0; i--) {
-        if (!g_layers[i].shown) continue;
-        hide_layer(&g_layers[i]);
-        said = 1;
-    }
+    int said = g_layers[SC_LAYER_GAME].shown || g_layers[SC_LAYER_OVERLAY].sc;
+    /* Top down, so nothing of the scene is ever uncovered for a frame. The overlay layer is let go
+     * of entirely rather than hidden (same reason as sc_layer_hide_overlay: a live second
+     * SurfaceControl keeps SurfaceFlinger composing on the GPU); the game layer keeps its
+     * SurfaceControl, since it goes up and down with every effects/frame-generation toggle. */
+    if (g_layers[SC_LAYER_OVERLAY].sc) sc_layer_hide_overlay();
+    if (g_layers[SC_LAYER_GAME].shown) hide_layer(&g_layers[SC_LAYER_GAME]);
     if (said) banner_log("layer", "layers hidden (scene is not a single fullscreen window)");
 }
 
