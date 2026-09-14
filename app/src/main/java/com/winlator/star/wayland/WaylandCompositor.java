@@ -201,6 +201,11 @@ public final class WaylandCompositor {
      *  Set before the compositor starts. */
     public static native void nativeSetUbwc(boolean on);
 
+    /** Debug: advertise no DRM device (main device 0:0) in the dma-buf feedback, as a phone that
+     *  exposes no /dev/dri node to apps does. BANNER_WAYLAND_NO_RENDER_NODE=1 in the container's or
+     *  shortcut's environment variables. Set before the compositor starts. */
+    public static native void nativeSetNoRenderNode(boolean on);
+
     /** VRR / refresh-rate matching: mirror the panel refresh-rate vote the activity puts on the
      *  compositor's SurfaceView onto the game's own SurfaceControl layer. Under zero-copy the game's
      *  frames go straight onto that layer and never reach the app's surface, so the surface vote alone

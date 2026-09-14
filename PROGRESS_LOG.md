@@ -1,5 +1,15 @@
 # Star-Compose — Progress Log
 
+## 2026-09-14 14:05 — ⬛📱 **Native OpenGL black with sound on phones that expose no DRM node (Adreno 830/840): the fix is in the Wayland LAYER (v9); this branch only adds a repro switch + session-log lines** (`fix/wayland-gl-no-drm-node`, off `main` `f81a666e`; testing build, not for pre-release 7)
+
+> **The report.** The user's own A840 (standard flavour, layer `Proton-11.0-2.1-arm64ec-8`, Turnip a8xx-white): Wizardry 30 s of `0 GPU frames from games | ~293 window redraws`, and at the game's first dma-buf bind `feedback ready: 8 format/modifier pairs, main device 0:0`. The phone gives apps no `/dev/dri` node, so `dmabuf_render_node()` returns 0.
+>
+> **Root cause (Mesa, read at 7cda7850 — the tree that ships libEGL/libgallium; `platform_wayland.c` is identical at all six refs the layer builds and at upstream main).** `default_dmabuf_feedback_main_device()` → `loader_get_render_node(0:0)` finds nothing → `fd_render_gpu` stays -1 (no wl_drm fallback: `HAVE_BIND_WL_DISPLAY` is off in our build). `dri2_initialize_wayland_drm()` still builds the kopper screen (fd -1 already means "no DRM" in `kopper_init_screen` → `pipe_loader_vk_probe_dri` → `zink_create_screen`), then **`dri2_setup_device(disp, false)` (platform_wayland.c:2752) fails**: `loader_is_device_render_capable(-1)` is false and `dri_query_compatible_render_only_device_fd(-1)` returns -1 → `eglInitialize` retries `Zink=FALSE, ForceSoftware=TRUE` → swrast, which this build cannot draw → black.
+>
+> **Fix = layer only** (Banners-Turnip `wayland` `644f1a5c`, `patches/wayland/egl_wayland_no_drm_node.py` → proton-wine `Proton-11.0-2.1-arm64ec-9`). Pre-release 7's app works unchanged with it.
+>
+> **This branch (debug/visibility, own testing):** `BANNER_WAYLAND_NO_RENDER_NODE=1` (container/shortcut env) → `nativeSetNoRenderNode` → the compositor advertises `main device 0:0` on a device that has a node (reproduces the A840 on the Pocket FIT without touching `/dev/dri`). Session log: `dmabuf` line when the main device is 0:0 (`… OpenGL games need Wayland layer versionCode 9 or newer …`), and an `opengl` line once per program that asked for dma-buf feedback and then drew 150 wl_shm frames with no dma-buf buffer (`… its OpenGL fell back to software rendering … expect a black picture`).
+
 ## 2026-09-14 09:20 — 🧪 **No more Wine Mono download prompt on first boot or after a layer switch — every layer** (`fix/wine-mono-prompt` `83c28493`, run 34847411880 green, headSha verified, pubg `e6b37f4e…`; device-proven: new container + real layer switch on Wayland, X11 on GE 11.0-6; box64/Wine 9.5 and a live .NET run still untested)
 
 > **The bug.** A new container's first boot, and the first launch after a container's layer changed, opened Wine's "Wine Mono Installer" dialog (Cancel / Install = download from winehq.org). Seen today on `Proton-11.0-2.1-arm64ec-7` (Wayland session logs 07:17 and 08:06, and 09-13 15:22 where Install was clicked).
