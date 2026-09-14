@@ -1,5 +1,64 @@
 # Star-Compose — Progress Log
 
+## 2026-09-14 (after the session crash) — 🧩 **Renderer labels + container-create fixes merged into `feat/wayland-phase2` for one combined build** (`9088f27b`, run 34839563917)
+
+> **Recovery note.** The session that owned the two fixes below crashed at ~07:31 while the user was in Titanfall 2. Both agents had already pushed and gone green (`7ec71021` run 34837932610, `5dd56079` run 34837591889); neither had been device-tested or merged. State was rebuilt from the transcript and the agents' own logs, nothing re-derived.
+>
+> **Merged, no conflicts:** the two branches touch disjoint files (labels: `XServerDisplayActivity`, `WineWaylandSupport`, the five card/launch surfaces; create: `Container`, `AdrenotoolsManager`, `ContainerDetailViewModel`). App-only: the layer stays `Proton-11.0-2.1-arm64ec-7`, no wcp change.
+>
+> **Device plan for this build:** (1) create a container with Wayland selected and read its `.container` back (`displayBackend`, `waylandGameDriver`, driver + DXVK/VKD3D choices); (2) Wizardry on Wayland → HUD must not say DXVK; (3) a D3D title on Wayland (HL2) → HUD still names D3D9 · DXVK; (4) Wayland cards read "Vulkan (Wayland)"; (5) an X11 launch unchanged.
+>
+> **User's own containers, changed by hand at 07:15–07:16 at their request:** `xuser-3` ("P11-2 Arm", was GE 11.0-6) and `xuser-6` ("P11-6 GE v6") now point at `Proton-11.0-2.1-arm64ec-7` with the Wayland backend. Prefixes untouched; `.container` + the three registry files backed up to `/sdcard/Download/wayland-backup/xuser-{3,6}-pre-wayland/`. First launch shows Wine's Mono prompt → Cancel.
+
+## 2026-09-14 (later) — 🏷️ **The HUD and the cards stop printing the container's config as the live renderer on Wayland** (`fix/wayland-renderer-labels` `7ec71021`, run 34837932610)
+
+> **The report.** Wizardry: The Labyrinth of Lost Souls, a native OpenGL title, showed "DXVK" in the HUD on Wayland, and Wayland container cards showed an "OpenGL" chip.
+>
+> **Why both lied.** The HUD seeded its renderer line from the container's X11 renderer setting and its wrapper from `dxwrapperConfig`. On Wayland the renderer setting picks a present path that never runs (the compositor is always Vulkan), and the configured wrapper only names what a D3D game *would* load. The cards had the same fault as a chip: `rendererLabelOf()` rendered the stored id.
+>
+> **The fix.** On Wayland the HUD starts at the one thing true of every session (the compositor's Vulkan, no wrapper named) and upgrades only on evidence. The existing resolvers (app-declared, engine log, DXVK/VKD3D wrapper logs) still prove the D3D API. A new per-process resolver answers the native case from the game's own `/proc/<pid>/maps`: the layer's host-side `libEGL.so.1` / `libgallium` / `libwayland-egl.so` mean OpenGL, `winevulkan.so` means Vulkan (both file-backed even on arm64ec, where the PE-only DLLs are invisible). Measured on a live Wayland D3D11/DXVK session (Titanfall 2): `winevulkan.so` mapped, none of the GL libraries, **but `opengl32.so` resident**, which is why `opengl32.so` is not treated as evidence. No evidence leaves the neutral label.
+>
+> The game and container cards (and the launch overlay, XMB and Big Picture, which share `buildLaunchSpec`) resolve the effective backend through `WineWaylandSupport.runsOnWayland` (the editors' rule, moved into the class that owns the capability probe) and show "Vulkan (Wayland)". X11 untouched on both surfaces.
+
+## 2026-09-14 (later) — 🧱 **Creating a container now saves what the create screen was showing** — create, edit and New Container Defaults go through one writer (`fix/container-create-settings` `5dd56079`, run 34837591889, pubg `e13d5b21…`, staged, not installed)
+
+> **The report.** "Selecting Wayland, then creating the container, leaves it back on X11", and "settings do not seem to be sticking on first time container launches not only for that but sometimes drivers and components like dxvk and vkd3d etc".
+
+> **What was actually wrong.** The container editor had **three** hand-maintained lists of what a save writes, and they had drifted:
+> 1. `buildCreateData()` — a JSON payload of ~40 keys handed to `ContainerManager.createContainerAsync`.
+> 2. the `createContainerAsync` callback — a second, different list re-applied through setters once the container existed (frame-gen, gyro, vibration, reshade, refresh, renderScale, autoCloseOnExit…).
+> 3. the **edit** branch of `doConfirm` — the full list, written straight onto the real container.
+>
+> Anything present in (3) but absent from both (1) and (2) was **silently dropped on create**. Mechanically diffing the three:
+>
+> | field | edit | create payload | create callback | result |
+> |---|---|---|---|---|
+> | `displayBackend` | ✅ `c.setDisplayBackend(…)` | ❌ | ❌ | **lost — every new container born X11** |
+> | `waylandGameDriver` | ✅ `c.setWaylandGameDriver(…)` | ❌ | ❌ | **lost — reverts to Auto** |
+> | `runAsAdmin` | ✅ `saveRunAsAdmin(c)` (registry) | ✅ flag → `ContainerManager` stamps EnableLUA | — | ok, different mechanism |
+> | everything else (70 fields) | ✅ | ✅ / ✅ | | ok |
+>
+> `displayBackend` never appears in the create payload at all — `grep -c '"displayBackend"'` over that block was **0** — and the view-model's own state was read only when seeding the form (`loadContainerData`) and in the Wayland capability guard (`onWineVersionChanged`). So the Wayland half of the report is exactly this: the value was chosen, shown, gated, and then thrown away at the moment of creation. `waylandGameDriver` — the *game's* Vulkan driver on a Wayland session — went with it, which is also the "drivers don't stick" half for anyone creating a Wayland container: that IS a driver setting, lost on create.
+>
+> **The same defect hit the New Container Defaults profile**, which is built from the same payload: a user could not save "Wayland" as their default at all, and `loadContainerData` seeded `displayBackend` from a profile that could never contain it.
+
+> **Followed the value the rest of the way, and the other half of the report is NOT in the create payload.** `graphicsDriver`, `graphicsDriverConfig`, `dxwrapper`, `dxwrapperConfig` and `wincomponents` *were* all in the payload and all survive to the `.container` file: `ContainerManager.createContainer` does `container.loadData(data)` → `container.saveData()`, and at first launch `XServerDisplayActivity.setupWineSystemFiles` extracts them because the marker extras (`container.getExtra("dxwrapper")`, `getExtra("wincomponents")`) are empty on a fresh container and `extractWinComponentFiles` forces every component through on `firstTimeBoot`. Two *other* things were rewriting driver config the user never chose, and both are fixed here — see below.
+
+> **The fix: one writer, not a fourth list.** A one-line `put("displayBackend", …)` would have fixed today's symptom and left the design that produced it, so `applyFormTo(container, …)` is now **the** place the form becomes container config, and all three callers use it:
+> - **edit** — called on the real container, then `saveData()`.
+> - **create** — called on a **throwaway** `Container(0, manager)`; its `getData()` *is* the payload. `Container.loadData` round-trips `getData()` in full, `extraData` included — the property `duplicateContainer` already depends on ("Copy the FULL source config (40+ fields) so nothing is dropped") — so every field reaches the new container and nothing is re-applied afterwards. Two keys are added by hand because `getData()` cannot carry them: `wineVersion` (omitted for the bundled main wine, but `createContainer` requires the key) and `runAsAdmin` (a registry stamp, not a config field).
+> - **New Container Defaults** — called on the profile template, which also deletes ~60 lines of computation duplicated from `doConfirm`.
+>
+> Net `-307/+211` in the view-model. A field added to the editor from now on is written once and sticks in create, edit and defaults together.
+
+> **Gating unchanged, and now it covers create too.** `applyFormTo` persists the **effective** backend (`isWaylandBackend` = stored Wayland **and** `WineWaylandSupport.isWaylandCapable(selectedWineVersion)`), which is the same line the edit path always used. Because create now goes through it, a container can no longer be *born* claiming a Wayland its Proton layer cannot drive — previously unreachable only because create wrote nothing at all.
+
+> **Two places that wrote configuration the user never chose, found on the way and fixed:**
+> - `AdrenotoolsManager.reloadContainers()` (runs on **every driver delete**) matched containers by driver *name* read from the driver's `meta.json`. An absent or unreadable `meta.json` makes `getDriverName()` return `""` — and `String.contains("")` is **true for everything**, so deleting one driver reset `graphicsDriverConfig.version` on **every container**, and pinned a `graphicsDriverConfig` override onto **every shortcut** that had only ever inherited one (`shortcut.getExtra("graphicsDriverConfig", container default)` read the inherited value straight back into `putExtra`). A null `version` would also NPE mid-loop and abandon the rest. Now: an empty driver name migrates nothing, a null version is skipped, and a shortcut with no override of its own is left inheriting (its container was just migrated anyway).
+> - `Container.checkObsoleteOrMissingProperties()` read an **absent** `appVersion` stamp as "written by app version 0" and re-added every `DEFAULT_ENV_VARS` entry. An absent stamp means *never booted* — which is exactly what a container the editor just wrote looks like, and what the defaults profile **always** looks like — so an env var the user deliberately deleted came back by itself. Only a container carrying a real old stamp is migrated now, and the stamp is parsed defensively (a junk value threw `NumberFormatException` straight out of `loadData`, which no caller catches). This also had to be right before create could carry `extraData` in its payload at all.
+
+> **Per-game shortcuts do NOT have this bug.** There is no create-vs-edit split to drift: creating a shortcut (`ExeShortcutImporter.writeExeShortcut`, or the `.desktop` generated from a `.lnk`) writes identity only — `Name`/`Exec`/`Icon`/`storeSource` — and a shortcut with no extra of its own **inherits** the container (`shortcut.getExtra(key, container-value)`). Every setting is written by the single `with(shortcut) { putExtra(...) }` block in `ShortcutsScreen` (which already carries `displayBackend` **and** `waylandGameDriver`), or by `XmbGameSettings`' equally single `xmb.set(p, key, …)`. One writer, so nothing to drop.
+
 ## 2026-09-14 (later still) — 🌊🚦 **The overlay layer is now GATED on whether the display can actually compose it — and on this panel a window above the game keeps `DEVICE/DEVICE`** (`feat/wayland-phase5` `5334b3d3`, run 34834608772, pubg `5be0ea93…`)
 
 > Acting on the measurement from the previous entry, as a gate rather than a removal: the overlay layer capability stays, it is simply not raised on a display where raising it costs the hardware composition the first layer was worth having.
