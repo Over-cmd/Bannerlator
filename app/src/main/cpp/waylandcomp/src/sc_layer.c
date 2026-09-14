@@ -13,6 +13,7 @@
 #include <errno.h>
 #include <poll.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -51,6 +52,10 @@ static struct {
     void (*reparent)(ASurfaceTransaction *, ASurfaceControl *, ASurfaceControl *);
     void (*setOnComplete)(ASurfaceTransaction *, void *, sc_complete_fn);
     int (*prevReleaseFence)(ASurfaceTransactionStats *, ASurfaceControl *);
+    /* Display frame-rate vote for the layer (API 30 / 31). Optional: absent on older Android, where
+     * the layer simply carries no vote and the app's surface vote is all there is. */
+    void (*setFrameRate)(ASurfaceTransaction *, ASurfaceControl *, float, int8_t);
+    void (*setFrameRateStrategy)(ASurfaceTransaction *, ASurfaceControl *, float, int8_t, int8_t);
     /* Not in the public NDK headers (vndk/hardware_buffer.h) but exported by libnativewindow.so on
      * every device; Mesa's Android WSI calls it for every gralloc buffer it imports. */
     const void *(*getNativeHandle)(const AHardwareBuffer *);
@@ -88,6 +93,8 @@ static int load_api(void) {
     SYM(reparent, "ASurfaceTransaction_reparent");
     SYM(setOnComplete, "ASurfaceTransaction_setOnComplete");
     SYM(prevReleaseFence, "ASurfaceTransactionStats_getPreviousReleaseFenceFd");
+    SYM(setFrameRate, "ASurfaceTransaction_setFrameRate");
+    SYM(setFrameRateStrategy, "ASurfaceTransaction_setFrameRateWithChangeStrategy");
 #undef SYM
     if (!api.createFromWindow || !api.release || !api.txCreate || !api.txDelete || !api.txApply ||
         !api.setBuffer || !api.setZOrder || !api.setVisibility || !api.setGeometry ||
@@ -97,6 +104,23 @@ static int load_api(void) {
     }
     api.state = 1;
     return 0;
+}
+
+/* ---- display frame-rate vote (VRR / refresh-rate matching) ------------------------------------ */
+/* The app votes a panel cadence with Surface.setFrameRate on the compositor's SurfaceView, but a
+ * zero-copy game's frames never touch that surface - they go straight onto the GAME layer - so
+ * SurfaceFlinger needs the same vote there or the layer's cadence is invisible to it. The vote
+ * belongs to the layer the game is actually presenting on and to no other: the overlay layer
+ * carries a window that updates on its own (slow) schedule and is explicitly voted 0, so it never
+ * drags the panel. The rate is set from the app thread and applied on the compositor thread with
+ * the next transaction, so no transaction is ever created off-thread. 0 = no vote (panel free). */
+#define ASC_FRAME_RATE_COMPAT_DEFAULT 0 /* == ANATIVEWINDOW_FRAME_RATE_COMPATIBILITY_DEFAULT */
+#define ASC_CHANGE_FRAME_RATE_ALWAYS  1 /* == ANATIVEWINDOW_CHANGE_FRAME_RATE_ALWAYS */
+
+static _Atomic float g_fps_want; /* what the app asked for (the game's cadence) */
+
+void sc_layer_set_frame_rate(float fps) {
+    atomic_store(&g_fps_want, fps > 0.0f ? fps : 0.0f);
 }
 
 /* ---- the layers and their buffer pools -------------------------------------------------------- */
@@ -129,9 +153,12 @@ struct layer {
     uint64_t pool_modifier;
     int first_logged;
     int64_t drop_logged_ns;
+    int votes_rate;             /* 1: this layer carries the game's cadence (the game layer) */
+    float fps_applied;          /* the vote the live SurfaceControl already carries (-1 = none yet) */
 };
 
 static struct layer g_layers[SC_LAYER_COUNT];
+static void apply_frame_rate(ASurfaceTransaction *tx, struct layer *l);
 static int g_layers_ready;
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER; /* pools + callback state */
 static int g_pending_cb;                                   /* OnComplete callbacks not yet delivered */
@@ -144,8 +171,10 @@ static AHardwareBuffer *g_blank;
 static void layers_init(void) {
     if (g_layers_ready) return;
     g_layers_ready = 1;
-    g_layers[SC_LAYER_GAME] = (struct layer){.name = "banner_wayland_game", .z = 1, .pool_n = 3, .cur_slot = -1};
-    g_layers[SC_LAYER_OVERLAY] = (struct layer){.name = "banner_wayland_overlay", .z = 2, .pool_n = 2, .cur_slot = -1};
+    g_layers[SC_LAYER_GAME] = (struct layer){.name = "banner_wayland_game", .z = 1, .pool_n = 3,
+                                             .cur_slot = -1, .votes_rate = 1, .fps_applied = -1.0f};
+    g_layers[SC_LAYER_OVERLAY] = (struct layer){.name = "banner_wayland_overlay", .z = 2, .pool_n = 2,
+                                                .cur_slot = -1, .votes_rate = 0, .fps_applied = -1.0f};
     for (int i = 0; i < SC_LAYER_COUNT; i++)
         for (int j = 0; j < POOL_MAX; j++) g_layers[i].slots[j].release_fd = -1;
 }
@@ -244,6 +273,7 @@ static void retire_sc(struct layer *l) {
     banner_log("layer", "%s: SurfaceControl retired (window %p)", l->name, (void *)l->win);
     l->sc = NULL; l->win = NULL;
     l->shown = 0; l->cur_slot = -1; l->cur_token = NULL; l->geo_valid = 0;
+    l->fps_applied = -1.0f; /* the next SurfaceControl carries no vote until it is re-applied */
 }
 
 /* Wait (bounded) for SurfaceFlinger to finish with every pool buffer of every layer, then free
@@ -391,6 +421,7 @@ static int ensure_sc(struct layer *l) {
         if (tx) {
             api.setZOrder(tx, l->sc, l->z);
             api.setVisibility(tx, l->sc, ASC_VISIBILITY_HIDE);
+            apply_frame_rate(tx, l);
             api.txApply(tx); api.txDelete(tx);
         }
         banner_log("layer", "SurfaceControl \"%s\" created as a child of the screen surface (z=%d)", l->name, (int)l->z);
@@ -413,6 +444,26 @@ static void apply_geometry(ASurfaceTransaction *tx, struct layer *l, const int r
         banner_log("layer", "%s geometry: buffer %d,%d-%d,%d -> screen %d,%d-%d,%d", l->name,
                    r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]);
     }
+}
+
+/* Add the vote to tx when it differs from what this layer carries (compositor thread). Only the
+ * layer the game presents on carries the game's rate; every other layer is voted 0, so a slow
+ * overlay window can never hold the panel at the game's cadence (or the game's at the overlay's). */
+static void apply_frame_rate(ASurfaceTransaction *tx, struct layer *l) {
+    float want = l->votes_rate ? atomic_load(&g_fps_want) : 0.0f;
+    if (want == l->fps_applied) return;
+    if (!api.setFrameRateStrategy && !api.setFrameRate) return;
+    if (api.setFrameRateStrategy) {
+        /* ALWAYS, like the app's own surface vote: the seamless-only default is ignored by a panel
+         * sitting at its peak rate, which is exactly the case we need to move. */
+        api.setFrameRateStrategy(tx, l->sc, want, ASC_FRAME_RATE_COMPAT_DEFAULT, ASC_CHANGE_FRAME_RATE_ALWAYS);
+    } else {
+        api.setFrameRate(tx, l->sc, want, ASC_FRAME_RATE_COMPAT_DEFAULT);
+    }
+    int first = l->fps_applied < 0.0f;
+    l->fps_applied = want;
+    if (want > 0.0f) banner_log("layer", "display frame-rate vote on %s: %.2f Hz", l->name, want);
+    else if (!first) banner_log("layer", "display frame-rate vote on %s cleared (panel runs free)", l->name);
 }
 
 /* Once, when a second layer first goes up: HWC only composes a few layers before SurfaceFlinger
@@ -438,6 +489,7 @@ static int present_slot(struct layer *l, int idx, const int r[8]) {
      * copy path either, so every layer is opaque and the picture matches it pixel for pixel. */
     api.setBufferTransparency(tx, l->sc, ASC_TRANSPARENCY_OPAQUE);
     apply_geometry(tx, l, r);
+    apply_frame_rate(tx, l);
     if (!l->shown) api.setVisibility(tx, l->sc, ASC_VISIBILITY_SHOW);
     add_complete(tx, l, l->cur_slot, l->cur_token, 0);
     pthread_mutex_lock(&g_lock);
@@ -473,7 +525,7 @@ int sc_layer_present_ahb(AHardwareBuffer *ahb, int w, int h, int acquire_fd, voi
          * has it; only the placement may have changed. */
         if (acquire_fd >= 0) close(acquire_fd);
         ASurfaceTransaction *tx = api.txCreate();
-        if (tx) { apply_geometry(tx, l, r); api.txApply(tx); api.txDelete(tx); }
+        if (tx) { apply_geometry(tx, l, r); apply_frame_rate(tx, l); api.txApply(tx); api.txDelete(tx); }
         return 0;
     }
     ASurfaceTransaction *tx = api.txCreate();
@@ -481,6 +533,7 @@ int sc_layer_present_ahb(AHardwareBuffer *ahb, int w, int h, int acquire_fd, voi
     api.setBuffer(tx, l->sc, ahb, acquire_fd); /* the transaction owns the fence */
     api.setBufferTransparency(tx, l->sc, ASC_TRANSPARENCY_OPAQUE);
     apply_geometry(tx, l, r);
+    apply_frame_rate(tx, l);
     if (!l->shown) api.setVisibility(tx, l->sc, ASC_VISIBILITY_SHOW);
     if (add_complete(tx, l, l->cur_slot, l->cur_token == token ? NULL : l->cur_token, 0) != 0) {
         api.txDelete(tx); /* the fence went with the transaction */

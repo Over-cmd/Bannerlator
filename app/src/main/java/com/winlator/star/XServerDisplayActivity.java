@@ -4734,7 +4734,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // paced against the wrong grid (device symptom: spurty FPS drops after an in-game multiplier
         // change that ONLY a genuine bg/fg cleared). Release it here, while the surface is still alive,
         // so the Resume half re-negotiates from scratch exactly like onStop→onResume.
-        if (xServerView != null) xServerView.setDisplayFrameRate(0f, VRR_FRAME_RATE_COMPATIBILITY);
+        routeVrrVote(0f);
         unregisterVrrDisplayListener();
         xServerView.teardownSurface();
         XServerDialogState.INSTANCE.setFgResetPaused(true);
@@ -6465,7 +6465,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
         handler.removeCallbacks(savePlaytimeRunnable);
         // Release the panel refresh-rate vote while backgrounded so we don't pin the display rate
         // for whatever is composited on top. onResume() re-asserts it.
-        if (xServerView != null) xServerView.setDisplayFrameRate(0f, VRR_FRAME_RATE_COMPATIBILITY);
+        routeVrrVote(0f);
         unregisterVrrDisplayListener();
     }
 
@@ -7145,6 +7145,9 @@ public class XServerDisplayActivity extends AppCompatActivity {
                 } else {
                     com.winlator.star.wayland.WaylandCompositor.nativeSetSurface(h.getSurface());
                 }
+                // A fresh surface comes up with no frame-rate vote: re-assert the one VRR last
+                // routed, the way XServerView.reassertFrameRate does for the X11 backend.
+                applySurfaceFrameRate(waylandSurfaceView, vrrVote);
             }
             @Override public void surfaceChanged(android.view.SurfaceHolder h, int f, int w, int ht) {}
             @Override public void surfaceDestroyed(android.view.SurfaceHolder h) {
@@ -11705,7 +11708,10 @@ return true;
     //   Auto OFF, manual rate > 0          -> vote that rate (lock, independent of the FPS cap)
     //   Auto OFF, manual rate == 0         -> vote 0f (no lock; panel runs free)
     private void applyVrr(int cap) {
-        if (xServerView == null) return;
+        // The policy below is backend-agnostic; only routeVrrVote() knows where the vote goes.
+        // X11 needs the X view (it owns the presenting surface); Wayland presents through the
+        // embedded compositor's SurfaceView instead, so it must not bail out here.
+        if (xServerView == null && !waylandMode) return;
         float vrrRate = 0.0f;
         // LSFG Native / Win-FG Native generating with Auto on: fit the display to
         // cap x multiplier, picked from the display's own rates (exact, else the
@@ -11739,11 +11745,64 @@ return true;
             int manual = resolvedManualRefreshRate();
             if (manual > 0) vrrRate = (float) manual;
         }
-        xServerView.setDisplayFrameRate(vrrRate, VRR_FRAME_RATE_COMPATIBILITY);
+        routeVrrVote(vrrRate);
         // onCreate pins the window's preferredRefreshRate to the panel max (for smooth UI). That
         // window-level request out-votes the VRR surface vote, so the panel never leaves max. When VRR is
         // matching a capped rate, lower the window preference to that rate too; otherwise restore the max.
         applyWindowPreferredRefreshRate(vrrRate);
+    }
+
+    // The last rate applyVrr routed, so a surface that is (re)created later can be given the same
+    // vote instead of coming up unvoted.
+    private float vrrVote = 0.0f;
+
+    // Send the panel refresh-rate vote to whichever surface the ACTIVE backend actually presents on.
+    // SurfaceFlinger only counts a frame-rate vote from a layer that is producing frames, so this has
+    // to follow the frames:
+    //   X11     -> the XServerView's surface (it owns the renderer, and re-asserts the vote itself
+    //              across surface recreation - XServerView.reassertFrameRate).
+    //   Wayland -> the embedded compositor's SurfaceView. The X view is still constructed and added
+    //              in a Wayland session, but it is idle (no X server component runs, nothing draws
+    //              into it), so the vote used to land on a layer that never presents and SurfaceFlinger
+    //              dropped it - refresh-rate matching was silently inert on every Wayland session.
+    //              Under zero-copy the game's frames go straight onto their own ASurfaceControl layer
+    //              and bypass this surface, so the same rate is voted on the layer as well.
+    // Never both: two layers of the same app voting different rates is exactly what makes the
+    // aggregate unpredictable.
+    private void routeVrrVote(float vrrRate) {
+        vrrVote = vrrRate;
+        if (waylandMode) {
+            applySurfaceFrameRate(waylandSurfaceView, vrrRate);
+            try {
+                com.winlator.star.wayland.WaylandCompositor.nativeSetLayerFrameRate(vrrRate);
+            } catch (Throwable t) {
+                Log.w("XServerDisplayActivity", "wayland: layer frame-rate vote unavailable", t);
+            }
+        } else if (xServerView != null) {
+            xServerView.setDisplayFrameRate(vrrRate, VRR_FRAME_RATE_COMPATIBILITY);
+        }
+    }
+
+    // Surface.setFrameRate on a SurfaceView's surface, with the same API guards and change strategy
+    // XServerView.applyFrameRateToSurface uses: the 3-arg overload with CHANGE_FRAME_RATE_ALWAYS from
+    // API 31 (the 2-arg default is seamless-only, which a peak-refresh panel simply ignores), the
+    // 2-arg one on API 30, nothing below that. Safe before the surface exists - surfaceCreated
+    // re-asserts the remembered vote.
+    private void applySurfaceFrameRate(android.view.SurfaceView v, float fps) {
+        if (Build.VERSION.SDK_INT < 30 || v == null) return;
+        android.view.SurfaceHolder h = v.getHolder();
+        android.view.Surface s = h != null ? h.getSurface() : null;
+        if (s == null || !s.isValid()) return;
+        try {
+            if (Build.VERSION.SDK_INT >= 31) {
+                s.setFrameRate(fps, VRR_FRAME_RATE_COMPATIBILITY,
+                        android.view.Surface.CHANGE_FRAME_RATE_ALWAYS);
+            } else {
+                s.setFrameRate(fps, VRR_FRAME_RATE_COMPATIBILITY);
+            }
+        } catch (IllegalArgumentException | IllegalStateException e) {
+            // Surface released, or the rate/compat was rejected - the vote is best-effort.
+        }
     }
 
     // Keep the window's preferred refresh rate in step with VRR so it doesn't fight the surface vote.

@@ -201,6 +201,15 @@ public final class WaylandCompositor {
      *  Set before the compositor starts. */
     public static native void nativeSetUbwc(boolean on);
 
+    /** VRR / refresh-rate matching: mirror the panel refresh-rate vote the activity puts on the
+     *  compositor's SurfaceView onto the game's own SurfaceControl layer. Under zero-copy the game's
+     *  frames go straight onto that layer and never reach the app's surface, so the surface vote alone
+     *  does not tell SurfaceFlinger the game's cadence. Same rate and compatibility as
+     *  {@code Surface.setFrameRate}; {@code 0} clears the vote. Callable any time from any thread; the
+     *  compositor applies it on its next layer transaction and writes one `layer` line per change to
+     *  the session log. A no-op on Android versions without {@code ASurfaceTransaction_setFrameRate}. */
+    public static native void nativeSetLayerFrameRate(float hz);
+
     /** The container's screen size, advertised as the Wayland output's mode so Wine's display-mode
      *  list stops at the desktop size, as the X server's does on X11. Set before the compositor starts. */
     public static native void nativeSetOutputSize(int width, int height);

@@ -310,6 +310,14 @@ app window ....... Compose UI, the in-game drawer, the perf HUD, the on-screen c
   `sc_layer_hide_overlay()` only the overlay (the window above the game closed — the game keeps its
   layer), and `sc_layer_window_gone()` retires both SurfaceControls and drains both pools on a
   surface loss / HOME / resume.
+- **The display frame-rate vote belongs to one layer.** The refresh-rate stream's
+  `sc_layer_set_frame_rate()` (the game's cadence, the same value the app votes on its own surface)
+  is carried **only** by the layer the game presents on — the game layer. The overlay layer is
+  explicitly voted `0`, so a window that redraws once a second can never hold the panel at the
+  game's cadence, nor drag the game's cadence down to its own. Each layer remembers what its live
+  SurfaceControl carries (`fps_applied`) and re-applies on the next transaction, and a retired
+  SurfaceControl resets it so a re-created layer is re-voted from scratch. Log: `display frame-rate
+  vote on banner_wayland_game: 60.00 Hz`.
 - **Stats.** The 10 s `stats` line now ends with `| N zero-copy frames` (the game's own buffers) and
   `| N layer frames` (frames the compositor put on a layer through one of its own buffers — the
   plain layer blit or the effects result). Both are hardware-composed; only the first is copy-free.

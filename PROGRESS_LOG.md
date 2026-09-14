@@ -1,5 +1,37 @@
 # Star-Compose — Progress Log
 
+## 2026-09-13 (later) — 🌊🖥️ **Wayland VRR: the refresh-rate vote now rides the surface that presents, plus a frame-rate hint on the zero-copy game layer** (`feat/wayland-vrr` `60c61b55`)
+> **The premise I was given did not hold, and the honest version is below.** The brief said `applyVrr()` returns early on Wayland because `xServerView == null`. It is not null: `setupUI()` builds an `XServerView` and `rootView.addView(xServerView)` runs in a Wayland session too (the compositor's SurfaceView is overlaid on top of it). So `applyVrr` never early-returned, `applyWindowPreferredRefreshRate()` and the drawer's `displayTargetHz` were already running, and on the Pocket FIT **refresh-rate matching on Wayland was already moving the panel**. Measured on the installed pre-release 4 (`abbe1028…`) before touching anything, container 7 + Half-Life 2 + Wayland, all foregrounded:
+> - 20:11:32 Auto + 60 cap → `refreshRate=60.000004`, `setFrameRate=(uid, frameRate)={10249, 60.00 Hz}`
+> - 20:13:31 30 cap, no frame gen → panel `60.000004`, vote `{10249, 30.00 Hz}` (30 is not a panel mode; SurfaceFlinger runs 60 and gives the uid a 30 Hz divisor override — correct)
+> - 20:15:22 LSFG Native x2 armed on a 30 cap → panel `60.000004`, vote `{10249, 60.00 Hz}` (the `cap x multiplier` pick), compositor log `LSFG Native x2 armed … generating: LSFG Native x2 at 1280x720`
+> - 20:16:30 zero-copy on, 30 cap → panel `60.000004`, vote `{10249, 30.00 Hz}`
+> - 20:18:10 cap off → panel `144.00002`, vote `{10249, 144.00 Hz}`
+>
+> **The real defect, and it is provable.** In a Wayland session the vote was issued on the X server view's surface — a layer that never presents one frame. `dumpsys SurfaceFlinger --latency` on the two BLAST SurfaceViews of the session, taken while the game ran at the 30 cap:
+> ```
+> === #56437 (X server view) ===      === #56440 (Wayland compositor) ===
+> 16666666                            16666666
+> 0	0	0                       82193481874947	82193505450884	82193483638436
+> 0	0	0                       82193515097447	82193538780155	82193516897134
+> 0	0	0                       82193548557082	82193572109217	82193550416405
+> ```
+> All-zero rows for the whole 128-row history on the layer that carries the vote; real timestamps ~33.3 ms apart on the layer that carries the game. It works today only because AOSP's `LayerHistory::isLayerActive()` keeps a **visible** layer with a valid `setFrameRate` vote in the active set whatever its buffer history — an accident we were relying on, not a design. And the zero-copy game layer (`banner_wayland_game`, an `ASurfaceControl` the game's own buffers go onto, bypassing every app surface) carried **no vote at all**.
+>
+> **What changed.** `applyVrr()` now only decides the rate; the new `routeVrrVote()` decides where it goes — X11 → `xServerView.setDisplayFrameRate()` exactly as before, Wayland → the compositor's SurfaceView via `Surface.setFrameRate` with the same API-30/31 guards and the same `CHANGE_FRAME_RATE_ALWAYS` strategy `XServerView` uses, remembered and re-asserted in the Wayland `surfaceCreated`. The early return and both `setDisplayFrameRate(0f)` clear sites (onStop, the FG-reset background half) are backend-agnostic now. On the native side `sc_layer.c` dlsyms `ASurfaceTransaction_setFrameRateWithChangeStrategy` (API 31, preferred) and `ASurfaceTransaction_setFrameRate` (API 30) next to the other transaction entry points, both optional, and applies the same rate and compatibility on the game layer when the SurfaceControl is created and on every later change — exposed as `WaylandCompositor.nativeSetLayerFrameRate()`, set from the app thread, applied on the compositor thread's next transaction so no transaction is ever built off-thread. One `layer` line per change, never per frame.
+>
+> **Proved on the fixed build** (CI run `34791664379` green at `60c61b55`, pubg APK `e13d5b21…`, installed and sha-verified on the Pocket FIT). Container 7, Half-Life 2, Wayland, `Proton-11.0-2.1-arm64ec-6`:
+> - **(a)+(e) Auto + 60 cap with zero-copy ON** → panel `refreshRate=60.000004`, vote `{10249, 60.00 Hz}`, and the layer hint applied at creation: `20:20:49.631  layer  display frame-rate vote on the game layer: 60.00 Hz` one line before `SurfaceControl "banner_wayland_game" created` / `zero-copy: presenting "HALF-LIFE 2 - Direct3D 9" (hl2.exe) without a copy`. This is the case the surface vote cannot describe — the game's frames are on the layer.
+> - **(b) cap off** → panel `144.00002`, vote `{10249, 144.00 Hz}`, `20:21:17.999  layer  display frame-rate vote on the game layer cleared (panel runs free)`.
+> - **(c) manual lock 90, Auto off, cap still 60** → panel `refreshRate=90.0`, vote `{10249, 90.00 Hz}`, `20:23:22.241  layer  display frame-rate vote on the game layer: 90.00 Hz`. The lock is independent of the cap, as designed.
+> - **(d) LSFG Native x2 on a 30 cap** → panel `60.000004`, vote `{10249, 60.00 Hz}`, drawer reads `30 real → 60 shown (2x)`. Note the compositor deliberately **pauses zero-copy under frame gen** (`framegen  zero-copy paused: frame generation needs the compositor pass`), so (d) and (e) cannot be true in the same instant — (e) is proved without frame gen, above.
+> - **(f) X11 regression** — same container, `displayBackend=x11`, Auto + 60 cap: one BLAST SurfaceView (no compositor surface), panel `60.000004`, vote `{10249, 60.00 Hz}`, HUD `D3D9 · DXVK … 60.0 fps · 16.7 ms · X11`. Unchanged.
+> - Full vote-change trail from one session, one line per change, none per frame: `60.00 Hz` → `cleared` → `60.00 Hz` → `30.00 Hz`.
+>
+> **Not proved.** Power draw: the device sat on the charger at 100 %, so `/sys/class/power_supply/battery/current_now` reads charge current (6408) and cannot show the panel saving — no A/B worth quoting. No other GPU or Android version was touched, so "the symbol is absent on older Android" is a code path, not a device result. The user's original report (panel pinned at 144 under LSFG) did **not** reproduce here; the most likely explanation is configuration — container 7 saves `matchRefreshRate=0`, and a shortcut that carries its own `matchRefreshRate` extra makes the in-game Auto toggle inert because `resolvedMatchRefreshRate()` prefers the shortcut extra over the container value the toggle writes. That is a separate pre-existing per-game-override quirk, untouched here and worth a look.
+>
+> **Device state left behind:** the Pocket FIT now runs `e13d5b21…` (this branch), **not** pre-release 4. Container 7's `frameGenMultiplier` (4) and `manualRefreshRate` (0) were restored after the drawer drove them; the test shortcut and the staged APK are deleted and the user's five Desktop shortcuts are untouched. Branch is not merged and nothing was released.
+
 ## 2026-09-13 (later) — ⏸️ **Superset v8: step 1 closed out, pausing until tomorrow**
 > - The seven post-merge parent builds all came back green under their new per-layer workflow names, so every layer branch now builds through the hardened pipeline end to end. Shipped layers are unchanged: all seven are still the v7 Wine XP builds; no v8 exists yet.
 > - Resume point: step 2, the two device A/Bs on the Pocket FIT (Rockstar Launcher / Social Club UI, and TF2 + Brawlhalla launch livelock — 11.0-2 vs GE 11.0-6). Then step 3 targeted fixes, then the Option A base decision (Valve bleeding-edge at GE-Proton 11-6's pin).

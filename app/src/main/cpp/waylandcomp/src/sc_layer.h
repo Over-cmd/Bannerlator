@@ -68,6 +68,17 @@ int sc_layer_present_pass(const struct vkp_draw *draws, int n, int scene_w, int 
 int sc_layer_present_ahb(AHardwareBuffer *ahb, int w, int h, int acquire_fd, void *token,
                          int scene_w, int scene_h);
 
+/* Vote a panel refresh rate for the layer the game presents on (VRR / refresh-rate matching), the
+ * same rate and compatibility the app votes on its own surface with Surface.setFrameRate; 0 = no
+ * vote. Needed because a zero-copy game's frames go onto the GAME layer and never reach the app's
+ * surface, so the surface vote alone does not describe the game's cadence to SurfaceFlinger. Only
+ * the game layer ever carries it: the overlay layer is explicitly voted 0, so a window that redraws
+ * once a second can never hold (or drop) the panel at the game's cadence. Callable from any thread
+ * at any time (it only stores the rate); the compositor applies it with the layer's next
+ * transaction, and re-applies it whenever a SurfaceControl is re-created. A no-op on devices whose
+ * libandroid has no ASurfaceTransaction_setFrameRate. */
+void sc_layer_set_frame_rate(float fps);
+
 /* OVERLAY layer: show `src` (one window's imported frame) above the game layer, at the placement
  * `geo` = {src x0,y0,x1,y1 in image pixels, dst x0,y0,x1,y1 in output pixels} from vkp_map_draw.
  * 0 = shown or dropped, -1 = unavailable (the caller must fall back to the copy path). */
