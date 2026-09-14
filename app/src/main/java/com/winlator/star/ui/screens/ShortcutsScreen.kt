@@ -7227,6 +7227,7 @@ internal fun ShortcutSettingsDialogScreen(
                     var showWrapperManager by remember { mutableStateOf(false) }
                     val gfxContext = LocalContext.current
                     var compositorChoices by remember { mutableStateOf<List<String>>(emptyList()) }
+                    var compositorChoicesLoaded by remember { mutableStateOf(false) }
                     // Wayland GAME driver choices + the variant Auto resolves to (native probe, off-main
                     // under graphicsProbeMutex with the compositor choices; cached after the first run).
                     var waylandGameDriverValues by remember { mutableStateOf<List<String>>(emptyList()) }
@@ -7234,6 +7235,7 @@ internal fun ShortcutSettingsDialogScreen(
                     LaunchedEffect(effectiveWaylandShortcut) {
                         if (!effectiveWaylandShortcut) return@LaunchedEffect
                         compositorChoices = compositorDriverChoices(gfxContext) // same source as the config dialog
+                        compositorChoicesLoaded = true
                         waylandGameDriverValues = com.winlator.star.core.WaylandGameDriver.optionValues(gfxContext)
                         waylandAutoPick = waylandAutoVariant(gfxContext)
                     }
@@ -7244,7 +7246,7 @@ internal fun ShortcutSettingsDialogScreen(
                                 dp, "gfxDriver",
                                 label = "Compositor driver",
                                 options = compositorChoices,
-                                selected = if (compositorVersion in compositorChoices) compositorVersion else "",
+                                selected = compositorDriverLabel(compositorVersion, compositorChoices, compositorChoicesLoaded),
                                 onSelect = { graphicsDriverConfig = withGraphicsDriverVersion(graphicsDriverConfig, it) },
                                 modifier = Modifier.weight(1f)
                             )
@@ -7286,10 +7288,11 @@ internal fun ShortcutSettingsDialogScreen(
                         }
                     } else {
                         // "System"/empty falls back to the system libvulkan, which can't import the
-                        // game's dmabufs (black screen) — mirrors XServerDisplayActivity's resolve. Warn only.
-                        if (compositorVersion.isEmpty() || compositorVersion == "System") {
+                        // game's dmabufs (black screen) — mirrors XServerDisplayActivity's resolve; so
+                        // does an id that is no longer installed. Warn only.
+                        if (compositorDriverUnusable(compositorVersion, compositorChoices, compositorChoicesLoaded)) {
                             Text(
-                                """Wayland needs a Turnip driver here. "System" cannot import the game's frames and shows a black screen.""",
+                                """Wayland needs a Turnip driver here. "System" or a missing driver cannot import the game's frames and shows a black screen.""",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.error
                             )

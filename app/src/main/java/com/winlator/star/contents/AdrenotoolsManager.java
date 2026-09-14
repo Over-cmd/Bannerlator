@@ -86,6 +86,22 @@ public class AdrenotoolsManager {
         return driverVersion;
     }
 
+    // meta.json "vendor" ("Mesa", "Qualcomm", ...), or "" when the package doesn't declare one
+    // (the bundled turnip-sdk36 meta.json carries only libraryName).
+    public String getDriverVendor(String adrenoToolsDriverId) {
+        String vendor = "";
+        File driverPath = new File(adrenotoolsContentDir, adrenoToolsDriverId);
+        try {
+            File metaProfile = new File(driverPath, "meta.json");
+            if (!metaProfile.exists()) return "";
+            JSONObject jsonObject = new JSONObject(FileUtils.readString(metaProfile));
+            vendor = jsonObject.optString("vendor", "");
+        }
+        catch (Exception e) {
+        }
+        return vendor;
+    }
+
     public String getDriverPath(String adrenotoolsDriverId) {
         return adrenotoolsContentDir.getAbsolutePath() + "/" + adrenotoolsDriverId + "/";
     }

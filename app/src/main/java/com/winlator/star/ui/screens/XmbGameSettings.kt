@@ -316,15 +316,20 @@ private fun generalRows(xmb: XmbScope, p: XmbPrefs, host: XmbGameHost): List<Xmb
             }
         }
         val turnips = ((xmbBundledDriverVersions ?: emptyList()) + importedDriverVersions(p.context)).distinct()
-        rows += XmbRow.Choice("gfxDriver", "Compositor driver", Icons.Filled.Memory, turnips, if (compositorVersion in turnips) compositorVersion else "",
+        val turnipsLoaded = xmbBundledDriverVersions != null
+        rows += XmbRow.Choice("gfxDriver", "Compositor driver", Icons.Filled.Memory, turnips,
+            compositorDriverLabel(compositorVersion, turnips, turnipsLoaded),
             subtitle = "Used by the Wayland compositor to put frames on screen; the game renders on the Wayland game driver below.") { v ->
             xmb.set(p, "graphicsDriverConfig", withGraphicsDriverVersion(gdc, v))
         }
         // "System"/empty falls back to the system libvulkan, which can't import the game's dmabufs
-        // (black screen) — mirrors XServerDisplayActivity's Wayland driver resolve. Warn only.
-        if (compositorVersion.isEmpty() || compositorVersion == "System") {
-            rows += XmbRow.Info("gfxSystemWarn", "Compositor driver is \"System\"", Icons.Filled.Info,
-                subtitle = """Wayland needs a Turnip driver here. "System" cannot import the game's frames and shows a black screen.""")
+        // (black screen) — mirrors XServerDisplayActivity's Wayland driver resolve; so does an id
+        // that is no longer installed. Warn only.
+        if (compositorDriverUnusable(compositorVersion, turnips, turnipsLoaded)) {
+            val isSystem = compositorVersion.isEmpty() || compositorVersion == "System"
+            rows += XmbRow.Info("gfxSystemWarn",
+                if (isSystem) "Compositor driver is \"System\"" else "Compositor driver is not available", Icons.Filled.Info,
+                subtitle = """Wayland needs a Turnip driver here. "System" or a missing driver cannot import the game's frames and shows a black screen.""")
         }
         // Wayland game driver (per-game override of the container's waylandGameDriver; "" = container
         // default): Auto / the bundled Turnip variants / imported Linux ICDs — same options and labels

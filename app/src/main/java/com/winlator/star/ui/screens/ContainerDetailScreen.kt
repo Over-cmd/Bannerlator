@@ -903,9 +903,10 @@ private fun TopLevelFields(
                 disabledOptions = if (waylandCapable) emptySet() else setOf(backendLabels[1]),
                 onSelect = {
                     val picked = backendValues[backendLabels.indexOf(it)]
-                    viewModel.displayBackend =
+                    viewModel.onDisplayBackendChanged(
                         if (picked == Container.DISPLAY_BACKEND_WAYLAND && !waylandCapable) Container.DISPLAY_BACKEND_X11
                         else picked
+                    )
                 }
             )
             if (viewModel.isWaylandBackend) {
@@ -946,14 +947,19 @@ private fun TopLevelFields(
         var showWrapperManager by remember { mutableStateOf(false) }
         val compositorDriverOnly = viewModel.isWaylandBackend
         var compositorChoices by remember { mutableStateOf<List<String>>(emptyList()) }
+        var compositorChoicesLoaded by remember { mutableStateOf(false) }
+        // Bumped after a driver is installed from the warning below, to re-read the choices.
+        var compositorChoicesKey by remember { mutableIntStateOf(0) }
+        var showDriverDownload by remember { mutableStateOf(false) }
         // Wayland GAME driver choices (bundled variants + imported Linux ICDs) and the variant Auto
         // resolves to on this GPU — the latter is a native probe, so it runs with the compositor
         // choices off-main under graphicsProbeMutex (cached per process after the first run).
         var waylandGameDriverValues by remember { mutableStateOf<List<String>>(emptyList()) }
         var waylandAutoPick by remember { mutableStateOf(com.winlator.star.core.WaylandGameDriver.autoVariantIfKnown()) }
-        LaunchedEffect(compositorDriverOnly) {
+        LaunchedEffect(compositorDriverOnly, compositorChoicesKey) {
             if (!compositorDriverOnly) return@LaunchedEffect
             compositorChoices = compositorDriverChoices(context) // same source as the config dialog
+            compositorChoicesLoaded = true
             waylandGameDriverValues = com.winlator.star.core.WaylandGameDriver.optionValues(context)
             waylandAutoPick = waylandAutoVariant(context)
         }
@@ -964,8 +970,8 @@ private fun TopLevelFields(
                 LabeledDropdown(
                     label = "Compositor driver",
                     options = compositorChoices,
-                    selectedOption = if (compositorVersion in compositorChoices) compositorVersion else "",
-                    onSelect = { viewModel.graphicsDriverConfig = withGraphicsDriverVersion(viewModel.graphicsDriverConfig, it) },
+                    selectedOption = compositorDriverLabel(compositorVersion, compositorChoices, compositorChoicesLoaded),
+                    onSelect = { viewModel.onCompositorDriverPicked(it) },
                     modifier = Modifier.weight(1f)
                 )
             } else {
@@ -995,12 +1001,45 @@ private fun TopLevelFields(
         if (compositorDriverOnly) {
             // The compositor imports the game's dmabufs, which only an installed Turnip can do:
             // an empty/"System" version falls back to the system libvulkan (see
-            // XServerDisplayActivity's Wayland driver resolve) and shows a black screen. Warn only.
-            if (compositorVersion.isEmpty() || compositorVersion == "System") {
-                Text(
-                    """Wayland needs a Turnip driver here. "System" cannot import the game's frames and shows a black screen.""",
+            // XServerDisplayActivity's Wayland driver resolve) and shows a black screen. The view-model
+            // fills an empty/"System" one with the newest installed driver that proves it can import
+            // them (defaultCompositorDriver); the warning is for when none can, or for a stored id
+            // that is no longer available — then with a way to get one.
+            when {
+                viewModel.compositorDriverSearching -> Text(
+                    "Looking for an installed Turnip that can import the game's frames…",
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                compositorDriverUnusable(compositorVersion, compositorChoices, compositorChoicesLoaded) -> {
+                    Text(
+                        if (viewModel.compositorDriverNoneUsable)
+                            """No installed driver can import the game's frames, so this runs on "System" and shows a black screen. Wayland needs a Turnip driver here."""
+                        else
+                            """Wayland needs a Turnip driver here. "System" or a missing driver cannot import the game's frames and shows a black screen.""",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                    TextButton(onClick = { showDriverDownload = true }) {
+                        Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Download a Turnip driver")
+                    }
+                }
+                viewModel.compositorDriverAutoPicked == compositorVersion -> Text(
+                    "Picked for you: the newest installed Turnip that can import the game's frames.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            if (showDriverDownload) {
+                com.winlator.star.ui.screens.adrenodownload.AdrenoDriverDownloadSheet(
+                    onDismiss = { showDriverDownload = false },
+                    onDriverInstalled = {
+                        showDriverDownload = false
+                        compositorChoicesKey++
+                        viewModel.onCompositorDriversChanged()
+                    }
                 )
             }
             Text(
@@ -2847,6 +2886,111 @@ internal fun importedDriverVersions(context: Context): List<String> =
  */
 internal suspend fun compositorDriverChoices(context: Context): List<String> =
     (supportedBundledDriverVersions(context) + importedDriverVersions(context)).distinct()
+
+/**
+ * What the Wayland "Compositor driver" field shows for the stored `version`. The picker leaves
+ * "System" out on purpose, so matching the stored value against the options (the old
+ * `if (v in choices) v else ""`) rendered both a new container's empty version and a carried-over
+ * "System" as a BLANK field. Name what is stored instead: empty behaves exactly like "System" at
+ * launch (XServerDisplayActivity's Wayland resolve skips adrenotools for both), and an id the
+ * picker no longer offers is shown as not available rather than hidden. [choicesLoaded] keeps the
+ * stored id as-is while the choice list is still being probed.
+ */
+internal fun compositorDriverLabel(version: String, choices: List<String>, choicesLoaded: Boolean): String = when {
+    version.isEmpty() || version == "System" -> "System"
+    choicesLoaded && version !in choices -> "$version (not available)"
+    else -> version
+}
+
+/** True when [version] cannot drive the Wayland compositor: "System"/empty, or an id the picker doesn't offer. */
+internal fun compositorDriverUnusable(version: String, choices: List<String>, choicesLoaded: Boolean): Boolean =
+    version.isEmpty() || version == "System" || (choicesLoaded && version !in choices)
+
+/**
+ * The dmabuf-import device extensions the Wayland compositor enables at vkCreateDevice
+ * (waylandcomp vk_present.c dev_init). A driver without all four fails device creation, which is
+ * the black screen "System" gives. VK_KHR_swapchain, the fifth extension it enables, comes from
+ * Android's Vulkan loader for every driver, so it tells the candidates nothing.
+ */
+private val COMPOSITOR_IMPORT_EXTENSIONS = listOf(
+    "VK_KHR_external_memory_fd", "VK_EXT_external_memory_dma_buf",
+    "VK_EXT_image_drm_format_modifier", "VK_KHR_image_format_list",
+)
+
+private class CompositorDriverVerdict(val usable: Boolean, val vulkanVersion: List<Int>, val reason: String)
+
+// Per-process verdicts keyed by driver id + its folder's mtime, so a re-import under the same id is
+// probed again. Read and written only under graphicsProbeMutex.
+private val compositorDriverVerdicts = HashMap<String, CompositorDriverVerdict>()
+
+/**
+ * The driver a Wayland form fills into an empty/"System" Compositor driver, or null when no
+ * installed driver can do the job. Decided from what each driver proves about itself, not from
+ * its name:
+ *  1. candidates are exactly what the picker offers ([compositorDriverChoices]);
+ *  2. a driver whose meta.json declares a proprietary vendor (Qualcomm, e.g. the bundled v819) is
+ *     not a Turnip and is skipped unprobed, as is an import that isn't a Mesa libvulkan_* build —
+ *     the config dialog's rule: proprietary blobs are never probed in-process;
+ *  3. every other candidate is probed like the config dialog's extension list: it must load itself
+ *     (no silent fall-back to the system ICD) and list all of [COMPOSITOR_IMPORT_EXTENSIONS];
+ *  4. of those, the one reporting the highest Vulkan version (the newest Mesa) wins; a tie keeps
+ *     the picker's order.
+ * The Turnip bundled with the app goes through the same test, so a user who never imported a
+ * driver still gets it when it passes.
+ */
+internal suspend fun defaultCompositorDriver(context: Context): String? {
+    val choices = compositorDriverChoices(context)   // takes graphicsProbeMutex itself
+    return withContext(Dispatchers.IO) {
+        val mgr = AdrenotoolsManager(context)
+        val imported = importedDriverVersions(context).toSet()
+        graphicsProbeMutex.withLock {
+            choices.map { it to compositorDriverVerdict(context, mgr, it, it in imported) }
+                .filter { it.second.usable }
+                .maxWithOrNull(Comparator { a, b -> compareVulkanVersions(a.second.vulkanVersion, b.second.vulkanVersion) })
+                ?.first
+        }
+    }.also { android.util.Log.i("CompositorDriver", "default for a Wayland form: ${it ?: "none (no installed driver can import the game's frames)"}") }
+}
+
+private fun compositorDriverVerdict(context: Context, mgr: AdrenotoolsManager, id: String, imported: Boolean): CompositorDriverVerdict {
+    val dir = File(mgr.getDriverPath(id))
+    val key = "$id@${dir.lastModified()}"
+    compositorDriverVerdicts[key]?.let { return it }
+    val vendor = mgr.getDriverVendor(id)
+    val library = mgr.getLibraryName(id)
+    val verdict = when {
+        // Without its folder the native probe would silently report the SYSTEM driver's extensions.
+        !dir.isDirectory -> CompositorDriverVerdict(false, emptyList(), "not installed")
+        vendor.contains("qualcomm", ignoreCase = true) ->
+            CompositorDriverVerdict(false, emptyList(), "proprietary $vendor driver, not a Turnip (not probed)")
+        imported && !library.startsWith("libvulkan", ignoreCase = true) ->
+            CompositorDriverVerdict(false, emptyList(), "not a Mesa build ($library, not probed)")
+        else -> {
+            val exts = runCatching { GPUInformation.enumerateExtensions(id, context)?.toSet() }.getOrNull() ?: emptySet()
+            val fellBack = GPUInformation.driverLoadedFellBack()
+            val missing = COMPOSITOR_IMPORT_EXTENSIONS.filterNot { it in exts }
+            when {
+                fellBack || exts.isEmpty() -> CompositorDriverVerdict(false, emptyList(), "does not load on this GPU")
+                missing.isNotEmpty() -> CompositorDriverVerdict(false, emptyList(), "missing ${missing.joinToString()}")
+                else -> {
+                    val v = runCatching { GPUInformation.getVulkanVersion(id, context) }.getOrNull() ?: ""
+                    CompositorDriverVerdict(true, v.split('.').mapNotNull { it.trim().toIntOrNull() }, "imports dmabufs, Vulkan $v")
+                }
+            }
+        }
+    }
+    android.util.Log.i("CompositorDriver", "$id: ${if (verdict.usable) "usable" else "not usable"} - ${verdict.reason}")
+    compositorDriverVerdicts[key] = verdict
+    return verdict
+}
+
+private fun compareVulkanVersions(a: List<Int>, b: List<Int>): Int {
+    for (i in 0 until maxOf(a.size, b.size)) {
+        val d = a.getOrElse(i) { 0 }.compareTo(b.getOrElse(i) { 0 })
+        if (d != 0) return d
+    }
+    return 0
+}
 
 /**
  * The bundled Wayland Turnip variant "Auto" resolves to on this GPU (WaylandGameDriver.VARIANT_*),

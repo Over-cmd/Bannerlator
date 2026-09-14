@@ -40,6 +40,7 @@ import com.winlator.star.midi.MidiManager
 import com.winlator.star.winhandler.WinHandler
 import com.winlator.star.xserver.XKeycode
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -150,6 +151,20 @@ class ContainerDetailViewModel(app: Application) : AndroidViewModel(app) {
     // imported:<id>). Only shown/used on the Wayland backend; kept as stored on X11 so flipping the
     // backend back and forth doesn't lose it. See core.WaylandGameDriver.
     var waylandGameDriver by mutableStateOf(Container.WAYLAND_GAME_DRIVER_AUTO)
+
+    // Wayland COMPOSITOR driver default. The compositor puts the game's frames on screen through the
+    // adrenotools driver named by graphicsDriverConfig's "version"; empty/"System" is the system
+    // Vulkan driver, which can't import them (black screen). Whenever the form is on Wayland with an
+    // empty/"System" version, the form STATE gets defaultCompositorDriver()'s pick — on load (create,
+    // edit, New Container Defaults) and on a switch to Wayland — so the one writer (applyFormTo)
+    // saves what the field shows. An explicit value is never replaced, and going back to X11 before
+    // saving restores the value from before the fill (the same key is the X11 game driver's version).
+    var compositorDriverAutoPicked by mutableStateOf<String?>(null); private set
+    var compositorDriverSearching by mutableStateOf(false); private set
+    // A search ran on Wayland and no installed driver can import the game's frames.
+    var compositorDriverNoneUsable by mutableStateOf(false); private set
+    private var compositorFillJob: Job? = null
+    private var versionBeforeCompositorFill: String? = null
 
     // Whether the given wine/Proton layer ships winewayland.so + its bundled Wayland Turnip. Same
     // early-composition caveat as isWineXrandrCapable, but the conservative default is NOT capable:
@@ -715,6 +730,69 @@ class ContainerDetailViewModel(app: Application) : AndroidViewModel(app) {
             }
             xrMappingIndices.add(idx)
         }
+
+        // A form loaded on Wayland with an empty/"System" compositor driver gets the default now.
+        resetCompositorFill()
+        syncCompositorDriverWithBackend()
+    }
+
+    /** The Display backend dropdown. */
+    fun onDisplayBackendChanged(backend: String) {
+        displayBackend = backend
+        syncCompositorDriverWithBackend()
+    }
+
+    /** The Compositor driver dropdown: an explicit pick, kept from here on (never restored or refilled). */
+    fun onCompositorDriverPicked(version: String) {
+        graphicsDriverConfig = withGraphicsDriverVersion(graphicsDriverConfig, version)
+        resetCompositorFill()
+    }
+
+    /** A driver was just installed from the editor: look for a usable compositor driver again. */
+    fun onCompositorDriversChanged() {
+        compositorDriverNoneUsable = false
+        syncCompositorDriverWithBackend()
+    }
+
+    private fun compositorVersion(): String = GraphicsDriverConfigDialog.getVersion(graphicsDriverConfig) ?: ""
+
+    private fun resetCompositorFill() {
+        compositorFillJob?.cancel()
+        compositorDriverSearching = false
+        compositorDriverNoneUsable = false
+        compositorDriverAutoPicked = null
+        versionBeforeCompositorFill = null
+    }
+
+    /**
+     * Keep the compositor driver in step with the EFFECTIVE backend. On Wayland an empty/"System"
+     * version is filled with [defaultCompositorDriver]'s pick (a native probe, so off-main; the
+     * value is re-checked when it lands, in case the user picked one or left Wayland meanwhile). On
+     * X11 our own fill is undone, unless the user has picked a driver since.
+     */
+    private fun syncCompositorDriverWithBackend() {
+        if (!isWaylandBackend) {
+            val before = versionBeforeCompositorFill
+            val picked = compositorDriverAutoPicked
+            if (before != null && picked != null && compositorVersion() == picked)
+                graphicsDriverConfig = withGraphicsDriverVersion(graphicsDriverConfig, before)
+            resetCompositorFill()
+            return
+        }
+        val current = compositorVersion()
+        if ((current.isNotEmpty() && current != "System") || compositorFillJob?.isActive == true) return
+        compositorDriverSearching = true
+        compositorFillJob = viewModelScope.launch {
+            // A cancelled older search must not clear the flag of the one that replaced it.
+            val pick = try { defaultCompositorDriver(context) }
+                       finally { if (compositorFillJob === coroutineContext[Job]) compositorDriverSearching = false }
+            val now = compositorVersion()
+            if (!isWaylandBackend || (now.isNotEmpty() && now != "System")) return@launch
+            if (pick == null) { compositorDriverNoneUsable = true; return@launch }
+            versionBeforeCompositorFill = now
+            graphicsDriverConfig = withGraphicsDriverVersion(graphicsDriverConfig, pick)
+            compositorDriverAutoPicked = pick
+        }
     }
 
     private fun refreshWineDependent(wineVersion: String) {
@@ -835,6 +913,7 @@ class ContainerDetailViewModel(app: Application) : AndroidViewModel(app) {
         coerceAudioDriverForWine()      // a switch to an unsupported layer drops a stale DirectAudio pick
         // Wayland is only offered on a layer that ships winewayland + its Wayland Turnip: snap back to X11.
         if (isWaylandStored && !isWineWaylandCapable(version)) displayBackend = Container.DISPLAY_BACKEND_X11
+        syncCompositorDriverWithBackend() // a stored Wayland becomes effective on a capable layer
         refreshWineDependent(version)   // updates isArm64EC + swaps the box64/wowbox64 list
 
         // CREATE mode only: a wine change can FLIP the architecture. applyArch() swapped the box64 list
@@ -901,6 +980,19 @@ class ContainerDetailViewModel(app: Application) : AndroidViewModel(app) {
         resolvedColorAsString: String,
         onDone: () -> Unit
     ) {
+        // A Wayland compositor default still being probed: let it land, then save. The fill only
+        // rewrites graphicsDriverConfig, and the screen passes that straight from this view-model,
+        // so re-reading it here saves exactly what the field shows once the pick is in.
+        compositorFillJob?.takeIf { it.isActive }?.let { pending ->
+            isSaving = true
+            viewModelScope.launch(Dispatchers.Main) {
+                pending.join()
+                isSaving = false
+                confirm(graphicsDriverConfig, resolvedDXWrapperConfig, resolvedFPSCounterConfig, resolvedEnvVars,
+                    resolvedCPUList, resolvedCPUListWoW64, resolvedColorAsString, onDone)
+            }
+            return
+        }
         // Defaults mode: the ✓ saves the field state as the user's new-container defaults profile
         // instead of creating a container (no Wine gate — a template can be saved before any Wine is
         // installed; the gate below still protects real create/edit).
