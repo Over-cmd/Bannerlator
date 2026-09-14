@@ -624,8 +624,10 @@ public class GuestProgramLauncherComponent extends EnvironmentComponent {
             }
         }
 
-        // Wayland: bring the prefix up to date BEFORE the desktop session (see updatePrefixBeforeSession).
-        if (waylandMode) updatePrefixBeforeSession(envVars, winePath, rootDir, imageFs);
+        // Bring a stale prefix up to date BEFORE the session, X11 and Wayland alike, with Wine Mono's
+        // download prompt switched off for that step only (see updatePrefixBeforeSession).
+        String wineLauncher = wineInfo.isArm64EC() ? winePath + "/wine" : imageFs.getBinDir() + "/box64 wine";
+        updatePrefixBeforeSession(envVars, wineLauncher, rootDir, imageFs);
 
         return ProcessHelper.exec(command, envVars.toStringArray(), rootDir, (status) -> {
             synchronized (lock) {
@@ -638,11 +640,28 @@ public class GuestProgramLauncherComponent extends EnvironmentComponent {
     }
 
     /**
-     * Wayland only: run Wine's prefix update (the wine.inf install ntdll triggers through
-     * {@code wineboot --init} in the FIRST process of a session) in a throwaway headless session,
-     * before the real launch, whenever the prefix is stale.
+     * Run Wine's prefix update (the wine.inf install ntdll triggers through {@code wineboot --init}
+     * in the FIRST process of a session) in a throwaway session of its own - headless on Wayland, on
+     * the already-running X server on X11 - before the real launch,
+     * whenever the prefix is stale: a new container (no layer's prefixPack ships a stamp except the
+     * x86_64 Proton one, which says "disable") and the first launch after its layer changed. Every
+     * display backend and every layer; {@code wineLauncher} is {@code <layer>/bin/wine} for arm64ec
+     * and {@code box64 wine} otherwise, the same way the session itself is started.
      *
-     * Why: on the first launch after a layer install/repoint the prefix's {@code .update-timestamp}
+     * Mono: wine.inf's RegisterDlls section registers mscoree.dll, and mscoree's DllRegisterServer
+     * runs install_wine_mono(): no C:\windows\mono and no share/wine/mono (no layer ships Wine Mono)
+     * means {@code control.exe appwiz.cpl install_mono}, whose last resort is the "Wine Mono Installer"
+     * dialog offering a download from winehq.org. That was the prompt on every new container and every
+     * layer switch, on every layer. {@code mscoree=d} for this process tree only makes setupapi skip
+     * the registration (its COM classes are already in every prefixPack), so no prompt and no network;
+     * the game session keeps the container's own overrides untouched, so a .NET game still loads
+     * mscoree and the Wine Mono the Components installer put in the prefix. (mshtml needs nothing
+     * here: no layer's DllRegisterServer asks for Gecko; that only happens when a program uses it.)
+     *
+     * Why a separate step at all: the env above must not reach the game, and ntdll hands the FIRST
+     * process's environment to the {@code wineboot --init} it spawns, so the update cannot run inside
+     * the session with its own env. Wayland also needs it off the desktop's path: on the first launch
+     * after a layer install/repoint the prefix's {@code .update-timestamp}
      * no longer matches the layer's {@code wine.inf} mtime, so ntdll blocks explorer (the session's
      * first process) before its main() for the ~7 s install. wineboot's wait dialog then needs a
      * desktop window while none exists, win32u auto-spawns {@code explorer.exe /desktop} on the
@@ -658,9 +677,10 @@ public class GuestProgramLauncherComponent extends EnvironmentComponent {
      * by the {@code --init} instance ntdll spawns for the first process. Afterwards the wineserver
      * shuts down by itself (services only, 3 s master-socket timeout) and flushes the registry; we
      * wait for that so the real launch starts from a clean prefix, and only force-terminate as a last
-     * resort. X11 launches are untouched (they keep the in-session update).
+     * resort. X11 used to keep the in-session update; it now takes this step too, for the Mono reason,
+     * with DISPLAY kept (unlike Wayland) so nothing else about its update changes.
      */
-    private void updatePrefixBeforeSession(EnvVars guestEnv, String winePath, File rootDir, ImageFs imageFs) {
+    private void updatePrefixBeforeSession(EnvVars guestEnv, String wineLauncher, File rootDir, ImageFs imageFs) {
         final String tag = "GuestProgramLauncherComponent";
         try {
             File wineInf = new File(imageFs.getWinePath(), "share/wine/wine.inf");
@@ -679,33 +699,49 @@ public class GuestProgramLauncherComponent extends EnvironmentComponent {
             }
             if (stamped == infMtime) return;
 
-            Log.i(tag, "wayland: prefix .update-timestamp \"" + current + "\" != wine.inf mtime " + infMtime
-                    + " (" + wineInf.getPath() + "); running Wine's prefix update before the session");
             EnvVars env = new EnvVars();
             env.putAll(guestEnv);
-            // No display for this session: wineboot's wait dialog and the explorer win32u spawns for it
-            // run on the null driver instead of connecting to the compositor. libwayland falls back to
-            // "wayland-0" under XDG_RUNTIME_DIR when WAYLAND_DISPLAY is unset, so drop both.
-            env.remove("WAYLAND_DISPLAY");
-            env.remove("XDG_RUNTIME_DIR");
-            env.remove("DISPLAY");
+            if (waylandMode) {
+                // No display for this session: wineboot's wait dialog and the explorer win32u spawns for
+                // it run on the null driver instead of connecting to the compositor. libwayland falls back
+                // to "wayland-0" under XDG_RUNTIME_DIR when WAYLAND_DISPLAY is unset, so drop both.
+                env.remove("WAYLAND_DISPLAY");
+                env.remove("XDG_RUNTIME_DIR");
+                env.remove("DISPLAY");
+            }
+            // X11 keeps DISPLAY: XServerComponent starts before this component, so the X server is
+            // already up and the update runs with the same env it had inside the session.
+            // No Wine Mono download prompt (see above). Appended last: in WINEDLLOVERRIDES a later entry
+            // for the same dll replaces an earlier one, so this wins over a user's own mscoree entry.
+            String overrides = withMscoreeDisabled(env.get("WINEDLLOVERRIDES"));
+            env.put("WINEDLLOVERRIDES", overrides);
+            Log.i(tag, "prefix update: .update-timestamp \"" + current + "\" != wine.inf mtime " + infMtime
+                    + " (" + wineInf.getPath() + "); running Wine's prefix update before the "
+                    + (waylandMode ? "Wayland" : "X11") + " session, WINEDLLOVERRIDES=" + overrides);
             long t0 = System.currentTimeMillis();
-            int status = ProcessHelper.execAndWait(winePath + "/wine wineboot -h", env.toStringArray(), rootDir, 180_000);
+            int status = ProcessHelper.execAndWait(wineLauncher + " wineboot -h", env.toStringArray(), rootDir, 180_000);
             // Let the wineserver wind down on its own (it flushes the registry on exit).
             long deadline = System.currentTimeMillis() + 30_000;
             while (!ProcessHelper.listRunningWineProcesses().isEmpty() && System.currentTimeMillis() < deadline) {
                 try { Thread.sleep(200); } catch (InterruptedException e) { Thread.currentThread().interrupt(); break; }
             }
             if (!ProcessHelper.listRunningWineProcesses().isEmpty()) {
-                Log.w(tag, "wayland: wine processes still alive after the prefix update; terminating them");
+                Log.w(tag, "prefix update: wine processes still alive after the prefix update; terminating them");
                 ProcessHelper.terminateAllWineProcessesAndWait(3000, true);
             }
             String after = stamp.isFile() ? FileUtils.readString(stamp) : "";
-            Log.i(tag, "wayland: prefix update finished in " + (System.currentTimeMillis() - t0) + " ms (wineboot exit "
+            Log.i(tag, "prefix update: finished in " + (System.currentTimeMillis() - t0) + " ms (wineboot exit "
                     + status + "), .update-timestamp now \"" + (after == null ? "" : after.trim()) + "\"");
         } catch (Throwable t) {
-            Log.w(tag, "wayland: prefix update before the session failed; launching anyway", t);
+            Log.w(tag, "prefix update: the step before the session failed; launching anyway", t);
         }
+    }
+
+    /** {@code overrides} (a WINEDLLOVERRIDES value, possibly empty) with {@code mscoree=d} appended. */
+    static String withMscoreeDisabled(String overrides) {
+        String o = overrides == null ? "" : overrides.trim();
+        while (o.endsWith(";")) o = o.substring(0, o.length() - 1).trim();
+        return o.isEmpty() ? "mscoree=d" : o + ";mscoree=d";
     }
 
     private void addBox64EnvVars(EnvVars envVars, boolean enableLogs) {
