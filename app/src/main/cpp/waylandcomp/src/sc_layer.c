@@ -784,7 +784,9 @@ int sc_layer_present_pass(const struct vkp_draw *draws, int n, int scene_w, int 
  * picture with the effects applied, goes onto the game layer - one layer, tagged BT2020_PQ with the
  * game's metadata, so the display composes it as HDR (and a window above the game never needs the
  * second layer that costs this panel its hardware composition). 10-bit buffers; if gralloc or the
- * import refuses those, 8-bit ones carry the same tagged picture (colours right, precision less). */
+ * import refuses those, 8-bit ones carry the same tagged picture (colours right, precision less).
+ * With the drawer's HDR output switch off (hf->tonemap) the same picture is composed tone-mapped to
+ * sRGB instead and goes on the ordinary 8-bit buffers, UNtagged - an SDR frame like any other. */
 static uint32_t g_hdr_pool_fmt = AHB_RGB10A2;
 
 int sc_layer_present_hdr_scene(const struct vkp_draw *draws, int n, const struct vkp_hdr_frame *hf,
@@ -795,9 +797,11 @@ int sc_layer_present_hdr_scene(const struct vkp_draw *draws, int n, const struct
     if (vkp_update_map(scene_w, scene_h) != 0) return -1;
     if (vkp_pass_begin_hdr(scene_w, scene_h, draws, n, hf, &rw, &rh) != 0) return -1;
     if (!vkp_map_rect(rw, rh, scene_w, scene_h, r)) { vkp_pass_abort(); sc_layer_hide(); return 0; }
+    const int tm = hf->tonemap;
+    const uint32_t fmt = tm ? AHB_RGBA8 : g_hdr_pool_fmt;
     g_alloc_failed = 0;
-    int idx = take_free_slot(l, rw, rh, g_hdr_pool_fmt);
-    if (idx < 0 && g_alloc_failed && g_hdr_pool_fmt == AHB_RGB10A2) {
+    int idx = take_free_slot(l, rw, rh, fmt);
+    if (idx < 0 && g_alloc_failed && fmt == AHB_RGB10A2) {
         g_hdr_pool_fmt = AHB_RGBA8;
         banner_log("color", "%s: this device will not make a 10-bit layer buffer (RGBA1010102): the HDR picture goes "
                    "on 8-bit buffers instead (still tagged BT2020_PQ; less precision)", l->name);
@@ -805,15 +809,21 @@ int sc_layer_present_hdr_scene(const struct vkp_draw *draws, int n, const struct
     }
     if (idx < 0) { vkp_pass_abort(); log_drop(l); return 0; }
     if (vkp_pass_copy_to(l->slots[idx].img) != 0) return -1;
-    if (present_slot(l, idx, r, color) != 0) return -1;
-    if (color && color->dataspace) banner_color_frame_shown(color, BANNER_HDR_COMPOSED, g_hdr_pool_fmt);
-    static int said;
-    if (!said) {
-        said = 1;
-        banner_log("color", "HDR picture on its own display layer: %dx%d, %s %s buffers, tagged %s", rw, rh,
-                   l->pool_modifier == MOD_QCOM_COMPRESSED ? "UBWC" : "linear",
-                   g_hdr_pool_fmt == AHB_RGB10A2 ? "10-bit" : "8-bit",
-                   color && color->dataspace == BANNER_ADATASPACE_BT2020_PQ ? "BT2020_PQ" : "HDR");
+    if (present_slot(l, idx, r, tm ? NULL : color) != 0) return -1; /* tone-mapped = plain sRGB: no tag */
+    if (color && color->dataspace)
+        banner_color_frame_shown(color, tm ? BANNER_HDR_TONEMAPPED : BANNER_HDR_COMPOSED, tm ? AHB_RGBA8 : g_hdr_pool_fmt);
+    static int said = -1;
+    if (said != tm) {
+        said = tm;
+        if (tm)
+            banner_log("color", "tone-mapped picture on the game's display layer: %dx%d, %s 8-bit buffers, untagged "
+                       "(sRGB) - HDR output is switched off", rw, rh,
+                       l->pool_modifier == MOD_QCOM_COMPRESSED ? "UBWC" : "linear");
+        else
+            banner_log("color", "HDR picture on its own display layer: %dx%d, %s %s buffers, tagged %s", rw, rh,
+                       l->pool_modifier == MOD_QCOM_COMPRESSED ? "UBWC" : "linear",
+                       g_hdr_pool_fmt == AHB_RGB10A2 ? "10-bit" : "8-bit",
+                       color && color->dataspace == BANNER_ADATASPACE_BT2020_PQ ? "BT2020_PQ" : "HDR");
     }
     if (!l->first_logged) { l->first_logged = 1; vkp_signal_first_frame(); }
     return 0;

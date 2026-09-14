@@ -1077,11 +1077,13 @@ static int render_impl(int scene_w, int scene_h, const struct vkp_draw *draws, i
                    1 + vkp_framegen_extra_images(), vkp_framegen_extra_images() ? "s" : "");
         destroy_swapchain();
     }
-    /* HDR frames presented here (frame generation with an HDR game) want an HDR10 swapchain; nothing
-     * else does. A change of that rebuilds the swapchain (only in HDR sessions: g_colorspace_ext). */
-    const int want_hdr = hf && g_colorspace_ext && !g_swap_hdr_unavailable;
+    /* HDR frames presented here (frame generation with an HDR game) want an HDR10 swapchain - unless the
+     * drawer's HDR output switch is off (tone-mapped) - nothing else does. A change of that rebuilds the
+     * swapchain (only in HDR sessions: g_colorspace_ext). */
+    const int want_hdr = hf && !hf->tonemap && g_colorspace_ext && !g_swap_hdr_unavailable;
     if (g_swapchain && want_hdr != g_swap_is_hdr) {
         banner_log("color", want_hdr ? "HDR frames with frame generation: rebuilding the screen swapchain as HDR10"
+                            : hf     ? "HDR output switched off: rebuilding the screen swapchain as SDR (frames tone-mapped)"
                                      : "no HDR frames through the screen swapchain any more: rebuilding it as SDR");
         destroy_swapchain();
     }
@@ -1101,7 +1103,6 @@ static int render_impl(int scene_w, int scene_h, const struct vkp_draw *draws, i
     const int fg = !g_plain_frame && vkp_framegen_active();
     /* An HDR scene always takes the pass: its draws are composed into one encoding first. */
     const int pass = (fx || fg || (hf && n > 0)) && ensure_scene_image(scene_w, scene_h) == 0;
-    vkp_effects_set_formats(VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM); /* this path's scene is 8-bit */
     const VkFilter blit_filter = vkp_effects_blit_filter();
 
     VkCommandBuffer cmd = g_cmds[0];
@@ -1205,6 +1206,9 @@ static int render_impl(int scene_w, int scene_h, const struct vkp_draw *draws, i
         VkImageLayout result_layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
         if (fx) {
             int mapped_w = (int)(scene_w * g_map.kx + 0.5f), mapped_h = (int)(scene_h * g_map.ky + 0.5f);
+            /* This path's scene is 8-bit. Set only where the chain really runs: a plain frame (the black
+             * base under an HDR picture) must not flip the chain's format back every frame. */
+            vkp_effects_set_formats(VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM);
             result = vkp_effects_run(cmd, g_scene.img, scene_w, scene_h, mapped_w, mapped_h, &rw, &rh);
             result_layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
         }
@@ -1536,12 +1540,14 @@ static int pass_begin_impl(int scene_w, int scene_h, const struct vkp_draw *draw
     free(bars);
 
     if (hf) {
-        /* HDR: every draw into the mixed image, then ONE encoding (PQ BT.2020, 10-bit) into the picture. */
-        if (compose_hdr(cmd, draws, n, hf, scene_w, scene_h, g_hdrscene.img, HDR_FMT, HDRC_OUT_PQ) != 0) {
+        /* HDR: every draw into the mixed image, then ONE encoding into the 10-bit picture: PQ BT.2020, or
+         * tone-mapped sRGB while the drawer's HDR output switch is off. */
+        if (compose_hdr(cmd, draws, n, hf, scene_w, scene_h, g_hdrscene.img, HDR_FMT,
+                        hf->tonemap ? HDRC_OUT_SDR : HDRC_OUT_PQ) != 0) {
             g_vk.EndCommandBuffer(cmd); /* never submitted; reset before its next use */
             return -1;
         }
-        vkp_effects_set_formats(HDR_FMT, HDR_FMT);
+        if (vkp_effects_active()) vkp_effects_set_formats(HDR_FMT, HDR_FMT);
     } else {
         VkClearColorValue black = {.float32 = {0.0f, 0.0f, 0.0f, 1.0f}};
         g_vk.CmdClearColorImage(cmd, g_scene.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &range);
@@ -1557,7 +1563,7 @@ static int pass_begin_impl(int scene_w, int scene_h, const struct vkp_draw *draw
                               draws[i].img->dmabuf ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL : VK_IMAGE_LAYOUT_GENERAL,
                               g_scene.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
         }
-        vkp_effects_set_formats(VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM);
+        if (vkp_effects_active()) vkp_effects_set_formats(VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM);
     }
 
     int mapped_w = (int)(scene_w * g_map.kx + 0.5f), mapped_h = (int)(scene_h * g_map.ky + 0.5f);

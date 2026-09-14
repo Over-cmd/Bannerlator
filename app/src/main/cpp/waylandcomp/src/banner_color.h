@@ -1,18 +1,22 @@
 #ifndef BANNER_COLOR_H
 #define BANNER_COLOR_H
 /*
- * HDR10 output on the Wayland backend, round 1 (opt-in) — the compositor half of HDR_RECON.md
- * Phase A, implemented in wl_color_mgmt.c. The game half already ships: Mesa's Wayland WSI in our
- * Turnip is a wp_color_manager_v1 client and exposes VK_COLOR_SPACE_HDR10_ST2084_EXT as soon as a
- * compositor advertises BT.2020 + ST 2084; DXVK takes it with DXVK_HDR=1.
+ * HDR10 output on the Wayland backend (opt-in) — the compositor half of HDR_RECON.md Phase A (round 1)
+ * plus HDR-aware composition (round 2, hdr_compose.h), implemented in wl_color_mgmt.c. The game half
+ * already ships: Mesa's Wayland WSI in our Turnip is a wp_color_manager_v1 client and exposes
+ * VK_COLOR_SPACE_HDR10_ST2084_EXT as soon as a compositor advertises BT.2020 + ST 2084; DXVK takes it
+ * with DXVK_HDR=1 (the app exports it when the setting is on).
  *
  * THE GATE. Nothing here exists for a session unless all of these hold when the compositor starts:
- *   - BANNER_WAYLAND_HDR=1 in the container's or the shortcut's environment (the opt-in);
+ *   - the container's / game's "HDR output" setting is on, or BANNER_WAYLAND_HDR=1 in their
+ *     environment (which overrides the setting either way);
  *   - the display the game is on lists HDR10 among its supported HDR types (read by the app from
  *     android.view.Display — a property of the connector, not of the device);
  *   - display layers with dataspace control (ASurfaceTransaction_setBufferDataSpace, Android 10+)
- *     and the zero-copy global (banner_ahb_v1): an HDR frame is only honest on the game's OWN
- *     display layer, because everything the compositor draws itself is 8-bit sRGB.
+ *     and the zero-copy global (banner_ahb_v1): the HDR frame (or the composed HDR picture) is shown
+ *     on the game's own display layer, tagged BT2020_PQ.
+ * In game, the drawer's HDR output switch (banner_color_set_output) flips between that and the same
+ * frames tone-mapped to SDR, live; the gate itself never changes during a session.
  * A closed gate advertises nothing — no colour-management global, no 10-bit dma-buf formats — so the
  * session is byte-for-byte what it was before this file existed, and the session log says why.
  * BANNER_WAYLAND_HDR=force skips the display check only (testing the negotiation on an SDR panel;
@@ -77,6 +81,15 @@ float banner_color_sdr_white(void);
 /* The HDR session was asked for (BANNER_WAYLAND_HDR / the setting resolved on or force) — known before
  * the compositor starts, so the Vulkan instance can enable VK_EXT_swapchain_colorspace for it. */
 int banner_color_requested(void);
+/* The drawer's live "HDR output" switch, per session, starting ON. On = HDR frames go to the display as
+ * HDR; off = the SAME frames are composed tone-mapped to SDR (hdr_compose.h) - the game is told nothing
+ * and keeps rendering HDR (DXVK_HDR and the colour-manager offer were decided at launch). Compositor
+ * thread (the app posts it through banner_host_hdr_output); logs the flip and redraws. */
+void banner_color_set_output(int on);
+/* 1 = HDR output on (any thread). */
+int banner_color_output(void);
+/* 1 while an HDR game's frames are being shown tone-mapped to SDR (the last one < 1.5 s ago); any thread. */
+int banner_color_tonemapped_on_screen(void);
 
 /* ---- compositor.c -> here */
 /* Decide the gate (call after ahb_swapchain_init) and create the global when it is open. */
@@ -101,7 +114,8 @@ enum banner_hdr_path {
     BANNER_HDR_LAYER_COPY,      /* one 8-bit copy of the game's frame on its layer, tagged */
     BANNER_HDR_COMPOSED,        /* the whole scene composed into one PQ picture on the game layer (hdr_compose.h) */
     BANNER_HDR_SWAPCHAIN,       /* composed into PQ and presented through an HDR10 swapchain (frame generation) */
-    BANNER_HDR_TONEMAPPED,      /* composed and tone-mapped to SDR (a present that cannot carry HDR) - NOT HDR */
+    BANNER_HDR_TONEMAPPED,      /* composed and tone-mapped to SDR (HDR output switched off, or a present that
+                                 * cannot carry HDR) - NOT HDR */
 };
 /* ahb_format = the buffer's AHARDWAREBUFFER_FORMAT_* where one exists (0 otherwise). */
 void banner_color_frame_shown(const struct banner_color *c, int path, uint32_t ahb_format);

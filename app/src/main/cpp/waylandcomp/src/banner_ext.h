@@ -38,6 +38,7 @@ void banner_host_text_commit(const char *utf8, int len);
 void banner_host_text_preedit(const char *utf8, int len, int cursor_begin, int cursor_end);
 void banner_host_text_delete(int before, int after);
 void banner_host_zero_copy(int on, int live);                 /* the drawer's zero-copy switch (ahb_swapchain_set_mode) */
+void banner_host_hdr_output(int on);                          /* the drawer's HDR output switch (banner_color_set_output) */
 
 /* ---- module internals reached through the queue (banner_ext.c → modules) */
 void clipboard_init(struct wl_display *display);

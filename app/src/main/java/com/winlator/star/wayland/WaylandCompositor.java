@@ -270,6 +270,18 @@ public final class WaylandCompositor {
      *  an HDR game, the desktop around a windowed one). Default 203 (BT.2408). Before the start. */
     public static native void nativeSetHdrSdrWhite(float nits);
 
+    /** The in-game drawer's HDR output switch (only meaningful while the HDR gate is open; per session,
+     *  starts on). On = the game's HDR frames go to the display as HDR; off = the same frames are shown
+     *  tone-mapped to SDR. Live, any thread (queued to the compositor, which logs the flip); the game is
+     *  told nothing - DXVK_HDR and the colour-manager offer were decided at launch. */
+    public static native void nativeSetHdrOutput(boolean on);
+
+    /** The HDR output switch's current state (any thread). */
+    public static native boolean nativeHdrOutput();
+
+    /** True while an HDR game's frames are being shown tone-mapped to SDR (the last one under 1.5 s ago). */
+    public static native boolean nativeHdrToneMappedOnScreen();
+
     /** Fullscreen mode ({@code Container.FULLSCREEN_OFF/FIT/STRETCH/FILL/INTEGER}) and screen alignment
      *  ({@code Container.ALIGN_CENTER/TOP/BOTTOM}): how the compositor fits the desktop onto the screen,
      *  with the same arithmetic as {@code ViewTransformation} (which maps touch input), so the picture and

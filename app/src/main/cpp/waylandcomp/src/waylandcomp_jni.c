@@ -442,6 +442,25 @@ Java_com_winlator_star_wayland_WaylandCompositor_nativeSetHdrSdrWhite(JNIEnv *en
     banner_color_set_sdr_white((float)nits);
 }
 
+/* The drawer's live HDR output switch: on = HDR frames as HDR, off = the same frames tone-mapped to SDR.
+ * Applied on the compositor thread (logged there, with a redraw). */
+JNIEXPORT void JNICALL
+Java_com_winlator_star_wayland_WaylandCompositor_nativeSetHdrOutput(JNIEnv *env, jclass clazz, jboolean on) {
+    if (banner_get_display()) banner_host_hdr_output(on ? 1 : 0);
+    else banner_color_set_output(on ? 1 : 0); /* no compositor thread yet: nothing is drawing either */
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_winlator_star_wayland_WaylandCompositor_nativeHdrOutput(JNIEnv *env, jclass clazz) {
+    return banner_color_output() ? JNI_TRUE : JNI_FALSE;
+}
+
+/* An HDR game's frames were shown tone-mapped to SDR in the last 1.5 s (the drawer's status line). */
+JNIEXPORT jboolean JNICALL
+Java_com_winlator_star_wayland_WaylandCompositor_nativeHdrToneMappedOnScreen(JNIEnv *env, jclass clazz) {
+    return banner_color_tonemapped_on_screen() ? JNI_TRUE : JNI_FALSE;
+}
+
 /* The Look the controls currently match (null = Custom) — only named in the session log. */
 JNIEXPORT void JNICALL
 Java_com_winlator_star_wayland_WaylandCompositor_nativeSetLookName(JNIEnv *env, jclass clazz, jstring name) {

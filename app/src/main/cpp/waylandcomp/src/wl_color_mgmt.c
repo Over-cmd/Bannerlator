@@ -96,6 +96,7 @@ static struct {
 
 static _Atomic int g_gate = -1;     /* -1 undecided, 0 closed, 1 open */
 static char g_gate_why[320];        /* the closed gate's reason (for the summary) */
+static _Atomic int g_output_on = 1; /* the drawer's HDR output switch (per session, starts on) */
 
 void banner_color_set_request(int mode, const char *source, int dxvk_hdr, int zero_copy_forced) {
     pthread_mutex_lock(&g_mu);
@@ -104,6 +105,7 @@ void banner_color_set_request(int mode, const char *source, int dxvk_hdr, int ze
     g_req.dxvk_hdr = dxvk_hdr ? 1 : 0;
     g_req.zero_copy_forced = zero_copy_forced ? 1 : 0;
     pthread_mutex_unlock(&g_mu);
+    atomic_store(&g_output_on, 1); /* the drawer's switch is per session and starts on */
 }
 
 void banner_color_set_display(int id, const char *name, const char *formats, int hdr10, float max_lum,
@@ -144,6 +146,8 @@ static struct {
     char applied_who[160];          /* the last surface that got one */
     uint64_t layer_frames, layer_10bit, layer_copy8, copy_frames; /* layer_frames = every frame shown AS HDR */
     uint64_t composed, swapchain, tonemapped;
+    uint64_t tm_off;                /* of `tonemapped`: while the drawer's HDR output switch was off */
+    unsigned output_offs;           /* times the switch was turned off */
     unsigned win_layer, win_copy, win_copy8, win_zc, win_composed, win_swapchain, win_tonemapped;
     char copy_reason[160];
     char layer_fmt[48];
@@ -151,9 +155,10 @@ static struct {
     float ratio_min, ratio_max, ratio_last, win_ratio_min, win_ratio_max, ratio_logged;
     float ratio_live_max;           /* highest reading taken WHILE HDR frames were on screen (the verdict's) */
     int64_t ratio_logged_ns, ratio_periodic_ns;
-    char verdict[480];
+    char verdict[512];
 } g_hdr;
 static _Atomic int64_t g_last_frame_ns;
+static _Atomic int64_t g_last_tm_ns;    /* the last HDR frame shown tone-mapped to SDR */
 
 int banner_color_last_frame_age_ms(void) {
     int64_t t = atomic_load(&g_last_frame_ns);
@@ -169,12 +174,14 @@ static void verdict_locked(char *out, size_t size) {
     if (gate == 0) { snprintf(out, size, "no, because %s", g_gate_why); return; }
     if (g_hdr.layer_frames) {
         const char *who = g_hdr.applied_who[0] ? g_hdr.applied_who : "the game";
-        char frames[300];
+        char frames[340];
         snprintf(frames, sizeof(frames), "%llu frames of %s reached the display as BT2020_PQ (%llu 10-bit zero-copy, "
-                 "%llu 8-bit layer copy, %llu composed HDR picture, %llu HDR10 swapchain; %llu more tone-mapped to SDR)",
+                 "%llu 8-bit layer copy, %llu composed HDR picture, %llu HDR10 swapchain; %llu more tone-mapped to SDR, "
+                 "%llu with HDR output off)",
                  (unsigned long long)g_hdr.layer_frames, who, (unsigned long long)g_hdr.layer_10bit,
                  (unsigned long long)g_hdr.layer_copy8, (unsigned long long)g_hdr.composed,
-                 (unsigned long long)g_hdr.swapchain, (unsigned long long)g_hdr.tonemapped);
+                 (unsigned long long)g_hdr.swapchain, (unsigned long long)g_hdr.tonemapped,
+                 (unsigned long long)g_hdr.tm_off);
         /* Only readings taken while HDR frames were on screen count: the ratio says what the display did
          * with THEM, not with whatever else was up at another moment. */
         if (g_hdr.ratio_live_n && g_hdr.ratio_live_max > 1.01f)
@@ -192,10 +199,16 @@ static void verdict_locked(char *out, size_t size) {
         return;
     }
     if (g_hdr.applied || g_hdr.descs) {
-        if (g_hdr.tonemapped)
-            snprintf(out, size, "no - %s's HDR frames were shown tone-mapped to SDR (%llu frames: frame generation "
-                     "through a screen surface that offers no HDR10 swapchain) - correct colours, no HDR brightness",
+        if (g_hdr.tonemapped && g_hdr.tm_off == g_hdr.tonemapped)
+            snprintf(out, size, "no - HDR output was switched off in the drawer whenever %s showed HDR: its %llu HDR "
+                     "frames were shown tone-mapped to SDR - correct colours, no HDR brightness (switch it on to see HDR)",
                      g_hdr.applied_who[0] ? g_hdr.applied_who : "the game", (unsigned long long)g_hdr.tonemapped);
+        else if (g_hdr.tonemapped)
+            snprintf(out, size, "no - %s's HDR frames were shown tone-mapped to SDR (%llu frames: %llu with frame "
+                     "generation through a screen surface that offers no HDR10 swapchain, %llu with HDR output switched "
+                     "off in the drawer) - correct colours, no HDR brightness",
+                     g_hdr.applied_who[0] ? g_hdr.applied_who : "the game", (unsigned long long)g_hdr.tonemapped,
+                     (unsigned long long)(g_hdr.tonemapped - g_hdr.tm_off), (unsigned long long)g_hdr.tm_off);
         else if (g_hdr.copy_frames)
             snprintf(out, size, "no, because %s asked for HDR but all %llu of its HDR frames went through the "
                      "compositor's 8-bit SDR copy (%s) and were shown without tone mapping",
@@ -213,7 +226,7 @@ static void verdict_locked(char *out, size_t size) {
 
 /* Log the verdict when it changed (force = log it even if not). */
 static void log_verdict(int force) {
-    char v[480];
+    char v[512];
     pthread_mutex_lock(&g_mu);
     verdict_locked(v, sizeof(v));
     int changed = strcmp(v, g_hdr.verdict) != 0;
@@ -247,7 +260,9 @@ void banner_color_frame_shown(const struct banner_color *c, int path, uint32_t a
         break;
     default: /* BANNER_HDR_TONEMAPPED: shown, but not as HDR */
         g_hdr.tonemapped++; g_hdr.win_tonemapped++;
+        if (!atomic_load(&g_output_on)) g_hdr.tm_off++;
         pthread_mutex_unlock(&g_mu);
+        atomic_store(&g_last_tm_ns, now_ns());
         return;
     }
     g_hdr.layer_frames++;
@@ -368,6 +383,38 @@ int banner_color_requested(void) {
     int m = g_req.mode;
     pthread_mutex_unlock(&g_mu);
     return m != 0;
+}
+
+int banner_color_output(void) { return atomic_load(&g_output_on); }
+
+int banner_color_tonemapped_on_screen(void) {
+    if (atomic_load(&g_gate) != 1) return 0;
+    int64_t t = atomic_load(&g_last_tm_ns);
+    return t && now_ns() - t < 1500000000LL;
+}
+
+void banner_color_set_output(int on) {
+    on = on ? 1 : 0;
+    if (atomic_load(&g_gate) != 1) {
+        /* The drawer only shows the switch in sessions whose gate is open; say so if it ever gets here. */
+        banner_log(TAG, "HDR output switch (%s) ignored: HDR is not open in this session", on ? "on" : "off");
+        return;
+    }
+    if (atomic_exchange(&g_output_on, on) == on) return;
+    char who[160];
+    int age = banner_color_last_frame_age_ms(), tm = banner_color_tonemapped_on_screen();
+    pthread_mutex_lock(&g_mu);
+    if (!on) g_hdr.output_offs++;
+    snprintf(who, sizeof(who), "%s", g_hdr.applied_who[0] ? g_hdr.applied_who : "no HDR program yet");
+    pthread_mutex_unlock(&g_mu);
+    if (on)
+        banner_log(TAG, "HDR output switched ON in the drawer: HDR frames go to the display as HDR again from the next "
+                   "frame (%s; %s)", who, tm ? "they were being tone-mapped to SDR until now" : "none were on screen just now");
+    else
+        banner_log(TAG, "HDR output switched OFF in the drawer: HDR frames are tone-mapped to SDR from the next frame "
+                   "(%s; %s). The game is not told - it keeps rendering HDR; its own HDR setting and DXVK_HDR are "
+                   "untouched", who, age >= 0 && age < 1500 ? "HDR frames were on screen" : "no HDR frames on screen just now");
+    banner_request_redraw(); /* a paused game commits nothing: show the change now */
 }
 
 static _Atomic int g_session_ended;

@@ -6995,11 +6995,16 @@ public class XServerDisplayActivity extends AppCompatActivity {
         }
     }
 
-    /** The HUD's display-server label: "Wayland · HDR" while HDR frames are really on screen. */
+    /** The HUD's display-server label: "Wayland · HDR" while HDR frames are really on screen, "Wayland ·
+     *  HDR off" while the drawer's HDR output switch is off (the picture is tone-mapped to SDR), else
+     *  "Wayland". What is on screen wins: frames that stay HDR with the switch off still read "HDR". */
     private volatile boolean hudHdrOnScreen = false;
+    /** The drawer's HDR output switch (per session, starts on; only offered while the HDR gate is open). */
+    private volatile boolean waylandHdrOutputOn = true;
     private String hudDisplayServerLabel() {
         if (!waylandMode) return "X11";
-        return hudHdrOnScreen ? "Wayland · HDR" : "Wayland";
+        if (hudHdrOnScreen) return "Wayland · HDR";
+        return waylandHdrOutputOn ? "Wayland" : "Wayland · HDR off";
     }
 
     /** Tell the compositor what the game's display reports (the HDR gate's input; logged on change). */
@@ -7082,6 +7087,23 @@ public class XServerDisplayActivity extends AppCompatActivity {
             }
         };
 
+        // HDR output (HDR sessions only: the row is shown once the sampler below sees the gate open).
+        // A live, per-session switch - nothing is saved: the editors' "HDR output" setting stays the
+        // next launch's choice (DXVK_HDR and the colour-manager offer are decided at launch).
+        waylandHdrOutputOn = true;
+        state.setWaylandHdrOutput(true);
+        state.onWaylandHdrOutputToggle = on -> {
+            waylandHdrOutputOn = on;
+            try {
+                com.winlator.star.wayland.WaylandCompositor.nativeSetHdrOutput(on);
+            } catch (Throwable t) {
+                Log.e("XServerDisplayActivity", "wayland: live HDR output switch failed", t);
+            }
+            Log.i("XServerDisplayActivity", "wayland: HDR output " + (on ? "on" : "off (tone-mapped to SDR)")
+                    + " for this session");
+            if (fusionHud != null) fusionHud.setDisplayServer(hudDisplayServerLabel());
+        };
+
         // Last-10-s zero-copy frame count, straight from the compositor's stats window, plus whether
         // a zero-copy frame reached the display layer just now. The 10 s counter cannot show a switch
         // that happened two seconds ago; the age can, so the row says "switching..." only for as long
@@ -7156,8 +7178,14 @@ public class XServerDisplayActivity extends AppCompatActivity {
                 int gate;
                 try { gate = com.winlator.star.wayland.WaylandCompositor.nativeHdrGateState(); }
                 catch (Throwable t) { gate = 0; }
-                if (gate == 0) { stopHdrRatioSampler(); return; }  // closed: nothing to prove this session
+                if (gate == 0) {  // closed: nothing to prove this session, and no drawer switch
+                    XServerDrawerState.INSTANCE.setWaylandHdrAvailable(false);
+                    stopHdrRatioSampler();
+                    return;
+                }
                 if (gate == 1) {
+                    XServerDrawerState drawer = XServerDrawerState.INSTANCE;
+                    drawer.setWaylandHdrAvailable(true);
                     android.view.Display d = hdrTargetDisplay();
                     armHdrRatioListener(d);
                     float ratio = com.winlator.star.display.DisplayHdrInfo.liveHdrSdrRatio(d);
@@ -7166,9 +7194,13 @@ public class XServerDisplayActivity extends AppCompatActivity {
                     // HUD badge: "Wayland · HDR" while HDR frames are really on screen (the compositor's
                     // verdict: frames tagged BT2020_PQ in the last 1.5 s and, where Android reports it,
                     // an HDR/SDR ratio above 1).
-                    boolean on;
+                    boolean on, toneMapped;
                     try { on = com.winlator.star.wayland.WaylandCompositor.nativeHdrOnScreen(); }
                     catch (Throwable t) { on = false; }
+                    try { toneMapped = com.winlator.star.wayland.WaylandCompositor.nativeHdrToneMappedOnScreen(); }
+                    catch (Throwable t) { toneMapped = false; }
+                    drawer.setWaylandHdrOnScreen(on);
+                    drawer.setWaylandHdrToneMapped(toneMapped);
                     if (on != hudHdrOnScreen) {
                         hudHdrOnScreen = on;
                         if (fusionHud != null) fusionHud.setDisplayServer(hudDisplayServerLabel());

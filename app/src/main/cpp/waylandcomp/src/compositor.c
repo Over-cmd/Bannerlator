@@ -1800,6 +1800,10 @@ static struct surface *ahb_layer_only_candidate(int scene_w, int scene_h) {
  *      tone-mapped to SDR (correct colours instead of washed out).
  *   3  a frame the compositor could not import: only its display layer can show it, so effects and
  *      frame generation are skipped for it (said in the log).
+ * The drawer's HDR output switch (banner_color_output) OFF: the same routes, tone-mapped - route 0
+ * becomes route 1 (the whole scene composed, tone-mapped to sRGB, onto the game layer UNtagged), route 2
+ * tone-maps into an SDR swapchain, route 3 cannot (nothing can read those frames) and stays HDR, said
+ * in the log. The game is told nothing; it keeps rendering HDR.
  * Nothing here runs while the HDR gate is closed. */
 
 struct hdr_scene {
@@ -1836,6 +1840,7 @@ static int hdr_plan(const struct draw_list *dl, int w, int h, int fx_on, int fra
         if (lo && is_hdr_surface(lo)) un = lo;
     }
     if (un && g_zero_copy) { hs->color = banner_color_of(un->resource); hs->who = un; return 3; }
+    hs->hf.tonemap = !banner_color_output();
     if (dl->n <= 0 || !(hs->is_hdr = calloc((size_t)dl->n, 1))) return 0;
     for (int i = 0; i < dl->n; i++) {
         struct surface *s = surface_for_image(dl->d[i].img);
@@ -1851,39 +1856,55 @@ static int hdr_plan(const struct draw_list *dl, int w, int h, int fx_on, int fra
                      : hs->color->has_st2086 ? hs->color->max_lum : 1000.0f;
     if (framegen) return 2;
     /* Route 0 when the game can be alone on its layer: no effects, zero-copy on, the fullscreen draw
-     * is the HDR game, and above it nothing - or one window the overlay layer can carry. */
+     * is the HDR game, and above it nothing - or one window the overlay layer can carry. Not while the
+     * HDR output switch is off: its frame as it stands is PQ, and only the composition can tone-map it. */
     int li = g_zero_copy ? layer_candidate(dl, w, h) : -1;
     int over = li >= 0 ? dl->n - 1 - li : 0;
-    if (!fx_on && li >= 0 && hs->is_hdr[li] && (over == 0 || (over == 1 && sc_layer_overlay_affordable())))
+    if (!hs->hf.tonemap && !fx_on && li >= 0 && hs->is_hdr[li] &&
+        (over == 0 || (over == 1 && sc_layer_overlay_affordable())))
         return 0;
-    hs->why = fx_on ? "screen effects are on"
+    hs->why = hs->hf.tonemap ? "HDR output is switched off in the drawer"
+            : fx_on ? "screen effects are on"
             : !g_zero_copy ? "zero-copy presentation is off"
             : (li >= 0 && hs->is_hdr[li]) ? "a window is above the game and this display cannot compose a second layer"
             : "the HDR game is not one fullscreen window";
     return 1;
 }
 
-/* One line per change of route (and of its reason). */
+/* One line per change of route (and of its reason, and of the HDR output switch). */
 static void hdr_note_route(int route, const struct hdr_scene *hs) {
-    static int said = -1;
+    static int said = -1, said_tm = -1;
     static const char *said_why;
-    if (route == said && (route != 1 || hs->why == said_why)) return;
+    const int tm = route != 0 && !banner_color_output(); /* route 0 never runs with the switch off */
+    if (route == said && tm == said_tm && (route != 1 || hs->why == said_why)) return;
     int was = said;
-    said = route; said_why = hs->why;
+    said = route; said_why = hs->why; said_tm = tm;
     char name[160] = "the HDR game";
     if (hs->who) describe(hs->who, name, sizeof(name));
     switch (route) {
     case 1:
-        banner_log("color", "HDR picture for %s: %s - the whole scene is composed into one 10-bit PQ BT.2020 picture "
-                   "(SDR content at %.0f nits, screen effects applied in 10-bit) on the game's display layer, tagged BT2020_PQ",
-                   name, hs->why ? hs->why : "?", banner_color_sdr_white());
+        if (tm)
+            banner_log("color", "tone-mapped picture for %s: %s - the whole scene is composed and tone-mapped to SDR "
+                       "(HDR peak %.0f nits rolled off to SDR white, screen effects applied after it) on the game's "
+                       "display layer, untagged", name, hs->why ? hs->why : "?", hs->hf.peak_nits);
+        else
+            banner_log("color", "HDR picture for %s: %s - the whole scene is composed into one 10-bit PQ BT.2020 picture "
+                       "(SDR content at %.0f nits, screen effects applied in 10-bit) on the game's display layer, tagged "
+                       "BT2020_PQ", name, hs->why ? hs->why : "?", banner_color_sdr_white());
         break;
     case 2:
-        banner_log("color", "HDR with frame generation for %s: the scene is composed into PQ and presented through the "
-                   "screen swapchain (HDR10 where the surface offers it, else tone-mapped to SDR)", name);
+        if (tm)
+            banner_log("color", "HDR with frame generation for %s, HDR output switched off: the scene is tone-mapped to "
+                       "SDR and presented through an SDR screen swapchain", name);
+        else
+            banner_log("color", "HDR with frame generation for %s: the scene is composed into PQ and presented through "
+                       "the screen swapchain (HDR10 where the surface offers it, else tone-mapped to SDR)", name);
         break;
     case 3:
-        break; /* hdr_note_precedence says it */
+        if (tm)
+            banner_log("color", "HDR output is switched off, but %s's HDR frames cannot be imported by the compositor, "
+                       "so nothing can tone-map them: they stay HDR on its own display layer", name);
+        break; /* otherwise hdr_note_precedence says it */
     default:
         if (was == 1 || was == 2)
             banner_log("color", "%s is back on its own display layer (no composition needed)", name);
@@ -1964,12 +1985,20 @@ static void render_scene(void) {
     const int hdr_alone = hdr_route == 3 || (hdr_route == 0 && hs.n_hdr > 0); /* an HDR game on its own layer */
     if (hdr_route == 3) { fx_on = 0; framegen = 0; }
     if (hdr_route == 1) {
+        static int fell_back;
         vkp_apply_window_request();
         sc_layer_hide_overlay();
-        if (sc_layer_present_hdr_scene(dl.d, dl.n, &hs.hf, w, h, hs.color) == 0)
+        if (sc_layer_present_hdr_scene(dl.d, dl.n, &hs.hf, w, h, hs.color) == 0) {
             rendered = vkp_render_plain(w, h) == 0;
-        else
+            if (fell_back) { fell_back = 0; banner_log("color", "the composed picture is on the game's display layer again"); }
+        } else {
             hdr_route = 2; /* no layer this frame: the picture goes through the swapchain instead */
+            if (!fell_back) {
+                fell_back = 1;
+                banner_log("color", "the composed picture could not go on the game's display layer (no layer, or the "
+                           "10-bit pass failed): it goes through the screen swapchain instead until that changes");
+            }
+        }
     }
     if (hdr_route == 2) {
         int how = 0;
