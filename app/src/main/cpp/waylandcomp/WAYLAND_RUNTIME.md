@@ -269,7 +269,7 @@ app window ....... Compose UI, the in-game drawer, the perf HUD, the on-screen c
   to the copy path. The count is said out loud the first time the overlay goes up (`layer`: `2
   display layers in use: "banner_wayland_game" (z=1) and "banner_wayland_overlay" (z=2) above it …`).
 - **Who owns what.** Each layer has its own `ASurfaceControl`, its own gralloc buffer pool (3
-  buffers for the game, 2 for the overlay), its own geometry and its own lifetime; `struct layer`
+  buffers each), its own geometry and its own lifetime; `struct layer`
   in `sc_layer.c` holds all of it and the z-order is fixed by the id (nothing is re-ordered at
   runtime). The SurfaceControls are children of the SurfaceView's surface, created on first use and
   retired together when the output window changes or goes away.
@@ -315,9 +315,12 @@ app window ....... Compose UI, the in-game drawer, the perf HUD, the on-screen c
   gets the shared 16x16 blank buffer so SurfaceFlinger really lets go of the game's buffer (and
   reports a release fence for it) instead of holding it while invisible. `sc_layer_hide()` takes
   every layer down (scene no longer a fullscreen game, zero-copy switched off live, session end),
-  `sc_layer_hide_overlay()` **retires** the overlay's SurfaceControl (see the HWC note below — a
-  merely hidden one keeps SurfaceFlinger in client composition), and `sc_layer_window_gone()`
-  retires both SurfaceControls and drains both pools on a surface loss / HOME / resume.
+  `sc_layer_hide_overlay()` is used when only the window above the game closed, and
+  `sc_layer_window_gone()` retires both SurfaceControls and drains both pools on a surface loss /
+  HOME / resume. **The overlay layer is always RETIRED, never merely hidden** (both paths) — see
+  the HWC note below: a live second SurfaceControl keeps SurfaceFlinger composing on the GPU even
+  when it is invisible. The game layer keeps its SurfaceControl through a hide, because it goes up
+  and down with every effects / frame-generation toggle.
 - **The display frame-rate vote belongs to one layer.** The refresh-rate stream's
   `sc_layer_set_frame_rate()` (the game's cadence, the same value the app votes on its own surface)
   is carried **only** by the layer the game presents on — the game layer. The overlay layer is
