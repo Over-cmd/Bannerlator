@@ -146,8 +146,9 @@ static struct {
     unsigned win_layer, win_copy, win_copy8;
     char copy_reason[160];
     char layer_fmt[48];
-    int ratio_n, win_ratio_n;
+    int ratio_n, win_ratio_n, ratio_live_n;
     float ratio_min, ratio_max, ratio_last, win_ratio_min, win_ratio_max, ratio_logged;
+    float ratio_live_max;           /* highest reading taken WHILE HDR frames were on screen (the verdict's) */
     int64_t ratio_logged_ns, ratio_periodic_ns;
     char verdict[480];
 } g_hdr;
@@ -171,13 +172,18 @@ static void verdict_locked(char *out, size_t size) {
         snprintf(frames, sizeof(frames), "%llu frames of %s reached the display tagged BT2020_PQ (%llu of them 10-bit "
                  "zero-copy, %llu through the 8-bit layer copy)", (unsigned long long)g_hdr.layer_frames, who,
                  (unsigned long long)g_hdr.layer_10bit, (unsigned long long)g_hdr.layer_copy8);
-        if (g_hdr.ratio_n && g_hdr.ratio_max > 1.01f)
-            snprintf(out, size, "yes - %s and the display's HDR/SDR ratio rose to %.2f (1.00 = SDR only): Android gave "
-                     "the picture real HDR headroom", frames, g_hdr.ratio_max);
+        /* Only readings taken while HDR frames were on screen count: the ratio says what the display did
+         * with THEM, not with whatever else was up at another moment. */
+        if (g_hdr.ratio_live_n && g_hdr.ratio_live_max > 1.01f)
+            snprintf(out, size, "yes - %s and the display's HDR/SDR ratio rose to %.2f while they were on screen "
+                     "(1.00 = SDR only): Android gave the picture real HDR headroom", frames, g_hdr.ratio_live_max);
+        else if (g_hdr.ratio_live_n)
+            snprintf(out, size, "tagged but NOT confirmed - %s, but the display's HDR/SDR ratio stayed at %.2f while they "
+                     "were on screen: Android may have tone-mapped them to SDR (power saving? HDR off for this display?)",
+                     frames, g_hdr.ratio_live_max);
         else if (g_hdr.ratio_n)
-            snprintf(out, size, "tagged but NOT confirmed - %s, but the display's HDR/SDR ratio never rose above %.2f: "
-                     "Android may have tone-mapped them to SDR (power saving? HDR switched off for this display?)",
-                     frames, g_hdr.ratio_max);
+            snprintf(out, size, "tagged, not measured - %s, but no HDR/SDR ratio reading was taken while they were on "
+                     "screen (highest reading otherwise %.2f)", frames, g_hdr.ratio_max);
         else
             snprintf(out, size, "yes by the tag only - %s (this display reports no HDR/SDR ratio to confirm it)", frames);
         return;
@@ -258,6 +264,10 @@ void banner_color_ratio_sample(float ratio, int listener) {
         if (!g_hdr.win_ratio_n || ratio > g_hdr.win_ratio_max) g_hdr.win_ratio_max = ratio;
         g_hdr.ratio_n++; g_hdr.win_ratio_n++;
         g_hdr.ratio_last = ratio;
+        if (live) {
+            if (!g_hdr.ratio_live_n || ratio > g_hdr.ratio_live_max) g_hdr.ratio_live_max = ratio;
+            g_hdr.ratio_live_n++;
+        }
         /* A change is logged at once (at most 4 lines a second); while HDR frames are on screen the
          * steady value is restated every 5 s, so a tester's log shows it holding, not just moving. */
         float moved = ratio - g_hdr.ratio_logged;
@@ -288,7 +298,7 @@ void banner_color_stats_tick(void) {
     char line[400];
     int any;
     pthread_mutex_lock(&g_mu);
-    any = g_hdr.win_layer || g_hdr.win_copy || g_hdr.win_ratio_n;
+    any = g_hdr.win_layer || g_hdr.win_copy; /* the ratio alone is logged when it moves, not every 10 s */
     if (any) {
         char ratio[96] = "no HDR/SDR ratio reading";
         if (g_hdr.win_ratio_n)
