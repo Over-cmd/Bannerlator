@@ -1,5 +1,9 @@
 # HDR on the Wayland backend — reconnaissance
 
+> **2026-09-14: round 1 of Phase A is built** (branch `feat/wayland-hdr`, opt-in, testing only) —
+> see **§10** at the end for what was built, how it is gated and how a tester's log proves it.
+> The recon below is kept as written.
+
 Written 2026-09-13. **Recon only: no product code was changed, nothing was built, nothing was
 installed on the device.** Branch surveyed: app `feat/wayland-phase2`, proton-wine
 `feat/winewayland-desktop-11.0-2`, Banners-Turnip `wayland` (Mesa `7cda7850`, v26.3.0).
@@ -667,3 +671,92 @@ The reasoning, plainly:
 * **Whether any of the games in §7.1 launch and run correctly under our Wayland backend at all.**
   Untested. Picking the HDR test title is its own small exercise and should start from games
   already known to work in a Wayland container.
+
+---
+
+## 10. Round 1 — as built (2026-09-14, `feat/wayland-hdr`)
+
+Phase A (A1–A5) for HDR10, opt-in, proven by the app's own logs because the first HDR panel in the
+loop is a tester's non-rooted Galaxy Fold (Adreno 840, Android API 37: HDR10/HLG/HDR10+, 1351 nits,
+HDR/SDR ratio available). App-only; no layer change.
+
+### 10.1 The gate (`wl_color_mgmt.c`, `banner_color_init`)
+
+Open only when ALL hold when the compositor starts:
+
+| Input | Where it comes from |
+|---|---|
+| `BANNER_WAYLAND_HDR=1` (or `true`/`on`) | container or shortcut env (`XServerDisplayActivity.resolvedWaylandHdrMode`) |
+| the game's display lists **HDR10** | `DisplayHdrInfo.supportsHdr10` for `hdrTargetDisplay()` (the TV when the game is on it) |
+| display layers with dataspace control | `sc_layer_can_tag_hdr()` = SurfaceControl API + `ASurfaceTransaction_setBufferDataSpace` |
+| the zero-copy global | `ahb_swapchain_advertised()` |
+
+`BANNER_WAYLAND_HDR=force` skips the display row only (testing the negotiation on an SDR panel —
+SurfaceFlinger then tone-maps the layer). A **closed** gate advertises nothing (no
+`wp_color_manager_v1` global, no 10-bit dma-buf rows), writes `color … HDR gate CLOSED: <why>` and
+`HDR on screen: no, because <why>`, and the session is otherwise byte-for-byte the old one. With the
+switch unset the module is silent unless the display lists HDR10 or `DXVK_HDR=1` is set (one hint line).
+On an HDR10 display the app also turns **zero-copy presentation on** for the session (an HDR frame is
+only right on the game's own layer) and exports `BANNER_WSI_AHB=1` to match.
+
+### 10.2 What an open gate offers (§2.2, exactly what Mesa binds)
+
+`wp_color_manager_v1` **version 1**: intent `perceptual`; features `parametric` +
+`set_mastering_display_primaries` (Mesa only sends mastering luminance inside that feature's branch);
+primaries `bt2020`; transfer `st2084_pq`. Not advertised: `srgb` (so Mesa creates no colour surface for
+SDR swapchains at all), HLG (no DXGI swapchain uses it), `ext_linear`/`extended_target_volume` (scRGB =
+Phase C, needs FP16 gralloc + a layer change), ICC, `windows_scrgb`. `zwp_linux_dmabuf_v1` gains
+`AB30`/`XB30` (A2B10G10R10 — Mesa lists a VkFormat only when both the alpha and opaque fourcc are there),
+appended after the four 8-bit rows. Protocol glue generated from wayland-protocols **1.41** with
+wayland-scanner 1.24.0 (`protocols/color-management-v1.xml`).
+
+Strictness: protocol errors only where a conforming client can never hit them (un-advertised
+feature/intent/primaries/tf, a property set twice, an incomplete set, a not-ready description).
+Everything a conforming client can produce on a bad day is logged and absorbed instead — out-of-range
+HDR metadata is dropped from what Android gets (and `max_cll`/`max_fall` of 0 = "unknown", which Mesa
+sends as-is), a second colour surface for the same `wl_surface` replaces the first, requests on inert
+objects are ignored. `ready` is sent from inside `create` (Mesa blocks its swapchain on it).
+Output and surface-feedback image descriptions answer `failed` (Mesa uses neither).
+
+### 10.3 The layer path (`sc_layer.c`)
+
+`setBufferDataSpace` (+ `setHdrMetadata_smpte2086` / `_cta861_3` when present) ride the same
+transaction as the buffer, per layer, only on change, re-sent on every new SurfaceControl (recovery
+swap, window change). A layer that was never tagged is never touched; once tagged, an untagged frame
+puts it back to `UNKNOWN` and clears the metadata. The zero-copy frame gets the surface's current
+description; the 8-bit pool copy of an HDR frame keeps the PQ tag (colours right, 8-bit precision,
+logged once); the effects pass and the overlay layer are always untagged.
+
+### 10.4 When an HDR frame cannot be zero-copy — round 1's decision
+
+No tone-mapping anywhere (the copy path is `vkCmdBlitImage` into an 8-bit sRGB swapchain; a PQ→SDR
+shader pass is its own project). Instead:
+
+- **Effects on / frame generation on:** an HDR fullscreen game **keeps its display layer**; the
+  effects chain and frame generation are skipped for it (both are 8-bit SDR and would wash it out),
+  and the base surface's black frame skips them too (`vkp_render_plain`) so generated presents cannot
+  pace the loop. Logged when it starts and when it ends.
+- **A window above the game on a display that cannot compose a second layer** (phase 5's
+  rotated+scaled rule is untouched), **a windowed HDR game**, **zero-copy switched off**, **layer
+  unavailable:** the scene goes through the copy path and the HDR frames are shown **untone-mapped
+  (washed out)**; every such scene is counted and the reason logged.
+
+### 10.5 Proof without root — what a tester's logs say
+
+`Download/Wayland-logs/wayland-*.log`, tag `color` (plus the existing `display` capability line):
+
+| Line | Means |
+|---|---|
+| `HDR gate OPEN: … "Built-in Screen" … reports HDR types HDR10, …` | the offer is on, with its inputs and which Android colour calls exist |
+| `<program> bound wp_color_manager_v1 version 1 …` | Mesa saw it: `VK_COLOR_SPACE_HDR10_ST2084_EXT` is now listed |
+| `<window>: colour-management surface created` | a swapchain asked for a non-sRGB colour space |
+| `image description #N from <program>: BT.2020, ST 2084 (PQ); mastering …; max CLL …, max FALL …` | the game's colour space + `vkSetHdrMetadataEXT` values |
+| `<window> presents WxH buffers in XB30 (10-bit A2B10G10R10) …, gralloc RGBA1010102 (10-bit)` | the 10-bit swapchain really arrived |
+| `banner_wayland_game: dataspace BT2020_PQ (0x9c60000) set on the display layer …` | the tag + metadata SurfaceFlinger received |
+| `HDR last 10 s: N frames on the display layer tagged BT2020_PQ …` | steady state |
+| `display HDR/SDR ratio X (was Y; HDR frames on screen: yes …)` | `Display.getHdrSdrRatio()` — rises above 1.00 only when Android grants HDR headroom |
+| `HDR on screen: yes / tagged but NOT confirmed / no, because …` | the verdict (written on changes, at game exit and at session end; the last one counts) |
+
+DXVK's own `<exe>_dxgi.log` / `<exe>_d3d11.log` add `Color space: VK_COLOR_SPACE_HDR10_ST2084_EXT` and
+the 10-bit format at swapchain creation; Mesa's `Not using HDR metadata to avoid protocol errors`
+(stderr → `wine_debug.log`) means the game's metadata failed Mesa's own legality check.

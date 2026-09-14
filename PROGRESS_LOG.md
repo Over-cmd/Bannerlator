@@ -1,5 +1,19 @@
 # Star-Compose — Progress Log
 
+## 2026-09-14 17:00 — 🌈 **HDR10 on the Wayland backend, round 1: opt-in gate + wp_color_manager_v1 + BT2020_PQ on the game's display layer** (`feat/wayland-hdr`, off `main` `4c3fb73b`; testing build for the user's Galaxy Fold, NOT for main)
+
+> **What it is.** The compositor half of `waylandcomp/HDR_RECON.md` Phase A. The game half already ships (Mesa's Wayland WSI in our Turnip is a `wp_color_manager_v1` client; DXVK takes `VK_COLOR_SPACE_HDR10_ST2084_EXT` with `DXVK_HDR=1`; the zero-copy WSI already maps `A2B10G10R10` to a gralloc `R10G10B10A2`). No layer change.
+>
+> **Gate (nothing changes without it).** `BANNER_WAYLAND_HDR=1` (container or shortcut env) AND the game's display lists HDR10 (`DisplayHdrInfo.supportsHdr10`) AND display layers with `ASurfaceTransaction_setBufferDataSpace` AND the zero-copy global. Closed = no colour-management global, no 10-bit formats, and a `color … HDR gate CLOSED: <why>` + `HDR on screen: no, because …` line. `=force` skips the display check (testing on SDR panels). On an HDR10 display the app turns zero-copy on for the session (an HDR frame is only right on the game's own layer).
+>
+> **Open gate offers** `wp_color_manager_v1` v1 (perceptual; parametric + mastering metadata; BT.2020 + ST 2084 PQ — exactly what Mesa lists HDR10 from) and `AB30`/`XB30` dma-buf formats. Image descriptions are double-buffered on `wl_surface.commit`; the game layer gets `BT2020_PQ` + SMPTE 2086 / CTA-861.3 from the game's `vkSetHdrMetadataEXT`. A never-tagged layer is never touched.
+>
+> **Non-zero-copy decision (round 1):** no tone-mapping anywhere. An HDR fullscreen game KEEPS its display layer: screen effects and frame generation are skipped for it (logged on/off). What still cannot keep the layer (a window above it on a display that cannot compose a second layer, a windowed game, zero-copy switched off) goes through the 8-bit copy untone-mapped, counted with its reason. The pool (8-bit) layer copy keeps the PQ tag.
+>
+> **Proof without root:** `color` lines in `Download/Wayland-logs/wayland-*.log` (gate + inputs, bind, every image description, buffer format changes, dataspace + metadata on the layer, 10 s HDR stats, HDR/SDR ratio samples from `Display.getHdrSdrRatio()` every second, verdict `HDR on screen: …`), plus DXVK's `<exe>_dxgi.log`/`_d3d11.log`.
+>
+> **CI:** `25dd6034` compositor-only build 34893896427 ✅; full build 34894335581 ❌ (javac: `Display.registerHdrSdrRatioListener` not in the compile SDK stubs) → `5325e5d6` reflection, run 34895296297 (in progress). Device work next: Pocket FIT regression (switch off / =1 closed / =force), then stage the standard APK + tester note for the Fold.
+
 ## 2026-09-14 15:50 — 🔖 **CHECKPOINT: Wayland pre-release 7 live with the v9 layer; main carries two small fixes on top**
 
 > **Public tester link:** `3.1.2-wayland-pre7` (pre-release, tag → `5907fd2a`, release branch `release/3.1.2-wayland-pre7` tip `1d7b0941`). Assets: `Bannerlator-3.1.2-wayland-pre7-{standard,pubg,ludashi}.apk` (versionName `3.1.2-wayland-pre7`, versionCode 85), `proton-11.0-2.1-arm64ec-wayland-v9.wcp` (sha256 `bce6e7cc0e8b4251e9cc1b58a11c3efe6a485857ec02b270a7bb9a61940e6961`, installs as `Proton-11.0-2.1-arm64ec-9`), `README-Wayland-test-kit.txt`. Pre-release 6 deleted (tag kept). **3.1.1 is still Latest**; the in-app updater offers nothing new.
