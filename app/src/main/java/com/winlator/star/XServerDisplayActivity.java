@@ -7313,6 +7313,13 @@ public class XServerDisplayActivity extends AppCompatActivity {
             boolean ubwc = !(ub != null && (ub.equals("0") || ub.equalsIgnoreCase("false") || ub.equalsIgnoreCase("off")));
             com.winlator.star.wayland.WaylandCompositor.nativeSetUbwc(ubwc);
             if (!ubwc) Log.i("XServerDisplayActivity", "wayland: compressed (UBWC) game buffers disabled by BANNER_WAYLAND_UBWC");
+            // Debug: BANNER_WAYLAND_NO_RENDER_NODE=1 makes the compositor name no DRM device in its
+            // dma-buf feedback (main device 0:0), which is what a phone that exposes no /dev/dri
+            // node to apps sends. Reproduces those phones' OpenGL path on a device that has one.
+            String nrn = env != null ? env.get("BANNER_WAYLAND_NO_RENDER_NODE") : null;
+            boolean noRenderNode = nrn != null && (nrn.equals("1") || nrn.equalsIgnoreCase("true") || nrn.equalsIgnoreCase("on"));
+            com.winlator.star.wayland.WaylandCompositor.nativeSetNoRenderNode(noRenderNode);
+            if (noRenderNode) Log.i("XServerDisplayActivity", "wayland: BANNER_WAYLAND_NO_RENDER_NODE - advertising no DRM device");
         } catch (Exception e) {
             Log.e("XServerDisplayActivity", "wayland: zero-copy flag read failed", e);
         }

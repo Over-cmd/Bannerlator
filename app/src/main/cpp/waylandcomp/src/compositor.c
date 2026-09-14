@@ -159,14 +159,23 @@ struct client_info {
     struct wl_listener destroy;
     pid_t pid;
     char name[64];
+    /* An OpenGL program whose EGL gave up on the GPU: it asked for dma-buf feedback (EGL's
+     * Wayland GPU path always does), never made a dma-buf buffer, and draws wl_shm frames. */
+    unsigned asked_feedback : 1, shm_gl_said : 1;
+    unsigned dmabuf_buffers, shm_frames;
     struct client_info *next;
 };
 static struct client_info *g_clients;
 
-static const char *client_name(struct wl_client *client) {
+static struct client_info *client_info_of(struct wl_client *client) {
     for (struct client_info *ci = g_clients; ci; ci = ci->next)
-        if (ci->client == client) return ci->name;
-    return "a program";
+        if (ci->client == client) return ci;
+    return NULL;
+}
+
+static const char *client_name(struct wl_client *client) {
+    struct client_info *ci = client_info_of(client);
+    return ci ? ci->name : "a program";
 }
 
 static void on_client_destroyed(struct wl_listener *l, void *data) {
@@ -300,6 +309,11 @@ static int g_zero_copy_fx_skip_said;
  * BANNER_WAYLAND_UBWC=0 in the container's environment turns the advertisement off (A/B switch). Set
  * from the app before the compositor starts; read at every zwp_linux_dmabuf_v1 bind. */
 volatile int g_ubwc = 1;
+
+/* Debug (BANNER_WAYLAND_NO_RENDER_NODE=1): name no DRM device in the dma-buf feedback, as a phone
+ * that exposes no /dev/dri node to apps does, to reproduce its OpenGL path here. Set from the app
+ * before the compositor starts. */
+volatile int g_no_render_node;
 
 /* The panel's refresh rate in mHz, from the app; wl_output advertises it so Wine's display modes
  * carry the real rate (games pick their saved 144 Hz mode, as on X11). 0 = 60 Hz. */
@@ -620,6 +634,8 @@ static void take_shm(struct surface *s, struct wl_shm_buffer *shm, struct wl_res
     s->buf_h = h;
     s->has_content = s->shm_img != NULL;
     g_stat_shm++;
+    struct client_info *ci = client_info_of(wl_resource_get_client(s->resource));
+    if (ci && ci->asked_feedback) ci->shm_frames++;  /* since it asked for GPU buffers */
 }
 
 /* The window the app's performance HUD follows: the latest one to start presenting GPU frames
@@ -1301,6 +1317,8 @@ static struct wl_resource *params_do_create(struct wl_client *c, struct wl_resou
         return NULL;
     }
     wl_resource_set_implementation(buf, &dbuf_buffer_impl, b, dbuf_buffer_resource_destroy);
+    struct client_info *ci = client_info_of(c);
+    if (ci) ci->dmabuf_buffers++;
     return buf;
 }
 static void params_create(struct wl_client *c, struct wl_resource *r, int32_t w, int32_t h,
@@ -1432,6 +1450,7 @@ static dev_t g_main_device;             /* the render node clients should alloca
 static dev_t dmabuf_render_node(void) {
     static const char *nodes[] = {"/dev/dri/renderD128", "/dev/dri/renderD129", "/dev/dri/card0"};
     struct stat st;
+    if (g_no_render_node) return 0;
     for (size_t i = 0; i < sizeof(nodes) / sizeof(nodes[0]); i++)
         if (!stat(nodes[i], &st) && S_ISCHR(st.st_mode)) return st.st_rdev;
     return 0;
@@ -1468,6 +1487,13 @@ static void dmabuf_build_feedback(void) {
     g_fmt_table_n = (uint16_t)n;
     banner_log("dmabuf", "feedback ready: %d format/modifier pairs, main device %u:%u",
                n, (unsigned)major(g_main_device), (unsigned)minor(g_main_device));
+    /* Vulkan games never need the node. Mesa's EGL did until Wayland layer versionCode 9: without
+     * one it fell back to a software path that draws nothing here (black window, sound plays). */
+    if (!g_main_device)
+        banner_log("dmabuf", "%s: OpenGL games need Wayland layer versionCode 9 or newer, "
+                   "which runs OpenGL on the GPU without a DRM node; older layers show a black window",
+                   g_no_render_node ? "no DRM device named (forced by BANNER_WAYLAND_NO_RENDER_NODE=1)"
+                                    : "this device gives apps no display (DRM) device (/dev/dri)");
 }
 
 /* One tranche: our device, every pair in the table, no scanout flag. */
@@ -1513,6 +1539,8 @@ static void dmabuf_new_feedback(struct wl_client *c, struct wl_resource *parent,
 }
 
 static void dmabuf_get_default_feedback(struct wl_client *c, struct wl_resource *r, uint32_t id) {
+    struct client_info *ci = client_info_of(c);
+    if (ci) ci->asked_feedback = 1;
     dmabuf_new_feedback(c, r, id);
 }
 /* Per-surface feedback would let us hint a different tranche for a window on its own display
@@ -2623,6 +2651,18 @@ static int on_stats_timer(void *data) {
                    g_stat_frames + generated, (g_stat_frames + generated) / 10.0, g_stat_dmabuf, g_stat_shm, windows, extra);
     }
     g_stat_frames = g_stat_dmabuf = g_stat_shm = 0;
+    /* A program that asked for dma-buf feedback (EGL's GPU path does, first thing) but has drawn
+     * only wl_shm frames since is an OpenGL program whose EGL gave up on the GPU. The software
+     * path it fell to has no rasteriser in the Wayland layers, so what it commits is black. */
+    for (struct client_info *ci = g_clients; ci; ci = ci->next) {
+        if (!ci->asked_feedback || ci->dmabuf_buffers || ci->shm_gl_said || ci->shm_frames < 150)
+            continue;
+        ci->shm_gl_said = 1;
+        banner_log("opengl", "%s asked for GPU buffers but has drawn only software (shared-memory) "
+                   "frames: its OpenGL fell back to software rendering, which the Wayland layer cannot "
+                   "draw - expect a black picture (main device %u:%u)", ci->name,
+                   (unsigned)major(g_main_device), (unsigned)minor(g_main_device));
+    }
     wl_event_source_timer_update(g_stats_timer, 10000);
     return 0;
 }
