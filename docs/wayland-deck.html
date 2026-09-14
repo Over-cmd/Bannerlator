@@ -237,7 +237,7 @@ th.num{text-align:right}
   <h2>Everything since 3.1.1</h2>
   <div class="grid3">
     <div class="tile"><h3>Setup that just works (pre-release 7)</h3><ul><li>A new container keeps what you chose: Wayland, the Wayland game driver, drivers, DXVK and VKD3D versions, and deleted env vars stay deleted.</li><li>The compositor driver fills itself in with a Turnip that can import the game's frames, so no black screen from a blank field.</li><li>No Wine Mono download prompt on a new container or after a layer update. Control Panel opens again in the XP desktop (v8 layer).</li></ul></div>
-    <div class="tile"><h3>OpenGL on Wayland (pre-releases 6 and 7)</h3><ul><li>Native OpenGL games render for the first time: buffer sharing moved to protocol version 4 and the layer stopped steering OpenGL into a software renderer it does not contain.</li><li>OpenGL safe mode, on by default, stops OpenGL games vanishing a few seconds in (Mesa's threaded helper faults; Wine hides the crash).</li><li>The HUD names what really renders: an OpenGL game reads OpenGL, not DXVK. Cards read Vulkan (Wayland) or Vulkan (X11).</li></ul></div>
+    <div class="tile"><h3>OpenGL on Wayland (pre-releases 6 and 7)</h3><ul><li>Native OpenGL games render for the first time: buffer sharing moved to protocol version 4 and the layer stopped steering OpenGL into a software renderer it does not contain.</li><li>v9 layer: OpenGL also draws on phones that hide their display device from apps (retail Adreno 830/840 phones showed black with sound); proven on an Adreno 840 phone.</li><li>OpenGL safe mode, on by default, stops OpenGL games vanishing a few seconds in (Mesa's threaded helper faults; Wine hides the crash).</li><li>The HUD names what really renders: an OpenGL game reads OpenGL, not DXVK. Cards read Vulkan (Wayland) or Vulkan (X11).</li></ul></div>
     <div class="tile"><h3>Wayland backend</h3><ul><li>Per container, with a per-game override: container default, force X11, force Wayland.</li><li>Only offered on a Proton that ships winewayland and its Wayland Turnip. Anything else falls back to X11 with a notice.</li><li>Settings tell the truth on Wayland: greyed controls show the reason, live ones apply.</li></ul></div>
     <div class="tile"><h3>Pointer lock</h3><ul><li>Pointer constraints and relative motion implemented in the compositor.</li><li>Touch drags, captured mouse and stick-as-mouse arrive as relative motion.</li><li>Half-Life 2 at 144 fps with touch mouse-look, full turn-around included.</li></ul></div>
     <div class="tile"><h3>Keyboard, clipboard, IME</h3><ul><li>Keyboard works on Wayland for the first time.</li><li>Copy in a Windows program, paste on Android, and back.</li><li>Soft keyboard opens when a Windows text field takes focus.</li></ul></div>
@@ -276,7 +276,7 @@ th.num{text-align:right}
     <div class="col">
       <ol class="steps">
         <li><b>01</b><span>Install the APK for your flavour over 3.1.1. Data is kept, and versionCode stays 85 so you can go back or move on to the next stable.</span></li>
-        <li><b>02</b><span>Contents, Proton, Install from file: the wcp installs as Proton-11.0-2.1-arm64ec-8, its own layer line, never offered as an update to a normal 11.0-2 container. A container on an older -N shows an Update layer button.</span></li>
+        <li><b>02</b><span>Contents, Proton, Install from file: the wcp installs as Proton-11.0-2.1-arm64ec-9, its own layer line, never offered as an update to a normal 11.0-2 container. A container on an older -N shows an Update layer button.</span></li>
         <li><b>03</b><span>Have any recent Android Turnip installed from the in-app catalog. It serves the compositor, and a Wayland container picks it for you. Never pick System.</span></li>
         <li><b>04</b><span>Container: that Proton, Display backend Wayland, Compositor driver your Turnip (filled in for you), Wayland game driver Auto, an installed FEXCore. DXVK, VKD3D, components and audio as on X11.</span></li>
         <li><b>05</b><span>Adreno 830/840 owners: try the a8xx choices one by one under Wayland game driver and report which runs best.</span></li>
@@ -287,7 +287,7 @@ th.num{text-align:right}
         <div><span>Bannerlator-3.1.2-wayland-pre7-standard.apk</span><span>com.winlator.banner</span></div>
         <div><span>Bannerlator-3.1.2-wayland-pre7-pubg.apk</span><span>com.tencent.ig</span></div>
         <div><span>Bannerlator-3.1.2-wayland-pre7-ludashi.apk</span><span>Ludashi flavour</span></div>
-        <div><span>proton-11.0-2.1-arm64ec-wayland-v8.wcp</span><span>117.5 MB, eight drivers + Control Panel fix</span></div>
+        <div><span>proton-11.0-2.1-arm64ec-wayland-v9.wcp</span><span>117.5 MB, eight drivers + Control Panel fix + OpenGL on phones with no display device</span></div>
         <div><span>README-Wayland-test-kit.txt</span><span>setup notes</span></div>
       </div>
       <p><a class="cta" href="https://github.com/The412Banner/Bannerlator/releases/tag/3.1.2-wayland-pre7">Open the pre-release on GitHub</a></p>
