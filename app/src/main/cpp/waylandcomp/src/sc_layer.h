@@ -44,6 +44,15 @@ int sc_layer_present(struct vkp_image *src, int scene_w, int scene_h);
 int sc_layer_present_ahb(AHardwareBuffer *ahb, int w, int h, int acquire_fd, void *token,
                          int scene_w, int scene_h);
 
+/* Vote a panel refresh rate for the layer (VRR / refresh-rate matching), the same rate and
+ * compatibility the app votes on its own surface with Surface.setFrameRate; 0 = no vote. Needed
+ * because a zero-copy game's frames go onto this layer and never reach the app's surface, so the
+ * surface vote alone does not describe the game's cadence to SurfaceFlinger. Callable from any
+ * thread at any time (it only stores the rate); the compositor applies it on the layer with its
+ * next transaction, and re-applies it whenever the SurfaceControl is re-created. A no-op on devices
+ * whose libandroid has no ASurfaceTransaction_setFrameRate. */
+void sc_layer_set_frame_rate(float fps);
+
 /* The scene is not a single fullscreen window this frame: hide the layer if it is up. */
 void sc_layer_hide(void);
 
