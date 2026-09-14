@@ -151,6 +151,9 @@ class ContainerDetailViewModel(app: Application) : AndroidViewModel(app) {
     // imported:<id>). Only shown/used on the Wayland backend; kept as stored on X11 so flipping the
     // backend back and forth doesn't lose it. See core.WaylandGameDriver.
     var waylandGameDriver by mutableStateOf(Container.WAYLAND_GAME_DRIVER_AUTO)
+    // HDR output (extra "waylandHdr": "1" on, absent off). Same rules as waylandGameDriver: only
+    // shown on the Wayland backend, kept as stored on X11. See display.WaylandHdr.
+    var waylandHdr by mutableStateOf(false)
 
     // Wayland COMPOSITOR driver default. The compositor puts the game's frames on screen through the
     // adrenotools driver named by graphicsDriverConfig's "version"; empty/"System" is the system
@@ -579,6 +582,7 @@ class ContainerDetailViewModel(app: Application) : AndroidViewModel(app) {
         rendererSfCompatMode     = seed?.getRendererSfCompatMode() ?: true
         displayBackend           = seed?.getDisplayBackend() ?: Container.DISPLAY_BACKEND_X11
         waylandGameDriver        = seed?.getWaylandGameDriver() ?: Container.WAYLAND_GAME_DRIVER_AUTO
+        waylandHdr               = seed?.isWaylandHdr() ?: false
         renderScale              = seed?.getExtra("renderScale", "1.0") ?: "1.0"
         autoCloseOnExit          = (seed?.getExtra("autoCloseOnExit", "1") ?: "1") == "1"
         selectedDXWrapper        = identifierToDisplay(seed?.getDXWrapper() ?: Container.DEFAULT_DXWRAPPER, dxWrapperEntries)
@@ -1231,6 +1235,7 @@ class ContainerDetailViewModel(app: Application) : AndroidViewModel(app) {
         // here too, a container can never be BORN claiming a Wayland its layer cannot do either.
         c.setDisplayBackend(if (isWaylandBackend) Container.DISPLAY_BACKEND_WAYLAND else Container.DISPLAY_BACKEND_X11)
         c.setWaylandGameDriver(waylandGameDriver)   // "auto" clears the extra
+        c.setWaylandHdr(waylandHdr)                 // off clears the extra
         c.putExtra("renderScale", if (renderScale == "1.0") null else renderScale)
         c.putExtra("autoCloseOnExit", if (autoCloseOnExit) null else "0")  // default ON
         c.setInputType(inputType)

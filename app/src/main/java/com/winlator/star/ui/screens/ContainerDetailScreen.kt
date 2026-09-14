@@ -1072,6 +1072,56 @@ private fun TopLevelFields(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
+            Spacer(Modifier.height(8.dp))
+            // HDR output (HDR10), see display.WaylandHdr. On a screen that doesn't report HDR10 the
+            // switch is greyed with the reason but still shows what is stored (launch turns nothing on
+            // there). The DXVK 2.x warning needs the layer's versionCode, whose first read per layer
+            // scans the installed contents, so it is worked out off-main and only while HDR is on.
+            run {
+                val hdrUnavailable = remember { com.winlator.star.display.WaylandHdr.unavailableReason(context) }
+                val hdrOn = viewModel.waylandHdr
+                val hdrWine = viewModel.selectedWineVersion
+                val hdrDxWrapper = StringUtils.parseIdentifier(viewModel.selectedDXWrapper)
+                val hdrDxConfig = viewModel.dxWrapperConfig
+                var hdrDxvkWarning by remember { mutableStateOf<String?>(null) }
+                LaunchedEffect(hdrOn, hdrWine, hdrDxWrapper, hdrDxConfig) {
+                    hdrDxvkWarning = if (!hdrOn) null else withContext(Dispatchers.IO) {
+                        com.winlator.star.display.WaylandHdr.dxvkWarning(context, hdrWine, hdrDxWrapper, hdrDxConfig)
+                    }
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Switch(
+                        enabled = hdrUnavailable == null,
+                        checked = hdrOn,
+                        onCheckedChange = { viewModel.waylandHdr = it }
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        com.winlator.star.display.WaylandHdr.TITLE,
+                        color = if (hdrUnavailable == null) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                if (hdrUnavailable != null) {
+                    Text(
+                        hdrUnavailable,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Text(
+                    com.winlator.star.display.WaylandHdr.HELP_TEXT,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                val dxvkWarning = hdrDxvkWarning
+                if (hdrOn && dxvkWarning != null) {
+                    Text(
+                        dxvkWarning,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+            }
         }
         if (showWrapperManager) WrapperManagerDialog(onDismiss = {
             showWrapperManager = false
