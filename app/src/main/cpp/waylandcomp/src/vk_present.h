@@ -94,6 +94,9 @@ int vkp_device_lost(void);
 // Clear to black, blit the draws in order (first = bottom) and present.
 // Returns 0 on success, -1 if nothing could be presented (no window yet, etc.).
 int vkp_render(int scene_w, int scene_h, const struct vkp_draw *draws, int n);
+/* A black frame with no compositor pass (no effects, no frame generation), whatever is armed: the
+ * base surface under an HDR game that keeps its display layer (compositor.c). */
+int vkp_render_plain(int scene_w, int scene_h);
 
 /* ---- layer mode helpers (sc_layer.c; compositor thread) ---- */
 /* Whole-image copy of src into dst (a blit-destination dmabuf image), waited for on the CPU. */

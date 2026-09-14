@@ -5,6 +5,7 @@
 #define _GNU_SOURCE
 #include "sc_layer.h"
 #include "ahb_swapchain.h"
+#include "banner_color.h"
 #include "vk_present.h"
 #include <android/hardware_buffer.h>
 #include <android/native_window.h>
@@ -38,6 +39,14 @@ typedef struct ASurfaceTransaction ASurfaceTransaction;
 typedef struct ASurfaceTransactionStats ASurfaceTransactionStats;
 typedef void (*sc_complete_fn)(void *context, ASurfaceTransactionStats *stats);
 
+/* <android/hdr_metadata.h> (NDK, API 29), declared here like the rest of this table: stable ABI. */
+struct banner_color_xy { float x, y; };
+struct banner_hdr_smpte2086 {
+    struct banner_color_xy displayPrimaryRed, displayPrimaryGreen, displayPrimaryBlue, whitePoint;
+    float maxLuminance, minLuminance;
+};
+struct banner_hdr_cta861_3 { float maxContentLightLevel, maxFrameAverageLightLevel; };
+
 static struct {
     ASurfaceControl *(*createFromWindow)(ANativeWindow *, const char *);
     void (*release)(ASurfaceControl *);
@@ -56,11 +65,19 @@ static struct {
      * the layer simply carries no vote and the app's surface vote is all there is. */
     void (*setFrameRate)(ASurfaceTransaction *, ASurfaceControl *, float, int8_t);
     void (*setFrameRateStrategy)(ASurfaceTransaction *, ASurfaceControl *, float, int8_t, int8_t);
+    /* Colour (API 29), optional: only an HDR session ever calls them (banner_color.h's gate needs
+     * setBufferDataSpace; the metadata calls are sent when present). */
+    void (*setBufferDataSpace)(ASurfaceTransaction *, ASurfaceControl *, int32_t);
+    void (*setHdrMetadata_smpte2086)(ASurfaceTransaction *, ASurfaceControl *, const struct banner_hdr_smpte2086 *);
+    void (*setHdrMetadata_cta861_3)(ASurfaceTransaction *, ASurfaceControl *, const struct banner_hdr_cta861_3 *);
     /* Not in the public NDK headers (vndk/hardware_buffer.h) but exported by libnativewindow.so on
      * every device; Mesa's Android WSI calls it for every gralloc buffer it imports. */
     const void *(*getNativeHandle)(const AHardwareBuffer *);
     int state; /* 0 = untried, 1 = loaded, -1 = unavailable */
 } api;
+/* Only looked up for the log line (API 35): the PQ layer's headroom is left at the default (as much
+ * as the display allows), so nothing calls it. */
+static int g_has_desired_headroom;
 
 #define ASC_VISIBILITY_HIDE 0
 #define ASC_VISIBILITY_SHOW 1
@@ -95,6 +112,10 @@ static int load_api(void) {
     SYM(prevReleaseFence, "ASurfaceTransactionStats_getPreviousReleaseFenceFd");
     SYM(setFrameRate, "ASurfaceTransaction_setFrameRate");
     SYM(setFrameRateStrategy, "ASurfaceTransaction_setFrameRateWithChangeStrategy");
+    SYM(setBufferDataSpace, "ASurfaceTransaction_setBufferDataSpace");
+    SYM(setHdrMetadata_smpte2086, "ASurfaceTransaction_setHdrMetadata_smpte2086");
+    SYM(setHdrMetadata_cta861_3, "ASurfaceTransaction_setHdrMetadata_cta861_3");
+    g_has_desired_headroom = dlsym(lib, "ASurfaceTransaction_setDesiredHdrHeadroom") != NULL;
 #undef SYM
     if (!api.createFromWindow || !api.release || !api.txCreate || !api.txDelete || !api.txApply ||
         !api.setBuffer || !api.setZOrder || !api.setVisibility || !api.setGeometry ||
@@ -157,6 +178,9 @@ struct layer {
     float fps_applied;          /* the vote the live SurfaceControl already carries (-1 = none yet) */
     int recreate_pending;       /* composition recovery: swap this layer's SurfaceControl for a fresh
                                  * one inside the next frame's transaction (see swap_sc_begin) */
+    int32_t ds_applied;         /* dataspace the live SurfaceControl carries; -1 = never set on it
+                                 * (untouched, today's UNKNOWN), see apply_colour */
+    uint32_t md_applied;        /* identity of the image description whose metadata it carries, 0 = none */
 };
 
 static struct layer g_layers[SC_LAYER_COUNT];
@@ -174,9 +198,11 @@ static void layers_init(void) {
     if (g_layers_ready) return;
     g_layers_ready = 1;
     g_layers[SC_LAYER_GAME] = (struct layer){.name = "banner_wayland_game", .z = 1, .pool_n = 3,
-                                             .cur_slot = -1, .votes_rate = 1, .fps_applied = -1.0f};
+                                             .cur_slot = -1, .votes_rate = 1, .fps_applied = -1.0f,
+                                             .ds_applied = -1};
     g_layers[SC_LAYER_OVERLAY] = (struct layer){.name = "banner_wayland_overlay", .z = 2, .pool_n = 3,
-                                                .cur_slot = -1, .votes_rate = 0, .fps_applied = -1.0f};
+                                                .cur_slot = -1, .votes_rate = 0, .fps_applied = -1.0f,
+                                                .ds_applied = -1};
     for (int i = 0; i < SC_LAYER_COUNT; i++)
         for (int j = 0; j < POOL_MAX; j++) g_layers[i].slots[j].release_fd = -1;
 }
@@ -292,6 +318,7 @@ static void retire_sc(struct layer *l) {
     l->shown = 0; l->cur_slot = -1; l->cur_token = NULL; l->geo_valid = 0;
     l->fps_applied = -1.0f; /* the next SurfaceControl carries no vote until it is re-applied */
     l->recreate_pending = 0; /* a fresh SurfaceControl is coming anyway */
+    l->ds_applied = -1; l->md_applied = 0; /* ...and no colour tag either */
 }
 
 /* Wait (bounded) for SurfaceFlinger to finish with every pool buffer of every layer, then free
@@ -435,6 +462,7 @@ static int ensure_sc(struct layer *l) {
         l->sc = api.createFromWindow(win, l->name);
         if (!l->sc) { banner_log("error", "layer: ASurfaceControl_createFromWindow(%s) failed", l->name); return -1; }
         l->win = win;
+        l->ds_applied = -1; l->md_applied = 0;
         ASurfaceTransaction *tx = api.txCreate();
         if (tx) {
             api.setZOrder(tx, l->sc, l->z);
@@ -491,6 +519,55 @@ static void apply_frame_rate(ASurfaceTransaction *tx, struct layer *l) {
     else if (!first) banner_log("layer", "display frame-rate vote on %s cleared (panel runs free)", l->name);
 }
 
+/* ---- colour (HDR, banner_color.h) -------------------------------------------------------------
+ * The layer is told what its buffer's pixels MEAN — the dataspace (BT2020_PQ for an HDR10 frame) and
+ * the game's mastering / content-light metadata — in the same transaction as the buffer, so the
+ * display never shows an HDR frame decoded as sRGB or the other way round. A layer that has never been
+ * tagged is never touched: sessions without an HDR description make no colour call at all. */
+static void apply_colour(ASurfaceTransaction *tx, struct layer *l, const struct banner_color *c) {
+    int32_t want = c ? c->dataspace : BANNER_ADATASPACE_UNKNOWN;
+    uint32_t md = (c && c->dataspace) ? c->identity : 0;
+    if (!api.setBufferDataSpace) return;
+    if (l->ds_applied < 0 && want == BANNER_ADATASPACE_UNKNOWN) return;   /* never tagged: leave it be */
+    if (want == l->ds_applied && md == l->md_applied) return;
+    api.setBufferDataSpace(tx, l->sc, want);
+    struct banner_hdr_smpte2086 st;
+    struct banner_hdr_cta861_3 cta;
+    int st_on = c && c->dataspace && c->has_st2086, cta_on = c && c->dataspace && c->has_cta861;
+    if (st_on) {
+        st = (struct banner_hdr_smpte2086){
+            .displayPrimaryRed = {c->red[0], c->red[1]}, .displayPrimaryGreen = {c->green[0], c->green[1]},
+            .displayPrimaryBlue = {c->blue[0], c->blue[1]}, .whitePoint = {c->white[0], c->white[1]},
+            .maxLuminance = c->max_lum, .minLuminance = c->min_lum};
+    }
+    if (cta_on) cta = (struct banner_hdr_cta861_3){.maxContentLightLevel = c->max_cll, .maxFrameAverageLightLevel = c->max_fall};
+    /* NULL clears what a previous description set: metadata never outlives the frame it belongs to. */
+    if (api.setHdrMetadata_smpte2086) api.setHdrMetadata_smpte2086(tx, l->sc, st_on ? &st : NULL);
+    if (api.setHdrMetadata_cta861_3) api.setHdrMetadata_cta861_3(tx, l->sc, cta_on ? &cta : NULL);
+    if (want)
+        banner_log("color", "%s: dataspace %s (%#x) set on the display layer for image description #%u; SMPTE 2086 "
+                   "%s, CTA-861.3 %s [%s]", l->name, want == BANNER_ADATASPACE_BT2020_PQ ? "BT2020_PQ" : "HDR",
+                   (unsigned)want, c->identity,
+                   st_on ? (api.setHdrMetadata_smpte2086 ? "sent" : "not supported by this Android") : "none given",
+                   cta_on ? (api.setHdrMetadata_cta861_3 ? "sent" : "not supported by this Android") : "none given",
+                   c->text);
+    else
+        banner_log("color", "%s: dataspace back to UNKNOWN (sRGB), HDR metadata cleared - the frame on the layer is "
+                   "not an HDR frame", l->name);
+    l->ds_applied = want;
+    l->md_applied = md;
+}
+
+int sc_layer_can_tag_hdr(void) { return load_api() == 0 && api.setBufferDataSpace != NULL; }
+
+void sc_layer_hdr_symbols(char *out, size_t size) {
+    if (load_api() != 0) { snprintf(out, size, "no display layers"); return; }
+    snprintf(out, size, "setBufferDataSpace %s, setHdrMetadata_smpte2086 %s, setHdrMetadata_cta861_3 %s, "
+             "setDesiredHdrHeadroom %s", api.setBufferDataSpace ? "yes" : "NO",
+             api.setHdrMetadata_smpte2086 ? "yes" : "no", api.setHdrMetadata_cta861_3 ? "yes" : "no",
+             g_has_desired_headroom ? "yes (left at the default: all the headroom the display allows)" : "no");
+}
+
 /* Once, when a second layer first goes up: HWC only composes a few layers before SurfaceFlinger
  * falls back to GPU client composition, so the count is deliberately capped and said out loud. */
 static void log_layer_count(void) {
@@ -544,13 +621,15 @@ static ASurfaceControl *swap_sc_begin(struct layer *l) {
     l->shown = 0;
     l->geo_valid = 0;
     l->fps_applied = -1.0f;
+    l->ds_applied = -1; l->md_applied = 0;
     banner_log("layer", "composition recovery: %s got a fresh SurfaceControl now that nothing is above "
                "the game (measured on this panel: hardware composition does NOT return from this alone)", l->name);
     return old;
 }
 
-/* The transaction that puts pool slot `idx` of layer `l` on screen at `r`. 0 = applied. */
-static int present_slot(struct layer *l, int idx, const int r[8]) {
+/* The transaction that puts pool slot `idx` of layer `l` on screen at `r`, as `color` (NULL = no
+ * description). 0 = applied. */
+static int present_slot(struct layer *l, int idx, const int r[8], const struct banner_color *color) {
     struct slot *s = &l->slots[idx];
     ASurfaceTransaction *tx = api.txCreate();
     if (!tx) return -1;
@@ -563,6 +642,7 @@ static int present_slot(struct layer *l, int idx, const int r[8]) {
     api.setBufferTransparency(tx, l->sc, ASC_TRANSPARENCY_OPAQUE);
     apply_geometry(tx, l, r);
     apply_frame_rate(tx, l);
+    apply_colour(tx, l, color);
     if (!l->shown) api.setVisibility(tx, l->sc, ASC_VISIBILITY_SHOW);
     if (old) retire_ops(tx, old);
     if (add_complete_on(tx, l, old ? old : l->sc, l->cur_slot, l->cur_token, old ? 1 : 0) != 0 && old)
@@ -588,7 +668,8 @@ static void log_drop(struct layer *l) {
     }
 }
 
-int sc_layer_present_ahb(AHardwareBuffer *ahb, int w, int h, int acquire_fd, void *token, int scene_w, int scene_h) {
+int sc_layer_present_ahb(AHardwareBuffer *ahb, int w, int h, int acquire_fd, void *token, int scene_w, int scene_h,
+                         const struct banner_color *color, uint32_t ahb_format) {
     struct layer *l = layer_of(SC_LAYER_GAME);
     int r[8];
     if (!ahb || !token || ensure_sc(l) != 0) goto unavailable;
@@ -597,10 +678,13 @@ int sc_layer_present_ahb(AHardwareBuffer *ahb, int w, int h, int acquire_fd, voi
     if (g == 0) { if (acquire_fd >= 0) close(acquire_fd); sc_layer_hide(); return 1; }
     if (token == l->cur_token && l->shown && !l->recreate_pending) {
         /* The same frame again (the scene was redrawn for another reason): the display already
-         * has it; only the placement may have changed. */
+         * has it; only the placement may have changed (or, rarely, its description). */
         if (acquire_fd >= 0) close(acquire_fd);
         ASurfaceTransaction *tx = api.txCreate();
-        if (tx) { apply_geometry(tx, l, r); apply_frame_rate(tx, l); api.txApply(tx); api.txDelete(tx); }
+        if (tx) {
+            apply_geometry(tx, l, r); apply_frame_rate(tx, l); apply_colour(tx, l, color);
+            api.txApply(tx); api.txDelete(tx);
+        }
         return 0;
     }
     ASurfaceTransaction *tx = api.txCreate();
@@ -611,6 +695,7 @@ int sc_layer_present_ahb(AHardwareBuffer *ahb, int w, int h, int acquire_fd, voi
     api.setBufferTransparency(tx, l->sc, ASC_TRANSPARENCY_OPAQUE);
     apply_geometry(tx, l, r);
     apply_frame_rate(tx, l);
+    apply_colour(tx, l, color);
     if (!l->shown) api.setVisibility(tx, l->sc, ASC_VISIBILITY_SHOW);
     if (old) retire_ops(tx, old);
     /* Same buffer, new SurfaceControl: it is NOT free, so no release is reported for it — the swap
@@ -619,6 +704,7 @@ int sc_layer_present_ahb(AHardwareBuffer *ahb, int w, int h, int acquire_fd, voi
                         l->cur_token == token ? NULL : l->cur_token, old ? 1 : 0) != 0) {
         api.txDelete(tx); /* the fence went with the transaction */
         if (old) api.release(old);
+        l->ds_applied = -1; l->md_applied = 0; /* the colour tag went with it too: re-send it next time */
         return -1;
     }
     api.txApply(tx);
@@ -627,13 +713,14 @@ int sc_layer_present_ahb(AHardwareBuffer *ahb, int w, int h, int acquire_fd, voi
     l->cur_token = token;
     if (!l->shown) { l->shown = 1; banner_log("layer", "%s: layer shown", l->name); }
     if (!l->first_logged) { l->first_logged = 1; vkp_signal_first_frame(); }
+    if (color && color->dataspace) banner_color_frame_on_layer(color, 1, ahb_format);
     return 0;
 unavailable:
     if (acquire_fd >= 0) close(acquire_fd);
     return -1;
 }
 
-int sc_layer_present(struct vkp_image *src, int scene_w, int scene_h) {
+int sc_layer_present(struct vkp_image *src, int scene_w, int scene_h, const struct banner_color *color) {
     struct layer *l = layer_of(SC_LAYER_GAME);
     if (!src || ensure_sc(l) != 0) return -1;
     int sw = vkp_image_width(src), sh = vkp_image_height(src);
@@ -645,7 +732,8 @@ int sc_layer_present(struct vkp_image *src, int scene_w, int scene_h) {
     int idx = take_free_slot(l, sw, sh);
     if (idx < 0) { log_drop(l); return 0; }
     if (vkp_blit_image(src, l->slots[idx].img) != 0) return -1;
-    if (present_slot(l, idx, r) != 0) return -1;
+    if (present_slot(l, idx, r, color) != 0) return -1;
+    if (color && color->dataspace) banner_color_frame_on_layer(color, 0, AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM);
     if (!l->first_logged) {
         l->first_logged = 1;
         banner_log("layer", "presenting %dx%d game frames on their own SurfaceControl layer (%s pool, %d buffers); "
@@ -668,7 +756,7 @@ int sc_layer_present_pass(const struct vkp_draw *draws, int n, int scene_w, int 
     int idx = take_free_slot(l, rw, rh);
     if (idx < 0) { vkp_pass_abort(); log_drop(l); return 0; }
     if (vkp_pass_copy_to(l->slots[idx].img) != 0) return -1;
-    if (present_slot(l, idx, r) != 0) return -1;
+    if (present_slot(l, idx, r, NULL) != 0) return -1; /* the effects chain's result is 8-bit sRGB */
     if (!l->first_logged) {
         l->first_logged = 1;
         banner_log("layer", "presenting %dx%d frames on their own SurfaceControl layer (%s pool, %d buffers); "
@@ -750,7 +838,7 @@ int sc_layer_present_overlay(struct vkp_image *src, const int geo[8]) {
     /* The window is copied into the layer buffer 1:1; `geo` crops it and places it, so the layer
      * is exactly the window's rectangle on screen and nothing else is blended anywhere. */
     if (vkp_blit_image(src, l->slots[idx].img) != 0) return -1;
-    if (present_slot(l, idx, geo) != 0) return -1;
+    if (present_slot(l, idx, geo, NULL) != 0) return -1;
     if (!l->first_logged) {
         l->first_logged = 1;
         log_layer_count();

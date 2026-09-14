@@ -52,6 +52,10 @@ int ahb_swapchain_defer_release(struct dmabuf_buffer *b, struct wl_resource *buf
 void ahb_swapchain_surface_gone(struct surface *s);
 /* Zero-copy frames since the last call (the 10 s summary). */
 unsigned ahb_swapchain_stats_take(void);
+/* 1 when the banner_ahb_v1 global exists (a display layer is possible): part of the HDR gate. */
+int ahb_swapchain_advertised(void);
+/* The AHARDWAREBUFFER_FORMAT_* of the game's buffer behind b, 0 when it has none. */
+uint32_t ahb_swapchain_ahb_format(const struct dmabuf_buffer *b);
 
 /* ---- sc_layer.c -> ahb_swapchain.c (SurfaceFlinger's callback thread): the layer let go of the
  * buffer behind `token`; release_fd (owned by the callee, -1 = none) signals when the display is
@@ -71,5 +75,8 @@ void banner_release_buffer(struct surface *s, struct wl_resource *buffer, int pa
 void banner_request_redraw(void);
 /* "<title>" (program) of the window a surface belongs to, for the log. */
 void banner_surface_describe(const struct surface *s, char *out, size_t size);
+/* The surface's current image description (banner_color.h), NULL = none / HDR gate closed. */
+struct banner_color;
+const struct banner_color *banner_surface_color(const struct surface *s);
 
 #endif

@@ -891,6 +891,17 @@ static int acquire_image(int k, int first, uint32_t *img, VkResult *ar_out) {
     }
 }
 
+/* vkp_render_plain: the base surface's black frame with the compositor pass skipped (HDR game on its
+ * layer, compositor.c) - neither the effects chain nor frame generation runs, and so neither paces
+ * this loop with extra presents. */
+static int g_plain_frame;
+int vkp_render_plain(int scene_w, int scene_h) {
+    g_plain_frame = 1;
+    int r = vkp_render(scene_w, scene_h, NULL, 0);
+    g_plain_frame = 0;
+    return r;
+}
+
 int vkp_render(int scene_w, int scene_h, const struct vkp_draw *draws, int n) {
     vkp_apply_window_request();
     if (g_dev_state == -2) return -1;
@@ -914,8 +925,8 @@ int vkp_render(int scene_w, int scene_h, const struct vkp_draw *draws, int n) {
      * chain (effects_chain.c) or frame generation (framegen_bridge.c). With both off the draws are
      * blitted straight through the mapping into the swapchain image, as they always were; only the
      * blit filter follows the scaling mode. */
-    const int fx = vkp_effects_active();
-    const int fg = vkp_framegen_active();
+    const int fx = !g_plain_frame && vkp_effects_active();
+    const int fg = !g_plain_frame && vkp_framegen_active();
     const int pass = (fx || fg) && ensure_scene_image(scene_w, scene_h) == 0;
     const VkFilter blit_filter = vkp_effects_blit_filter();
 

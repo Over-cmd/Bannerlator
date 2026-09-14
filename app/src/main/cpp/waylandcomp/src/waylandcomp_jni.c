@@ -16,6 +16,7 @@
 #include "ahb_swapchain.h"
 #include "sc_layer.h"
 #include "effects_chain.h"
+#include "banner_color.h"
 
 extern int banner_wayland_run(void);
 extern void banner_wayland_send_pointer(int action, int x, int y);
@@ -372,6 +373,53 @@ Java_com_winlator_star_wayland_WaylandCompositor_nativeLogDisplay(JNIEnv *env, j
     char *s = dup_jstr(env, message);
     if (s) banner_log("display", "%s", s);
     free(s);
+}
+
+/* ---- HDR10 output, round 1 (banner_color.h / wl_color_mgmt.c) ---- */
+
+/* The opt-in: mode 0 off, 1 BANNER_WAYLAND_HDR=1, 2 =force (testing). Before the compositor starts. */
+JNIEXPORT void JNICALL
+Java_com_winlator_star_wayland_WaylandCompositor_nativeSetHdrRequest(JNIEnv *env, jclass clazz, jint mode,
+        jstring source, jboolean dxvkHdr, jboolean zeroCopyForced) {
+    char *s = dup_jstr(env, source);
+    banner_color_set_request((int)mode, s, dxvkHdr ? 1 : 0, zeroCopyForced ? 1 : 0);
+    free(s);
+}
+
+/* The game's display as android.view.Display reports it (before the start; again on every change). */
+JNIEXPORT void JNICALL
+Java_com_winlator_star_wayland_WaylandCompositor_nativeSetHdrDisplay(JNIEnv *env, jclass clazz, jint id, jstring name,
+        jstring formats, jboolean hdr10, jfloat maxLum, jfloat maxAvg, jfloat minLum, jboolean ratioAvailable,
+        jfloat ratio, jint api) {
+    char *n = dup_jstr(env, name), *f = dup_jstr(env, formats);
+    banner_color_set_display((int)id, n, f, hdr10 ? 1 : 0, (float)maxLum, (float)maxAvg, (float)minLum,
+                             ratioAvailable ? 1 : 0, (float)ratio, (int)api);
+    free(n); free(f);
+}
+
+/* One Display.getHdrSdrRatio() reading (listener = from the display's ratio listener). Any thread. */
+JNIEXPORT void JNICALL
+Java_com_winlator_star_wayland_WaylandCompositor_nativeHdrSdrRatioSample(JNIEnv *env, jclass clazz, jfloat ratio,
+        jboolean listener) {
+    banner_color_ratio_sample((float)ratio, listener ? 1 : 0);
+}
+
+/* ms since an HDR frame last reached a display layer, -1 = never this session. Any thread. */
+JNIEXPORT jint JNICALL
+Java_com_winlator_star_wayland_WaylandCompositor_nativeHdrLastFrameAgeMs(JNIEnv *env, jclass clazz) {
+    return (jint)banner_color_last_frame_age_ms();
+}
+
+/* -1 = not decided yet, 0 = closed, 1 = open. Any thread. */
+JNIEXPORT jint JNICALL
+Java_com_winlator_star_wayland_WaylandCompositor_nativeHdrGateState(JNIEnv *env, jclass clazz) {
+    return (jint)banner_color_gate_state();
+}
+
+/* The session is ending: the "HDR on screen: ..." summary line. Any thread, once. */
+JNIEXPORT void JNICALL
+Java_com_winlator_star_wayland_WaylandCompositor_nativeHdrSessionEnd(JNIEnv *env, jclass clazz) {
+    banner_color_session_end();
 }
 
 /* The Look the controls currently match (null = Custom) — only named in the session log. */

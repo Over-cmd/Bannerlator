@@ -65,11 +65,13 @@
  * Compositor thread only, except the SurfaceFlinger OnComplete callbacks (binder threads), which
  * only touch the pools under g_lock. sc_layer_hide*() is safe at any time.
  */
+#include <stddef.h>
 #include <stdint.h>
 #include <android/hardware_buffer.h>
 
 struct vkp_image;
 struct vkp_draw;
+struct banner_color;
 
 /* The layers, bottom first. The z-order is the array order (z = id + 1). */
 enum sc_layer_id { SC_LAYER_GAME = 0, SC_LAYER_OVERLAY = 1, SC_LAYER_COUNT = 2 };
@@ -82,10 +84,23 @@ int sc_layer_available(void);
  * Decides where a zero-copy acquire fence can come from; result goes to the session log. */
 void sc_layer_probe_dmabuf_fd(int fd);
 
+/* HDR (banner_color.h): can a display layer be told its buffer's colour encoding here
+ * (ASurfaceTransaction_setBufferDataSpace, Android 10+)? Part of the HDR gate. */
+int sc_layer_can_tag_hdr(void);
+/* Which of the colour calls this libandroid has, for the gate's log line. */
+void sc_layer_hdr_symbols(char *out, size_t size);
+
+/* COLOUR on the game layer: `color` is the image description of the frame being presented (NULL =
+ * none, i.e. sRGB). A layer that was never tagged is never touched (no setBufferDataSpace call at all:
+ * a session without an HDR description behaves exactly as before); once tagged, a later untagged frame
+ * puts the layer back to UNKNOWN. SMPTE 2086 / CTA-861.3 metadata travel with the dataspace. */
+
 /* GAME layer: show `src` (the fullscreen window's imported frame, scene-sized) on it, placed
  * through the current fullscreen mode / alignment mapping. 0 = shown (or deliberately dropped: no
- * free buffer), -1 = the layer path is unavailable this frame and the caller must draw the old way. */
-int sc_layer_present(struct vkp_image *src, int scene_w, int scene_h);
+ * free buffer), -1 = the layer path is unavailable this frame and the caller must draw the old way.
+ * The copy into the layer buffer is 8-bit: an HDR frame keeps its tag (its colours stay right), and
+ * loses precision. */
+int sc_layer_present(struct vkp_image *src, int scene_w, int scene_h, const struct banner_color *color);
 
 /* GAME layer, screen effects on: run the compositor pass (composite `draws` + the effects chain,
  * vkp_pass_begin) and put its result on the layer. Same return values as sc_layer_present. */
@@ -97,9 +112,10 @@ int sc_layer_present_pass(const struct vkp_draw *draws, int n, int scene_w, int 
  * retired), ahb_swapchain_layer_released(token, release_fd) reports SurfaceFlinger's release fence
  * for it. Presenting the token already on the layer only updates the placement. 0 = on the layer,
  * 1 = nothing of it is on screen (layer hidden, the buffer was not taken), -1 = unavailable this
- * frame (the caller draws the old way). */
+ * frame (the caller draws the old way). `color` / `ahb_format`: the frame's image description (NULL =
+ * none) and the buffer's AHARDWAREBUFFER_FORMAT_*, for the dataspace and the HDR evidence. */
 int sc_layer_present_ahb(AHardwareBuffer *ahb, int w, int h, int acquire_fd, void *token,
-                         int scene_w, int scene_h);
+                         int scene_w, int scene_h, const struct banner_color *color, uint32_t ahb_format);
 
 /* Vote a panel refresh rate for the layer the game presents on (VRR / refresh-rate matching), the
  * same rate and compatibility the app votes on its own surface with Surface.setFrameRate; 0 = no
