@@ -123,9 +123,9 @@ th.num{text-align:right}
 <main class="slides">
 
 <section class="slide" id="s1">
-  <div class="eyebrow">Bannerlator · 3.1.2 Wayland pre-release 4 · 13 September 2026</div>
+  <div class="eyebrow">Bannerlator · 3.1.2 Wayland pre-release 5 · 13 September 2026</div>
   <h1>Two display backends, one handheld</h1>
-  <p class="lede">X11 is the mature path every Bannerlator game has used until now. Wayland is a second backend that runs Windows games through a compositor Bannerlator carries itself. This deck compares the two as they stand after pre-release 4, lists what shipped, shows the measured zero-copy result, and is honest about what is left.</p>
+  <p class="lede">X11 is the mature path every Bannerlator game has used until now. Wayland is a second backend that runs Windows games through a compositor Bannerlator carries itself. This deck compares the two as they stand after pre-release 5, lists what shipped, shows the measured zero-copy result, and is honest about what is left.</p>
   <div class="legend"><span><i class="x"></i>X11: Java X server + libwinlator</span><span><i class="w"></i>Wayland: winewayland + embedded compositor</span></div>
   <p class="note">Every number and claim here comes from one device: an AYANEO Pocket FIT with an Adreno 750. Nothing else has run it yet.</p>
 </section>
@@ -221,6 +221,8 @@ th.num{text-align:right}
       <tr><td>Frame generation (LSFG Native, Win-FG Native)</td><td>Yes</td><td>Yes since pre-release 3, armed from the drawer. Half-Life 2 at 30 fps shown at 60, 90 and 120 fps</td></tr>
       <tr><td>Scaling modes and screen effects (SGSR, FSR, NIS, CAS, HDR, Looks, CRT and the rest)</td><td>Yes</td><td>Yes since pre-release 3, live from the drawer, a 13-pass Vulkan chain in the compositor</td></tr>
       <tr><td>Zero-copy toggle and display backend row in the drawer</td><td>Native Rendering</td><td>Yes, and since pre-release 4 it switches live mid-game</td></tr>
+      <tr><td>Screen effects without giving up the hardware-composed path</td><td>No, X11 always composites itself</td><td>Yes since pre-release 5, the chain draws into the game's display layer</td></tr>
+      <tr><td>Match the panel rate to the game (and to frame generation)</td><td>Yes</td><td>Yes, fixed on Wayland in pre-release 5, including the game's own layer</td></tr>
       <tr><td>Render scale (supersampling)</td><td>Yes</td><td>Not used</td></tr>
       <tr><td>Keyboard layouts other than US</td><td>Yes</td><td>Yes since pre-release 2, xkb data bundled in the layer</td></tr>
       <tr><td>Drag-and-drop, image clipboard</td><td>Partly</td><td>No, text only</td></tr>
@@ -231,7 +233,7 @@ th.num{text-align:right}
 </section>
 
 <section class="slide" id="s5">
-  <div class="eyebrow">Slide 5 · What shipped in pre-releases 1 to 4</div>
+  <div class="eyebrow">Slide 5 · What shipped in pre-releases 1 to 5</div>
   <h2>Everything since 3.1.1</h2>
   <div class="grid3">
     <div class="tile"><h3>Wayland backend</h3><ul><li>Per container, with a per-game override: container default, force X11, force Wayland.</li><li>Only offered on a Proton that ships winewayland and its Wayland Turnip. Anything else falls back to X11 with a notice.</li><li>Settings tell the truth on Wayland: greyed controls show the reason, live ones apply.</li></ul></div>
@@ -240,6 +242,7 @@ th.num{text-align:right}
     <div class="tile"><h3>Screen and compositor</h3><ul><li>Off, Fit, Stretch, Fill and Integer modes plus alignment, with matching touch mapping.</li><li>No black frame on swapchain rebuild, exact FPS cap, resume after HOME, recovery on surface loss.</li><li>HUD sampling moved off the compositor thread.</li></ul></div>
     <div class="tile"><h3>Eight bundled drivers</h3><ul><li>Auto by GPU, plain, Vauzi a7xx, WinNative Balanced and Performance, gen8, SMXZ, WHITE, upstream.</li><li>Imported Linux drivers accepted as a zip.</li><li>Each pick verified to load its own driver.</li></ul></div>
     <div class="tile"><h3>Zero-copy and compressed buffers</h3><ul><li>Zero-copy toggle in the drawer, or BANNER_WAYLAND_ZERO_COPY=1: the game's own frames go to the display hardware, no compositor copy. Measured on slide 3.</li><li>Compressed (UBWC) game buffers accepted by default, BANNER_WAYLAND_UBWC=0 to force linear.</li><li>First-launch size and desktop-close bugs fixed; odd shortcut names no longer crash.</li></ul></div>
+    <div class="tile"><h3>Two display layers (pre-release 5)</h3><ul><li>Screen effects draw straight into the game's display layer, so a Look or a scaling mode no longer costs the game its hardware-composed path.</li><li>A window above a fullscreen game gets its own layer while the game keeps presenting copy-free underneath. Two layers is a deliberate cap.</li><li>Refresh-rate matching now reaches Wayland: a 60 cap runs the panel at 60, even with zero-copy on.</li></ul></div>
     <div class="tile"><h3>The live zero-copy switch (pre-release 4)</h3><ul><li>Flip zero-copy on or off in the drawer while the game runs: the compositor tells the game's driver to rebuild its swapchain, and the game moves onto or off its own display layer.</li><li>Proven on Half-Life 2: off, on, off, on with the frame rate flat and the picture never black.</li><li>Needs the v6 layer, because the game driver lives inside it. Mixed old and new versions fall back safely.</li></ul></div>
     <div class="tile"><h3>The drawer on Wayland (pre-release 3)</h3><ul><li>Every scaling mode and screen effect live, in X11's order, as a Vulkan chain in the compositor.</li><li>LSFG Native and Win-FG Native frame generation, armed from the drawer. Effects or frame generation on means the copy path; zero-copy resumes when both are off.</li><li>Task Manager shows the display backend and both drivers; HUD FPS fixed under zero-copy on GPUs whose frames bypass the compositor.</li></ul></div>
   </div>
@@ -279,13 +282,13 @@ th.num{text-align:right}
     </div>
     <div class="col">
       <div class="files">
-        <div><span>Bannerlator-3.1.2-wayland-pre4-standard.apk</span><span>com.winlator.banner</span></div>
-        <div><span>Bannerlator-3.1.2-wayland-pre4-pubg.apk</span><span>com.tencent.ig</span></div>
-        <div><span>Bannerlator-3.1.2-wayland-pre4-ludashi.apk</span><span>Ludashi flavour</span></div>
+        <div><span>Bannerlator-3.1.2-wayland-pre5-standard.apk</span><span>com.winlator.banner</span></div>
+        <div><span>Bannerlator-3.1.2-wayland-pre5-pubg.apk</span><span>com.tencent.ig</span></div>
+        <div><span>Bannerlator-3.1.2-wayland-pre5-ludashi.apk</span><span>Ludashi flavour</span></div>
         <div><span>proton-11.0-2.1-arm64ec-wayland-v6.wcp</span><span>117.5 MB, eight drivers</span></div>
         <div><span>README-Wayland-test-kit.txt</span><span>setup notes</span></div>
       </div>
-      <p><a class="cta" href="https://github.com/The412Banner/Bannerlator/releases/tag/3.1.2-wayland-pre4">Open the pre-release on GitHub</a></p>
+      <p><a class="cta" href="https://github.com/The412Banner/Bannerlator/releases/tag/3.1.2-wayland-pre5">Open the pre-release on GitHub</a></p>
       <p class="note">Logs: Download/Wayland-logs for the compositor session, Download/bannerlator/&lt;game&gt;/wine_debug.log for Wine, DXVK and VKD3D.</p>
     </div>
   </div>
@@ -314,7 +317,8 @@ th.num{text-align:right}
     <li><span><b>Turn zero-copy on by default</b> once more GPUs have run it, and measure it where it can show: a GPU-bound game and a large panel. Both performance paths are in and proven.</span></li>
         <li><span><b>Real 710, 720, 722 and 8xx testing</b> of the eight bundled drivers. The most valuable thing a tester can send.</span></li>
         <li><span><b>Guest-side leak on every API switch</b>, a few dozen file descriptors and threads. X11 leaks more, so not Wayland-specific.</span></li>
-    <li><span><b>Screen effects on GPUs whose buffers the compositor cannot import</b>, now within reach thanks to the display-layer machinery the live switch added.</span></li>
+    <li><span><b>Screen effects on GPUs whose buffers the compositor cannot import</b>, now within reach thanks to the display-layer machinery.</span></li>
+    <li><span><b>Real HDR.</b> The game side already works today: the bundled driver carries colour management and the HDR Vulkan extensions. What is missing is colour management in our compositor and a 10-bit path. Blocked on hardware that can actually show it.</span></li>
   </ol>
 </section>
 
