@@ -1,5 +1,58 @@
 # Star-Compose — Progress Log
 
+## 2026-09-14 (later) — 🌊🧱 **Wayland phase 5, round 2: composition recovery MEASURED and it does NOT work on this panel; effects-live and X11 regressions green** (`feat/wayland-phase5` `93d40b88`, run 34832708528)
+
+> Picking up the three things the first round could not reach. Build under test for the device work was still `207154ce…` (run 34825893993 @ `217efe9e`) — `feat/wayland-phase2` had been merged in the meantime and fast-forwarded with no code drift, so the installed binary was exactly the code being measured.
+
+> ### ❌→📏 (1) Display-layer composition recovery — the mechanism works, the cure does not
+> **Getting two layers up.** Fullscreen HL2 was the wrong vehicle: it self-minimises when Wine's Task Manager takes guest focus (`window moved "HALF-LIFE 2 - Direct3D 9" (hl2.exe) to -32000,-32000` → `layers hidden`). **Wizardry works** — it is a borderless-fullscreen toplevel that does not minimise. A copy of its shortcut with `BANNER_WAYLAND_ZERO_COPY=1` puts it on the game layer (`300 layer frames` per 10 s at its 30 fps cap), and Wine's Task Manager then lands on the overlay layer:
+> ```
+> 06:00:45.211  layer  SurfaceControl "banner_wayland_overlay" created as a child of the screen surface (z=2)
+> 06:00:45.213  layer  banner_wayland_overlay geometry: buffer 0,0-404,453 -> screen 657,200-1263,879
+> 06:00:45.213  layer  2 display layers in use: "banner_wayland_game" (z=1) and "banner_wayland_overlay" (z=2) above it …
+> ```
+> **The recovery fires exactly as designed.** Closing the overlay window (the guest `taskmgr.exe` was ended from the host, because Wizardry holds a persistent pointer lock so taps never reach the guest window's close box):
+> ```
+> 06:03:47.177  layer  banner_wayland_overlay: SurfaceControl retired (window 0x79574d3530)
+> 06:03:47.177  layer  banner_wayland_overlay: gone (nothing is above the game any more)
+> 06:03:47.183  layer  composition recovery: banner_wayland_game got a fresh SurfaceControl …
+> 06:03:47.183  layer  banner_wayland_game geometry: buffer 0,0-1280,720 -> screen 0,0-1920,1080
+> 06:03:47.183  layer  banner_wayland_game: layer shown
+> ```
+> **6 ms** from the overlay retiring to the swap, SurfaceFlinger really hands out a new layer (its id goes `17632` → `17636`), and the game does not drop a frame across the boundary (`305 frames on screen (30.5 fps) | 300 GPU frames from games | 414 layer frames`). No black frame. The atomic-transaction design does what it claims.
+>
+> **But it does not bring hardware composition back, and that is now measured rather than assumed.** `dumpsys android.hardware.graphics.composer3.IComposer/default`, one line per layer, reproduced twice end to end:
+> ```
+> one layer (baseline)                        AHardwareBuffer z: 0  composition: DEVICE/DEVICE  transform: 90/0/0
+> two layers (overlay up)                     z: 0 DEVICE/CLIENT · z: 1 DEVICE/CLIENT · z: 2 DEVICE/CLIENT
+> overlay retired + fresh SurfaceControl      z: 0 DEVICE/CLIENT          (and at +8 s, +16 s, +24 s)
+> layer path dropped entirely and re-created  z: 0 DEVICE/CLIENT
+> drawer opened and closed, no second window  z: 0 DEVICE/DEVICE          ← control
+> HOME + resume                               z: 0 DEVICE/DEVICE
+> ```
+> The control matters: the drawer alone does **not** cause the fallback on this build, so the second display layer really is the cause. And the cure is not the child layer — **HOME + resume re-creates the app's whole window and SurfaceView** (`VRI[XServerDisplayActivity]#0` becomes `#4` in the dump), which is the only thing that clears it. **So the phase-4 note written into `sc_layer.h` — "only re-creating the GAME layer's SurfaceControl clears it" — is wrong**; it was inferred from HOME + resume, which re-creates everything. The sticky client-composition state belongs to the parent surface or the display.
+>
+> **What was changed in response** (`93d40b88`): the swap is **kept** — it is free, correct, and the mechanism may well differ on hardware that is not rotating and scaling every layer — but the header comment, the function comment and the log line no longer promise an outcome that was not observed. The log line now reads `composition recovery: banner_wayland_game got a fresh SurfaceControl now that nothing is above the game (measured on this panel: hardware composition does NOT return from this alone)`, and `sc_layer.h` carries the five-line measurement table above.
+> **Recommendation, not implemented** (it is a behaviour change, not a bug fix): the only cure that keeps the single-layer win is **prevention** — do not put a second display layer up at all while the game layer is rotated and scaled, and send the window above the game down the copy path instead, which is what the pre-phase-4 code did. That costs one blit SurfaceFlinger would have done anyway and keeps `DEVICE/DEVICE` for the whole session. Re-creating the parent SurfaceView, the only other lever, would cost a real black frame and a swapchain rebuild — far worse than the few percent of GPU that client composition costs.
+
+> ### ✅ (2) Effects applied live, over a running game, still on the game's layer
+> CAS switched on from the drawer while Wizardry ran on the game layer:
+> ```
+> 06:07:10.861  effects  scaling=None, CAS on 60%, Look="Custom"
+> 06:07:10.862  effects  scene image 1280x720 for the effect chain
+> 06:07:11.500  effects  chain ready: 13 passes (SGSR, SGSR HQ, NIS, FSR EASU+RCAS, CAS, colour, FXAA, Toon, HDR, NTSC, CRT, deband) on Adreno (TM) 750
+> 06:07:13.616  stats    last 10 s: 283 frames on screen (28.3 fps) | 284 GPU frames from games | … | 283 layer frames
+> ```
+> The chain built live, the game **kept its display layer** through it (`283 layer frames` — the chain's result goes into the game's own layer, not the compositor's swapchain), and the composer stayed `DEVICE/DEVICE` **with effects on**. Switched back off cleanly (`effects  all off: scaling=None (plain blit)`).
+
+> ### ✅ (3) X11 is untouched
+> A copy of a container-7 shortcut forced to `displayBackend=x11` (Insane 2). In the whole session logcat: **zero** occurrences of `OpenGL safe mode` or `GALLIUM_THREAD` (the export is gated on the Wayland backend), and **no new Wayland session log was created** (`wayland-2026-09-14_05-57-53.log` stayed the newest), so nothing wrote into the compositor log either. The HDR read still runs — it is backend-agnostic by design — and goes to logcat only: `06:08:14.269 I XServerDisplayActivity: HDR: HDR capability of "Built-in Screen" (display 0, Android API 34): formats none | …`. The game itself: in-race at `D3D9 · DXVK · 121.8 fps · 8.2 ms · X11`.
+
+> ### ◑ (4) HDR re-read on a display change — still code-only, and here is exactly how far it got
+> Nothing can be plugged into this device's USB-C port today, so a simulated secondary display was used instead (`settings put global overlay_display_devices "1280x720/213"`, removed again afterwards). The framework did create it and report it — `DisplayDeviceInfo{"Overlay #1" … type OVERLAY, hdrCapabilities null}`, `DisplayViewport{type=VIRTUAL, displayId=7}` — and `onDisplayAdded` reached the reporter. **No second line was logged, correctly**: the game stayed on the built-in panel, so `hdrTargetDisplay()` returned the same display and `sameAs()` suppressed the duplicate, which is the de-duplication the row is supposed to do. Moving the game onto the simulated display through the TV tab was not reached before the session was wound up. So: the listener, the per-display read and the de-duplication are all exercised; **the "log again with different values when the game's display changes" path is code, not a device result.** One useful detail fell out of it — a display can report `hdrCapabilities null`, which `DisplayHdrInfo.read()` already handles (formats become `unknown` rather than throwing).
+
+> **Device left clean:** app force-stopped, both `ZZ …` test shortcuts deleted, temp logs and screenshots removed, the simulated display setting deleted (`settings get global overlay_display_devices` → `null`). Container 7's Desktop is the user's seven. Build `207154ce…` still installed. No release, no tag, nothing staged in `/sdcard/Download/Wayland/`.
+
 ## 2026-09-14 — 🌊🔧 **Wayland phase 5 DEVICE RESULTS: OpenGL safe mode and HDR reporting PROVEN; layer composition recovery UNPROVEN (device handed back mid-test)** (`feat/wayland-phase5` `217efe9e`, run 34825893993, pubg `207154ce…`)
 
 > Build: CI run **34825893993** green on all three flavours at `217efe9e` (headSha verified). pubg APK sha256 **`207154ce007a5279bf985a400dbd2e8394bb3691d89945d1e680b18f26c2bd5e`**, installed on the Pocket FIT and sha-verified against the installed `base.apk`. Container 7, `Proton-11.0-2.1-arm64ec-7`, unchanged — no `.wcp` work in this phase.
