@@ -1,8 +1,19 @@
-Bannerlator Wayland test kit  (2026-09-13, phase 3c = pre-release 4)
+Bannerlator Wayland test kit  (2026-09-13, phase 4 = pre-release 5)
 ====================================================================
 
-1. Bannerlator-3.1.2-wayland-pre4-<flavour>.apk   (all three flavours on the GitHub pre-release)
+1. Bannerlator-3.1.2-wayland-pre5-<flavour>.apk   (all three flavours on the GitHub pre-release)
    versionCode 85 like 3.1.1, so you can go back to 3.1.1 or forward to the next stable.
+   New since pre-release 4 (same v6 layer, app only):
+   - Screen effects KEEP the game on its own display layer. A Look, a scaling mode or a filter used
+     to drop the whole session back to the compositor's copy path; the chain now draws its result
+     into the game's layer instead, so the display hardware still puts it on screen.
+   - A window above a fullscreen game (a launcher, Wine's Task Manager) gets its OWN layer, and the
+     game keeps presenting its frames copy-free underneath. Two layers is a hard cap on purpose.
+   - Input is unchanged: display layers carry no input, so touch and mouse still reach the game and
+     the drawer still draws above everything.
+   - Refresh-rate matching now works on Wayland: with a 60 cap the panel runs at 60 (zero-copy too),
+     clearing the cap returns it to the panel maximum, a manual lock is honoured, frame generation
+     still asks for cap x multiplier. Turn it on under "Match refresh rate" in the container.
    New since pre-release 3 (needs the v6 layer below):
    - The zero-copy toggle SWITCHES LIVE. Flip it in the drawer while the game runs and the game
      moves onto its own Android display layer (no copy between the game and the screen), flip it
@@ -76,6 +87,11 @@ Verified on this build (AYANEO Pocket FIT, Adreno 750)
   LSFG Native from the drawer on Half-Life 2 (30 fps game): 60.0 / 90.0 / 120.0 fps shown at 2x / 3x / 4x.
   Live zero-copy switch on Half-Life 2: off -> on -> off -> on mid-game, every presented frame
   zero-copy while on, ~1435 game frames per 10 s throughout, picture never black.
+  Retro CRT over Half-Life 2 with the game still on its display layer: ~123 fps vs 122-126 on the
+  old copy path, hardware composition kept. Wine Task Manager over a windowed game: two layers,
+  game frames still copy-free underneath.
+  Refresh rate: 60 cap -> panel 60 (with zero-copy on), cap off -> 144, manual 90 -> 90,
+  LSFG 2x on a 30 cap -> 60.
 
 Known gaps
 ----------
@@ -84,6 +100,9 @@ Known gaps
   Zero-copy removes the compositor's GPU work; fps gains need a GPU-bound game or a big panel.
 - Real Adreno 710/720/722 and 830/840 hardware untested: please report which a8xx build works best.
 - bionic-fg stays X11-only; drag-and-drop, image clipboard and window decorations are not on Wayland yet.
+- With a window above the game, THIS panel hands the frame back to the GPU instead of composing two
+  layers itself (the game still keeps its copy-free frames). Other panels may differ - please report.
+- Frame generation still needs the compositor pass, so it pauses zero-copy.
 - The live switch is proven on the Adreno 750 only. On a GPU where the compositor cannot import the
   game's buffers, switching off keeps the old frames on the layer until the game rebuilds.
 
