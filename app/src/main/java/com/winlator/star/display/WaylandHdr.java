@@ -50,11 +50,16 @@ public final class WaylandHdr {
     /** The setting's help text (every editor shows the same words). */
     public static final String HELP_TEXT =
             "Games that support HDR show it on this screen: their frames go to the display in 10-bit with " +
-            "the HDR10 (BT.2020 PQ) tag, on their own display layer. Switch HDR on in the game's own " +
-            "settings too. While a game shows HDR, screen effects and frame generation are paused for it. " +
-            "Windows is told this screen's peak brightness as Android reports it; Android gives no live " +
-            "brightness in nits, so the session log records the live HDR/SDR headroom instead. " +
-            "Not the same as the \"HDR\" screen effect.";
+            "the HDR10 (BT.2020 PQ) tag. Switch HDR on in the game's own settings too. Screen effects, " +
+            "windows over the game and windowed games stay HDR (the whole picture is composed in HDR); " +
+            "with frame generation it depends on the screen offering an HDR swapchain, otherwise the picture " +
+            "is tone-mapped to SDR. Windows is told this screen's peak brightness as Android reports it; " +
+            "Android gives no live brightness in nits, so the session log records the live HDR/SDR headroom " +
+            "instead. Not the same as the \"HDR\" screen effect.";
+
+    /** One line for XMB, whose subtitles are a single line. */
+    public static final String HELP_SHORT =
+            "Real HDR10 on this screen for games that support it (switch HDR on in the game too).";
 
     /** The screen a game started from an editor will run on: the device's built-in display. */
     public static Display targetDisplay(Context context) {
@@ -129,7 +134,9 @@ public final class WaylandHdr {
             ContentProfile p = cm.getProfileByEntryName(wineVersion);
             if (p != null) code = p.verCode;
         } catch (Throwable ignored) {}
-        synchronized (layerCodes) { layerCodes.put(wineVersion, code); }
+        /* Only a real answer is kept: a layer that is not installed yet (or not readable right now) is
+         * looked up again next time instead of staying "unknown" for the life of the process. */
+        if (code >= 0) synchronized (layerCodes) { layerCodes.put(wineVersion, code); }
         return code;
     }
 

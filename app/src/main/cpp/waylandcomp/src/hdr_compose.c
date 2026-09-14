@@ -9,7 +9,11 @@
 /* SPIR-V, pre-compiled (glslangValidator -V hdr_encode.frag --vn hdr_encode_code) and committed next
  * to the GLSL, like every other shader of the compositor: the NDK build compiles no shaders. The quad
  * is the effect chain's upscale.vert (same bytes, from app/src/main/cpp/winlator). */
+/* The headers define plain (external) arrays and effects_chain.c includes upscale_vert.h too: this
+ * translation unit gets its own copy under another name, so the link sees no duplicate symbol. */
+#define upscale_vert_code hdrc_upscale_vert_code
 #include "upscale_vert.h"
+#undef upscale_vert_code
 #include "hdr_encode_frag.h"
 
 #define MIXED_FORMAT VK_FORMAT_A2B10G10R10_UNORM_PACK32
@@ -172,7 +176,7 @@ static int objects_ensure(void) {
                                       .flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, .maxSets = 2,
                                       .poolSizeCount = 1, .pPoolSizes = &ps};
     if (g_vk.CreateDescriptorPool(g_dev, &dpi, NULL, &g_dpool) != VK_SUCCESS) goto fail;
-    if (!(g_vert = shader(upscale_vert_code, sizeof(upscale_vert_code)))) goto fail;
+    if (!(g_vert = shader(hdrc_upscale_vert_code, sizeof(hdrc_upscale_vert_code)))) goto fail;
     if (!(g_frag = shader(hdr_encode_code, sizeof(hdr_encode_code)))) goto fail;
     for (int i = 0; i < NFMT; i++) {
         if (!(g_out[i].rp = make_rp(g_out[i].fmt))) goto fail;

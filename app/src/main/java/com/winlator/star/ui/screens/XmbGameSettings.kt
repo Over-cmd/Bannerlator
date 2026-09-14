@@ -375,7 +375,7 @@ private fun generalRows(xmb: XmbScope, p: XmbPrefs, host: XmbGameHost): List<Xmb
         val hdrLabels = listOf("Container default (" + (if (c.isWaylandHdr()) "On" else "Off") + ")", "On", "Off")
         rows += XmbRow.Choice(WaylandHdr.EXTRA, WaylandHdr.TITLE, Icons.Filled.HdrOn, hdrLabels,
             hdrLabels[hdrValues.indexOf(WaylandHdr.shortcutChoice(s)).coerceAtLeast(0)],
-            subtitle = WaylandHdr.HELP_TEXT, disabledReason = p.hdrUnavailableReason) { v ->
+            subtitle = WaylandHdr.HELP_SHORT, disabledReason = p.hdrUnavailableReason) { v ->
             xmb.set(p, WaylandHdr.EXTRA, hdrValues[hdrLabels.indexOf(v)].ifEmpty { null })
         }
         val hdrDxvkWarning = if (p.hdrLayerRead && WaylandHdr.effective(s, c))
