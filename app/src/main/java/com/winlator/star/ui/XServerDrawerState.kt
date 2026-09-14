@@ -69,6 +69,11 @@ object XServerDrawerState {
     val waylandZeroCopyFrames: StateFlow<Int> = _waylandZeroCopyFrames
     private val _waylandZeroCopyLive      = MutableStateFlow(false)
     val waylandZeroCopyLive: StateFlow<Boolean> = _waylandZeroCopyLive
+    // OpenGL safe mode (Wayland): GALLIUM_THREAD=0 for the next launch of this game. True = on,
+    // which is the default. Unlike zero-copy this cannot be applied live - Mesa reads the variable
+    // when the guest's GL driver starts - so the row is a saved preference, not a live switch.
+    private val _waylandGlSafeMode        = MutableStateFlow(true)
+    val waylandGlSafeMode: StateFlow<Boolean> = _waylandGlSafeMode
 
     private val _isMouseDisabled         = MutableStateFlow(false)
     val isMouseDisabled: StateFlow<Boolean> = _isMouseDisabled
@@ -448,6 +453,9 @@ object XServerDrawerState {
     // is on screen).
     @JvmField var onWaylandZeroCopyToggle: java.util.function.Consumer<Boolean>? = null
     @JvmField var onWaylandZeroCopyPoll: Runnable? = null
+    // OpenGL safe mode toggle: saves GALLIUM_THREAD=0 on/off to the shortcut (else the container)
+    // as the next launch's default. Nothing is applied to the running game.
+    @JvmField var onWaylandGlSafeModeToggle: java.util.function.Consumer<Boolean>? = null
 
     // Whether the active renderer supports Native Rendering (direct scanout). True for Vulkan;
     // false for OpenGL (GL scanout is disabled for now — bespoke path, unresolved brightness).
@@ -499,6 +507,7 @@ object XServerDrawerState {
     fun setWaylandZeroCopyActive(v: Boolean)    { _waylandZeroCopyActive.value = v }
     fun setWaylandZeroCopyFrames(v: Int)        { _waylandZeroCopyFrames.value = v }
     fun setWaylandZeroCopyLive(v: Boolean)      { _waylandZeroCopyLive.value = v }
+    fun setWaylandGlSafeMode(v: Boolean)        { _waylandGlSafeMode.value = v }
     fun setIsMouseDisabled(v: Boolean)         { _isMouseDisabled.value = v }
     fun setMoveCursorToTouchpoint(v: Boolean)  { _moveCursorToTouchpoint.value = v }
     fun setGestureDragSelect(v: Boolean)          { _gestureDragSelect.value = v }
@@ -649,6 +658,7 @@ object XServerDrawerState {
         _waylandZeroCopyActive.value = false
         _waylandZeroCopyFrames.value = 0
         _waylandZeroCopyLive.value = false
+        _waylandGlSafeMode.value = true
         _isMouseDisabled.value = false
         _moveCursorToTouchpoint.value = false
         _gestureDragSelect.value = true
@@ -713,6 +723,7 @@ object XServerDrawerState {
         onRelativeMouseMovement = null; onDisableMouse = null
         onNativeRenderingToggle = null; onFpsConfigApply = null
         onWaylandZeroCopyToggle = null; onWaylandZeroCopyPoll = null
+        onWaylandGlSafeModeToggle = null
         onBionicFgConfigChange = null; onFpsLimitChange = null
         onPresentModeChange = null
         onMatchRefreshChange = null

@@ -477,6 +477,24 @@ public class Container {
         return DISPLAY_BACKEND_WAYLAND.equals(getDisplayBackend());
     }
 
+    // --- OpenGL safe mode (per-container), stored in extraData. Wayland sessions only. ---
+    // Native OpenGL games on the Wayland backend render through Mesa (Zink on Turnip). Mesa's
+    // u_threaded_context helper thread ("gdrv0") can fault inside libgallium, and because that is a
+    // plain pthread with no Wine TEB, Wine's own SIGSEGV handler faults again on it: the kernel then
+    // kills the process outright. The game VANISHES - no crash dump, no dialog, no log line.
+    // GALLIUM_THREAD=0 removes that thread; the cost is that OpenGL draw submission stops being
+    // pipelined onto a second core, i.e. a little CPU-side throughput on GL titles and nothing at
+    // all on Vulkan ones (DXVK/VKD3D never load a gallium driver). Default ON because a silent
+    // disappearance is far worse than a few percent of CPU throughput.
+    // A shortcut may override per game with the same-named extra.
+    public boolean isWaylandGlSafeMode() {
+        return getExtra("waylandGlSafeMode", "1").equals("1");
+    }
+
+    public void setWaylandGlSafeMode(boolean enabled) {
+        putExtra("waylandGlSafeMode", enabled ? "1" : "0");
+    }
+
     // --- Wayland game driver (per-container), stored in extraData ---
     // On Wayland the GAME renders on a Vulkan driver the Proton layer picks (winewayland sets
     // VK_ICD_FILENAMES), not on the compositor's Turnip. The layer bundles three Wayland Turnip
