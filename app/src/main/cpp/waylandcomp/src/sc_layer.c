@@ -497,17 +497,24 @@ static void log_layer_count(void) {
 }
 
 /* ---- composition recovery ---------------------------------------------------------------------
- * MEASURED on this panel (see sc_layer.h): while a second display layer is up, the hardware
- * composer hands the whole frame back to the GPU (`DEVICE/CLIENT` in the composer dump), and it
- * does NOT come back when the overlay goes away — only a NEW SurfaceControl for the GAME layer
- * clears it (reproduced twice with HOME + resume, which re-creates it as a side effect).
- *
- * So when the overlay is retired and the scene is one fullscreen window again, the game layer is
+ * When the overlay is retired and the scene is one fullscreen window again, the game layer is
  * marked for a swap and the swap rides the NEXT frame: a fresh SurfaceControl is created here, the
  * frame is put on it, and the old one is hidden and unparented IN THE SAME TRANSACTION. Because
  * SurfaceFlinger applies a transaction atomically there is never a composited frame with neither
  * layer on it — no black frame, and no dropped frame beyond the one layer creation. The outgoing
  * buffer is released through the OLD SurfaceControl's callback, which also releases it.
+ *
+ * ⚠️ MEASURED 2026-09-14, and the news is bad: on the Pocket FIT this does NOT bring hardware
+ * composition back. The swap fires 6 ms after the overlay goes, SurfaceFlinger really does hand out
+ * a new layer (its id changes), the game never drops a frame — and the composer still reports
+ * `DEVICE/CLIENT` 24 s later. Neither does dropping the layer path entirely and re-creating the
+ * SurfaceControl after a gap. The ONE thing that clears it is HOME + resume, which re-creates the
+ * app's whole window and SurfaceView (`VRI[XServerDisplayActivity]#0` becomes `#4`) — so the sticky
+ * client-composition state belongs to the PARENT surface (or the display), not to this child layer.
+ * The phase-4 note that "only re-creating the GAME layer's SurfaceControl clears it" was inferred
+ * from HOME + resume and is wrong; see sc_layer.h. The swap is kept because it is free and correct
+ * and the mechanism may differ on hardware that does not rotate every layer — but do not claim it
+ * restores DEVICE composition, and do not log as if it did.
  *
  * Returns the old SurfaceControl (the caller must add retire_ops for it to the same transaction and
  * name it in add_complete_on), or NULL when no swap is due. Compositor thread. */
@@ -531,7 +538,7 @@ static ASurfaceControl *swap_sc_begin(struct layer *l) {
     l->geo_valid = 0;
     l->fps_applied = -1.0f;
     banner_log("layer", "composition recovery: %s got a fresh SurfaceControl now that nothing is above "
-               "the game — the display can take the frame back from the GPU", l->name);
+               "the game (measured on this panel: hardware composition does NOT return from this alone)", l->name);
     return old;
 }
 
