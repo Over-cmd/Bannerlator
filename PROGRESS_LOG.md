@@ -1,5 +1,28 @@
 # Star-Compose — Progress Log
 
+## 2026-09-14 08:20 — ✅ **Combined build device-proven: new containers keep Wayland and their drivers, the HUD names OpenGL for Wizardry, X11 unchanged** (`feat/wayland-phase2` `4a9b1c14`, run 34839775874, pubg `810d3346…`)
+
+> **Build.** Run 34839775874 green on `4a9b1c14` (headSha verified). pubg `810d3346509cf0164b0d14ad2d759d43519a546742cb1f42e1e304767015afdd`, staged as `/sdcard/Download/Bannerlator-p5d-pubg.apk`, installed with `pm install -r` and sha-verified on the Pocket FIT. Layer unchanged (`Proton-11.0-2.1-arm64ec-7`).
+
+> **1. Creating a container keeps what the screen showed.** Created "ZZ createtest" through the real UI: Proton 11.0-2.1-arm64ec-7, Display backend **Wayland**, Compositor driver **Mesa Turnip v26.3.0-20260830-r4**, Wayland game driver **Bundled (Adreno 6xx / 730–750)**, DXVK **2.4.1-1-gplasync-pre-reg-0**, VKD3D **3.0.1-d01924b6-1**, and the default `ZINK_DEBUG` **deleted** from the environment tab. The saved `.container` carried every one of them: `extraData.displayBackend=wayland`, `extraData.waylandGameDriver=bundled`, `graphicsDriverConfig version=Mesa Turnip v26.3.0-20260830-r4`, `dxwrapperConfig version=2.4.1-1-gplasync-pre-reg-0 … vkd3dVersion=3.0.1-d01924b6-1`, and no `ZINK_DEBUG`. Before this fix the first two were the ones lost. The editor re-opened with all of them.
+>
+> **First launch** of that container ran on Wayland (a new session log, `explorer.exe` connected over Wayland). Read back after the first boot had saved the file (`appVersion` now 85): backend, game driver and compositor driver unchanged, `ZINK_DEBUG` still absent, and the install marker `dxwrapper=dxvk-2.4.1-1-gplasync-pre-reg-0;vkd3d-3.0.1-d01924b6-1;none` proves the chosen DXVK/VKD3D were the ones actually extracted into the prefix.
+>
+> **Cards.** The three Wayland containers read "Vulkan (Wayland)", the X11 Wine 9.5 container still reads "Vulkan".
+
+> **2. HUD labels.** Wizardry (native OpenGL, Wayland): **`OpenGL` · 30.0 fps · Wayland** (was "DXVK"). Insane 2 (D3D9, Wayland): **`D3D9 · DXVK` · 141.4 fps · Wayland**. Insane 2 on an X11-forced copy: **`D3D9 · DXVK` · X11**, title screen at 1680 fps.
+>
+> ⚠️ The first X11 launch, started seconds after force-stopping the Wayland Insane 2 session, minimised itself: DXVK logged a third swapchain at **160x23** (a minimised window) after the 1280x720 one, the screen stayed black with a cursor and a tap did not restore it. A clean relaunch drew normally and logged only 105x76 → 1280x720, as the two earlier good runs (06:08, 07:00) did. Seen once, not reproduced.
+
+> **The user's own containers.** The 07:15 hand-swap of `xuser-3` ("P11-2 Arm") and `xuser-6` ("p11-6 GE v6") to the Wayland layer had written `displayBackend`/`waylandGameDriver` as **top-level** keys. The backend lives in `extraData` (`Container.getDisplayBackend()` = `getExtra("displayBackend")`), so neither container was ever on Wayland; `xuser-6` lost the dead keys on its next save at 07:21:34. Titanfall 2 and Half-Life 2 had run on Wayland only through their own shortcut overrides. Fixed with the app stopped: `extraData.displayBackend=wayland`, dead keys removed, owner and mode kept; a diff against the backup shows only those keys. Pre-fix copies in `/sdcard/Download/wayland-backup/xuser-{3,6}-pre-fix-0750/`.
+
+> **Found on the way, not fixed:**
+> - A new container's **Compositor driver** field is blank on Wayland, with the warning that "System" shows a black screen; it had to be picked by hand.
+> - Every new container on layer v7 gets Wine's **Mono downloader prompt** on first boot.
+> - In landscape the **"+" button covers the last container card's settings gear** (the list has no bottom padding); it was reached with keyboard focus.
+
+> **Device left clean.** "ZZ createtest" removed through the app's own Remove (dialog named it), the X11 shortcut copy deleted, temporary screenshots and the test log folder removed, rotation settings restored. The user's shortcuts untouched, including the `The Elder Scrolls V - Skyrim` shortcut they added to container 7.
+
 ## 2026-09-14 (after the session crash) — 🧩 **Renderer labels + container-create fixes merged into `feat/wayland-phase2` for one combined build** (`9088f27b`, run 34839563917)
 
 > **Recovery note.** The session that owned the two fixes below crashed at ~07:31 while the user was in Titanfall 2. Both agents had already pushed and gone green (`7ec71021` run 34837932610, `5dd56079` run 34837591889); neither had been device-tested or merged. State was rebuilt from the transcript and the agents' own logs, nothing re-derived.
