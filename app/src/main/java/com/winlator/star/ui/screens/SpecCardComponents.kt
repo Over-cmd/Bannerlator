@@ -57,12 +57,13 @@ internal const val WAYLAND_RENDERER_CHIP = "Vulkan (Wayland)"
 // Map a renderer id (vulkan/surfaceflinger/opengl) to a display label, or "" if unknown. Pass
 // [wayland] = does this container/shortcut effectively run on Wayland (WineWaylandSupport
 // .runsOnWayland — never re-derive it here): the stored id is then meaningless and the chip shows
-// the compositor instead.
+// the compositor instead. Every renderer id is an X11 present path, so the chip names the backend
+// on both sides and two cards can be told apart at a glance.
 internal fun rendererLabelOf(renderer: String, wayland: Boolean): String =
     if (wayland) WAYLAND_RENDERER_CHIP else when (renderer.lowercase()) {
-        "vulkan" -> "Vulkan"
-        "surfaceflinger" -> "SurfaceFlinger"
-        "opengl" -> "OpenGL"
+        "vulkan" -> "Vulkan (X11)"
+        "surfaceflinger" -> "SurfaceFlinger (X11)"
+        "opengl" -> "OpenGL (X11)"
         else -> ""
     }
 
