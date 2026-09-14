@@ -5,6 +5,64 @@
 > **The request.** Wayland cards already read "Vulkan (Wayland)"; an X11 card read a bare "Vulkan" or "OpenGL", so the backend could not be told apart at a glance. `rendererLabelOf()`'s X11 branch now appends "(X11)" — every stored renderer id is an X11 present path. Display only: the chip, launch overlay, XMB and Big Picture share the label; the editors keep their own renderer state and nothing compares against it.
 >
 > **Device.** Installed and sha-verified on the Pocket FIT. Games list: The Crew 2 and Watch Dogs (Wine 9.5 x86-64, X11) read **"Vulkan (X11)"**; Stumble Guys, Team Fortress 2, Skyrim, Titanfall 2 and Wizardry read **"Vulkan (Wayland)"**.
+## 2026-09-14 11:25 — ✅ **Device-proven: a Wayland container no longer starts with a blank Compositor driver; it gets a Turnip that can import the game's frames, and the session renders** (`fix/wayland-compositor-driver-default`, code `7f1b2254`, run 34846772508, pubg `14e10dde…`, installed and sha-verified)
+
+> **Waited 09:13–11:06 for the shared phone** (lock held by two other engineers in turn, then the user in sessions and Discord). Held it 11:06–11:21. Installed `/sdcard/Download/Bannerlator-compdrv-pubg.apk` with `pm install -r`; installed `base.apk` sha256 `14e10dde00c6304343fa4c33fea7e93419df9284c924bc5d41cf6d596d4befd8`. Layer `Proton-11.0-2.1-arm64ec-8`. This build is left installed.
+
+> **1. Create on Wayland, compositor field untouched.** New container "ZZ compdrv wl": Wine Version `Proton-11.0-2.1-arm64ec-8`, Display backend **Wayland**. The field filled itself in the same UI dump that showed the backend change:
+> ```
+> 'Mesa Turnip v26.3.0-20260830-r4'   EditText   (Compositor driver)
+> 'Picked for you: the driver in your New Container Defaults.'
+> ```
+> No red warning. logcat, the verdict for every installed driver (all five probed in 70 ms):
+> ```
+> 11:08:58.959 I/CompositorDriver: v819: not usable - proprietary Qualcomm driver, not a Turnip (not probed)
+> 11:08:58.972 I/CompositorDriver: turnip-sdk36: usable - imports dmabufs, Vulkan 1.4.335
+> 11:08:58.992 I/CompositorDriver: WN-Turnip-1.10-p Axxx: usable - imports dmabufs, Vulkan 1.4.359
+> 11:08:59.012 I/CompositorDriver: Mesa Turnip v26.3.0-20260830-r4: usable - imports dmabufs, Vulkan 1.4.359
+> 11:08:59.027 I/CompositorDriver: Mesa Turnip v26.3.0-7cda785 (Android + Wayland): usable - imports dmabufs, Vulkan 1.4.362
+> 11:08:59.027 I/CompositorDriver: default for a Wayland form: Mesa Turnip v26.3.0-20260830-r4 (the New Container Defaults driver; newest usable is Mesa Turnip v26.3.0-7cda785 (Android + Wayland))
+> ```
+> Saved `xuser-12/.container`: `graphicsDriverConfig … version=Mesa Turnip v26.3.0-20260830-r4 …`, `extraData.displayBackend=wayland`. (Its other driver keys, e.g. `vulkanVersion=1.3`, are the built-in defaults rather than the arm64ec profile's `1.4`: the seeding bug below, untouched here.) First launch, `wayland-2026-09-14_11-10-00.log`:
+> ```
+> 11:10:00.617  gpu       compositor renders on Adreno (TM) 750 with libvulkan_freedreno.so
+> 11:10:00.617  gpu       driver folder /data/user/0/com.tencent.ig/files/contents/adrenotools/Mesa Turnip v26.3.0-20260830-r4/
+> 11:10:04.530  program   connected over Wayland: explorer.exe (pid 32403)
+> 11:10:06.769  window    opened "Wine Mono Installer" (control.exe) 396x186 at 442,267
+> 11:10:10.627  stats     last 10 s: 20 frames on screen (2.0 fps) | 0 GPU frames from games | 13 window redraws | 2 windows open
+> ```
+> Screenshot: the XP desktop, taskbar and the Mono dialog drawn, not black. Escape closed the Mono prompt (`window closed "Wine Mono Installer"`), explorer came back after first boot.
+
+> **2. X11 created normally keeps its old default.** "ZZ compdrv x11" on the same layer, backend left at X11: `version=turnip-sdk36`, `extraData.displayBackend=x11` (the writer's X11 finalize, same value the user's X11 container `xuser-4` carries), and **zero** `CompositorDriver` lines, so no Wayland probe ran for an X11 form.
+
+> **3. Edit path.**
+> - **A stored Turnip is kept.** That X11 container (`turnip-sdk36`) switched to Wayland shows `turnip-sdk36`: no fill, no note, no warning. Saved on Wayland and launched (`wayland-2026-09-14_11-14-21.log`): `compositor renders on Adreno (TM) 750 with vulkan.ad08XX.so` / `driver folder …/adrenotools/turnip-sdk36/`, desktop and dialog on screen. So the **bundled** Turnip works as the compositor driver, the no-imports case.
+> - **An explicit X11 "System" gets the default on Wayland and comes back on X11.** Set "System" in the X11 driver config dialog (Graphics Driver Version → System → OK), then Display backend → Wayland: `'Mesa Turnip v26.3.0-20260830-r4'` + `'Picked for you: the driver in your New Container Defaults.'` Back to X11 and saved: `.container` `version=System`, `displayBackend=x11`.
+> - **An explicit pick is never replaced.** Wayland again (filled r4), then picked `Mesa Turnip v26.3.0-7cda785 (Android + Wayland)` from the dropdown: the "Picked for you" note goes away. X11 → Wayland round trip: still `…7cda785 (Android + Wayland)`, neither restored to System nor refilled. Saved on Wayland: `version=Mesa Turnip v26.3.0-7cda785 (Android + Wayland)`, `displayBackend=wayland`; reopened, the field shows it with no note.
+
+> **4. New Container Defaults cannot reach Wayland on this phone (pre-existing, not fixed).** Opened read-only: Architecture `arm64ec`, Display backend `X11`, with the hint "The selected layer does not include winewayland and its Wayland Turnip." Defaults mode judges Wayland capability against `selectedWineVersion`, which there is the first wine entry (`Wine-9.5-X86_64-1`), not a layer of the chosen architecture. The fill runs in defaults mode through the same `loadContainerData`/`onDisplayBackendChanged` hooks, but it could not be exercised through the UI here. Nothing saved; the profile's mtime is still 2026-09-05.
+
+> **Device left clean.** Both ZZ containers removed through the app's Remove (`Remove "ZZ compdrv x11" permanently?`, `Remove "ZZ compdrv wl" permanently?`), `xuser-12`/`xuser-13` gone. At the lead's request, re-took the lock at 11:22 and also removed the Mono engineer's leftovers the same way (`Remove "ZZ Mono Before" permanently?`, `Remove "ZZ Mono After" permanently?`, ids 10 and 11), checking that `com.tencent.ig` was the focused app before every input batch. Left: `xuser-3` "P11-2 Arm", `xuser-4` "Wine 9.5 x86-64", `xuser-6` "p11-6 GE v6", `xuser-7` "wayland", all untouched. The defaults profile is untouched, temp dumps and screenshots are deleted, the lock was released at 11:24 and Termux is back in front. My two session logs stay in `Wayland-logs/`.
+
+## 2026-09-14 09:10 — 🧭 **A Wayland container no longer starts with a blank Compositor driver: the form fills in the newest installed Turnip that can import the game's frames** (`fix/wayland-compositor-driver-default` `7f1b2254`, off `main` `c518c7af`; run 34846772508 green, pubg `14e10dde…` staged as `/sdcard/Download/Bannerlator-compdrv-pubg.apk`)
+
+> **Build.** Run 34846772508 green on all three flavours at `7f1b2254` (headSha verified). pubg `14e10dde00c6304343fa4c33fea7e93419df9284c924bc5d41cf6d596d4befd8`. Two earlier runs (34846176385, 34846678820) were cancelled by me when the defaults-profile preference and its log line were added; neither is a result.
+
+> **The report.** A new container created with Display backend = Wayland showed an empty "Compositor driver" field and the red `Wayland needs a Turnip driver here. "System" cannot import the game's frames and shows a black screen.` The user had to pick a Turnip by hand or the session was black.
+
+> **Why the field was BLANK and not "System".** `Container.DEFAULT_GRAPHICSDRIVERCONFIG` carries `version=` (empty). The picker's options are `compositorDriverChoices()` = supported bundled ids + imports, with "System" left out on purpose, and the field was rendered as `if (version in choices) version else ""`. Neither `""` nor a carried-over `"System"` is ever in that list, so both rendered as nothing. At launch both mean the same thing: `XServerDisplayActivity`'s Wayland resolve skips adrenotools for an empty or "System" id, the compositor opens the system Vulkan driver, and `vkCreateDevice` fails on the missing dmabuf-import extensions. The same mapping sat in all three editors (container, shortcut pop-up, XMB).
+
+> **Why nothing filled it.** Nothing ever looked. The only place an empty version is replaced is the writer's X11 finalize (`applyFormTo`: empty → `DefaultVersion.WRAPPER_ADRENO` if supported, else "System"), which is invisible to the form and knows nothing about Wayland.
+>
+> **And the user's own default never arrived.** The Pocket FIT has a New Container Defaults profile for arm64ec naming `version=Mesa Turnip v26.3.0-20260830-r4` (there is no x86_64 profile). The create form seeds its arch-agnostic fields, `graphicsDriverConfig` among them, from the arch of the FIRST wine entry, which here is `Wine-9.5-X86_64-1`; with no x86_64 profile it falls back to the built-in empty `version=`. Picking the arm64ec Proton afterwards re-seeds only the arch-dependent fields (emulator, box64, FEXCore). So the user's saved Turnip never reached an arm64ec container.
+
+> **The rule (form state, all three paths).** `ContainerDetailViewModel.syncCompositorDriverWithBackend()` runs when the form loads (create, edit, New Container Defaults), when the Display backend changes and when a wine change makes a stored Wayland effective. On the EFFECTIVE Wayland backend with an empty or "System" version it fills in `defaultCompositorDriver()`'s pick; an explicit value is never replaced, an explicit pick from the dropdown is kept from then on, and going back to X11 before saving restores the pre-fill value (the same `version` key is the X11 game driver's). A save pressed while the probe is still running waits for it. `applyFormTo` is untouched.
+
+> **How the default is chosen (evidence, not names).** Candidates are exactly what the picker offers. A driver whose `meta.json` declares a proprietary vendor (the bundled `v819` says `"vendor": "Qualcomm"`) is not a Turnip and is skipped without being probed, as is an import that is not a Mesa `libvulkan_*` build (the config dialog's existing never-probe-a-blob rule). Every other candidate is probed through the same native path the config dialog's extension list uses: it must load itself (no fall-back to the system ICD) and list all four dmabuf-import extensions the compositor enables at `vkCreateDevice` (`VK_KHR_external_memory_fd`, `VK_EXT_external_memory_dma_buf`, `VK_EXT_image_drm_format_modifier`, `VK_KHR_image_format_list`, from `waylandcomp/src/vk_present.c`). Of those, the driver the user's own **New Container Defaults** name for that architecture wins if it passes; otherwise the one reporting the highest Vulkan version wins (the newest Mesa), a tie keeping the picker's order. The app's bundled Turnip (`turnip-sdk36`, Mesa 26.0.0-devel, `meta.json` has no vendor) goes through the same test, so a user with no imports still gets one. If nothing passes, the field reads "System", the red warning stays, and a **Download a Turnip driver** button opens the existing Adrenotools driver sheet; installing one re-runs the search. Every verdict is logged to logcat under tag `CompositorDriver`.
+
+> **Label fix on its own, in all three editors.** The field now names what is stored: "System" for empty/"System", `<id> (not available)` for an id the picker no longer offers, the id otherwise; the red warning also covers a missing id. The shortcut and XMB editors get the label and warning only; they do not auto-fill (per-game values are overrides, left to the user).
+
+> **Device plan.** (1) Create `ZZ` on Proton-11.0-2.1-arm64ec-7 + Wayland without touching the compositor field → field shows a Turnip, `.container` carries it, first launch's session log names its driver folder and renders. (2) An X11 `ZZ` container with "System" switched to Wayland gets the default; back to X11 restores "System"; an explicit pick is not replaced. (3) An X11 container created normally keeps `turnip-sdk36`. (4) The logcat verdicts for every installed driver.
 
 ## 2026-09-14 08:20 — ✅ **Combined build device-proven: new containers keep Wayland and their drivers, the HUD names OpenGL for Wizardry, X11 unchanged** (`feat/wayland-phase2` `4a9b1c14`, run 34839775874, pubg `810d3346…`)
 
