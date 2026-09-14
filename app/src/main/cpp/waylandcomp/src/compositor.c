@@ -47,6 +47,7 @@
 #include "relative-pointer-unstable-v1-server-protocol.h"
 #include "vk_present.h"
 #include "framegen_bridge.h"
+#include <pthread.h>
 #include "effects_chain.h"
 #include "banner_ext.h"
 
@@ -62,6 +63,15 @@
 
 static FILE *g_log;
 
+/* Lines logged before the session file exists are kept here and written into it, in order, the
+ * moment it opens — the compositor runs on its own thread, so anything the app reports as that
+ * thread starts (the display's HDR capability, for one) would otherwise only reach logcat. The
+ * lock also serialises the file writes, which now come from the app's threads too. */
+#define PRELOG_MAX 32
+static pthread_mutex_t g_log_lock = PTHREAD_MUTEX_INITIALIZER;
+static char *g_prelog[PRELOG_MAX];
+static int g_prelog_n;
+
 void banner_log(const char *tag, const char *fmt, ...) {
     char msg[512];
     va_list ap;
@@ -69,19 +79,24 @@ void banner_log(const char *tag, const char *fmt, ...) {
     vsnprintf(msg, sizeof(msg), fmt, ap);
     va_end(ap);
     WLOGI("[%s] %s", tag, msg);
-    if (!g_log) return;
     struct timespec ts;
     struct tm tm;
     clock_gettime(CLOCK_REALTIME, &ts);
     localtime_r(&ts.tv_sec, &tm);
-    fprintf(g_log, "%02d:%02d:%02d.%03ld  %-9s %s\n", tm.tm_hour, tm.tm_min, tm.tm_sec,
-            ts.tv_nsec / 1000000, tag, msg);
+    char line[640];
+    snprintf(line, sizeof(line), "%02d:%02d:%02d.%03ld  %-9s %s\n", tm.tm_hour, tm.tm_min, tm.tm_sec,
+             ts.tv_nsec / 1000000, tag, msg);
+    pthread_mutex_lock(&g_log_lock);
+    if (g_log) fputs(line, g_log);
+    else if (g_prelog_n < PRELOG_MAX) g_prelog[g_prelog_n++] = strdup(line);
+    pthread_mutex_unlock(&g_log_lock);
 }
 
 static void open_session_log(void) {
     char path[256], stamp[32];
     time_t now = time(NULL);
     struct tm tm;
+    FILE *f;
 
     localtime_r(&now, &tm);
     strftime(stamp, sizeof(stamp), "%Y-%m-%d_%H-%M-%S", &tm);
@@ -89,13 +104,13 @@ static void open_session_log(void) {
     if (mkdir(SESSION_LOG_DIR, 0775) != 0 && errno != EEXIST)
         WLOGE("can't create %s: %s", SESSION_LOG_DIR, strerror(errno));
     snprintf(path, sizeof(path), "%s/wayland-%s.log", SESSION_LOG_DIR, stamp);
-    if (!(g_log = fopen(path, "w"))) {
+    if (!(f = fopen(path, "w"))) {
         WLOGE("can't open session log %s: %s", path, strerror(errno));
         return;
     }
-    setvbuf(g_log, NULL, _IOLBF, 0);
+    setvbuf(f, NULL, _IOLBF, 0);
     strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M:%S", &tm);
-    fprintf(g_log,
+    fprintf(f,
             "Bannerlator Wayland session\n"
             "===========================\n"
             "Started   %s\n"
@@ -105,6 +120,13 @@ static void open_session_log(void) {
             "Time          Area      Event\n"
             "------------  --------  -----------------------------------------------------\n",
             stamp, path);
+    /* Publish the file and flush anything logged before it existed, in one critical section, so a
+     * line from another thread can never land ahead of the header or be dropped between the two. */
+    pthread_mutex_lock(&g_log_lock);
+    for (int i = 0; i < g_prelog_n; i++) { fputs(g_prelog[i], f); free(g_prelog[i]); g_prelog[i] = NULL; }
+    g_prelog_n = 0;
+    g_log = f;
+    pthread_mutex_unlock(&g_log_lock);
     WLOGI("session log: %s", path);
 }
 

@@ -355,6 +355,16 @@ Java_com_winlator_star_wayland_WaylandCompositor_nativeSetScreenEffects(JNIEnv *
     vkp_effects_set_screen(brightness, contrast, gamma, saturation, fxaa ? 1 : 0, toon ? 1 : 0, crt ? 1 : 0, ntsc ? 1 : 0);
 }
 
+/* One "display" line in the session log, written from Java: facts that live in the Android
+ * framework (the panel's HDR capability) rather than in the compositor. banner_log() mirrors to
+ * logcat and appends to the session file when one is open, so this is safe at any point. */
+JNIEXPORT void JNICALL
+Java_com_winlator_star_wayland_WaylandCompositor_nativeLogDisplay(JNIEnv *env, jclass clazz, jstring message) {
+    char *s = dup_jstr(env, message);
+    if (s) banner_log("display", "%s", s);
+    free(s);
+}
+
 /* The Look the controls currently match (null = Custom) — only named in the session log. */
 JNIEXPORT void JNICALL
 Java_com_winlator_star_wayland_WaylandCompositor_nativeSetLookName(JNIEnv *env, jclass clazz, jstring name) {

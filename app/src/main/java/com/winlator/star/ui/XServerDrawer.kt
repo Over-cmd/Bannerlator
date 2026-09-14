@@ -1363,6 +1363,38 @@ private fun GraphicsContent(state: XServerDrawerState) {
     }
 
     if (isWaylandSession) WaylandZeroCopyRow(state, waylandEffectsOk)
+    if (isWaylandSession) WaylandGlSafeModeRow(state)
+}
+
+// ───── Wayland: OpenGL safe mode ─────
+// Native OpenGL games render through Mesa here (Zink on Turnip). Mesa runs OpenGL draw submission on
+// a helper thread of its own, and a fault on that thread takes the whole game down WITHOUT a crash
+// report: it is not a Wine thread, so Wine's crash handler faults again on it and the kernel kills
+// the process outright - the game simply vanishes. Safe mode removes the helper thread. The cost is
+// a little CPU-side throughput in OpenGL games; DXVK/VKD3D games never load that driver at all.
+//
+// GALLIUM_THREAD is read once, when the guest's GL driver starts, so this row is a saved preference
+// for the next launch and NOT a live switch - the helper text says exactly that rather than
+// pretending the flip did something to the running game.
+@Composable
+private fun WaylandGlSafeModeRow(state: XServerDrawerState) {
+    val safeMode by state.waylandGlSafeMode.collectAsState()
+    var checked by remember(safeMode) { mutableStateOf(safeMode) }
+
+    Spacer(Modifier.height(6.dp))
+    ToggleRow("OpenGL safe mode", checked) {
+        checked = it
+        state.setWaylandGlSafeMode(it)
+        state.onWaylandGlSafeModeToggle?.accept(it)
+    }
+    HelperText(
+        if (checked)
+            "On: stops native OpenGL games disappearing with no error. Costs a little OpenGL speed; " +
+            "DirectX games are unaffected. Saved for this game - takes effect the next time it starts."
+        else
+            "Off: OpenGL games keep Mesa's extra draw thread (slightly faster), but a fault on it can " +
+            "close the game with no error message. Saved for this game - takes effect the next time it starts."
+    )
 }
 
 // ───── Wayland: Zero-copy presentation ─────
@@ -5086,6 +5118,9 @@ private fun TmContainerPanel(info: XServerDialogState.TmContainerInfo?) {
                 ContainerInfoRow("Renderer", if (wayland) "Vulkan (Wayland compositor)" else prettyRenderer(info.renderer), accent)
                 ContainerInfoRow("Graphics driver", info.graphicsDriver)
                 ContainerInfoRow("Resolution", info.resolution)
+                // What the panel the game is on reports, read live. Reporting only - there is no HDR
+                // output path, so there is deliberately no toggle beside it.
+                ContainerInfoRow("HDR", info.hdr)
                 ContainerInfoRow("Device", tidyDevice(info.device))
             }
         }

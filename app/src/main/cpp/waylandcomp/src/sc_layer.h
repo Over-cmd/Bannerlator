@@ -30,6 +30,13 @@
  * client composition the overlay layer is not a loss — SurfaceFlinger does the one blit the
  * compositor would have done — but the hardware-composition win is only real for one layer.
  *
+ * COMPOSITION RECOVERY (sc_layer.c, swap_sc_begin) acts on that measurement: retiring the overlay
+ * arms the game layer, and the NEXT frame is presented on a brand-new SurfaceControl while the old
+ * one is hidden and unparented in the SAME transaction. SurfaceFlinger applies a transaction
+ * atomically, so no composited frame is ever missing the game — no black frame, no dropped frame
+ * beyond the layer creation itself — and the display takes the frame back (`DEVICE/DEVICE`). One
+ * `layer` line is written when it happens.
+ *
  * What can be on the game layer, cheapest first:
  *   - the game's own gralloc buffer (ahb_swapchain.c, true zero-copy: no copy anywhere);
  *   - one blit of the game's frame into a compositor-allocated AHardwareBuffer (sc_layer_present);
@@ -97,7 +104,9 @@ int sc_layer_present_overlay(struct vkp_image *src, const int geo[8]);
 
 /* The scene is not a single fullscreen window this frame: hide every layer that is up. */
 void sc_layer_hide(void);
-/* Only the overlay layer: nothing is above the game any more (the game keeps its layer). */
+/* Only the overlay layer: nothing is above the game any more. The game keeps its layer, but its
+ * SurfaceControl is swapped for a fresh one on the next frame so hardware composition comes back
+ * (composition recovery, above). */
 void sc_layer_hide_overlay(void);
 
 /* The output window changed or went away (compositor thread, from vkp_apply_window_request). */

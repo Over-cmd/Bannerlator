@@ -210,6 +210,12 @@ public final class WaylandCompositor {
      *  the session log. A no-op on Android versions without {@code ASurfaceTransaction_setFrameRate}. */
     public static native void nativeSetLayerFrameRate(float hz);
 
+    /** Write one line into the compositor's session log (Download/Wayland-logs) under the "display"
+     *  area, from Java. Used for facts the platform knows and the native side does not — the panel's
+     *  HDR capability, which lives behind android.view.Display. Safe before the compositor thread is
+     *  up (the line then only reaches logcat) and safe after it has gone. */
+    public static native void nativeLogDisplay(String message);
+
     /** The container's screen size, advertised as the Wayland output's mode so Wine's display-mode
      *  list stops at the desktop size, as the X server's does on X11. Set before the compositor starts. */
     public static native void nativeSetOutputSize(int width, int height);
