@@ -1,6 +1,6 @@
 # Star-Compose — Progress Log
 
-## 2026-09-14 09:20 — 🧪 **No more Wine Mono download prompt on first boot or after a layer switch — every layer** (`fix/wine-mono-prompt` `83c28493`, run 34847411880 green, headSha verified, pubg `e6b37f4e…`; device test in progress)
+## 2026-09-14 09:20 — 🧪 **No more Wine Mono download prompt on first boot or after a layer switch — every layer** (`fix/wine-mono-prompt` `83c28493`, run 34847411880 green, headSha verified, pubg `e6b37f4e…`; device-proven: new container + real layer switch on Wayland, X11 on GE 11.0-6; box64/Wine 9.5 and a live .NET run still untested)
 
 > **The bug.** A new container's first boot, and the first launch after a container's layer changed, opened Wine's "Wine Mono Installer" dialog (Cancel / Install = download from winehq.org). Seen today on `Proton-11.0-2.1-arm64ec-7` (Wayland session logs 07:17 and 08:06, and 09-13 15:22 where Install was clicked).
 >
@@ -12,9 +12,12 @@
 >
 > **Device, so far (Pocket FIT).** BEFORE (installed `a39e8805…`, = main): new container "ZZ Mono Before" on `Proton-11.0-2.1-arm64ec-7`, Wayland, Turnip r4 → **"Wine Mono Installer" on screen**; `ps`: `wine wineboot -h` (parent = app) → `wineboot.exe --init` → `rundll32.exe setupapi,InstallHinfSection DefaultInstall 128 …wine.inf` → `control.exe appwiz.cpl install_mono`; `control.exe` environ carried `XDG_RUNTIME_DIR=/data/user/0/com.tencent.ig/files/.wayland-rt` (see finding below); step `finished in 88214 ms` after Cancel. AFTER (this build `e6b37f4e…`, sha-verified installed): same layer/backend/driver, "ZZ Mono After" → **no dialog, desktop up**; `prefix update: … before the Wayland session, WINEDLLOVERRIDES=mscoree=d` then `finished in 5018 ms (wineboot exit 0), .update-timestamp now "1789358770"`; the session's explorer environ has no `WINEDLLOVERRIDES`; Wayland log has no `control.exe`. `system.reg`/`user.reg` of the two prefixes: same 17,410 keys and byte size, only per-boot device GUIDs differ.
 >
+> **Layer switch and another layer, same build (from launches by others, captured by the same logcat filter).** 10:55, the user's container 7 moved `-7` → `Proton-11.0-2.1-arm64ec-8` by the in-app updater: `prefix update: .update-timestamp "1789358770" != wine.inf mtime 1789390901 … before the Wayland session, WINEDLLOVERRIDES=mscoree=d` → `finished in 8320 ms`, its Wayland log has no `control.exe` / no "Wine Mono Installer", nothing new in its `.cache/wine`. 10:12, a new container on GE `Proton-11.0-6-arm64ec-6`: `… before the X11 session, WINEDLLOVERRIDES=mscoree=d` → `finished in 6291 ms` (every dialog case took 60–88 s: the step waits for a click). Control: at 11:10 and 11:14 another build (`14e10dde…`, no fix) was installed and two new containers on `-8` opened "Wine Mono Installer" again.
+>
+> **Not device-tested yet.** The x86_64 path (`box64 wine wineboot -h`, Wine 9.5 / Proton x86_64 without a `disable` stamp) is CI-green only; failure falls back to the old in-session update. A managed exe after installing `mono-10.4.1` from Components was not run; what is proven is that the session's own environment carries no `mscoree` override. Throwaway containers "ZZ Mono Before" (10) and "ZZ Mono After" (11) are still on the device.
+>
 > **Finding (not changed here).** The Wayland step was never headless: `waylandcomp_jni.c` `setenv("XDG_RUNTIME_DIR")` lands in the app process env, Android's `ProcessBuilder` starts children from it and `ProcessHelper.exec` only adds our map, so `env.remove("XDG_RUNTIME_DIR")` has no effect and libwayland connects to `wayland-0`. That is why the dialog was visible on Wayland.
 >
-> **Device plan.** Before (installed `a39e8805…`) and after (this build): new `ZZ` container on the Wayland layer; `ZZ` container on another layer switched to 11.0-2.1; an X11 container on another layer; Wine Mono from Components + a managed exe still runs; one title on container 7.
 
 ## 2026-09-14 08:43 — 🏷️ **Cards name the X11 backend too: "Vulkan (X11)", "OpenGL (X11)", "SurfaceFlinger (X11)"** (`fix/renderer-chip-backend` `acd06e7d`, run 34843443878, pubg `a39e8805…`)
 
