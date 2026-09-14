@@ -644,12 +644,13 @@ void sc_layer_hide_overlay(void) {
     layers_init();
     struct layer *l = &g_layers[SC_LAYER_OVERLAY];
     if (!l->sc) return;
-    /* RETIRED, not just hidden. Measured on the Pocket FIT: while a second SurfaceControl exists on
-     * the screen surface, SurfaceFlinger keeps composing the whole frame on the GPU
-     * (composition: DEVICE/CLIENT) - and hiding the layer does NOT bring it back; only letting the
-     * SurfaceControl go does. So the overlay layer lives exactly as long as the window above the
-     * game, and the game gets its hardware composition back the moment that window closes. The
-     * pool buffers stay allocated for the next one. */
+    /* RETIRED, not just hidden, so the overlay layer lives exactly as long as the window above the
+     * game: a live second SurfaceControl is what puts SurfaceFlinger into GPU client composition
+     * on this hardware (see sc_layer.h), and a hidden one is still live. Measured caveat: letting
+     * it go does NOT by itself bring hardware composition back - on the Pocket FIT the fallback
+     * outlives the overlay and only clears when the GAME layer's SurfaceControl is re-created
+     * (HOME + resume). Retiring is still the right thing; it just is not the whole cure. The pool
+     * buffers stay allocated for the next window. */
     if (l->shown) hide_layer(l);
     retire_sc(l);
     banner_log("layer", "%s: gone (nothing is above the game any more)", l->name);
