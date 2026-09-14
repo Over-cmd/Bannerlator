@@ -1471,7 +1471,20 @@ public class Container {
 
             if (data.has("envVars") && data.has("extraData")) {
                 JSONObject extraData = data.getJSONObject("extraData");
-                int appVersion = Integer.parseInt(extraData.optString("appVersion", "0"));
+                // Back-fill env vars added since app version 16, but ONLY onto a container that
+                // really carries an old stamp. An ABSENT appVersion means "never booted", not
+                // "written by app version 0": it is what a container the editor just wrote looks
+                // like, and what the New Container Defaults profile always looks like. Treating
+                // that as legacy re-added every DEFAULT_ENV_VARS entry the user had deliberately
+                // deleted, silently undoing their edit. (Parsing defensively also keeps a junk
+                // stamp from throwing NumberFormatException straight out of loadData, which no
+                // caller catches.)
+                String stamp = extraData.optString("appVersion", "");
+                int appVersion = Integer.MAX_VALUE;
+                if (!stamp.isEmpty()) {
+                    try { appVersion = Integer.parseInt(stamp); }
+                    catch (NumberFormatException e) { appVersion = 0; }
+                }
                 if (appVersion < 16) {
                     EnvVars defaultEnvVars = new EnvVars(DEFAULT_ENV_VARS);
                     EnvVars envVars = new EnvVars(data.getString("envVars"));
