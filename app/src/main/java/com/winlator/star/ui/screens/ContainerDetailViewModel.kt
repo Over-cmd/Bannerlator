@@ -957,6 +957,64 @@ class ContainerDetailViewModel(app: Application) : AndroidViewModel(app) {
         colorAsString: String,
         onComplete: () -> Unit
     ) {
+        val c = container
+        if (c != null) {
+            // Edit mode — the form is written straight onto the real container.
+            applyFormTo(c, gdConfig, dxConfig, fpsConfig, envVarsIn, cpuListIn, cpuListWoW64In,
+                colorAsString, seedControllerGlobals = false)
+            c.saveData()
+            saveMouseWarp(c)
+            saveRunAsAdmin(c)
+            onComplete()
+        }
+        else {
+            // Create mode — the SAME writer fills a throwaway container, whose serialized form is
+            // the payload createContainerAsync consumes (see buildCreateData). Nothing is re-applied
+            // afterwards, so nothing can be forgotten afterwards either.
+            val data = buildCreateData(gdConfig, dxConfig, fpsConfig, envVarsIn, cpuListIn,
+                cpuListWoW64In, colorAsString)
+            // createContainerAsync posts callback to main thread when done
+            manager.createContainerAsync(data, contentsManager) { created ->
+                container = created
+                // Registry-backed settings need the prefix to exist, so they land after extraction.
+                // (Run as administrator is stamped by ContainerManager from the runAsAdmin flag.)
+                if (created != null) saveMouseWarp(created)
+                onComplete()
+            }
+        }
+    }
+
+    /**
+     * Write EVERY field this editor can set onto [c]. The ONE place the form becomes container
+     * config: the edit path calls it on the real container, the create path on the throwaway
+     * container it serializes into createContainerAsync's payload, and the "New Container Defaults"
+     * path on the profile template. A field added here therefore sticks in all three.
+     *
+     * It exists because those three used to be hand-maintained lists that drifted: create put a
+     * subset in its JSON, re-applied a second subset through setters once the container existed, and
+     * silently dropped whatever was in neither. displayBackend and waylandGameDriver were in neither,
+     * so a container created on Wayland was born on X11 — and the defaults profile could not hold a
+     * Wayland default at all.
+     *
+     * NOT here: mouse warp and "Run as administrator". Both live in the prefix's registry rather than
+     * the config, so they need a container that exists on disk — saveMouseWarp/saveRunAsAdmin on
+     * edit, and on create the registry stamp ContainerManager applies from the runAsAdmin data flag.
+     *
+     * [seedControllerGlobals] is create-only: a BRAND-NEW container inherits the app-drawer
+     * controller globals for each of those three fields the user left at its default (existing
+     * containers are never retroactively changed, and an explicit edit here always wins).
+     */
+    private fun applyFormTo(
+        c: Container,
+        gdConfig: String,
+        dxConfig: String,
+        fpsConfig: String,
+        envVarsIn: String,
+        cpuListIn: String,
+        cpuListWoW64In: String,
+        colorAsString: String,
+        seedControllerGlobals: Boolean,
+    ) {
         // Belt-and-suspenders: never write Audio=directaudio for a layer that can't load it. The UI
         // grey-out already blocks a fresh pick, but a container loaded already-set (or edited without
         // touching the audio row) reaches here — drop it back to the default first.
@@ -973,315 +1031,141 @@ class ContainerDetailViewModel(app: Application) : AndroidViewModel(app) {
             }
         } catch (_: Exception) {}
 
-        val screenSize   = buildScreenSize()
-        val graphicsDriver = StringUtils.parseIdentifier(selectedGraphicsDriver)
-        val dxWrapper    = StringUtils.parseIdentifier(selectedDXWrapper)
-        val audioDriver  = StringUtils.parseIdentifier(selectedAudioDriver)
-        val emulator     = StringUtils.parseIdentifier(selectedEmulator)
-        val midiSoundFont = if (selectedMidiIndex == 0) "" else midiEntries.getOrElse(selectedMidiIndex) { "" }
-        val wincomponents = winComponents.joinToString(",") { "${it.key}=${it.selectedIndex}" }
-        val drivesStr = buildDrivesString()
-        val desktopThemeStr = buildDesktopThemeStr(colorAsString)
-        val box64Preset = box64PresetIds.getOrElse(selectedBox64PresetIndex) { Box64Preset.COMPATIBILITY }
-        val fexcorePreset = fexCorePresetIds.getOrElse(selectedFEXCorePresetIndex) { FEXCorePreset.INTERMEDIATE }
-        val controllerMapping = buildControllerMapping()
-
         var inputType = 0
         if (enableXInput) inputType = inputType or WinHandler.FLAG_INPUT_TYPE_XINPUT.toInt()
         if (enableDInput) inputType = inputType or WinHandler.FLAG_INPUT_TYPE_DINPUT.toInt()
 
-        val c = container
-        if (c != null) {
-            // Edit mode
-            c.name               = containerName
-            c.screenSize         = screenSize
-            c.envVars            = envVarsIn
-            c.setCPUList(cpuListIn)
-            c.setCPUListWoW64(cpuListWoW64In)
-            c.graphicsDriver     = graphicsDriver
-            c.graphicsDriverConfig = finalGDConfig
-            c.setDXWrapper(dxWrapper)
-            c.setDXWrapperConfig(dxConfig)
-            c.audioDriver        = audioDriver
-            c.emulator           = emulator
-            c.winComponents      = wincomponents
-            c.drives             = drivesStr
-            c.setShowFPS(showFPS)
-            c.setFPSCounterConfig(fpsConfig)
-            c.setFullscreenMode(fullscreenMode)
-            c.setScreenAlignment(screenAlignment)
-            c.setFrameGenEngine(frameGenEngine)
-            c.setFrameGenModel(frameGenModel)
-            c.setLsfgPerformanceMode(lsfgPerformanceMode)
-            c.setLsfgAutoEnable(lsfgAutoEnable)
-            if (com.winlator.star.FeatureFlags.LSFG_NATIVE_EXPERIMENTS_ENABLED) {
-                c.setFgCaptureResolution(resolvedFgCaptureResolution())
-                c.setLsfgVk11Compat(lsfgVk11Compat)
-            }
-            c.setFpsLimiterEnabled(fpsLimiterEnabled)
-            c.setMatchRefreshRate(matchRefreshRate)
-            c.setManualRefreshRate(manualRefreshRate)
-            applyRefreshSettings(c)
-            c.setReshadeLoadout(reshadeLoadout.loadoutJsonOrNull())
-            c.setReshadeMode(reshadeLoadout.mode)
-            c.setReshadeParams(reshadeLoadout.paramsJsonOrNull())
-            c.setReshadeEffect(reshadeLoadout.firstEffectName())
-            c.setExclusiveXInput(exclusiveXInput)
-            c.setVibrationMode(vibrationMode)
-            c.setVibrationIntensity(vibrationIntensity)
-            c.setControllerSlotOverrides(controllerSlotOverridesJson)
-            c.setOnScreenControllerMode(onScreenControllerMode)
-            c.setAutoHideControlsOnPad(autoHideControlsOnPad)
-            c.setGyroEnabled(gyroEnabled)
-            c.setGyroTarget(gyroTarget)
-            c.setGyroActivator(gyroActivator)
-            c.setGyroActivationMode(gyroActivationMode)
-            c.setGyroMode(gyroMode)
-            c.setGyroSensitivity(gyroSensitivity)
-            c.setGyroDeadzone(gyroDeadzone)
-            c.setGyroSmoothing(gyroSmoothing)
-            c.setGyroInvertX(gyroInvertX)
-            c.setGyroInvertY(gyroInvertY)
-            c.setRenderer(StringUtils.parseIdentifier(selectedRenderer))
-            c.setRendererNative(rendererNative)
-            c.setRendererNativeBackend(rendererNativeBackend)
-            c.setRendererPresentMode(rendererPresentMode)
-            c.setRendererDriverId(rendererDriverId)
-            c.setRendererFilterMode(rendererFilterMode)
-            c.setRendererSwapRB(rendererSwapRB)
-            c.setRendererSfCompatMode(rendererSfCompatMode)
-            // Persist the EFFECTIVE backend: a stored "wayland" on a layer that can no longer drive it
-            // displayed as X11 in the editor, so X11 is what gets saved.
-            c.setDisplayBackend(if (isWaylandBackend) Container.DISPLAY_BACKEND_WAYLAND else Container.DISPLAY_BACKEND_X11)
-            c.setWaylandGameDriver(waylandGameDriver)   // "auto" clears the extra
-            c.putExtra("renderScale", if (renderScale == "1.0") null else renderScale)
-            c.putExtra("autoCloseOnExit", if (autoCloseOnExit) null else "0")  // default ON
-            c.setInputType(inputType)
-            c.setStartupSelection(selectedStartupSelection.toByte())
-            // Persist the Custom enabled set regardless of the active selection, so toggling to another
-            // preset and back restores the picks. Launch only reads it when the selection is Custom.
-            c.setStartupServices(startupServicesEnabled.joinToString(","))
-            c.setBox64Version(selectedBox64Version)
-            c.setBox64Preset(box64Preset)
-            c.setFEXCoreVersion(selectedFEXCoreVersion)
-            c.setFEXCorePreset(fexcorePreset)
-            c.desktopTheme       = desktopThemeStr
-            c.setMidiSoundFont(midiSoundFont)
-            c.setLC_ALL(lcAll)
-            c.setPrimaryController(selectedPrimaryController)
-            c.setControllerMapping(controllerMapping)
-            c.saveData()
-            saveMouseWarp(c)
-            saveRunAsAdmin(c)
-            onComplete()
-        } else {
-            // Create mode
-            val data = buildCreateData(
-                screenSize, envVarsIn, cpuListIn, cpuListWoW64In, graphicsDriver, finalGDConfig,
-                dxWrapper, dxConfig, audioDriver, emulator, wincomponents, drivesStr, fpsConfig,
-                inputType, box64Preset, fexcorePreset, desktopThemeStr, midiSoundFont, controllerMapping,
-            )
-            // createContainerAsync posts callback to main thread when done
-            manager.createContainerAsync(data, contentsManager) { created ->
-                container = created
-                if (created != null) {
-                    created.setFrameGenEngine(frameGenEngine)
-                    created.setFrameGenModel(frameGenModel)
-                    created.setLsfgPerformanceMode(lsfgPerformanceMode)
-                    created.setLsfgAutoEnable(lsfgAutoEnable)
-                    if (com.winlator.star.FeatureFlags.LSFG_NATIVE_EXPERIMENTS_ENABLED) {
-                        created.setFgCaptureResolution(resolvedFgCaptureResolution())
-                        created.setLsfgVk11Compat(lsfgVk11Compat)
-                    }
-                    created.setVibrationMode(vibrationMode)
-                    created.setVibrationIntensity(vibrationIntensity)
-                    // Player Slots + On-screen mode: a NEW container is SEEDED from the app-drawer global
-                    // default ONLY at creation (never a live launch-time fallback, and existing containers
-                    // are never retroactively changed). An explicit edit in this create screen wins over
-                    // the global — so only fall back to the global when the field is still the all-auto
-                    // default the user didn't touch.
-                    val seededSlotOverrides =
-                        if (controllerSlotOverridesJson.isBlank() || controllerSlotOverridesJson == "{}")
-                            com.winlator.star.ui.components.GlobalControllerPrefs.getSlotOverridesJson(context)
-                        else controllerSlotOverridesJson
-                    created.setControllerSlotOverrides(seededSlotOverrides)
-                    created.setOnScreenControllerMode(
-                        if (onScreenControllerMode == Container.ON_SCREEN_MODE_DEFAULT)
-                            com.winlator.star.ui.components.GlobalControllerPrefs.getOnScreenMode(context)
-                        else onScreenControllerMode
-                    )
-                    // Seed auto-hide from the global default (ON) when the user didn't turn it on in the
-                    // create screen; an explicit ON in the create screen is kept. Existing containers never
-                    // hit this path, so they stay on the FALSE container-level fallback.
-                    created.setAutoHideControlsOnPad(
-                        if (!autoHideControlsOnPad)
-                            com.winlator.star.ui.components.GlobalControllerPrefs.getAutoHideControlsOnPad(context)
-                        else true
-                    )
-                    // Same set as the edit path above — a new container must not silently drop these.
-                    created.setGyroEnabled(gyroEnabled)
-                    created.setGyroTarget(gyroTarget)
-                    created.setGyroActivator(gyroActivator)
-                    created.setGyroActivationMode(gyroActivationMode)
-                    created.setGyroMode(gyroMode)
-                    created.setGyroSensitivity(gyroSensitivity)
-                    created.setGyroDeadzone(gyroDeadzone)
-                    created.setGyroSmoothing(gyroSmoothing)
-                    created.setGyroInvertX(gyroInvertX)
-                    created.setGyroInvertY(gyroInvertY)
-                    created.setFpsLimiterEnabled(fpsLimiterEnabled)
-                    created.setMatchRefreshRate(matchRefreshRate)
-                    created.setManualRefreshRate(manualRefreshRate)
-                    applyRefreshSettings(created)
-                    created.setReshadeLoadout(reshadeLoadout.loadoutJsonOrNull())
-                    created.setReshadeMode(reshadeLoadout.mode)
-                    created.setReshadeParams(reshadeLoadout.paramsJsonOrNull())
-                    created.setReshadeEffect(reshadeLoadout.firstEffectName())
-                    if (renderScale != "1.0") created.putExtra("renderScale", renderScale)
-                    if (!autoCloseOnExit) created.putExtra("autoCloseOnExit", "0")  // default ON
-                    created.saveData()
-                    saveMouseWarp(created)
-                }
-                onComplete()
-            }
+        c.name               = containerName
+        c.screenSize         = buildScreenSize()
+        c.envVars            = envVarsIn
+        c.setCPUList(cpuListIn)
+        c.setCPUListWoW64(cpuListWoW64In)
+        c.graphicsDriver     = StringUtils.parseIdentifier(selectedGraphicsDriver)
+        c.graphicsDriverConfig = finalGDConfig
+        c.setDXWrapper(StringUtils.parseIdentifier(selectedDXWrapper))
+        c.setDXWrapperConfig(dxConfig)
+        c.audioDriver        = StringUtils.parseIdentifier(selectedAudioDriver)
+        c.emulator           = StringUtils.parseIdentifier(selectedEmulator)
+        c.winComponents      = winComponents.joinToString(",") { "${it.key}=${it.selectedIndex}" }
+        c.drives             = buildDrivesString()
+        c.setShowFPS(showFPS)
+        c.setFPSCounterConfig(fpsConfig)
+        c.setFullscreenMode(fullscreenMode)
+        c.setScreenAlignment(screenAlignment)
+        c.setFrameGenEngine(frameGenEngine)
+        c.setFrameGenModel(frameGenModel)
+        c.setLsfgPerformanceMode(lsfgPerformanceMode)
+        c.setLsfgAutoEnable(lsfgAutoEnable)
+        if (com.winlator.star.FeatureFlags.LSFG_NATIVE_EXPERIMENTS_ENABLED) {
+            c.setFgCaptureResolution(resolvedFgCaptureResolution())
+            c.setLsfgVk11Compat(lsfgVk11Compat)
+        }
+        c.setFpsLimiterEnabled(fpsLimiterEnabled)
+        c.setMatchRefreshRate(matchRefreshRate)
+        c.setManualRefreshRate(manualRefreshRate)
+        applyRefreshSettings(c)
+        c.setReshadeLoadout(reshadeLoadout.loadoutJsonOrNull())
+        c.setReshadeMode(reshadeLoadout.mode)
+        c.setReshadeParams(reshadeLoadout.paramsJsonOrNull())
+        c.setReshadeEffect(reshadeLoadout.firstEffectName())
+        c.setExclusiveXInput(exclusiveXInput)
+        c.setVibrationMode(vibrationMode)
+        c.setVibrationIntensity(vibrationIntensity)
+        // Player Slots + On-screen mode + auto-hide: seeded from the app-drawer global ONLY for a
+        // brand-new container, and only where the field is still the default the user didn't touch.
+        c.setControllerSlotOverrides(
+            if (seedControllerGlobals &&
+                (controllerSlotOverridesJson.isBlank() || controllerSlotOverridesJson == "{}"))
+                com.winlator.star.ui.components.GlobalControllerPrefs.getSlotOverridesJson(context)
+            else controllerSlotOverridesJson
+        )
+        c.setOnScreenControllerMode(
+            if (seedControllerGlobals && onScreenControllerMode == Container.ON_SCREEN_MODE_DEFAULT)
+                com.winlator.star.ui.components.GlobalControllerPrefs.getOnScreenMode(context)
+            else onScreenControllerMode
+        )
+        c.setAutoHideControlsOnPad(
+            if (seedControllerGlobals && !autoHideControlsOnPad)
+                com.winlator.star.ui.components.GlobalControllerPrefs.getAutoHideControlsOnPad(context)
+            else autoHideControlsOnPad
+        )
+        c.setGyroEnabled(gyroEnabled)
+        c.setGyroTarget(gyroTarget)
+        c.setGyroActivator(gyroActivator)
+        c.setGyroActivationMode(gyroActivationMode)
+        c.setGyroMode(gyroMode)
+        c.setGyroSensitivity(gyroSensitivity)
+        c.setGyroDeadzone(gyroDeadzone)
+        c.setGyroSmoothing(gyroSmoothing)
+        c.setGyroInvertX(gyroInvertX)
+        c.setGyroInvertY(gyroInvertY)
+        c.setRenderer(StringUtils.parseIdentifier(selectedRenderer))
+        c.setRendererNative(rendererNative)
+        c.setRendererNativeBackend(rendererNativeBackend)
+        c.setRendererPresentMode(rendererPresentMode)
+        c.setRendererDriverId(rendererDriverId)
+        c.setRendererFilterMode(rendererFilterMode)
+        c.setRendererSwapRB(rendererSwapRB)
+        c.setRendererSfCompatMode(rendererSfCompatMode)
+        // Persist the EFFECTIVE backend: a stored "wayland" on a layer that can no longer drive it
+        // displayed as X11 in the editor, so X11 is what gets saved. Because create goes through
+        // here too, a container can never be BORN claiming a Wayland its layer cannot do either.
+        c.setDisplayBackend(if (isWaylandBackend) Container.DISPLAY_BACKEND_WAYLAND else Container.DISPLAY_BACKEND_X11)
+        c.setWaylandGameDriver(waylandGameDriver)   // "auto" clears the extra
+        c.putExtra("renderScale", if (renderScale == "1.0") null else renderScale)
+        c.putExtra("autoCloseOnExit", if (autoCloseOnExit) null else "0")  // default ON
+        c.setInputType(inputType)
+        c.setStartupSelection(selectedStartupSelection.toByte())
+        // Persist the Custom enabled set regardless of the active selection, so toggling to another
+        // preset and back restores the picks. Launch only reads it when the selection is Custom.
+        c.setStartupServices(startupServicesEnabled.joinToString(","))
+        c.setBox64Version(selectedBox64Version)
+        c.setBox64Preset(box64PresetIds.getOrElse(selectedBox64PresetIndex) { Box64Preset.COMPATIBILITY })
+        c.setFEXCoreVersion(selectedFEXCoreVersion)
+        c.setFEXCorePreset(fexCorePresetIds.getOrElse(selectedFEXCorePresetIndex) { FEXCorePreset.INTERMEDIATE })
+        c.desktopTheme       = buildDesktopThemeStr(colorAsString)
+        c.setMidiSoundFont(if (selectedMidiIndex == 0) "" else midiEntries.getOrElse(selectedMidiIndex) { "" })
+        c.setLC_ALL(lcAll)
+        c.setPrimaryController(selectedPrimaryController)
+        c.setControllerMapping(buildControllerMapping())
+    }
+
+    // The create-mode container-config `data` JSON — built by writing the WHOLE form onto a
+    // throwaway container (never touches disk) and serializing it with the SAME getData() a real
+    // save uses. Container.loadData round-trips getData() in full, extraData included — the same
+    // property duplicateContainer relies on — so every field the editor can set reaches the new
+    // container, instead of the hand-picked subset this used to list.
+    //
+    // Two keys getData() cannot carry are added by hand:
+    //   • wineVersion — getData() omits it for the bundled main wine, and createContainer REQUIRES
+    //     the key (data.getString), so it is always written here.
+    //   • runAsAdmin  — a registry stamp rather than a config field; ContainerManager reads the flag
+    //     off the payload and writes EnableLUA into the freshly-extracted prefix.
+    private fun buildCreateData(
+        gdConfig: String, dxConfig: String, fpsConfig: String, envVarsIn: String,
+        cpuListIn: String, cpuListWoW64In: String, colorAsString: String,
+    ): JSONObject {
+        val template = Container(0, manager)
+        applyFormTo(template, gdConfig, dxConfig, fpsConfig, envVarsIn, cpuListIn, cpuListWoW64In,
+            colorAsString, seedControllerGlobals = true)
+        return template.getData().apply {
+            put("wineVersion", selectedWineVersion)
+            put("runAsAdmin", runAsAdmin)
         }
     }
 
-    // The create-mode container-config `data` JSON — the exact field set createContainerAsync consumes.
-    // Extracted so the "New Container Defaults" profile persists the identical shape rather than a copy
-    // that could silently drift. Post-create-only extras (frameGen/gyro/vibration/reshade/refresh/
-    // renderScale/autoCloseOnExit) are NOT here — they're applied by their setters after the container
-    // exists (see the createContainerAsync callback and saveDefaults' throwaway template).
-    private fun buildCreateData(
-        screenSize: String, envVarsIn: String, cpuListIn: String, cpuListWoW64In: String,
-        graphicsDriver: String, finalGDConfig: String, dxWrapper: String, dxConfig: String,
-        audioDriver: String, emulator: String, wincomponents: String, drivesStr: String,
-        fpsConfig: String, inputType: Int, box64Preset: String, fexcorePreset: String,
-        desktopThemeStr: String, midiSoundFont: String, controllerMapping: String,
-    ): JSONObject = JSONObject().apply {
-        put("name", containerName)
-        put("screenSize", screenSize)
-        put("envVars", envVarsIn)
-        put("cpuList", cpuListIn)
-        put("cpuListWoW64", cpuListWoW64In)
-        put("graphicsDriver", graphicsDriver)
-        put("graphicsDriverConfig", finalGDConfig)
-        put("dxwrapper", dxWrapper)
-        put("dxwrapperConfig", dxConfig)
-        put("audioDriver", audioDriver)
-        put("emulator", emulator)
-        put("wincomponents", wincomponents)
-        put("drives", drivesStr)
-        put("showFPS", showFPS)
-        put("fpsCounterConfig", fpsConfig)
-        put("fullscreenMode", fullscreenMode)
-        put("screenAlignment", screenAlignment)
-        put("exclusiveXInput", exclusiveXInput)
-        put("renderer", StringUtils.parseIdentifier(selectedRenderer))
-        put("rendererNative", rendererNative)
-        put("rendererNativeBackend", rendererNativeBackend)
-        put("rendererPresentMode", rendererPresentMode)
-        put("rendererDriverId", rendererDriverId)
-        put("rendererFilterMode", rendererFilterMode)
-        put("rendererSwapRB", rendererSwapRB)
-        put("rendererSfCompatMode", rendererSfCompatMode)
-        put("inputType", inputType)
-        put("runAsAdmin", runAsAdmin)
-        put("startupSelection", selectedStartupSelection)
-        put("startupServices", startupServicesEnabled.joinToString(","))
-        put("box64Version", selectedBox64Version)
-        put("box64Preset", box64Preset)
-        put("fexcoreVersion", selectedFEXCoreVersion)
-        put("fexcorePreset", fexcorePreset)
-        put("desktopTheme", desktopThemeStr)
-        put("wineVersion", selectedWineVersion)
-        put("midiSoundFont", midiSoundFont)
-        put("lc_all", lcAll)
-        put("primaryController", selectedPrimaryController)
-        put("controllerMapping", controllerMapping)
-    }
-
-    // Defaults mode ✓: build the same create `data`, materialise a throwaway template container to
-    // capture the post-create extras through the REAL setters, then persist its serialized form (minus
-    // the per-container name/drives) as the user's new-container defaults profile. Never creates a
-    // container. Mirrors doConfirm's local computations so the saved shape matches create exactly.
+    // Defaults mode ✓: write the form onto a throwaway template through the SAME applyFormTo a real
+    // save uses, then persist its serialized form (minus the per-container name/drives and the
+    // never-templated wineVersion) as the user's new-container defaults profile. Never creates a
+    // container, and never seeds the controller globals — those belong to a real new container.
     private fun saveDefaults(
         gdConfig: String, dxConfig: String, fpsConfig: String, envVarsIn: String,
         cpuListIn: String, cpuListWoW64In: String, colorAsString: String, onDone: () -> Unit,
     ) {
-        // Finalize graphics driver config (ensure version is set) — identical to doConfirm.
-        var finalGDConfig = gdConfig
-        try {
-            val cfg = GraphicsDriverConfigDialog.parseGraphicsDriverConfig(gdConfig)
-            if (cfg["version"].isNullOrEmpty()) {
-                cfg["version"] = if (GPUInformation.isDriverSupported(DefaultVersion.WRAPPER_ADRENO, context))
-                    DefaultVersion.WRAPPER_ADRENO else DefaultVersion.WRAPPER
-                finalGDConfig = GraphicsDriverConfigDialog.toGraphicsDriverConfig(cfg)
-            }
-        } catch (_: Exception) {}
-
-        val screenSize   = buildScreenSize()
-        val graphicsDriver = StringUtils.parseIdentifier(selectedGraphicsDriver)
-        val dxWrapper    = StringUtils.parseIdentifier(selectedDXWrapper)
-        val audioDriver  = StringUtils.parseIdentifier(selectedAudioDriver)
-        val emulator     = StringUtils.parseIdentifier(selectedEmulator)
-        val midiSoundFont = if (selectedMidiIndex == 0) "" else midiEntries.getOrElse(selectedMidiIndex) { "" }
-        val wincomponents = winComponents.joinToString(",") { "${it.key}=${it.selectedIndex}" }
-        val drivesStr = buildDrivesString()
-        val desktopThemeStr = buildDesktopThemeStr(colorAsString)
-        val box64Preset = box64PresetIds.getOrElse(selectedBox64PresetIndex) { Box64Preset.COMPATIBILITY }
-        val fexcorePreset = fexCorePresetIds.getOrElse(selectedFEXCorePresetIndex) { FEXCorePreset.INTERMEDIATE }
-        val controllerMapping = buildControllerMapping()
-
-        var inputType = 0
-        if (enableXInput) inputType = inputType or WinHandler.FLAG_INPUT_TYPE_XINPUT.toInt()
-        if (enableDInput) inputType = inputType or WinHandler.FLAG_INPUT_TYPE_DINPUT.toInt()
-
-        val data = buildCreateData(
-            screenSize, envVarsIn, cpuListIn, cpuListWoW64In, graphicsDriver, finalGDConfig,
-            dxWrapper, dxConfig, audioDriver, emulator, wincomponents, drivesStr, fpsConfig,
-            inputType, box64Preset, fexcorePreset, desktopThemeStr, midiSoundFont, controllerMapping,
-        )
-
-        // A throwaway container (never written to disk) so the post-create-only extras round-trip
-        // through the SAME setters createContainerAsync's callback uses — keeping the profile's extras
-        // byte-identical to what a real new container would store. Same set as the create callback.
         try {
             val template = Container(0, manager)
-            template.loadData(data)
-            template.setFrameGenEngine(frameGenEngine)
-            template.setFrameGenModel(frameGenModel)
-            template.setLsfgPerformanceMode(lsfgPerformanceMode)
-            template.setLsfgAutoEnable(lsfgAutoEnable)
-            if (com.winlator.star.FeatureFlags.LSFG_NATIVE_EXPERIMENTS_ENABLED) {
-                template.setFgCaptureResolution(resolvedFgCaptureResolution())
-                template.setLsfgVk11Compat(lsfgVk11Compat)
-            }
-            template.setVibrationMode(vibrationMode)
-            template.setVibrationIntensity(vibrationIntensity)
-            template.setControllerSlotOverrides(controllerSlotOverridesJson)
-            template.setOnScreenControllerMode(onScreenControllerMode)
-            template.setAutoHideControlsOnPad(autoHideControlsOnPad)
-            template.setGyroEnabled(gyroEnabled)
-            template.setGyroTarget(gyroTarget)
-            template.setGyroActivator(gyroActivator)
-            template.setGyroActivationMode(gyroActivationMode)
-            template.setGyroMode(gyroMode)
-            template.setGyroSensitivity(gyroSensitivity)
-            template.setGyroDeadzone(gyroDeadzone)
-            template.setGyroSmoothing(gyroSmoothing)
-            template.setGyroInvertX(gyroInvertX)
-            template.setGyroInvertY(gyroInvertY)
-            template.setFpsLimiterEnabled(fpsLimiterEnabled)
-            template.setMatchRefreshRate(matchRefreshRate)
-            template.setManualRefreshRate(manualRefreshRate)
-            applyRefreshSettings(template)
-            template.setReshadeLoadout(reshadeLoadout.loadoutJsonOrNull())
-            template.setReshadeMode(reshadeLoadout.mode)
-            template.setReshadeParams(reshadeLoadout.paramsJsonOrNull())
-            template.setReshadeEffect(reshadeLoadout.firstEffectName())
-            if (renderScale != "1.0") template.putExtra("renderScale", renderScale)
-            if (!autoCloseOnExit) template.putExtra("autoCloseOnExit", "0")  // default ON
+            applyFormTo(template, gdConfig, dxConfig, fpsConfig, envVarsIn, cpuListIn,
+                cpuListWoW64In, colorAsString, seedControllerGlobals = false)
             // runAsAdmin is a registry stamp for real containers (not a config field), so getData()
             // won't carry it. Stash it as a dedicated profile-only extra so loadContainerData can seed
             // a new container's toggle from the saved default (see the template branch there).
