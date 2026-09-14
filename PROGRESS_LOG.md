@@ -1,5 +1,11 @@
 # Star-Compose — Progress Log
 
+## 2026-09-14 08:43 — 🏷️ **Cards name the X11 backend too: "Vulkan (X11)", "OpenGL (X11)", "SurfaceFlinger (X11)"** (`fix/renderer-chip-backend` `acd06e7d`, run 34843443878, pubg `a39e8805…`)
+
+> **The request.** Wayland cards already read "Vulkan (Wayland)"; an X11 card read a bare "Vulkan" or "OpenGL", so the backend could not be told apart at a glance. `rendererLabelOf()`'s X11 branch now appends "(X11)" — every stored renderer id is an X11 present path. Display only: the chip, launch overlay, XMB and Big Picture share the label; the editors keep their own renderer state and nothing compares against it.
+>
+> **Device.** Installed and sha-verified on the Pocket FIT. Games list: The Crew 2 and Watch Dogs (Wine 9.5 x86-64, X11) read **"Vulkan (X11)"**; Stumble Guys, Team Fortress 2, Skyrim, Titanfall 2 and Wizardry read **"Vulkan (Wayland)"**.
+
 ## 2026-09-14 08:20 — ✅ **Combined build device-proven: new containers keep Wayland and their drivers, the HUD names OpenGL for Wizardry, X11 unchanged** (`feat/wayland-phase2` `4a9b1c14`, run 34839775874, pubg `810d3346…`)
 
 > **Build.** Run 34839775874 green on `4a9b1c14` (headSha verified). pubg `810d3346509cf0164b0d14ad2d759d43519a546742cb1f42e1e304767015afdd`, staged as `/sdcard/Download/Bannerlator-p5d-pubg.apk`, installed with `pm install -r` and sha-verified on the Pocket FIT. Layer unchanged (`Proton-11.0-2.1-arm64ec-7`).
