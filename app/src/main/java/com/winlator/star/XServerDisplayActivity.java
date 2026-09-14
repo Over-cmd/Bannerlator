@@ -7089,29 +7089,36 @@ public class XServerDisplayActivity extends AppCompatActivity {
     }
 
     /** Register the display's own ratio listener (changes arrive at once, not a second later); moves with
-     *  the game to another display. Silently nothing where the display has no ratio (API < 34 / SDR). */
+     *  the game to another display. Silently nothing where the display has no ratio (API < 34 / SDR).
+     *  Reached by reflection: Display.registerHdrSdrRatioListener is not in the compile SDK's stubs,
+     *  and where it is missing the one-second sampler above is all there is (nothing is lost but speed). */
     private void armHdrRatioListener(android.view.Display d) {
         if (android.os.Build.VERSION.SDK_INT < 34 || d == null || d == hdrRatioDisplay) return;
         disarmHdrRatioListener();
+        hdrRatioDisplay = d; // whatever happens below, do not retry every second
         try {
-            if (!d.isHdrSdrRatioAvailable()) { hdrRatioDisplay = d; return; }
-            hdrRatioListener = disp -> {
+            if (!d.isHdrSdrRatioAvailable()) return;
+            java.util.function.Consumer<android.view.Display> l = disp -> {
                 float r = com.winlator.star.display.DisplayHdrInfo.liveHdrSdrRatio(disp);
                 try { com.winlator.star.wayland.WaylandCompositor.nativeHdrSdrRatioSample(r, true); }
                 catch (Throwable ignored) {}
             };
-            d.registerHdrSdrRatioListener(hdrRatioHandler::post, hdrRatioListener);
-            hdrRatioDisplay = d;
+            java.util.concurrent.Executor ex = hdrRatioHandler::post;
+            android.view.Display.class.getMethod("registerHdrSdrRatioListener",
+                    java.util.concurrent.Executor.class, java.util.function.Consumer.class).invoke(d, ex, l);
+            hdrRatioListener = l;
         } catch (Throwable t) {
             hdrRatioListener = null;
-            hdrRatioDisplay = d; // do not retry every second
-            Log.w("XServerDisplayActivity", "HDR: ratio listener unavailable", t);
+            Log.w("XServerDisplayActivity", "HDR: ratio listener unavailable (sampling once a second instead)", t);
         }
     }
 
     private void disarmHdrRatioListener() {
-        if (android.os.Build.VERSION.SDK_INT >= 34 && hdrRatioDisplay != null && hdrRatioListener != null) {
-            try { hdrRatioDisplay.unregisterHdrSdrRatioListener(hdrRatioListener); } catch (Throwable ignored) {}
+        if (hdrRatioDisplay != null && hdrRatioListener != null) {
+            try {
+                android.view.Display.class.getMethod("unregisterHdrSdrRatioListener", java.util.function.Consumer.class)
+                        .invoke(hdrRatioDisplay, hdrRatioListener);
+            } catch (Throwable ignored) {}
         }
         hdrRatioListener = null;
         hdrRatioDisplay = null;
