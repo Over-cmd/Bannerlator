@@ -6,12 +6,8 @@ import android.view.Display;
 
 import com.winlator.star.container.Container;
 import com.winlator.star.container.Shortcut;
-import com.winlator.star.contents.ContentProfile;
-import com.winlator.star.contents.ContentsManager;
 
-import java.util.HashMap;
 import java.util.Locale;
-import java.util.Map;
 
 /**
  * The "HDR output" setting of the Wayland backend — one place for everything the container editor,
@@ -32,18 +28,13 @@ import java.util.Map;
  * ({@link #unavailableReason}); the editors grey the row out with the reason everywhere else, and the
  * launch path turns nothing on there even if the stored value says on.
  *
- * <p>Every method is safe to call from any thread and never throws; {@link #layerVersionCode} scans the
- * installed contents on its first call per layer, so editors should call it off the main thread.
+ * <p>Every method is safe to call from any thread and never throws.
  */
 public final class WaylandHdr {
     private WaylandHdr() {}
 
     /** The extra's key on the container and on a shortcut. */
     public static final String EXTRA = "waylandHdr";
-
-    /** First versionCode of the Wayland layer whose winevulkan exposes VK_EXT_swapchain_colorspace, which
-     *  DXVK 2.x needs before it lists any HDR colour space (DXVK 3.x does not ask for it). */
-    public static final int LAYER_VERSION_CODE_DXVK2_HDR = 10;
 
     public static final String TITLE = "HDR output (HDR10)";
 
@@ -100,63 +91,6 @@ public final class WaylandHdr {
         String s = shortcutChoice(shortcut);
         if (!s.isEmpty()) return s.equals("1");
         return container != null && container.isWaylandHdr();
-    }
-
-    /** Major version of the DXVK a dxwrapperConfig names ("version=2.4.1-1-gplasync-…" -> 2,
-     *  "version=v3.1-gplasync-0" -> 3); -1 when it names none or cannot be read. */
-    public static int dxvkMajor(String dxwrapperConfig) {
-        if (dxwrapperConfig == null) return -1;
-        String version = null;
-        for (String part : dxwrapperConfig.split(",")) {
-            int eq = part.indexOf('=');
-            if (eq > 0 && part.substring(0, eq).trim().equals("version")) { version = part.substring(eq + 1).trim(); break; }
-        }
-        if (version == null) return -1;
-        int i = 0;
-        while (i < version.length() && !Character.isDigit(version.charAt(i))) i++;
-        int j = i;
-        while (j < version.length() && Character.isDigit(version.charAt(j))) j++;
-        if (j == i) return -1;
-        try { return Integer.parseInt(version.substring(i, j)); } catch (NumberFormatException e) { return -1; }
-    }
-
-    private static final Map<String, Integer> layerCodes = new HashMap<>();
-
-    /** The installed layer's versionCode as its profile declares it (profile.json), -1 when unknown.
-     *  Cached per identifier; the first call per layer scans the installed contents. */
-    public static int layerVersionCode(Context context, String wineVersion) {
-        if (context == null || wineVersion == null || wineVersion.isEmpty()) return -1;
-        synchronized (layerCodes) {
-            Integer cached = layerCodes.get(wineVersion);
-            if (cached != null) return cached;
-        }
-        int code = -1;
-        try {
-            ContentsManager cm = new ContentsManager(context);
-            cm.syncContents();
-            ContentProfile p = cm.getProfileByEntryName(wineVersion);
-            if (p != null) code = p.verCode;
-        } catch (Throwable ignored) {}
-        /* Only a real answer is kept: a layer that is not installed yet (or not readable right now) is
-         * looked up again next time instead of staying "unknown" for the life of the process. */
-        if (code >= 0) synchronized (layerCodes) { layerCodes.put(wineVersion, code); }
-        return code;
-    }
-
-    /**
-     * The DXVK 2.x warning, or {@code null} when none applies: DXVK before 3.0 lists HDR colour spaces
-     * only when the instance exposes VK_EXT_swapchain_colorspace, which the Wayland layer's winevulkan
-     * does from versionCode {@link #LAYER_VERSION_CODE_DXVK2_HDR}. Decided by the layer's versionCode,
-     * never its name; an unknown versionCode or DXVK version gives no warning.
-     */
-    public static String dxvkWarning(Context context, String wineVersion, String dxwrapper, String dxwrapperConfig) {
-        if (dxwrapper != null && !dxwrapper.isEmpty() && !dxwrapper.toLowerCase(Locale.ROOT).contains("dxvk")) return null;
-        int dxvk = dxvkMajor(dxwrapperConfig);
-        if (dxvk < 0 || dxvk >= 3) return null;
-        int layer = layerVersionCode(context, wineVersion);
-        if (layer < 0 || layer >= LAYER_VERSION_CODE_DXVK2_HDR) return null;
-        return "DXVK " + dxvk + ".x cannot offer games HDR on this layer (versionCode " + layer + "): use DXVK v3.1, "
-                + "or a Wayland layer of versionCode " + LAYER_VERSION_CODE_DXVK2_HDR + " or newer.";
     }
 
     /** Decimal nits for an env var: "1351", "0.05", "0" — no exponent, no trailing zeros; null for < 0. */

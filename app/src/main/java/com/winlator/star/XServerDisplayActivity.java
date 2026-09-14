@@ -6939,13 +6939,13 @@ public class XServerDisplayActivity extends AppCompatActivity {
     /** The Wayland session's HDR environment (launch worker thread, after the user's env vars are
      *  merged, so an explicit value of theirs always wins):
      *  - HDR output on for this session -> DXVK_HDR=1, so DXVK tells the game its display is HDR;
-     *  - every Wayland session whose display reports luminance -> BANNER_WAYLAND_HDR_MAX_NITS /
+     *  - every Wayland session whose display lists HDR10 -> BANNER_WAYLAND_HDR_MAX_NITS /
      *    _MAX_AVG_NITS / _MIN_NITS (decimal nits from Display.getHdrCapabilities(); a value that is
      *    unknown is left out, and so is a max or max-average of 0). The Wayland layer from versionCode
      *    10 describes the monitor to Windows with them (EDID HDR metadata), so DXGI reports this
-     *    screen's real peak instead of DXVK's 1499-nit stand-in. Android reports no LIVE brightness in
-     *    nits; the live HDR/SDR ratio is what the compositor logs instead;
-     *  - HDR on with a DXVK before 3.0 on a layer below versionCode 10 -> a session-log warning. */
+     *    screen's real peak instead of DXVK's 1499-nit stand-in. Never on a display without HDR10: its
+     *    EDID would then claim PQ support the screen does not have. Android reports no LIVE brightness
+     *    in nits; the live HDR/SDR ratio is what the compositor logs instead. */
     private void applyWaylandHdrEnv(EnvVars envVars) {
         try {
             StringBuilder said = new StringBuilder();
@@ -6963,7 +6963,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
                     {"BANNER_WAYLAND_HDR_MAX_NITS", d.maxLuminance > 0f ? com.winlator.star.display.WaylandHdr.nits(d.maxLuminance) : null},
                     {"BANNER_WAYLAND_HDR_MAX_AVG_NITS", d.maxAverageLuminance > 0f ? com.winlator.star.display.WaylandHdr.nits(d.maxAverageLuminance) : null},
                     {"BANNER_WAYLAND_HDR_MIN_NITS", d.minLuminance >= 0f ? com.winlator.star.display.WaylandHdr.nits(d.minLuminance) : null}};
-            if (d.maxLuminance > 0f) { // no peak = nothing worth describing
+            if (d.supportsHdr10 && d.maxLuminance > 0f) { // HDR10 displays only; no peak = nothing worth describing
                 for (String[] kv : nits) {
                     if (kv[1] == null) continue;
                     if (said.length() > 0) said.append(' ');
@@ -6980,15 +6980,6 @@ public class XServerDisplayActivity extends AppCompatActivity {
                         + "brightness in nits; the HDR/SDR ratio lines are the live reading)";
                 Log.i("XServerDisplayActivity", "wayland HDR " + line);
                 com.winlator.star.wayland.WaylandCompositor.nativeLogColor(line);
-            }
-            if (waylandHdrActive) {
-                String warn = com.winlator.star.display.WaylandHdr.dxvkWarning(this, container.getWineVersion(), dxwrapper,
-                        dxwrapperConfig != null ? "version=" + dxwrapperConfig.get("version") : null);
-                if (warn != null) {
-                    Log.w("XServerDisplayActivity", "wayland HDR: " + warn);
-                    com.winlator.star.wayland.WaylandCompositor.nativeLogColor(warn
-                            + " (this game will not see an HDR display until then)");
-                }
             }
         } catch (Throwable t) {
             Log.w("XServerDisplayActivity", "wayland: HDR environment failed", t);
@@ -7576,11 +7567,12 @@ public class XServerDisplayActivity extends AppCompatActivity {
             }
             EnvVars env = raw != null && !raw.isEmpty() ? new EnvVars(raw) : null;
             boolean zeroCopy = isWaylandZeroCopyRequested();
-            // HDR10 output (opt-in, BANNER_WAYLAND_HDR): the compositor decides the gate when it starts,
-            // from this request plus the display the game is on. An HDR frame is only right on the
-            // game's own display layer (everything the compositor draws itself is 8-bit sRGB), so when
-            // HDR can be on, zero-copy presentation is turned on for this session too. Without the
-            // switch, or on a display without HDR10, nothing here changes anything.
+            // HDR10 output (opt-in: the game's / container's HDR output setting, BANNER_WAYLAND_HDR overrides
+            // it): the compositor decides the gate when it starts, from this request plus the display the
+            // game is on. The best path is the game's own 10-bit frames straight on its display layer, so
+            // when HDR can be on, zero-copy presentation is turned on for this session too (whatever needs
+            // the compositor - effects, windows, frame generation - gets the composed HDR picture). Without
+            // the setting, or on a display without HDR10, nothing here changes anything.
             waylandHdrMode = resolvedWaylandHdrMode();
             com.winlator.star.display.DisplayHdrInfo hdrDisp =
                     com.winlator.star.display.DisplayHdrInfo.read(hdrTargetDisplay());

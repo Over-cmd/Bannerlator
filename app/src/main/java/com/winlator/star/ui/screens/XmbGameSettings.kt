@@ -99,10 +99,6 @@ internal class XmbPrefs(val context: Context, val shortcut: Shortcut) {
     // async facts the editor loads in the background
     var arm64ec by mutableStateOf<Boolean?>(null)
     var midiList by mutableStateOf<List<String>>(emptyList())
-    // The container layer's versionCode has been read. WaylandHdr.layerVersionCode scans the installed
-    // contents on its first call per layer and caches the answer, so loadAsync reads it off-main and the
-    // HDR row's DXVK 2.x warning is only worked out once this is true.
-    var hdrLayerRead by mutableStateOf(false)
 
     /** Why the device's screen can't show HDR10 (the HDR row is greyed with it), null when it can. Read once. */
     val hdrUnavailableReason: String? by lazy { WaylandHdr.unavailableReason(context) }
@@ -117,10 +113,9 @@ private fun XmbPrefs.loadAsync(xmb: XmbScope) {
             }.getOrDefault(false)
             val m = mutableListOf("-- ${context.getString(R.string.disabled)} --", MidiManager.DEFAULT_SF2_FILE)
             File(context.filesDir, MidiManager.SF_DIR).listFiles()?.forEach { m.add(it.name) }
-            WaylandHdr.layerVersionCode(context, c.wineVersion)
             arm to m
         }
-        arm64ec = a; midiList = midi; hdrLayerRead = true
+        arm64ec = a; midiList = midi
     }
 }
 
@@ -368,9 +363,7 @@ private fun generalRows(xmb: XmbScope, p: XmbPrefs, host: XmbGameHost): List<Xmb
         }
         // HDR output (per-game override of the container's waylandHdr; "" = container default, "1" on,
         // "0" off) — same options as the pop-up editor (WaylandHdr). Greyed with the reason on a screen
-        // that doesn't report HDR10, still showing what is stored. While it is on for this game, the DXVK
-        // 2.x warning (WaylandHdr.dxvkWarning over the game's effective DX wrapper + config) follows as
-        // an info row once loadAsync has read the layer's versionCode; until then it is left out.
+        // that doesn't report HDR10, still showing what is stored.
         val hdrValues = listOf("", "1", "0")
         val hdrLabels = listOf("Container default (" + (if (c.isWaylandHdr()) "On" else "Off") + ")", "On", "Off")
         rows += XmbRow.Choice(WaylandHdr.EXTRA, WaylandHdr.TITLE, Icons.Filled.HdrOn, hdrLabels,
@@ -378,10 +371,6 @@ private fun generalRows(xmb: XmbScope, p: XmbPrefs, host: XmbGameHost): List<Xmb
             subtitle = WaylandHdr.HELP_SHORT, disabledReason = p.hdrUnavailableReason) { v ->
             xmb.set(p, WaylandHdr.EXTRA, hdrValues[hdrLabels.indexOf(v)].ifEmpty { null })
         }
-        val hdrDxvkWarning = if (p.hdrLayerRead && WaylandHdr.effective(s, c))
-            WaylandHdr.dxvkWarning(p.context, c.wineVersion, p.ex("dxwrapper", c.getDXWrapper()), p.ex("dxwrapperConfig", c.getDXWrapperConfig()))
-        else null
-        if (hdrDxvkWarning != null) rows += XmbRow.Info("waylandHdrDxvk", hdrDxvkWarning, Icons.Filled.Info)
     } else {
         rows += XmbRow.Choice("gfxDriver", p.str(R.string.graphics_driver), Icons.Filled.Memory, gfxEntries, p.labelFor(gfxEntries, gfxId)) { v ->
             xmb.set(p, "graphicsDriver", StringUtils.parseIdentifier(v))

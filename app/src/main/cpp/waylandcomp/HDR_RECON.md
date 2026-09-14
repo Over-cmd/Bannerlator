@@ -760,3 +760,71 @@ shader pass is its own project). Instead:
 DXVK's own `<exe>_dxgi.log` / `<exe>_d3d11.log` add `Color space: VK_COLOR_SPACE_HDR10_ST2084_EXT` and
 the 10-bit format at swapchain creation; Mesa's `Not using HDR metadata to avoid protocol errors`
 (stderr → `wine_debug.log`) means the game's metadata failed Mesa's own legality check.
+
+## 11. Round 2 — as built (2026-09-14, `feat/wayland-hdr`; CI only, not device-proven yet)
+
+Round 1 is proven on the tester's Fold (God of War, DXVK v3.1: 10-bit zero-copy, `BT2020_PQ` on the
+layer, HDR/SDR ratio 1.00 → 2.51, `HDR on screen: yes`). Round 2 makes it a setting and removes
+round 1's big limitation (§10.4: no tone-mapping, effects/frame generation skipped, washed-out copies).
+The gate itself is unchanged (§10.1) apart from its first input.
+
+### 11.1 The setting, and what the launch does with it
+
+- `Container.isWaylandHdr()` (extraData `waylandHdr`) and the shortcut extra `waylandHdr` (`1`/`0`/unset
+  = the container's) — one resolver, `display/WaylandHdr.effective()`, used by the three editors
+  (container, game shortcut, XMB game settings) and the launch path. `BANNER_WAYLAND_HDR` in the
+  environment still overrides it (`1` / `0` / `force`). Editors grey the row with the reason when the
+  built-in screen does not list HDR10 (`WaylandHdr.unavailableReason`), and say it applies from the
+  next launch.
+- HDR on for the session (setting resolved on AND HDR10 display, or `force`): `DXVK_HDR=1` is exported
+  after the user's env merge unless the user set `DXVK_HDR` themselves.
+- Every Wayland session whose display lists **HDR10** exports `BANNER_WAYLAND_HDR_MAX_NITS`,
+  `…_MAX_AVG_NITS`, `…_MIN_NITS` (decimal nits from `Display.getHdrCapabilities()`; unknown values and
+  a max of 0 are left out) — the contract the Wayland layer from versionCode 10 turns into EDID HDR
+  metadata for DXGI (checked by the Wine side against DXVK's own EDID parser: the Fold's 1351/1351/0 →
+  DXGI max 1345.43, max full-frame 1345.43, min 0.01). Never on an SDR display, whose EDID would then
+  claim PQ support. One `session environment:` line logs them. Android has no live absolute nits; the
+  live evidence stays the HDR/SDR ratio.
+- A "DXVK before 3.0 needs layer v10" warning was built and then **removed**: its premise was wrong
+  (Wine already exposes `VK_EXT_swapchain_colorspace` at instance level; DXVK ≥ 2.1 looks for it in the
+  device list, logs 0 on every Mesa system — the working v3.1 run logs 0 too — and never uses it for the
+  HDR decision). Why God of War offered no HDR option on DXVK 2.4.1 is open (Fold A/B).
+
+### 11.2 HDR-aware composition (`hdr_compose.c`, `hdr_encode.frag`, compositor.c `hdr_plan`)
+
+Every scene with an HDR draw takes one of four routes (logged on each change, with the reason):
+
+| Route | When | What reaches the display |
+|---|---|---|
+| 0 | the HDR game alone fullscreen, zero-copy on, no effects, nothing above it (or one window the overlay layer can carry) | the game's own 10-bit gralloc frames on its layer, `BT2020_PQ` (round 1) |
+| 1 | effects on, a window above on a display that cannot take a second layer, a windowed game, zero-copy off | **the HDR picture**: every draw blitted 1:1 into a 10-bit "mixed" image (each pixel still in its own encoding), ONE encode pass to PQ BT.2020 (SDR pixels sRGB → linear → BT.2020, placed at 203 nits, `BANNER_WAYLAND_HDR_SDR_NITS` overrides), the effects chain run on it in 10-bit (`vkp_effects_set_formats`), copied into a 10-bit (`RGBA1010102`) layer buffer, tagged with the game's description; 8-bit buffers if gralloc refuses 10-bit (logged) |
+| 2 | frame generation on | composed into PQ in the 8-bit scene image, through the frame-generation engine, presented through an **HDR10 swapchain** (`VK_EXT_swapchain_colorspace` enabled on the compositor instance in HDR sessions only; first `A2B10G10R10` else FP16 pair the surface lists with `HDR10_ST2084`); where the surface lists none, **tone-mapped** into the ordinary swapchain. 8 bits through the engine: gradients may band |
+| 3 | an HDR frame the compositor could not import | layer only; effects/frame generation skipped for it (round 1's behaviour, now the rare case) |
+
+The tone map (mode 1 of `hdr_encode.frag`): PQ → nits → BT.2020 → BT.709, relative to SDR white, maxRGB
+curve linear to a 0.8 knee then an exponential roll-off that puts the content peak (the game's max CLL,
+else mastering max, else 1000 nits) at 98 %, sRGB-encoded. Which pixels are HDR comes from up to six
+top-first scene rects + a mask in the push constants (more windows over the game → the lowest are
+treated as SDR, logged once). A composed frame that cannot reach the layer falls back to route 2 for as
+long as that lasts (logged once each way).
+
+### 11.3 The live switch (lead's addition): drawer → Graphics → "HDR output"
+
+Shown only while the gate is open (the activity's 1 s HDR sampler flips `waylandHdrAvailable`). Per
+session, starts on, nothing saved. Off (`banner_color_set_output(0)`, posted through the host queue
+to the compositor thread, logged, redraw): route 0 becomes route 1 with the tone map, the picture goes
+on the layer **untagged** on 8-bit buffers (the layer's dataspace returns to `UNKNOWN`); route 2
+rebuilds the swapchain as SDR and tone-maps; route 3 cannot (nothing can read those frames) and stays
+HDR, said in the log. The game is told nothing (its DXVK_HDR and colour-manager offer were decided at
+launch). The HUD reads `Wayland · HDR` while HDR frames are on screen (tagged in the last 1.5 s and
+ratio > 1.01 where reported), `Wayland · HDR off` while the switch is off. Frames tone-mapped by the
+switch are counted separately in the verdict.
+
+### 11.4 What is still NOT done / not proven
+
+- Nothing of round 2 has run on a device yet (CI only). The Fold test note is `docs/HDR-test-r2.md`.
+- Frame generation runs on 8-bit PQ (the engines' format); a 10-bit engine path would need the
+  engines to take `A2B10G10R10`.
+- Colour effects (brightness/contrast/saturation/gamma, the "HDR" bloom) operate on the PQ signal in
+  route 1 and look stronger than in SDR; sharpening/AA/CRT/upscalers are perceptually fine.
+- scRGB (FP16) swapchains (Phase C) — unchanged: needs FP16 gralloc and a layer change.

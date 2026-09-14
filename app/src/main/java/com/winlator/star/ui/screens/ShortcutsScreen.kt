@@ -7337,23 +7337,10 @@ internal fun ShortcutSettingsDialogScreen(
                         Spacer(Modifier.height(8.dp))
                         // HDR output (per-game): "Use container default (<On/Off>)" / On / Off, see
                         // display.WaylandHdr. On a screen that doesn't report HDR10 the dropdown is greyed
-                        // with the reason but still shows what is stored. The DXVK 2.x warning follows the
-                        // wrapper + config being edited here; it needs the layer's versionCode, whose first
-                        // read per layer scans the installed contents, so it is worked out off-main and
-                        // only while HDR is on for this game.
+                        // with the reason but still shows what is stored.
                         run {
                             val hdrUnavailable = remember { com.winlator.star.display.WaylandHdr.unavailableReason(gfxContext) }
                             val containerHdr = shortcut.container.isWaylandHdr()
-                            val hdrOn = if (waylandHdrOverride.isEmpty()) containerHdr else waylandHdrOverride == "1"
-                            val hdrWine = shortcut.container.wineVersion
-                            val hdrDxWrapper = StringUtils.parseIdentifier(selectedDxWrapper)
-                            val hdrDxConfig = dxWrapperConfig
-                            var hdrDxvkWarning by remember { mutableStateOf<String?>(null) }
-                            LaunchedEffect(hdrOn, hdrWine, hdrDxWrapper, hdrDxConfig) {
-                                hdrDxvkWarning = if (!hdrOn) null else withContext(Dispatchers.IO) {
-                                    com.winlator.star.display.WaylandHdr.dxvkWarning(gfxContext, hdrWine, hdrDxWrapper, hdrDxConfig)
-                                }
-                            }
                             val values = listOf("", "1", "0")
                             val labels = listOf("Use container default (" + (if (containerHdr) "On" else "Off") + ")", "On", "Off")
                             DpDrop(
@@ -7377,14 +7364,6 @@ internal fun ShortcutSettingsDialogScreen(
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
-                            val dxvkWarning = hdrDxvkWarning
-                            if (hdrOn && dxvkWarning != null) {
-                                Text(
-                                    dxvkWarning,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.error
-                                )
-                            }
                         }
                     }
 

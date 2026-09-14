@@ -745,8 +745,8 @@ void banner_color_commit(struct wl_resource *surface) {
             snprintf(g_hdr.applied_who, sizeof(g_hdr.applied_who), "%s", who);
             pthread_mutex_unlock(&g_mu);
             if (!g_zero_copy)
-                banner_log(TAG, "%s: zero-copy presentation is OFF, so its HDR frames take the compositor's 8-bit "
-                           "SDR copy and show washed out - switch Zero-copy presentation on in the drawer", who);
+                banner_log(TAG, "%s: zero-copy presentation is OFF, so its HDR frames are composed into the HDR picture "
+                           "(one extra pass per frame) - switch Zero-copy presentation on for the direct path", who);
         }
     } else if (old) {
         banner_log(TAG, "%s: image description #%u removed - its frames are sRGB again", who, old->c.identity);
@@ -908,15 +908,23 @@ void banner_color_init(struct wl_display *display) {
     else
         snprintf(disp, sizeof(disp), "the app could not read the display's HDR capability");
 
+    /* What asked for HDR, in the words the user knows it by: the editors' setting, or the env override. */
+    char asked[128];
+    if (mode == 2) snprintf(asked, sizeof(asked), "BANNER_WAYLAND_HDR=force (%s)", source);
+    else if (strstr(source, "env")) snprintf(asked, sizeof(asked), "BANNER_WAYLAND_HDR=1 (%s)", source);
+    else snprintf(asked, sizeof(asked), "HDR output is on (%s)", source);
+
     int layer_ok = sc_layer_can_tag_hdr();
     int ahb_ok = ahb_swapchain_advertised();
+    char off_why[128];
+    if (strstr(source, "env")) snprintf(off_why, sizeof(off_why), "BANNER_WAYLAND_HDR=0 in the %s overrides the setting", source);
+    else snprintf(off_why, sizeof(off_why), "the HDR output setting is off");
     if (mode == 0)
-        snprintf(why, sizeof(why), "HDR output is off (BANNER_WAYLAND_HDR is not set in the container's or shortcut's "
-                 "environment variables)");
+        snprintf(why, sizeof(why), "HDR output is off (%s)", off_why);
     else if (mode == 1 && !known)
-        snprintf(why, sizeof(why), "BANNER_WAYLAND_HDR=1 is set but %s", disp);
+        snprintf(why, sizeof(why), "%s but %s", asked, disp);
     else if (mode == 1 && !hdr10)
-        snprintf(why, sizeof(why), "BANNER_WAYLAND_HDR=1 is set but this display cannot show HDR10: %s", disp);
+        snprintf(why, sizeof(why), "%s but this display cannot show HDR10: %s", asked, disp);
     else if (!layer_ok)
         snprintf(why, sizeof(why), "this Android has no display layers with dataspace control "
                  "(ASurfaceControl + ASurfaceTransaction_setBufferDataSpace, Android 10+)");
@@ -937,8 +945,9 @@ void banner_color_init(struct wl_display *display) {
         } else if (dxvk_hdr || (known && hdr10)) {
             /* Off, and silent unless it is worth a line: a display that could show HDR10, or a DXVK
              * switch that promises games an HDR display they cannot get. */
-            banner_log(TAG, "HDR output off for this session (BANNER_WAYLAND_HDR not set)%s%s",
-                       (known && hdr10) ? " - this display lists HDR10, so BANNER_WAYLAND_HDR=1 would offer it to games" : "",
+            banner_log(TAG, "HDR output off for this session (%s)%s%s", off_why,
+                       (known && hdr10) ? " - this display lists HDR10, so switching HDR output on for this game would "
+                                          "offer it to games" : "",
                        dxvk_hdr ? " - but DXVK_HDR=1 is set, so DXGI claims an HDR display the game cannot get a "
                                   "swapchain for" : "");
         }
@@ -955,16 +964,16 @@ void banner_color_init(struct wl_display *display) {
     atomic_store(&g_gate, 1);
     char syms[160];
     sc_layer_hdr_symbols(syms, sizeof(syms));
-    banner_log(TAG, "HDR gate %s: BANNER_WAYLAND_HDR=%s (%s) and %s. Offering games HDR10: wp_color_manager_v1 "
-               "version 1 (BT.2020 primaries + ST 2084 PQ, parametric descriptions with mastering metadata) and 10-bit "
-               "AB30/XB30 dma-buf formats; HDR frames go on the game's own display layer as BT2020_PQ (%s)",
-               mode == 2 ? "FORCED OPEN (testing)" : "OPEN", mode == 2 ? "force" : "1", source, disp, syms);
+    banner_log(TAG, "HDR gate %s: %s and %s. Offering games HDR10: wp_color_manager_v1 version 1 (BT.2020 primaries "
+               "+ ST 2084 PQ, parametric descriptions with mastering metadata) and 10-bit AB30/XB30 dma-buf formats; HDR "
+               "frames go on the game's own display layer as BT2020_PQ (%s)",
+               mode == 2 ? "FORCED OPEN (testing)" : "OPEN", asked, disp, syms);
     if (mode == 2 && !hdr10)
         banner_log(TAG, "BANNER_WAYLAND_HDR=force on a display without HDR10 - testing only: SurfaceFlinger will tone-map "
                    "the game layer for this panel (expect GPU/CLIENT composition for it), nothing looks HDR");
     if (zc_forced)
-        banner_log(TAG, "zero-copy presentation turned on for this session: HDR frames must reach the display on the "
-                   "game's own layer, because the compositor's own copy is 8-bit sRGB");
+        banner_log(TAG, "zero-copy presentation turned on for this session: the HDR game's own 10-bit frames go straight "
+                   "to its display layer (the best path; anything that needs the compositor gets the composed HDR picture)");
     if (!dxvk_hdr)
         banner_log(TAG, "DXVK_HDR=1 is not in the game's environment: DXVK games will not see an HDR display in DXGI "
                    "(dxgi.enableHDR in a dxvk.conf does the same) - add DXVK_HDR=1 to the container's or shortcut's "
