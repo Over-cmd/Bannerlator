@@ -1,5 +1,45 @@
 # Star-Compose — Progress Log
 
+## 2026-09-14 (later still) — 🌊🚦 **The overlay layer is now GATED on whether the display can actually compose it — and on this panel a window above the game keeps `DEVICE/DEVICE`** (`feat/wayland-phase5` `5334b3d3`, run 34834608772, pubg `5be0ea93…`)
+
+> Acting on the measurement from the previous entry, as a gate rather than a removal: the overlay layer capability stays, it is simply not raised on a display where raising it costs the hardware composition the first layer was worth having.
+
+> **The rule and where its inputs come from.** Raise the overlay only when the game layer is **not both rotated and scaled**. Neither input is a device or panel allowlist:
+> - **rotation** — `VkSurfaceCapabilitiesKHR::currentTransform`, captured when the swapchain is built and exposed as `vkp_surface_rotation_degrees()`. That is the presentation engine stating what it will do to *every* layer we hand it, so it follows the panel's install orientation and the session's orientation together, on any device. (It is also the same fact behind the long-standing `surface reports SUBOPTIMAL (panel rotation)` line.)
+> - **scale** — the game layer's own `src -> dst` rectangles, the ones passed to `ASurfaceTransaction_setGeometry`. Kept in `g_game_src`/`g_game_dst`, which survive a SurfaceControl retire and the recovery swap (the per-layer `geo_valid` does not).
+>
+> **Decided before the game is committed to a layer, not after.** `render_scene()` asks `sc_layer_overlay_affordable()` next to the existing `fx_blocks` test and drops `li = -1; over = 0` when the answer is no, so the whole scene goes down the copy path from the start. Deciding it inside `sc_layer_present_overlay()` alone would have shown the game layer and hidden it again on **every frame** — a per-frame visibility transaction, which is exactly the flicker this is supposed to avoid. The guard inside `sc_layer_present_overlay()` stays as belt and braces.
+
+> **Why the gate predicts instead of measuring, which would be better.** The composition type is not readable by an app. It lives in the Composer HAL; `ASurfaceTransactionStats` carries latch time and fences and nothing else; the only published copy is `dumpsys android.hardware.graphics.composer3.IComposer/default`, which needs `android.permission.DUMP` and string-parsing, and it would arrive at least a frame after the layer went up — so a measure-then-back-out would itself be the visible change being avoided. Hence the transform rule.
+
+> **Proved on device** (run 34834608772 green on all three flavours at `5334b3d3`; pubg sha256 `5be0ea936a5923b55191590537af728d005cf300113474f3bd5cee716145f44e`, installed and sha-verified, left installed). Wizardry on the game layer, Wine's Task Manager opened above it:
+> ```
+> 06:57:29.314  layer  overlay layer declined: this display rotates every layer 90° and the game layer is
+>                      scaled 1280x720 -> 1920x1080, and on that combination a second layer drops the whole
+>                      frame to GPU composition for the rest of the session (measured). The window above the
+>                      game goes on the copy path instead - same picture, one blit.
+> 06:57:29.314  layer  zero-copy paused: a window above the game would need a second display layer, which this
+>                      display cannot compose in hardware - whole scene on the copy path
+> 06:57:29.315  layer  layers hidden (scene is not a single fullscreen window)
+> ```
+> and the composer dump with that window up — **no `AHardwareBuffer` layers at all, everything DEVICE**:
+> ```
+> SurfaceView[com.tencent.ig/com.winlator.star. | z=0 DEVICE/DEVICE t=90
+> VRI[XServerDisplayActivity]#0(BLAST Consumer) | z=1 DEVICE/DEVICE t=0
+> VRI[ScreenDecorHwcOverlay]#0(BLAST Consumer)0 | z=2 DISPLAY_DECORATION/CLIENT t=0
+> ```
+> against the **three `DEVICE/CLIENT` layers** the same scene produced yesterday. **The picture is identical** — screenshot shows the Task Manager drawn crisply over Wizardry's title screen, right place, right size, no black box, no darkening, no black frame at the transition. **The frame rate is not worse**: `305 / 276 / 306 / 308 / 305 frames on screen (30.5 / 27.6 / 30.6 / 30.8 / 30.5 fps) | 300 GPU frames from games` with the window up, against `305 / 308 frames (30.5 / 30.8 fps) | 300 GPU frames` measured on the two-layer path yesterday. Same numbers, hardware composition kept.
+> **And it comes back by itself.** Closing the window: `effects  zero-copy resumed: the game is back on its own display layer`, the game layer is back in the dump (`AHardwareBuffer pid [31209] | z=0 DEVICE/DEVICE t=90`), `267 layer frames` in the next window. **The session never leaves `DEVICE/DEVICE` at any point** — which is the whole point, because before the gate this sequence cost it for the rest of the session.
+
+> **Short regression set, all green on the same build:**
+> - **Layer path with no window above** — baseline `300 frames on screen (30.0 fps) | 300 GPU frames from games | 300 layer frames`, composer `AHardwareBuffer z=0 DEVICE/DEVICE transform=90`. Unchanged.
+> - **Effects applied live** — `effects  scaling=None, CAS on 60%, Look="Custom"` → `chain ready: 13 passes (SGSR, SGSR HQ, NIS, FSR EASU+RCAS, CAS, colour, FXAA, Toon, HDR, NTSC, CRT, deband) on Adreno (TM) 750`, the game kept its layer (`300 layer frames`) and the composer stayed `DEVICE/DEVICE` with effects on. Switched off cleanly.
+> - **X11 launch** — an x11-forced copy of a container-7 shortcut: **zero** `OpenGL safe mode` / `GALLIUM_THREAD` lines, **zero** `overlay layer` lines, and **no new Wayland session log** (`wayland-2026-09-14_06-55-19.log` stayed newest). HDR still reported to logcat only. Insane 2 in-race at `D3D9 · DXVK · 202.4 fps · 4.9 ms · X11`.
+>
+> The fresh-SurfaceControl swap from the previous round is untouched — it is free and correct, and it still runs on any display where the overlay *is* raised.
+
+> **Device left clean:** app force-stopped, both `ZZ …` test shortcuts deleted, temp logs and screenshots removed, the stale staged APK removed. Container 7's Desktop is the user's seven. `Bannerlator-p5c-pubg.apk` is the only staged build and matches what is installed. No release, no tag, nothing in `/sdcard/Download/Wayland/`.
+
 ## 2026-09-14 (later) — 🌊🧱 **Wayland phase 5, round 2: composition recovery MEASURED and it does NOT work on this panel; effects-live and X11 regressions green** (`feat/wayland-phase5` `93d40b88`, run 34832708528)
 
 > Picking up the three things the first round could not reach. Build under test for the device work was still `207154ce…` (run 34825893993 @ `217efe9e`) — `feat/wayland-phase2` had been merged in the meantime and fast-forwarded with no code drift, so the installed binary was exactly the code being measured.
