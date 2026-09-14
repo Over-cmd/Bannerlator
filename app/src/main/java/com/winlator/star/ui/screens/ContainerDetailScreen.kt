@@ -2950,16 +2950,18 @@ internal suspend fun defaultCompositorDriver(context: Context, preferred: String
         graphicsProbeMutex.withLock {
             val usable = choices.map { it to compositorDriverVerdict(context, mgr, it, it in imported) }
                 .filter { it.second.usable }
-            usable.firstOrNull { it.first == preferred }?.first
-                ?: usable.maxWithOrNull(Comparator { a, b -> compareVulkanVersions(a.second.vulkanVersion, b.second.vulkanVersion) })
-                    ?.first
+            val newest = usable
+                .maxWithOrNull(Comparator { a, b -> compareVulkanVersions(a.second.vulkanVersion, b.second.vulkanVersion) })
+                ?.first
+            val fromDefaults = usable.firstOrNull { it.first == preferred }?.first
+            android.util.Log.i("CompositorDriver", "default for a Wayland form: " + when {
+                fromDefaults != null -> "$fromDefaults (the New Container Defaults driver; newest usable is $newest)"
+                newest != null -> "$newest (newest usable" +
+                    (if (preferred != null) "; New Container Defaults names $preferred, which is not usable" else "") + ")"
+                else -> "none (no installed driver can import the game's frames)"
+            })
+            fromDefaults ?: newest
         }
-    }.also {
-        android.util.Log.i("CompositorDriver", "default for a Wayland form: " + when {
-            it == null -> "none (no installed driver can import the game's frames)"
-            it == preferred -> "$it (the New Container Defaults driver)"
-            else -> "$it (newest usable" + (if (preferred != null) "; New Container Defaults names $preferred, not usable" else "") + ")"
-        })
     }
 }
 
