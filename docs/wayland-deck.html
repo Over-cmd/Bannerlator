@@ -123,9 +123,9 @@ th.num{text-align:right}
 <main class="slides">
 
 <section class="slide" id="s1">
-  <div class="eyebrow">Bannerlator · 3.1.2 Wayland pre-release 5 · 13 September 2026</div>
+  <div class="eyebrow">Bannerlator · 3.1.2 Wayland pre-release 7 · 14 September 2026</div>
   <h1>Two display backends, one handheld</h1>
-  <p class="lede">X11 is the mature path every Bannerlator game has used until now. Wayland is a second backend that runs Windows games through a compositor Bannerlator carries itself. This deck compares the two as they stand after pre-release 5, lists what shipped, shows the measured zero-copy result, and is honest about what is left.</p>
+  <p class="lede">X11 is the mature path every Bannerlator game has used until now. Wayland is a second backend that runs Windows games through a compositor Bannerlator carries itself. This deck compares the two as they stand after pre-release 7, lists what shipped, shows the measured zero-copy result, and is honest about what is left.</p>
   <div class="legend"><span><i class="x"></i>X11: Java X server + libwinlator</span><span><i class="w"></i>Wayland: winewayland + embedded compositor</span></div>
   <p class="note">Every number and claim here comes from one device: an AYANEO Pocket FIT with an Adreno 750. Nothing else has run it yet.</p>
 </section>
@@ -143,7 +143,7 @@ th.num{text-align:right}
   </div>
   <p class="note">The zero-copy row is real since pre-release 2, behind the BANNER_WAYLAND_ZERO_COPY=1 flag: the game's driver builds its swapchain on Android gralloc buffers and the compositor passes them to the display hardware untouched.</p>
   <div class="two">
-    <div class="col"><h3>Two drivers on Wayland</h3><p>The game renders on a Turnip built into the Proton layer (Linux build, KGSL backend, Wayland WSI). The compositor uses whatever Android Turnip you pick under Compositor driver. The stock "System" driver cannot import the game's frames, so it is never a valid compositor pick.</p></div>
+    <div class="col"><h3>Two drivers on Wayland</h3><p>The game renders on a Turnip built into the Proton layer (Linux build, KGSL backend, Wayland WSI). The compositor uses whatever Android Turnip you pick under Compositor driver. The stock "System" driver cannot import the game's frames, so it is never a valid compositor pick; since pre-release 7 a Wayland container fills in a Turnip that can.</p></div>
     <div class="col"><h3>One driver on X11</h3><p>The picked Android Turnip renders the game and the X server hands the result to libwinlator. No X server exists on the Wayland side, which is where the future gains come from and also why keyboard, clipboard and pointer capture had to be built from scratch.</p></div>
   </div>
 </section>
@@ -189,7 +189,7 @@ th.num{text-align:right}
     </svg>
   </figure>
   <div class="legend"><span><i class="x"></i>X11</span><span><i class="w"></i>Wayland</span><span class="mono">AIO Graphics Test, Adreno 750, one launch switching between all eight APIs</span></div>
-  <p class="note">With the default copy path Wayland is not a frame-rate win. Vulkan and D3D12 sit about 20 percent behind X11 because the compositor copies every frame once; the DXVK paths are within a few percent; OpenGL is ahead because Zink on Wayland beats the X11 GL path. At hundreds of frames per second one copy shows up hard. In a GPU-bound game at 40 to 60 fps the same copy costs well under half a millisecond, a few percent either way. Half-Life 2 sits at the 144 Hz cap on both.</p>
+  <p class="note">With the default copy path Wayland is not a frame-rate win. Vulkan and D3D12 sit about 20 percent behind X11 because the compositor copies every frame once; the DXVK paths are within a few percent; The OpenGL row is not a native OpenGL result: the AIO test draws that row through a Vulkan swapchain on Wayland. Native OpenGL games render on Wayland since pre-release 6. At hundreds of frames per second one copy shows up hard. In a GPU-bound game at 40 to 60 fps the same copy costs well under half a millisecond, a few percent either way. Half-Life 2 sits at the 144 Hz cap on both.</p>
   <div class="tablewrap"><table>
     <thead><tr><th>Zero-copy, measured (pre-release 2)</th><th class="num">Zero-copy on</th><th class="num">Copy path</th></tr></thead>
     <tbody>
@@ -233,16 +233,18 @@ th.num{text-align:right}
 </section>
 
 <section class="slide" id="s5">
-  <div class="eyebrow">Slide 5 · What shipped in pre-releases 1 to 5</div>
+  <div class="eyebrow">Slide 5 · What shipped in pre-releases 1 to 7</div>
   <h2>Everything since 3.1.1</h2>
   <div class="grid3">
+    <div class="tile"><h3>Setup that just works (pre-release 7)</h3><ul><li>A new container keeps what you chose: Wayland, the Wayland game driver, drivers, DXVK and VKD3D versions, and deleted env vars stay deleted.</li><li>The compositor driver fills itself in with a Turnip that can import the game's frames, so no black screen from a blank field.</li><li>No Wine Mono download prompt on a new container or after a layer update. Control Panel opens again in the XP desktop (v8 layer).</li></ul></div>
+    <div class="tile"><h3>OpenGL on Wayland (pre-releases 6 and 7)</h3><ul><li>Native OpenGL games render for the first time: buffer sharing moved to protocol version 4 and the layer stopped steering OpenGL into a software renderer it does not contain.</li><li>OpenGL safe mode, on by default, stops OpenGL games vanishing a few seconds in (Mesa's threaded helper faults; Wine hides the crash).</li><li>The HUD names what really renders: an OpenGL game reads OpenGL, not DXVK. Cards read Vulkan (Wayland) or Vulkan (X11).</li></ul></div>
     <div class="tile"><h3>Wayland backend</h3><ul><li>Per container, with a per-game override: container default, force X11, force Wayland.</li><li>Only offered on a Proton that ships winewayland and its Wayland Turnip. Anything else falls back to X11 with a notice.</li><li>Settings tell the truth on Wayland: greyed controls show the reason, live ones apply.</li></ul></div>
     <div class="tile"><h3>Pointer lock</h3><ul><li>Pointer constraints and relative motion implemented in the compositor.</li><li>Touch drags, captured mouse and stick-as-mouse arrive as relative motion.</li><li>Half-Life 2 at 144 fps with touch mouse-look, full turn-around included.</li></ul></div>
     <div class="tile"><h3>Keyboard, clipboard, IME</h3><ul><li>Keyboard works on Wayland for the first time.</li><li>Copy in a Windows program, paste on Android, and back.</li><li>Soft keyboard opens when a Windows text field takes focus.</li></ul></div>
     <div class="tile"><h3>Screen and compositor</h3><ul><li>Off, Fit, Stretch, Fill and Integer modes plus alignment, with matching touch mapping.</li><li>No black frame on swapchain rebuild, exact FPS cap, resume after HOME, recovery on surface loss.</li><li>HUD sampling moved off the compositor thread.</li></ul></div>
     <div class="tile"><h3>Eight bundled drivers</h3><ul><li>Auto by GPU, plain, Vauzi a7xx, WinNative Balanced and Performance, gen8, SMXZ, WHITE, upstream.</li><li>Imported Linux drivers accepted as a zip.</li><li>Each pick verified to load its own driver.</li></ul></div>
     <div class="tile"><h3>Zero-copy and compressed buffers</h3><ul><li>Zero-copy toggle in the drawer, or BANNER_WAYLAND_ZERO_COPY=1: the game's own frames go to the display hardware, no compositor copy. Measured on slide 3.</li><li>Compressed (UBWC) game buffers accepted by default, BANNER_WAYLAND_UBWC=0 to force linear.</li><li>First-launch size and desktop-close bugs fixed; odd shortcut names no longer crash.</li></ul></div>
-    <div class="tile"><h3>Two display layers (pre-release 5)</h3><ul><li>Screen effects draw straight into the game's display layer, so a Look or a scaling mode no longer costs the game its hardware-composed path.</li><li>A window above a fullscreen game gets its own layer while the game keeps presenting copy-free underneath. Two layers is a deliberate cap.</li><li>Refresh-rate matching now reaches Wayland: a 60 cap runs the panel at 60, even with zero-copy on.</li></ul></div>
+    <div class="tile"><h3>Two display layers (pre-release 5)</h3><ul><li>Screen effects draw straight into the game's display layer, so a Look or a scaling mode no longer costs the game its hardware-composed path.</li><li>A window above a fullscreen game gets its own layer while the game keeps presenting copy-free underneath. Two layers is a deliberate cap. Since pre-release 7 that layer is only raised where the display can compose it: on a handheld that rotates and scales the game, the window is drawn the old way and hardware composition holds all session.</li><li>Refresh-rate matching now reaches Wayland: a 60 cap runs the panel at 60, even with zero-copy on.</li></ul></div>
     <div class="tile"><h3>The live zero-copy switch (pre-release 4)</h3><ul><li>Flip zero-copy on or off in the drawer while the game runs: the compositor tells the game's driver to rebuild its swapchain, and the game moves onto or off its own display layer.</li><li>Proven on Half-Life 2: off, on, off, on with the frame rate flat and the picture never black.</li><li>Needs the v6 layer, because the game driver lives inside it. Mixed old and new versions fall back safely.</li></ul></div>
     <div class="tile"><h3>The drawer on Wayland (pre-release 3)</h3><ul><li>Every scaling mode and screen effect live, in X11's order, as a Vulkan chain in the compositor.</li><li>LSFG Native and Win-FG Native frame generation, armed from the drawer. Effects or frame generation on means the copy path; zero-copy resumes when both are off.</li><li>Task Manager shows the display backend and both drivers; HUD FPS fixed under zero-copy on GPUs whose frames bypass the compositor.</li></ul></div>
   </div>
@@ -274,21 +276,21 @@ th.num{text-align:right}
     <div class="col">
       <ol class="steps">
         <li><b>01</b><span>Install the APK for your flavour over 3.1.1. Data is kept, and versionCode stays 85 so you can go back or move on to the next stable.</span></li>
-        <li><b>02</b><span>Contents, Proton, Install from file: the wcp installs as Proton-11.0-2.1-arm64ec-5, its own layer line, never offered as an update to a normal 11.0-2 container.</span></li>
-        <li><b>03</b><span>Have any recent Android Turnip installed from the in-app catalog. It serves the compositor. Never pick System.</span></li>
-        <li><b>04</b><span>Container: that Proton, Display backend Wayland, Compositor driver your Turnip, Wayland game driver Auto, an installed FEXCore. DXVK, VKD3D, components and audio as on X11.</span></li>
+        <li><b>02</b><span>Contents, Proton, Install from file: the wcp installs as Proton-11.0-2.1-arm64ec-8, its own layer line, never offered as an update to a normal 11.0-2 container. A container on an older -N shows an Update layer button.</span></li>
+        <li><b>03</b><span>Have any recent Android Turnip installed from the in-app catalog. It serves the compositor, and a Wayland container picks it for you. Never pick System.</span></li>
+        <li><b>04</b><span>Container: that Proton, Display backend Wayland, Compositor driver your Turnip (filled in for you), Wayland game driver Auto, an installed FEXCore. DXVK, VKD3D, components and audio as on X11.</span></li>
         <li><b>05</b><span>Adreno 830/840 owners: try the a8xx choices one by one under Wayland game driver and report which runs best.</span></li>
       </ol>
     </div>
     <div class="col">
       <div class="files">
-        <div><span>Bannerlator-3.1.2-wayland-pre5-standard.apk</span><span>com.winlator.banner</span></div>
-        <div><span>Bannerlator-3.1.2-wayland-pre5-pubg.apk</span><span>com.tencent.ig</span></div>
-        <div><span>Bannerlator-3.1.2-wayland-pre5-ludashi.apk</span><span>Ludashi flavour</span></div>
-        <div><span>proton-11.0-2.1-arm64ec-wayland-v6.wcp</span><span>117.5 MB, eight drivers</span></div>
+        <div><span>Bannerlator-3.1.2-wayland-pre7-standard.apk</span><span>com.winlator.banner</span></div>
+        <div><span>Bannerlator-3.1.2-wayland-pre7-pubg.apk</span><span>com.tencent.ig</span></div>
+        <div><span>Bannerlator-3.1.2-wayland-pre7-ludashi.apk</span><span>Ludashi flavour</span></div>
+        <div><span>proton-11.0-2.1-arm64ec-wayland-v8.wcp</span><span>117.5 MB, eight drivers + Control Panel fix</span></div>
         <div><span>README-Wayland-test-kit.txt</span><span>setup notes</span></div>
       </div>
-      <p><a class="cta" href="https://github.com/The412Banner/Bannerlator/releases/tag/3.1.2-wayland-pre5">Open the pre-release on GitHub</a></p>
+      <p><a class="cta" href="https://github.com/The412Banner/Bannerlator/releases/tag/3.1.2-wayland-pre7">Open the pre-release on GitHub</a></p>
       <p class="note">Logs: Download/Wayland-logs for the compositor session, Download/bannerlator/&lt;game&gt;/wine_debug.log for Wine, DXVK and VKD3D.</p>
     </div>
   </div>
@@ -306,6 +308,10 @@ th.num{text-align:right}
     <li><b>Lock contention</b><span>Swapchain calls were held under the same lock the UI thread needs. Backgrounding mid-game risked a freeze; the UI thread now hands the surface over without waiting.</span></li>
     <li><b>Shortcut names</b><span>An executable without a folder or without .exe crashed the launch in two places. Fixed.</span></li>
     <li><b>First launch</b><span>The first launch after installing a layer opened at 1024x768: Wine's prefix update ran inside the session's first process, its helper desktop was killed at once, and the display cache fell back to a default rectangle. The update now runs before the session.</span></li>
+    <li><b>OpenGL black</b><span>Native OpenGL games were a black window with sound: the compositor advertised an older buffer-sharing protocol than Mesa's EGL needs to find the GPU, and the layer then steered OpenGL into a software renderer it does not contain. Fixed in pre-release 6.</span></li>
+    <li><b>OpenGL vanish</b><span>OpenGL games disappeared seconds in with no error: Mesa's threaded helper faults on a thread Wine does not manage, so no handler reports it. Safe mode turns the helper off; the crash itself still needs a driver rebuild.</span></li>
+    <li><b>Create screen</b><span>A new container dropped the display backend and the Wayland game driver: three hand-kept lists of what a save writes had drifted apart. Create, edit and the defaults now share one writer.</span></li>
+    <li><b>Control Panel</b><span>The v7 XP Start menu opened the Control Panel folder through a new explorer, which mangled the folder's special name and quit. The entry now starts control.exe.</span></li>
     <li><b>Desktop close</b><span>Wine's desktop closed a second into a 32-bit game's startup: this Proton tree closes a desktop with zero grace instead of upstream's one second, and the thread count matched by coincidence. The grace is restored in the layer and every session process now starts on the game desktop.</span></li>
   </ul>
 </section>
@@ -318,6 +324,7 @@ th.num{text-align:right}
         <li><span><b>Real 710, 720, 722 and 8xx testing</b> of the eight bundled drivers. The most valuable thing a tester can send.</span></li>
         <li><span><b>Guest-side leak on every API switch</b>, a few dozen file descriptors and threads. X11 leaks more, so not Wayland-specific.</span></li>
     <li><span><b>Screen effects on GPUs whose buffers the compositor cannot import</b>, now within reach thanks to the display-layer machinery.</span></li>
+    <li><span><b>Fix the OpenGL threaded-driver crash itself</b> so safe mode can default to off. Needs a driver rebuild that can report a fault on a thread Wine does not manage.</span></li>
     <li><span><b>Real HDR.</b> The game side already works today: the bundled driver carries colour management and the HDR Vulkan extensions. What is missing is colour management in our compositor and a 10-bit path. Blocked on hardware that can actually show it.</span></li>
   </ol>
 </section>
