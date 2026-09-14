@@ -51,7 +51,15 @@
 > ### ◑ (4) HDR re-read on a display change — still code-only, and here is exactly how far it got
 > Nothing can be plugged into this device's USB-C port today, so a simulated secondary display was used instead (`settings put global overlay_display_devices "1280x720/213"`, removed again afterwards). The framework did create it and report it — `DisplayDeviceInfo{"Overlay #1" … type OVERLAY, hdrCapabilities null}`, `DisplayViewport{type=VIRTUAL, displayId=7}` — and `onDisplayAdded` reached the reporter. **No second line was logged, correctly**: the game stayed on the built-in panel, so `hdrTargetDisplay()` returned the same display and `sameAs()` suppressed the duplicate, which is the de-duplication the row is supposed to do. Moving the game onto the simulated display through the TV tab was not reached before the session was wound up. So: the listener, the per-display read and the de-duplication are all exercised; **the "log again with different values when the game's display changes" path is code, not a device result.** One useful detail fell out of it — a display can report `hdrCapabilities null`, which `DisplayHdrInfo.read()` already handles (formats become `unknown` rather than throwing).
 
-> **Device left clean:** app force-stopped, both `ZZ …` test shortcuts deleted, temp logs and screenshots removed, the simulated display setting deleted (`settings get global overlay_display_devices` → `null`). Container 7's Desktop is the user's seven. Build `207154ce…` still installed. No release, no tag, nothing staged in `/sdcard/Download/Wayland/`.
+> ### ✅ Corrected build verified on device
+> Run **34832708528** green on all three flavours at `93d40b88`; pubg sha256 **`b6b98793bfa1071d33583b029072f3724a33f0479ccc352491f14dca4bd0eb6d`**, installed and sha-verified, and **left installed**. The whole two-layer arc was driven once more on it — third independent reproduction — and the log line now says what is true:
+> ```
+> 06:35:03.393  layer  banner_wayland_overlay: gone (nothing is above the game any more)
+> 06:35:03.399  layer  composition recovery: banner_wayland_game got a fresh SurfaceControl now that nothing is above the game (measured on this panel: hardware composition does NOT return from this alone)
+> ```
+> Same 6 ms, same persisting `DEVICE/CLIENT`.
+
+> **Device left clean:** app force-stopped, every `ZZ …` test shortcut deleted, temp logs and screenshots removed, the simulated display setting deleted (`settings get global overlay_display_devices` → `null`). Container 7's Desktop is the user's seven. Only `Bannerlator-p5b-pubg.apk` is staged in `/sdcard/Download/` (the installed build); the stale one was removed. No release, no tag, nothing in `/sdcard/Download/Wayland/`.
 
 ## 2026-09-14 — 🌊🔧 **Wayland phase 5 DEVICE RESULTS: OpenGL safe mode and HDR reporting PROVEN; layer composition recovery UNPROVEN (device handed back mid-test)** (`feat/wayland-phase5` `217efe9e`, run 34825893993, pubg `207154ce…`)
 
