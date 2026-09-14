@@ -859,9 +859,12 @@ object XServerDialogState {
         val batteryPct: Int?, val batteryWatts: Float, val batteryTempC: Int?, val charging: Boolean,
         val perCoreMhz: List<Int>,
     )
+    // displayBackend: "X11" or "Wayland". On Wayland the activity fills graphicsDriver with the
+    // "compositor: … · game: …" pair (the X11 renderer + its driver are idle in that session).
     data class TmContainerInfo(
         val wine: String, val dxWrapper: String, val renderer: String,
         val graphicsDriver: String, val resolution: String, val device: String,
+        val displayBackend: String,
     )
 
     private val _tmHeader = MutableStateFlow<TmHeaderStats?>(null)

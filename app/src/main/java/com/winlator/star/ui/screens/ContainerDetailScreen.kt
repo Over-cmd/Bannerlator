@@ -946,18 +946,19 @@ private fun TopLevelFields(
         var showWrapperManager by remember { mutableStateOf(false) }
         val compositorDriverOnly = viewModel.isWaylandBackend
         var compositorChoices by remember { mutableStateOf<List<String>>(emptyList()) }
+        // Wayland GAME driver choices (bundled variants + imported Linux ICDs) and the variant Auto
+        // resolves to on this GPU — the latter is a native probe, so it runs with the compositor
+        // choices off-main under graphicsProbeMutex (cached per process after the first run).
+        var waylandGameDriverValues by remember { mutableStateOf<List<String>>(emptyList()) }
+        var waylandAutoPick by remember { mutableStateOf(com.winlator.star.core.WaylandGameDriver.autoVariantIfKnown()) }
         LaunchedEffect(compositorDriverOnly) {
             if (!compositorDriverOnly) return@LaunchedEffect
             compositorChoices = compositorDriverChoices(context) // same source as the config dialog
+            waylandGameDriverValues = com.winlator.star.core.WaylandGameDriver.optionValues(context)
+            waylandAutoPick = waylandAutoVariant(context)
         }
         val compositorVersion = com.winlator.star.contentdialog.GraphicsDriverConfigDialog
             .getVersion(viewModel.graphicsDriverConfig) ?: ""
-        if (compositorDriverOnly) {
-            Text(
-                "Game driver: Wayland Turnip bundled with this Proton",
-                style = MaterialTheme.typography.bodySmall
-            )
-        }
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             if (compositorDriverOnly) {
                 LabeledDropdown(
@@ -1003,10 +1004,32 @@ private fun TopLevelFields(
                 )
             }
             Text(
-                "Used by the Wayland compositor to put frames on screen; the game renders on the Turnip bundled with the Proton.",
+                "Used by the Wayland compositor to put frames on screen; the game renders on the Wayland game driver below.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+            Spacer(Modifier.height(8.dp))
+            // Wayland game driver: what the GAME renders on (winewayland sets VK_ICD_FILENAMES from
+            // it). Auto / the three bundled Turnip variants / each imported Linux ICD. A stored
+            // imported:<id> whose import is gone is still listed (labelled missing) so the editor
+            // shows what is saved; launch falls back to Auto for it.
+            run {
+                val stored = viewModel.waylandGameDriver
+                val values = if (stored in waylandGameDriverValues) waylandGameDriverValues
+                             else waylandGameDriverValues + stored
+                val labels = values.map { com.winlator.star.core.WaylandGameDriver.optionLabel(context, it, waylandAutoPick) }
+                LabeledDropdown(
+                    label = "Wayland game driver",
+                    options = labels,
+                    selectedOption = labels[values.indexOf(stored)],
+                    onSelect = { viewModel.waylandGameDriver = values[labels.indexOf(it)] }
+                )
+                Text(
+                    com.winlator.star.core.WaylandGameDriver.HELP_TEXT,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
         }
         if (showWrapperManager) WrapperManagerDialog(onDismiss = {
             showWrapperManager = false
@@ -1319,26 +1342,15 @@ private fun TopLevelFields(
             stringResource(R.string.fullscreen_mode_fill),
             stringResource(R.string.fullscreen_mode_integer)
         )
-        // Neither fullscreen mode nor alignment is wired to the Wayland compositor (its JNI surface
-        // has no setter for them; it always scales the whole desktop), so both are greyed there and
-        // DISPLAY "Not used on Wayland"; the stored values are untouched.
-        val fsAlignEnabled = !viewModel.isWaylandBackend
+        // Applies on both backends: the Wayland compositor fits the desktop with the same modes
+        // (WaylandCompositor.nativeSetScaleMode), so nothing is greyed here for Wayland.
         val fsSelIdx = viewModel.fullscreenMode.coerceIn(0, fullscreenModeLabels.size - 1)
-        val fsShown = if (fsAlignEnabled) fullscreenModeLabels[fsSelIdx] else "Not used on Wayland"
         LabeledDropdown(
             label = stringResource(R.string.fullscreen_mode),
-            options = if (fsAlignEnabled) fullscreenModeLabels else listOf(fsShown),
-            selectedOption = fsShown,
-            onSelect = { viewModel.fullscreenMode = fullscreenModeLabels.indexOf(it).coerceAtLeast(0) },
-            enabled = fsAlignEnabled
+            options = fullscreenModeLabels,
+            selectedOption = fullscreenModeLabels[fsSelIdx],
+            onSelect = { viewModel.fullscreenMode = fullscreenModeLabels.indexOf(it).coerceAtLeast(0) }
         )
-        if (!fsAlignEnabled) {
-            Text(
-                "Not used on Wayland: the Wayland compositor always scales the whole desktop to the screen; fullscreen modes and alignment are not wired to it yet.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
         Spacer(Modifier.height(8.dp))
 
         // Screen alignment (#413): Center / Top / Bottom on square-ish foldables. TOP/BOTTOM confine the
@@ -1351,21 +1363,12 @@ private fun TopLevelFields(
             stringResource(R.string.screen_alignment_bottom)
         )
         val alignSelIdx = viewModel.screenAlignment.coerceIn(0, screenAlignmentLabels.size - 1)
-        val alignShown = if (fsAlignEnabled) screenAlignmentLabels[alignSelIdx] else "Not used on Wayland"
         LabeledDropdown(
             label = stringResource(R.string.screen_alignment),
-            options = if (fsAlignEnabled) screenAlignmentLabels else listOf(alignShown),
-            selectedOption = alignShown,
-            onSelect = { viewModel.screenAlignment = screenAlignmentLabels.indexOf(it).coerceAtLeast(0) },
-            enabled = fsAlignEnabled
+            options = screenAlignmentLabels,
+            selectedOption = screenAlignmentLabels[alignSelIdx],
+            onSelect = { viewModel.screenAlignment = screenAlignmentLabels.indexOf(it).coerceAtLeast(0) }
         )
-        if (!fsAlignEnabled) {
-            Text(
-                "Not used on Wayland: the Wayland compositor always scales the whole desktop to the screen; fullscreen modes and alignment are not wired to it yet.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
         Spacer(Modifier.height(8.dp))
 
         // Frame Generation engine: Off / bionic-fg / lsfg-vk (mutually exclusive). lsfg-vk is grayed
@@ -1899,27 +1902,15 @@ private fun WineConfigTab(
 
         // DirectInput section
         SectionBox(title = "DirectInput") {
-            // Mouse warp needs pointer constraints, which the Wayland compositor doesn't implement yet
-            // (same rule as the in-game Relative Mouse chip): greyed there, displays "Not available",
-            // stored index untouched.
-            val mouseWarpEnabled = !viewModel.isWaylandBackend
-            val mouseWarpShown = if (mouseWarpEnabled)
-                viewModel.mouseWarpEntries.getOrElse(viewModel.selectedMouseWarpIndex) { "" }
-            else "Not available on Wayland yet"
+            // Mouse warp (DirectInput's SetCursorPos re-centring) works on both backends: on Wayland
+            // the compositor implements pointer constraints, which is what winewayland's SetCursorPos
+            // goes through (lock + position hint + unlock).
             LabeledDropdown(
                 label = stringResource(R.string.mouse_warp_override),
-                options = if (mouseWarpEnabled) viewModel.mouseWarpEntries else listOf(mouseWarpShown),
-                selectedOption = mouseWarpShown,
-                onSelect = { opt -> viewModel.selectedMouseWarpIndex = viewModel.mouseWarpEntries.indexOf(opt).coerceAtLeast(0) },
-                enabled = mouseWarpEnabled
+                options = viewModel.mouseWarpEntries,
+                selectedOption = viewModel.mouseWarpEntries.getOrElse(viewModel.selectedMouseWarpIndex) { "" },
+                onSelect = { opt -> viewModel.selectedMouseWarpIndex = viewModel.mouseWarpEntries.indexOf(opt).coerceAtLeast(0) }
             )
-            if (!mouseWarpEnabled) {
-                Text(
-                    "Not available on Wayland yet: pointer constraints are not implemented in the Wayland compositor",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
         }
 
         // System section — "Run as administrator" (default ON) toggles UAC in the prefix. Backed by
@@ -2856,6 +2847,17 @@ internal fun importedDriverVersions(context: Context): List<String> =
  */
 internal suspend fun compositorDriverChoices(context: Context): List<String> =
     (supportedBundledDriverVersions(context) + importedDriverVersions(context)).distinct()
+
+/**
+ * The bundled Wayland Turnip variant "Auto" resolves to on this GPU (WaylandGameDriver.VARIANT_*),
+ * for the "Auto (by GPU: …)" label of the Wayland game driver pickers. The first call is a native
+ * renderer probe: off-main and serialized on graphicsProbeMutex like the other driver probes; the
+ * cached answer is returned without touching the mutex afterwards.
+ */
+internal suspend fun waylandAutoVariant(context: Context): String =
+    com.winlator.star.core.WaylandGameDriver.autoVariantIfKnown() ?: withContext(Dispatchers.IO) {
+        graphicsProbeMutex.withLock { com.winlator.star.core.WaylandGameDriver.autoVariant(context) }
+    }
 
 @Composable
 internal fun GraphicsDriverConfigDialog(

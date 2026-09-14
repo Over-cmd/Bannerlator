@@ -146,6 +146,9 @@ internal fun xmbGeneralMenu(xmb: XmbScope, p: XmbPrefs, host: XmbGameHost): XmbM
 // the first build launches it and refreshes when done; imported ids are re-read on every build.
 private var xmbBundledDriverVersions: List<String>? = null
 private var xmbBundledDriverVersionsLoading = false
+// Same once-per-process pattern for the variant "Auto" resolves to (native renderer probe) — the
+// "Auto (by GPU: …)" label of the Wayland game driver row; WaylandGameDriver caches the answer.
+private var xmbWaylandAutoLoading = false
 
 private fun generalRows(xmb: XmbScope, p: XmbPrefs, host: XmbGameHost): List<XmbRow> {
     val s = p.shortcut
@@ -241,11 +244,9 @@ private fun generalRows(xmb: XmbScope, p: XmbPrefs, host: XmbGameHost): List<Xmb
     val saValues = listOf("", "0", "1", "2")
     val saLabels = listOf(p.str(R.string.use_container_default), p.str(R.string.screen_alignment_center), p.str(R.string.screen_alignment_top), p.str(R.string.screen_alignment_bottom))
     val sa = p.ex("screenAlignment", "")
-    // Neither alignment nor fullscreen mode is wired to the Wayland compositor (it always scales the
-    // whole desktop): disabled there, displaying "Not used on Wayland"; stored values untouched.
-    val saShown = if (waylandGame) "Not used on Wayland" else saLabels[saValues.indexOf(sa).coerceAtLeast(0)]
-    rows += XmbRow.Choice("screenAlignment", "Screen alignment", Icons.Filled.DesktopWindows, if (waylandGame) listOf(saShown) else saLabels, saShown,
-        disabledReason = if (waylandGame) "Not used on Wayland: the compositor always scales the whole desktop to the screen; fullscreen modes and alignment are not wired to it yet" else null) { v ->
+    // Alignment and fullscreen mode apply on X11 and Wayland alike (the compositor fits the desktop
+    // with the same modes), so neither row is gated on the backend.
+    rows += XmbRow.Choice("screenAlignment", "Screen alignment", Icons.Filled.DesktopWindows, saLabels, saLabels[saValues.indexOf(sa).coerceAtLeast(0)]) { v ->
         xmb.set(p, "screenAlignment", saValues[saLabels.indexOf(v)].ifEmpty { null })
     }
     val fsLabels = listOf(p.str(R.string.fullscreen_mode_default), p.str(R.string.fullscreen_mode_off), p.str(R.string.fullscreen_mode_fit),
@@ -257,9 +258,7 @@ private fun generalRows(xmb: XmbScope, p: XmbPrefs, host: XmbGameHost): List<Xmb
         else -> -1
     }
     val fsIdx = if (fsOverride < 0) 0 else (fsOverride + 1).coerceIn(1, fsLabels.size - 1)
-    val fsShown = if (waylandGame) "Not used on Wayland" else fsLabels[fsIdx]
-    rows += XmbRow.Choice("fullscreen", "Fullscreen mode", Icons.Filled.DesktopWindows, if (waylandGame) listOf(fsShown) else fsLabels, fsShown,
-        disabledReason = if (waylandGame) "Not used on Wayland: the compositor always scales the whole desktop to the screen; fullscreen modes and alignment are not wired to it yet" else null) { v ->
+    rows += XmbRow.Choice("fullscreen", "Fullscreen mode", Icons.Filled.DesktopWindows, fsLabels, fsLabels[fsIdx]) { v ->
         val idx = fsLabels.indexOf(v)
         s.putExtra("fullscreenStretched", null)
         xmb.set(p, "fullscreenMode", if (idx <= 0) null else (idx - 1).toString())
@@ -317,9 +316,8 @@ private fun generalRows(xmb: XmbScope, p: XmbPrefs, host: XmbGameHost): List<Xmb
             }
         }
         val turnips = ((xmbBundledDriverVersions ?: emptyList()) + importedDriverVersions(p.context)).distinct()
-        rows += XmbRow.Info("gfxGameDriver", "Game driver", Icons.Filled.Memory, "Wayland Turnip bundled with this Proton")
         rows += XmbRow.Choice("gfxDriver", "Compositor driver", Icons.Filled.Memory, turnips, if (compositorVersion in turnips) compositorVersion else "",
-            subtitle = "Used by the Wayland compositor to put frames on screen; the game renders on the Turnip bundled with the Proton.") { v ->
+            subtitle = "Used by the Wayland compositor to put frames on screen; the game renders on the Wayland game driver below.") { v ->
             xmb.set(p, "graphicsDriverConfig", withGraphicsDriverVersion(gdc, v))
         }
         // "System"/empty falls back to the system libvulkan, which can't import the game's dmabufs
@@ -327,6 +325,31 @@ private fun generalRows(xmb: XmbScope, p: XmbPrefs, host: XmbGameHost): List<Xmb
         if (compositorVersion.isEmpty() || compositorVersion == "System") {
             rows += XmbRow.Info("gfxSystemWarn", "Compositor driver is \"System\"", Icons.Filled.Info,
                 subtitle = """Wayland needs a Turnip driver here. "System" cannot import the game's frames and shows a black screen.""")
+        }
+        // Wayland game driver (per-game override of the container's waylandGameDriver; "" = container
+        // default): Auto / the bundled Turnip variants / imported Linux ICDs — same options and labels
+        // as the pop-up editors (WaylandGameDriver). A stored imported:<id> whose import is gone stays
+        // listed (labelled missing); launch uses Auto for it.
+        val wgdAuto = com.winlator.star.core.WaylandGameDriver.autoVariantIfKnown()
+        if (wgdAuto == null && !xmbWaylandAutoLoading) {
+            xmbWaylandAutoLoading = true
+            xmb.scope.launch {
+                waylandAutoVariant(p.context)
+                xmbWaylandAutoLoading = false
+                xmb.refresh()
+            }
+        }
+        val wgdOverride = p.ex("waylandGameDriver", "")
+        val wgdInstalled = com.winlator.star.core.WaylandGameDriver.optionValues(p.context)
+        val wgdValues = listOf("") + (if (wgdOverride.isEmpty() || wgdOverride in wgdInstalled) wgdInstalled else wgdInstalled + wgdOverride)
+        val wgdLabels = wgdValues.map {
+            if (it.isEmpty()) "Container default (" + com.winlator.star.core.WaylandGameDriver.optionLabel(p.context, c.waylandGameDriver, wgdAuto) + ")"
+            else com.winlator.star.core.WaylandGameDriver.optionLabel(p.context, it, wgdAuto)
+        }
+        rows += XmbRow.Choice("waylandGameDriver", "Wayland game driver", Icons.Filled.Memory, wgdLabels,
+            wgdLabels[wgdValues.indexOf(wgdOverride).coerceAtLeast(0)],
+            subtitle = com.winlator.star.core.WaylandGameDriver.HELP_TEXT) { v ->
+            xmb.set(p, "waylandGameDriver", wgdValues[wgdLabels.indexOf(v)].ifEmpty { null })
         }
     } else {
         rows += XmbRow.Choice("gfxDriver", p.str(R.string.graphics_driver), Icons.Filled.Memory, gfxEntries, p.labelFor(gfxEntries, gfxId)) { v ->

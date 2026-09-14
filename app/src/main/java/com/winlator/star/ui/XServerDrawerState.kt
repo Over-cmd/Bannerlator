@@ -45,6 +45,31 @@ object XServerDrawerState {
     private val _isWaylandMode           = MutableStateFlow(false)
     val isWaylandMode: StateFlow<Boolean> = _isWaylandMode
 
+    // Wayland runtime capabilities, only read while isWaylandMode. Each Graphics-tab control that
+    // lives in the X11 renderer's pass is driven from ONE of these: false = greyed with the short
+    // "Not on Wayland in this build yet" reason, true = fully live with the same callbacks and
+    // labels as on X11. Both default false; the activity flips them when the compositor reports
+    // the corresponding chain (effects + scaling modes; frame generation).
+    private val _waylandEffectsAvailable  = MutableStateFlow(false)
+    val waylandEffectsAvailable: StateFlow<Boolean> = _waylandEffectsAvailable
+    private val _waylandFrameGenAvailable = MutableStateFlow(false)
+    val waylandFrameGenAvailable: StateFlow<Boolean> = _waylandFrameGenAvailable
+
+    // Zero-copy presentation. `requested` = what the toggle shows; it is applied to the running
+    // compositor at once AND written to the effective env (shortcut override else container) as the
+    // next launch's default. `active` = the compositor's live state. `frames` = its zero-copy frames
+    // in the last completed 10 s window. `live` = a zero-copy frame reached the display layer in the
+    // last ~1.5 s, which is what separates "switching..." from "running" right after a flip (the
+    // 10 s counter is far too slow for that).
+    private val _waylandZeroCopyRequested = MutableStateFlow(false)
+    val waylandZeroCopyRequested: StateFlow<Boolean> = _waylandZeroCopyRequested
+    private val _waylandZeroCopyActive    = MutableStateFlow(false)
+    val waylandZeroCopyActive: StateFlow<Boolean> = _waylandZeroCopyActive
+    private val _waylandZeroCopyFrames    = MutableStateFlow(0)
+    val waylandZeroCopyFrames: StateFlow<Int> = _waylandZeroCopyFrames
+    private val _waylandZeroCopyLive      = MutableStateFlow(false)
+    val waylandZeroCopyLive: StateFlow<Boolean> = _waylandZeroCopyLive
+
     private val _isMouseDisabled         = MutableStateFlow(false)
     val isMouseDisabled: StateFlow<Boolean> = _isMouseDisabled
 
@@ -415,6 +440,14 @@ object XServerDrawerState {
     @JvmField var onRelativeMouseMovement:  Runnable? = null
     @JvmField var onDisableMouse:           Runnable? = null
     @JvmField var onNativeRenderingToggle: Runnable? = null
+    // Zero-copy presentation toggle: applies the switch to the RUNNING compositor (nativeSetZeroCopy,
+    // which tells the game to rebuild its swapchain) and writes/removes BANNER_WAYLAND_ZERO_COPY=1 in
+    // the shortcut's (else the container's) env vars as the next launch's default. Poll: reads the
+    // compositor's last-10-s zero-copy frame count into waylandZeroCopyFrames and whether a zero-copy
+    // frame arrived just now into waylandZeroCopyLive (the drawer calls it every second while the row
+    // is on screen).
+    @JvmField var onWaylandZeroCopyToggle: java.util.function.Consumer<Boolean>? = null
+    @JvmField var onWaylandZeroCopyPoll: Runnable? = null
 
     // Whether the active renderer supports Native Rendering (direct scanout). True for Vulkan;
     // false for OpenGL (GL scanout is disabled for now — bespoke path, unresolved brightness).
@@ -460,6 +493,12 @@ object XServerDrawerState {
     fun setIsPaused(v: Boolean)                { _isPaused.value = v }
     fun setIsRelativeMouseMovement(v: Boolean) { _isRelativeMouseMovement.value = v }
     fun setIsWaylandMode(v: Boolean)           { _isWaylandMode.value = v }
+    fun setWaylandEffectsAvailable(v: Boolean)  { _waylandEffectsAvailable.value = v }
+    fun setWaylandFrameGenAvailable(v: Boolean) { _waylandFrameGenAvailable.value = v }
+    fun setWaylandZeroCopyRequested(v: Boolean) { _waylandZeroCopyRequested.value = v }
+    fun setWaylandZeroCopyActive(v: Boolean)    { _waylandZeroCopyActive.value = v }
+    fun setWaylandZeroCopyFrames(v: Int)        { _waylandZeroCopyFrames.value = v }
+    fun setWaylandZeroCopyLive(v: Boolean)      { _waylandZeroCopyLive.value = v }
     fun setIsMouseDisabled(v: Boolean)         { _isMouseDisabled.value = v }
     fun setMoveCursorToTouchpoint(v: Boolean)  { _moveCursorToTouchpoint.value = v }
     fun setGestureDragSelect(v: Boolean)          { _gestureDragSelect.value = v }
@@ -604,6 +643,12 @@ object XServerDrawerState {
         _isPaused.value = false
         _isRelativeMouseMovement.value = false
         _isWaylandMode.value = false
+        _waylandEffectsAvailable.value = false
+        _waylandFrameGenAvailable.value = false
+        _waylandZeroCopyRequested.value = false
+        _waylandZeroCopyActive.value = false
+        _waylandZeroCopyFrames.value = 0
+        _waylandZeroCopyLive.value = false
         _isMouseDisabled.value = false
         _moveCursorToTouchpoint.value = false
         _gestureDragSelect.value = true
@@ -667,6 +712,7 @@ object XServerDrawerState {
         onLogs = null; onExit = null; onMoveCursorToTouchpoint = null; onGestureConfigChange = null
         onRelativeMouseMovement = null; onDisableMouse = null
         onNativeRenderingToggle = null; onFpsConfigApply = null
+        onWaylandZeroCopyToggle = null; onWaylandZeroCopyPoll = null
         onBionicFgConfigChange = null; onFpsLimitChange = null
         onPresentModeChange = null
         onMatchRefreshChange = null
