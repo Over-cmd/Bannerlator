@@ -109,9 +109,12 @@ Known gaps
   (no change, CPU-bound), GPU busy 79% vs 83%, GPU clock 944 vs 1000 MHz, power 16.3 W vs 16.8 W.
   Zero-copy removes the compositor's GPU work; fps gains need a GPU-bound game or a big panel.
 - Real Adreno 710/720/722 and 830/840 hardware untested: please report which a8xx build works best.
-- OpenGL is newly working, not broadly tested: a GL game can still fail for its own reasons (the
-  game used for this fix draws, then quits chasing an old NVIDIA Cg shader profile Zink lacks).
-  Reports from OpenGL games are the most useful thing to send right now.
+- OpenGL is newly working, not broadly tested. Reports from OpenGL games are the most useful thing
+  to send right now.
+- If an OpenGL game vanishes with no error, no log and no crash dialog, put GALLIUM_THREAD=0 in its
+  Env Vars. Mesa's threaded-driver helper can fault on this build, and Wine's crash handling means
+  the process just disappears. The game used to find this went from dying after two frames to
+  playing its full intro at a steady 30 fps.
 - bionic-fg stays X11-only; drag-and-drop, image clipboard and window decorations are not on Wayland yet.
 - With a window above the game, THIS panel hands the frame back to the GPU instead of composing two
   layers itself (the game still keeps its copy-free frames). Other panels may differ - please report.
