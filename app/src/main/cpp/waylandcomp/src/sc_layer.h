@@ -19,6 +19,17 @@
  * layers before SurfaceFlinger falls back to GPU client composition, which would throw away the
  * whole benefit. The count is logged when the second layer first goes up.
  *
+ * MEASURED on the Pocket FIT (Adreno 750, portrait panel + landscape session, so every layer is
+ * ROT_90 + scaled), `dumpsys android.hardware.graphics.composer3.IComposer/default`: one layer is
+ * `composition: DEVICE/DEVICE`, effects on the layer keep it DEVICE/DEVICE — but a SECOND layer
+ * flips the whole frame to `DEVICE/CLIENT`. It does not come back when the overlay goes away; only
+ * re-creating the GAME layer's SurfaceControl clears it (HOME + resume does, reproduced twice).
+ * The overlay layer is retired rather than hidden for that reason, but the fallback outlives it.
+ * The likely mechanism is the DPU's rotator budget (one rotated+scaled layer), not the layer count
+ * as such, so a device or orientation needing no rotation may well take both on the DPU. Even in
+ * client composition the overlay layer is not a loss — SurfaceFlinger does the one blit the
+ * compositor would have done — but the hardware-composition win is only real for one layer.
+ *
  * What can be on the game layer, cheapest first:
  *   - the game's own gralloc buffer (ahb_swapchain.c, true zero-copy: no copy anywhere);
  *   - one blit of the game's frame into a compositor-allocated AHardwareBuffer (sc_layer_present);
