@@ -173,7 +173,7 @@ static void layers_init(void) {
     g_layers_ready = 1;
     g_layers[SC_LAYER_GAME] = (struct layer){.name = "banner_wayland_game", .z = 1, .pool_n = 3,
                                              .cur_slot = -1, .votes_rate = 1, .fps_applied = -1.0f};
-    g_layers[SC_LAYER_OVERLAY] = (struct layer){.name = "banner_wayland_overlay", .z = 2, .pool_n = 2,
+    g_layers[SC_LAYER_OVERLAY] = (struct layer){.name = "banner_wayland_overlay", .z = 2, .pool_n = 3,
                                                 .cur_slot = -1, .votes_rate = 0, .fps_applied = -1.0f};
     for (int i = 0; i < SC_LAYER_COUNT; i++)
         for (int j = 0; j < POOL_MAX; j++) g_layers[i].slots[j].release_fd = -1;
@@ -579,14 +579,13 @@ int sc_layer_present_pass(const struct vkp_draw *draws, int n, int scene_w, int 
     int rw = 0, rh = 0, r[8];
     if (!draws || n <= 0 || ensure_sc(l) != 0) return -1;
     if (vkp_update_map(scene_w, scene_h) != 0) return -1;
-    /* Compose + run the effects chain first: the chain's result size (a scaling mode resizes to
-     * the scene's mapped output size) decides how big the layer buffer has to be. */
-    if (vkp_pass_begin(scene_w, scene_h, draws, n, &rw, &rh) != 0) return -1;
-    int g = vkp_map_rect(rw, rh, scene_w, scene_h, r) ? 1 : 0;
-    if (!g) { vkp_pass_abort(); sc_layer_hide(); return 0; }
+    /* The chain's result size (a scaling mode resizes to the scene's mapped output size) decides
+     * how big the layer buffer has to be, so it is asked for before anything is recorded. */
+    if (vkp_pass_target_size(scene_w, scene_h, &rw, &rh) != 0) return -1;
+    if (!vkp_map_rect(rw, rh, scene_w, scene_h, r)) { sc_layer_hide(); return 0; }
     int idx = take_free_slot(l, rw, rh);
-    if (idx < 0) { vkp_pass_abort(); log_drop(l); return 0; }
-    if (vkp_pass_copy_to(l->slots[idx].img) != 0) return -1;
+    if (idx < 0) { log_drop(l); return 0; }
+    if (vkp_pass_present_layer(scene_w, scene_h, draws, n, l->slots[idx].img) != 0) return -1;
     if (present_slot(l, idx, r) != 0) return -1;
     if (!l->first_logged) {
         l->first_logged = 1;
@@ -643,9 +642,17 @@ void sc_layer_hide(void) {
 
 void sc_layer_hide_overlay(void) {
     layers_init();
-    if (!g_layers[SC_LAYER_OVERLAY].shown) return;
-    hide_layer(&g_layers[SC_LAYER_OVERLAY]);
-    banner_log("layer", "%s: layer hidden (nothing is above the game any more)", g_layers[SC_LAYER_OVERLAY].name);
+    struct layer *l = &g_layers[SC_LAYER_OVERLAY];
+    if (!l->sc) return;
+    /* RETIRED, not just hidden. Measured on the Pocket FIT: while a second SurfaceControl exists on
+     * the screen surface, SurfaceFlinger keeps composing the whole frame on the GPU
+     * (composition: DEVICE/CLIENT) - and hiding the layer does NOT bring it back; only letting the
+     * SurfaceControl go does. So the overlay layer lives exactly as long as the window above the
+     * game, and the game gets its hardware composition back the moment that window closes. The
+     * pool buffers stay allocated for the next one. */
+    if (l->shown) hide_layer(l);
+    retire_sc(l);
+    banner_log("layer", "%s: gone (nothing is above the game any more)", l->name);
 }
 
 void sc_layer_window_gone(void) {

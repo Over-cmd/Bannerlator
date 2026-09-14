@@ -1202,33 +1202,42 @@ int vkp_blit_image(struct vkp_image *src, struct vkp_image *dst) {
     return 0;
 }
 
-/* ---------------------------------------------------------------- the compositor pass, off-screen
+/* ---------------------------------------------------------------- the compositor pass, to a layer
  *
  * Layer mode with screen effects on: the game's frame still has to go through the compositor pass
- * (scene image -> effects chain), but the RESULT does not have to end up in the app's swapchain —
- * it can be copied into a gralloc buffer and put on the game's own Android layer, so hardware
- * composition (and the DPU's scaling, which replaces record_screen_blit's mapping blit) stays
- * alive while a Look is applied. sc_layer.c drives it in three steps because the chain's result
- * size is only known once the chain has run, and the destination buffer is sized from it:
- *     vkp_pass_begin()  -> records composite + effects into the frame's command buffer
- *     vkp_pass_copy_to()-> appends the copy into the layer buffer, submits, waits
- *     vkp_pass_abort()  -> drops it unsubmitted (no free layer buffer this frame)
- * Frame generation is NOT run here: its extra frames need a present each, on consecutive vblanks,
+ * (scene image -> effects chain), but the RESULT does not have to end up in the app's swapchain -
+ * it is copied into a gralloc buffer and put on the game's own Android layer, so hardware
+ * composition stays alive while a Look is applied and the scene -> output mapping is done by the
+ * display (setGeometry) instead of a second full-screen GPU blit.
+ *
+ * It all happens in ONE command buffer, ONE submit and ONE present, exactly like the copy path:
+ * the layer's copy AND the black frame for the base surface under it are recorded together. (An
+ * earlier shape recorded the pass and the black present as two submits with a CPU fence wait
+ * between them; that cost ~13 % of the frame rate on the Pocket FIT.)
+ *
+ * Frame generation is NOT run here: its extra frames need a present each on consecutive vblanks,
  * which one buffer per layer transaction cannot pace (see WAYLAND_RUNTIME.md). */
 
-static struct {
-    int active;
-    VkImage result;   /* in TRANSFER_SRC_OPTIMAL */
-    int rw, rh;
-} g_pass;
+int vkp_pass_target_size(int scene_w, int scene_h, int *rw, int *rh) {
+    if (!g_map.valid || scene_w <= 0 || scene_h <= 0) return -1;
+    int mapped_w = (int)(scene_w * g_map.kx + 0.5f), mapped_h = (int)(scene_h * g_map.ky + 0.5f);
+    vkp_effects_chain_size(scene_w, scene_h, mapped_w, mapped_h, rw, rh);
+    return (*rw > 0 && *rh > 0) ? 0 : -1;
+}
 
-int vkp_pass_begin(int scene_w, int scene_h, const struct vkp_draw *draws, int n, int *rw, int *rh) {
-    if (g_pass.active) vkp_pass_abort();
-    if (g_dev_state == -2 || dev_init() != 0 || !g_window || scene_w <= 0 || scene_h <= 0) return -1;
-    if (!g_swapchain && swap_init() != 0) return -1; /* the mapping is in output pixels */
-    update_map(scene_w, scene_h);
-    if (!g_map.valid) return -1;
+int vkp_pass_present_layer(int scene_w, int scene_h, const struct vkp_draw *draws, int n,
+                           struct vkp_image *dst) {
+    vkp_apply_window_request();
+    if (g_dev_state == -2) return -1;
+    if (dev_init() != 0 || !g_window || scene_w <= 0 || scene_h <= 0) return -1;
+    if (!dst || !dst->blit_dst) return -1;
+    if (g_swapchain && vkp_framegen_extra_images() != g_swap_extra) destroy_swapchain();
     if (ensure_scene_image(scene_w, scene_h) != 0) return -1;
+
+    uint32_t img = 0;
+    VkResult ar;
+    if (acquire_image(0, 1, &img, &ar) != 0) return -1;
+    update_map(scene_w, scene_h);
 
     VkCommandBuffer cmd = g_cmds[0];
     g_vk.ResetCommandBuffer(cmd, 0);
@@ -1237,9 +1246,9 @@ int vkp_pass_begin(int scene_w, int scene_h, const struct vkp_draw *draws, int n
     g_vk.BeginCommandBuffer(cmd, &bi);
     VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
 
-    /* Same acquisition as vkp_render's compositor pass: the sources come from the client's queue
-     * family (dmabuf) or from a host write (shm), the scene image is the transfer destination. */
-    VkImageMemoryBarrier *bars = calloc((size_t)n + 1, sizeof(*bars));
+    /* Sources come from the client's queue family (dmabuf) or from a host write (shm); the scene
+     * image, the layer buffer and the swapchain image are all transfer destinations this frame. */
+    VkImageMemoryBarrier *bars = calloc((size_t)n + 3, sizeof(*bars));
     if (!bars) { g_vk.EndCommandBuffer(cmd); return -1; }
     int nb = 0;
     bars[nb++] = (VkImageMemoryBarrier){
@@ -1247,6 +1256,16 @@ int vkp_pass_begin(int scene_w, int scene_h, const struct vkp_draw *draws, int n
         .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .image = g_scene.img, .subresourceRange = range, .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT};
+    bars[nb++] = (VkImageMemoryBarrier){
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = g_images[img], .subresourceRange = range, .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT};
+    bars[nb++] = (VkImageMemoryBarrier){
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_FOREIGN_EXT, .dstQueueFamilyIndex = g_qfam,
+        .image = dst->image, .subresourceRange = range, .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT};
     for (int i = 0; i < n; i++) {
         struct vkp_image *im = draws[i].img;
         int seen = 0;
@@ -1273,7 +1292,10 @@ int vkp_pass_begin(int scene_w, int scene_h, const struct vkp_draw *draws, int n
                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, (uint32_t)nb, bars);
     free(bars);
 
+    /* The base surface under the layer: black. The layer is opaque and covers it, so this is only
+     * here to keep the SurfaceView's own content defined and its present cadence unchanged. */
     VkClearColorValue black = {.float32 = {0.0f, 0.0f, 0.0f, 1.0f}};
+    g_vk.CmdClearColorImage(cmd, g_images[img], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &range);
     g_vk.CmdClearColorImage(cmd, g_scene.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &range);
     VkMemoryBarrier mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
                           .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
@@ -1289,64 +1311,61 @@ int vkp_pass_begin(int scene_w, int scene_h, const struct vkp_draw *draws, int n
     }
 
     int mapped_w = (int)(scene_w * g_map.kx + 0.5f), mapped_h = (int)(scene_h * g_map.ky + 0.5f);
-    g_pass.rw = scene_w; g_pass.rh = scene_h;
-    g_pass.result = vkp_effects_run(cmd, g_scene.img, scene_w, scene_h, mapped_w, mapped_h,
-                                    &g_pass.rw, &g_pass.rh);
-    g_pass.active = 1;
-    if (rw) *rw = g_pass.rw;
-    if (rh) *rh = g_pass.rh;
-    return 0;
-}
+    int rw = scene_w, rh = scene_h;
+    VkImage result = vkp_effects_run(cmd, g_scene.img, scene_w, scene_h, mapped_w, mapped_h, &rw, &rh);
 
-int vkp_pass_copy_to(struct vkp_image *dst) {
-    if (!g_pass.active) return -1;
-    g_pass.active = 0;
-    VkCommandBuffer cmd = g_cmds[0];
-    if (!dst || !dst->blit_dst || g_dev_state == -2) { g_vk.EndCommandBuffer(cmd); return -1; }
-    VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-
-    VkImageMemoryBarrier acq = {
-        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-        .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, .srcQueueFamilyIndex = VK_QUEUE_FAMILY_FOREIGN_EXT,
-        .dstQueueFamilyIndex = g_qfam, .image = dst->image, .subresourceRange = range,
-        .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT};
-    g_vk.CmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                            0, 0, NULL, 0, NULL, 1, &acq);
-    /* The result stands for the whole scene, and so does the layer buffer (the DPU maps it onto
-     * the output), so this is 1:1 whenever the buffer was allocated at the size begin() reported;
+    /* The chain's result stands for the whole scene, and so does the layer buffer (the display maps
+     * it onto the output), so this is 1:1 whenever the buffer was sized with vkp_pass_target_size();
      * a stale-sized buffer is resampled rather than shown wrong. */
-    VkImageBlit blit = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
-                        .srcOffsets = {{0, 0, 0}, {g_pass.rw, g_pass.rh, 1}},
+    VkImageBlit copy = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                        .srcOffsets = {{0, 0, 0}, {rw, rh, 1}},
                         .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
                         .dstOffsets = {{0, 0, 0}, {dst->w, dst->h, 1}}};
-    g_vk.CmdBlitImage(cmd, g_pass.result, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst->image,
-                      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
-                      (g_pass.rw == dst->w && g_pass.rh == dst->h) ? VK_FILTER_NEAREST : VK_FILTER_LINEAR);
-    VkImageMemoryBarrier rel = {
-        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-        .newLayout = VK_IMAGE_LAYOUT_GENERAL, .srcQueueFamilyIndex = g_qfam,
-        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_FOREIGN_EXT, .image = dst->image, .subresourceRange = range,
-        .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT};
+    g_vk.CmdBlitImage(cmd, result, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst->image,
+                      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy,
+                      (rw == dst->w && rh == dst->h) ? VK_FILTER_NEAREST : VK_FILTER_LINEAR);
+
+    VkImageMemoryBarrier post[2] = {
+        {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+         .newLayout = VK_IMAGE_LAYOUT_GENERAL, .srcQueueFamilyIndex = g_qfam,
+         .dstQueueFamilyIndex = VK_QUEUE_FAMILY_FOREIGN_EXT, .image = dst->image, .subresourceRange = range,
+         .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT},
+        {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+         .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+         .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = g_images[img], .subresourceRange = range,
+         .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT}};
     g_vk.CmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-                            0, 0, NULL, 0, NULL, 1, &rel);
+                            0, 0, NULL, 0, NULL, 2, post);
     g_vk.EndCommandBuffer(cmd);
 
-    VkSubmitInfo si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &cmd};
+    VkPipelineStageFlags wait = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    VkSubmitInfo si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .waitSemaphoreCount = 1,
+                       .pWaitSemaphores = &g_acqs[0], .pWaitDstStageMask = &wait, .commandBufferCount = 1,
+                       .pCommandBuffers = &cmd, .signalSemaphoreCount = 1, .pSignalSemaphores = &g_rnds[0]};
     g_vk.ResetFences(g_dev, 1, &g_fence);
     VkResult qr = g_vk.QueueSubmit(g_queue, 1, &si, g_fence);
     if (qr != VK_SUCCESS) {
         if (qr == VK_ERROR_DEVICE_LOST) device_lost("layer pass");
         else LOGE("layer: effects pass submit failed (%d)", (int)qr);
+        if (g_dev_state != -2) destroy_swapchain();
         return -1;
     }
+    VkPresentInfoKHR pi = {.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = 1,
+                           .pWaitSemaphores = &g_rnds[0], .swapchainCount = 1,
+                           .pSwapchains = &g_swapchain, .pImageIndices = &img};
+    VkResult pr = g_vk.QueuePresentKHR(g_queue, &pi);
+    /* The layer transaction the caller applies next must not hand SurfaceFlinger a buffer the GPU
+     * is still writing, so the copy is waited for here (the transaction carries no acquire fence). */
     VkResult fr = g_vk.WaitForFences(g_dev, 1, &g_fence, VK_TRUE, 1000000000ULL);
-    if (fr == VK_ERROR_DEVICE_LOST) { device_lost("layer pass"); return -1; }
+    if (fr == VK_ERROR_DEVICE_LOST || pr == VK_ERROR_DEVICE_LOST) { device_lost("layer pass"); return -1; }
     if (fr != VK_SUCCESS) { LOGE("layer: effects pass fence wait -> %s", vk_result_name(fr)); return -1; }
+    if (pr == VK_ERROR_OUT_OF_DATE_KHR || pr == VK_ERROR_SURFACE_LOST_KHR) {
+        banner_log("gpu", "screen surface %s on present: rebuilding the swapchain", vk_result_name(pr));
+        destroy_swapchain();
+        /* The layer copy itself succeeded, so the frame is still good: the caller may show it. */
+    } else if (pr != VK_SUCCESS && pr != VK_SUBOPTIMAL_KHR) {
+        banner_log("error", "present: vkQueuePresentKHR failed (%s %d)", vk_result_name(pr), (int)pr);
+        destroy_swapchain();
+    }
     return 0;
-}
-
-void vkp_pass_abort(void) {
-    if (!g_pass.active) return;
-    g_pass.active = 0;
-    g_vk.EndCommandBuffer(g_cmds[0]); /* never submitted; the buffer is reset before its next use */
 }

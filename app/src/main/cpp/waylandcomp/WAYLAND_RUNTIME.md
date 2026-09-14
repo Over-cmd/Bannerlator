@@ -276,10 +276,16 @@ app window ....... Compose UI, the in-game drawer, the perf HUD, the on-screen c
 - **What can be on the game layer**, cheapest first: the game's own gralloc buffer (zero-copy, no
   copy anywhere — `ahb_swapchain.c`); one blit of the game's frame into a compositor buffer
   (`sc_layer_present`); or, with screen effects on, the compositor pass's **result** blitted into
-  such a buffer (`sc_layer_present_pass` → `vkp_pass_begin` / `vkp_pass_copy_to`). The last one is
-  what keeps a Look from dropping the session back to the app's swapchain: the scene → output
-  mapping (Fullscreen Mode / Alignment, and the scaling a mode like FSR asks for) is then done by
-  the display through `setGeometry` instead of by a second full-screen GPU blit.
+  such a buffer (`sc_layer_present_pass` → `vkp_pass_present_layer`). The last one is what keeps a
+  Look from dropping the session back to the app's swapchain: the scene → output mapping
+  (Fullscreen Mode / Alignment, and the scaling a mode like FSR asks for) is then done by the
+  display through `setGeometry` instead of by a second full-screen GPU blit. That pass records the
+  composite, the chain, the copy into the layer buffer **and** the black frame for the base surface
+  into ONE command buffer, one submit and one present — the same cost shape as the copy path. (The
+  first shape used two submits with a CPU fence wait between them and measured ~13 % slower than the
+  copy path with the same Look on the Pocket FIT; one submit is what makes the layer path worth
+  taking.) `vkp_pass_target_size()` (→ `vkp_effects_chain_size()`) gives the buffer size before
+  anything is recorded, so the copy is 1:1.
 - **What goes on the overlay layer**: exactly one draw above the game — a second Wayland toplevel
   (a launcher or settings window, a message box), copied 1:1 into the overlay pool and then
   *cropped and placed* by the display through the same `vkp_map_draw` mapping the copy path uses.
@@ -307,9 +313,9 @@ app window ....... Compose UI, the in-game drawer, the perf HUD, the on-screen c
   gets the shared 16x16 blank buffer so SurfaceFlinger really lets go of the game's buffer (and
   reports a release fence for it) instead of holding it while invisible. `sc_layer_hide()` takes
   every layer down (scene no longer a fullscreen game, zero-copy switched off live, session end),
-  `sc_layer_hide_overlay()` only the overlay (the window above the game closed — the game keeps its
-  layer), and `sc_layer_window_gone()` retires both SurfaceControls and drains both pools on a
-  surface loss / HOME / resume.
+  `sc_layer_hide_overlay()` **retires** the overlay's SurfaceControl (see the HWC note below — a
+  merely hidden one keeps SurfaceFlinger in client composition), and `sc_layer_window_gone()`
+  retires both SurfaceControls and drains both pools on a surface loss / HOME / resume.
 - **The display frame-rate vote belongs to one layer.** The refresh-rate stream's
   `sc_layer_set_frame_rate()` (the game's cadence, the same value the app votes on its own surface)
   is carried **only** by the layer the game presents on — the game layer. The overlay layer is
@@ -321,6 +327,18 @@ app window ....... Compose UI, the in-game drawer, the perf HUD, the on-screen c
 - **Stats.** The 10 s `stats` line now ends with `| N zero-copy frames` (the game's own buffers) and
   `| N layer frames` (frames the compositor put on a layer through one of its own buffers — the
   plain layer blit or the effects result). Both are hardware-composed; only the first is copy-free.
+- **Measured on the Pocket FIT (Adreno 750, portrait panel, landscape session → every layer is
+  ROT_90 + scaled), `dumpsys android.hardware.graphics.composer3.IComposer/default`:** one layer is
+  `composition: DEVICE/DEVICE` (game's own gralloc buffer scanned out by the DPU), with effects on
+  the layer it stays `DEVICE/DEVICE`, but **two** layers flip the whole frame to `DEVICE/CLIENT` —
+  SurfaceFlinger composes it on the GPU. It does not recover while the second SurfaceControl exists,
+  which is why `sc_layer_hide_overlay()` retires rather than hides. The likely mechanism is the
+  DPU's rotator budget (one rotated+scaled layer), not the layer count as such, so a device or
+  orientation that needs no rotation may well take both on the DPU. Even in client composition the
+  overlay layer is not a loss (SurfaceFlinger does the one blit the compositor would have done), but
+  the hardware-composition win is only real for the single-layer cases. Note `VRI[ScreenDecorHwcOverlay]`
+  is always `DISPLAY_DECORATION/CLIENT` (the system's rounded corners) — that is why SurfaceFlinger's
+  `clientCompositionFrames` counter reads 100 % on this device in every state and is useless here.
 - **Not done yet:** a second toplevel that is itself rendering into gralloc buffers could go on the
   overlay layer zero-copy too (the token machinery in `ahb_swapchain.c` is already per-buffer, not
   per-layer); today the overlay always costs one small blit.

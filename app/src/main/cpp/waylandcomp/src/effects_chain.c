@@ -465,6 +465,24 @@ static void pass(VkCommandBuffer cmd, VkPipeline p, struct fx_target *dst, VkDes
 static const float FULL_NDC[4] = {-1.0f, -1.0f, 1.0f, 1.0f};
 #define SET_NDC(pc) memcpy((pc).ndc, FULL_NDC, sizeof(FULL_NDC))
 
+/* The size vkp_effects_run() will hand back for this frame, without running anything: the layer
+ * path has to allocate its gralloc destination BEFORE the chain records, and one 1:1 copy into a
+ * correctly sized buffer is the whole point (a mismatch would cost a resample). Mirrors the
+ * clamping and the "nothing to do" case below; reads the settings the last vkp_effects_sync()
+ * snapshotted, which the compositor tick has already taken for this frame. */
+void vkp_effects_chain_size(int scene_w, int scene_h, int out_w, int out_h, int *rw, int *rh) {
+    const struct fx_settings *s = &g_cur;
+    int cw = out_w > 0 ? out_w : scene_w, ch = out_h > 0 ? out_h : scene_h;
+    if (cw > FX_MAX_DIM) cw = FX_MAX_DIM;
+    if (ch > FX_MAX_DIM) ch = FX_MAX_DIM;
+    if (cw < 1) cw = 1;
+    if (ch < 1) ch = 1;
+    const int upscaling = cw > scene_w || ch > scene_h;
+    const int spatial = (spatial_mode(s->scaling) && (s->scaling == 6 || upscaling)) ? s->scaling : 0;
+    if (spatial || effect_count(s)) { *rw = cw; *rh = ch; }
+    else { *rw = scene_w; *rh = scene_h; }
+}
+
 VkImage vkp_effects_run(VkCommandBuffer cmd, VkImage scene, int scene_w, int scene_h,
                         int out_w, int out_h, int *res_w, int *res_h) {
     const struct fx_settings *s;

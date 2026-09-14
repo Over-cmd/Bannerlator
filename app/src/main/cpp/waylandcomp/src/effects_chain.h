@@ -43,6 +43,11 @@ int vkp_effects_active(void);
 /* The filter for the scene -> output resize: NEAREST for scaling mode 2, else LINEAR. */
 VkFilter vkp_effects_blit_filter(void);
 
+/* The size the hook below will return for this frame, computed without recording anything, so a
+ * caller that must allocate the destination first (the display-layer path, sc_layer.c) can size it
+ * exactly. Same inputs as vkp_effects_run's scene_w/h and out_w/h. */
+void vkp_effects_chain_size(int scene_w, int scene_h, int out_w, int out_h, int *rw, int *rh);
+
 /* THE HOOK. Records the chain into `cmd`. `scene` (scene_w x scene_h, R8G8B8A8_UNORM, in
  * TRANSFER_DST_OPTIMAL after the composite) -> the image to present, returned in
  * TRANSFER_SRC_OPTIMAL with its size in res_w / res_h. out_w/out_h = the scene's mapped size on

@@ -112,16 +112,18 @@ ANativeWindow *vkp_window(void);
 void vkp_signal_first_frame(void);
 
 /* ---- the compositor pass into a layer buffer (sc_layer.c; compositor thread) ----
- * Screen effects on the game's own Android layer: compose `draws` into the scene image and run the
- * effects chain WITHOUT presenting, then copy the result into a gralloc layer buffer. Three steps
- * because the chain's result size (a scaling mode resizes to the scene's mapped output size) is
- * only known once the chain has run, and the layer buffer is allocated from it.
- * begin: 0 = a pass is in progress, its result is *rw x *rh; -1 = not possible (draw the old way).
- * Exactly one of copy_to (blit into dst, submit, wait; 0 = done) / abort (drop it unsubmitted)
- * must follow a successful begin. Frame generation is not run here (see WAYLAND_RUNTIME.md). */
-int vkp_pass_begin(int scene_w, int scene_h, const struct vkp_draw *draws, int n, int *rw, int *rh);
-int vkp_pass_copy_to(struct vkp_image *dst);
-void vkp_pass_abort(void);
+ * Screen effects on the game's own Android layer: compose `draws` into the scene image, run the
+ * effects chain, copy the result into the layer's gralloc buffer `dst` AND clear + present the
+ * base surface under it - all in one command buffer, one submit and one present, the same cost
+ * shape as the copy path. The GPU work is waited for before returning, so the caller's layer
+ * transaction never hands SurfaceFlinger a buffer still being written.
+ * vkp_pass_target_size() gives the size dst must have (the chain resizes to the scene's mapped
+ * output size under a scaling mode); a mismatched dst is resampled rather than shown wrong.
+ * 0 = the layer buffer holds this frame, -1 = not possible (the caller draws the old way).
+ * Frame generation is not run here (see WAYLAND_RUNTIME.md). */
+int vkp_pass_target_size(int scene_w, int scene_h, int *rw, int *rh);
+int vkp_pass_present_layer(int scene_w, int scene_h, const struct vkp_draw *draws, int n,
+                           struct vkp_image *dst);
 
 // Session log (compositor.c): one line to Download/Wayland-logs and logcat.
 void banner_log(const char *tag, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
