@@ -1,6 +1,8 @@
 # Star-Compose — Progress Log
 
-## 2026-09-14 09:10 — 🧭 **A Wayland container no longer starts with a blank Compositor driver: the form fills in the newest installed Turnip that can import the game's frames** (`fix/wayland-compositor-driver-default`, off `main` `c518c7af`; building, not yet on device)
+## 2026-09-14 09:10 — 🧭 **A Wayland container no longer starts with a blank Compositor driver: the form fills in the newest installed Turnip that can import the game's frames** (`fix/wayland-compositor-driver-default` `7f1b2254`, off `main` `c518c7af`; run 34846772508 green, pubg `14e10dde…` staged as `/sdcard/Download/Bannerlator-compdrv-pubg.apk`; device test pending — phone held by another engineer at 09:13)
+
+> **Build.** Run 34846772508 green on all three flavours at `7f1b2254` (headSha verified). pubg `14e10dde00c6304343fa4c33fea7e93419df9284c924bc5d41cf6d596d4befd8`. Two earlier runs (34846176385, 34846678820) were cancelled by me when the defaults-profile preference and its log line were added; neither is a result.
 
 > **The report.** A new container created with Display backend = Wayland showed an empty "Compositor driver" field and the red `Wayland needs a Turnip driver here. "System" cannot import the game's frames and shows a black screen.` The user had to pick a Turnip by hand or the session was black.
 
