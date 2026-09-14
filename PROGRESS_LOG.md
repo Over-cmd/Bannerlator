@@ -1,5 +1,17 @@
 # Star-Compose — Progress Log
 
+## 2026-09-14 17:25 — 🌈 **HDR round 1 in flight** (branch `feat/wayland-hdr`; nothing merged, no Bannerlator release)
+
+> **Why now.** `app/src/main/cpp/waylandcomp/HDR_RECON.md` parked HDR until an HDR panel was in the loop and multi-layer presentation had landed. Both are now true: the user's Galaxy Fold (Adreno 840, API 37) reports `HDR10, HLG, HDR10+ | 1351 nits | HDR/SDR headroom available`.
+>
+> **Round 1, app-only (no wcp change).** Opt-in `BANNER_WAYLAND_HDR=1` + the display's own HDR10 capability as the gate (closed on the SDR Pocket FIT); `wp_color_manager_v1` v1 subset (perceptual; parametric + mastering; BT.2020 + PQ); 10-bit `AB30`/`XB30` dma-buf formats; `BT2020_PQ` dataspace + SMPTE 2086 / CTA 861.3 metadata on the zero-copy game layer; effects and frame generation skipped for an HDR game (logged); frames that cannot keep the layer go through the copy untone-mapped with a counted reason; live `getHdrSdrRatio()` samples as the non-root proof that the panel really showed HDR. Every one of the eight bundled v9 Wayland drivers already carries `wp_color_manager_v1`, `banner_ahb_v1` and `VK_EXT_hdr_metadata` (checked with `strings`).
+>
+> **Builds.** `b2c882b0` failed javac (`Display.registerHdrSdrRatioListener` is not in the compileSdk 34 stubs; now reflection + a 1 s sampler). `5325e5d6` (run 34895296297) was published first, then a hole was found: an HDR game on a subsurface whose 10-bit buffer the compositor's own Turnip cannot import would be black. `a194c1ef` routes such a fullscreen HDR subsurface onto the display layer; `5d628a54` makes the verdict count only HDR/SDR readings taken while HDR frames were on screen. Replacement build: run 34897295593.
+>
+> **Distribution, kept off Bannerlator's release page on the user's request:** a pre-release in The412Banner/Gamehub-Components, tag `bannerlator-hdr-test-r1`, published server-side by that repo's `Bannerlator test build release` workflow (fetches the APKs from a green Bannerlator run, verifies the commit, optionally attaches a proton-wine layer by sha). Tester note: `docs/HDR-test-r1.md` on the branch. Test setup: layer `Proton-11.0-2.1-arm64ec-9`, any Wayland game driver, compositor driver unchanged; shortcut Env Vars `BANNER_WAYLAND_HDR=1` + `DXVK_HDR=1`; in-game HDR on.
+>
+> **Next:** refresh the Gamehub release with run 34897295593 + the v9 layer; the user tests on the Fold and sends back the session log + the game's DXVK logs; Pocket FIT regression waits for the user's go. Rollback point: the 15:50 checkpoint below (main `cd553d8c`).
+
 ## 2026-09-14 15:50 — 🔖 **CHECKPOINT: Wayland pre-release 7 live with the v9 layer; main carries two small fixes on top**
 
 > **Public tester link:** `3.1.2-wayland-pre7` (pre-release, tag → `5907fd2a`, release branch `release/3.1.2-wayland-pre7` tip `1d7b0941`). Assets: `Bannerlator-3.1.2-wayland-pre7-{standard,pubg,ludashi}.apk` (versionName `3.1.2-wayland-pre7`, versionCode 85), `proton-11.0-2.1-arm64ec-wayland-v9.wcp` (sha256 `bce6e7cc0e8b4251e9cc1b58a11c3efe6a485857ec02b270a7bb9a61940e6961`, installs as `Proton-11.0-2.1-arm64ec-9`), `README-Wayland-test-kit.txt`. Pre-release 6 deleted (tag kept). **3.1.1 is still Latest**; the in-app updater offers nothing new.
