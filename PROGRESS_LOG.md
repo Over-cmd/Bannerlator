@@ -12,7 +12,11 @@
 >
 > **Proof without root:** `color` lines in `Download/Wayland-logs/wayland-*.log` (gate + inputs, bind, every image description, buffer format changes, dataspace + metadata on the layer, 10 s HDR stats, HDR/SDR ratio samples from `Display.getHdrSdrRatio()` every second, verdict `HDR on screen: …`), plus DXVK's `<exe>_dxgi.log`/`_d3d11.log`.
 >
-> **CI:** `25dd6034` compositor-only build 34893896427 ✅; full build 34894335581 ❌ (javac: `Display.registerHdrSdrRatioListener` not in the compile SDK stubs) → `5325e5d6` reflection, run 34895296297 (in progress). Device work next: Pocket FIT regression (switch off / =1 closed / =force), then stage the standard APK + tester note for the Fold.
+> **CI:** `25dd6034` compositor-only build 34893896427 ✅; full build 34894335581 ❌ (javac: `Display.registerHdrSdrRatioListener` not in the compile SDK stubs) → `5325e5d6` reflection, run 34895296297 ✅ → `a194c1ef` (an HDR subsurface whose 10-bit frame the compositor cannot import still goes on the display layer — a Vulkan swapchain is a subsurface and the old layer-only fallback looked at toplevels only; the format line says "imported" / "could NOT import") → `5d628a54` (verdict counts only HDR/SDR readings taken while HDR frames were on screen), **run 34897295593 ✅ (headSha verified) = the build under test**; quick compositor builds 34896797528 / 34897292907 ✅.
+>
+> **Fold hand-over (lead's call):** a GitHub release in `The412Banner/Gamehub-Components`, tag `bannerlator-hdr-test-r1`, cut server-side by the lead (first from 34895296297, APKs replaced in place with 34897295593's `Bannerlator-hdr-r1-standard`). Tester note = `docs/HDR-test-r1.md` (game, env vars `BANNER_WAYLAND_HDR=1` + `DXVK_HDR=1` on the game's shortcut, what to look for, which files to send back, success/failure log lines). Nothing staged on the phone.
+>
+> **Pocket FIT:** on hold until the user's go (lead's rule). Plan: switch off (user's Wizardry + Insane2 unchanged), `=1` on a ZZ copy (gate closed), `=force` (gate open, SDR game untouched), then reinstall the `cd553d8c` reference.
 
 ## 2026-09-14 15:50 — 🔖 **CHECKPOINT: Wayland pre-release 7 live with the v9 layer; main carries two small fixes on top**
 
