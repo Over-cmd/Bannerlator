@@ -6254,6 +6254,9 @@ internal fun ShortcutSettingsDialogScreen(
     // Wayland GAME driver override (per-game, same extra name as the container's): "" = the
     // container's choice. Only shown when the effective backend is Wayland; see core.WaylandGameDriver.
     var waylandGameDriverOverride by remember { mutableStateOf(shortcut.getExtra("waylandGameDriver", "")) }
+    // HDR output override (per-game, same extra name as the container's): "" = the container's,
+    // "1" on, "0" off. Only shown when the effective backend is Wayland; see display.WaylandHdr.
+    var waylandHdrOverride by remember { mutableStateOf(com.winlator.star.display.WaylandHdr.shortcutChoice(shortcut)) }
 
     // Gyro (motion aim) per-game overrides — seeded from the shortcut extra, falling back to the
     // container's value. Only the game-facing half lives here (deadzone/smoothing stay container-wide,
@@ -6717,6 +6720,8 @@ internal fun ShortcutSettingsDialogScreen(
                 else displayBackendOverride.ifEmpty { null })
             // Wayland game driver override: "" clears the extra (container default).
             putExtra("waylandGameDriver", waylandGameDriverOverride.ifEmpty { null })
+            // HDR output override: "" clears the extra (container default).
+            putExtra(com.winlator.star.display.WaylandHdr.EXTRA, waylandHdrOverride.ifEmpty { null })
             putExtra("renderer", StringUtils.parseIdentifier(selectedRenderer))
             putExtra("sfCompatMode", if (sfCompatMode) "1" else "0")
             // Gyro per-game overrides (read by the launch resolver in XServerDisplayActivity).
@@ -6817,7 +6822,7 @@ internal fun ShortcutSettingsDialogScreen(
                 if (selectedScreenSize == "Custom") { add("customW"); add("customH") }
                 add("screenAlignment")
                 add("selectIcon"); add("displayBackend"); add("gfxDriver")
-                if (effectiveWaylandShortcut) add("waylandGameDriver")
+                if (effectiveWaylandShortcut) { add("waylandGameDriver"); add(com.winlator.star.display.WaylandHdr.EXTRA) }
                 if (!effectiveWaylandShortcut) { add("gfxWrapper"); add("gfxConfig") } // hidden on Wayland (X11 shims/tuning)
                 add("dxWrapper"); add("dxConfig"); add("renderer")
                 if (!effectiveWaylandShortcut && selectedRenderer == "SurfaceFlinger") add("sfCompat")
@@ -7328,6 +7333,58 @@ internal fun ShortcutSettingsDialogScreen(
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
+                        }
+                        Spacer(Modifier.height(8.dp))
+                        // HDR output (per-game): "Use container default (<On/Off>)" / On / Off, see
+                        // display.WaylandHdr. On a screen that doesn't report HDR10 the dropdown is greyed
+                        // with the reason but still shows what is stored. The DXVK 2.x warning follows the
+                        // wrapper + config being edited here; it needs the layer's versionCode, whose first
+                        // read per layer scans the installed contents, so it is worked out off-main and
+                        // only while HDR is on for this game.
+                        run {
+                            val hdrUnavailable = remember { com.winlator.star.display.WaylandHdr.unavailableReason(gfxContext) }
+                            val containerHdr = shortcut.container.isWaylandHdr()
+                            val hdrOn = if (waylandHdrOverride.isEmpty()) containerHdr else waylandHdrOverride == "1"
+                            val hdrWine = shortcut.container.wineVersion
+                            val hdrDxWrapper = StringUtils.parseIdentifier(selectedDxWrapper)
+                            val hdrDxConfig = dxWrapperConfig
+                            var hdrDxvkWarning by remember { mutableStateOf<String?>(null) }
+                            LaunchedEffect(hdrOn, hdrWine, hdrDxWrapper, hdrDxConfig) {
+                                hdrDxvkWarning = if (!hdrOn) null else withContext(Dispatchers.IO) {
+                                    com.winlator.star.display.WaylandHdr.dxvkWarning(gfxContext, hdrWine, hdrDxWrapper, hdrDxConfig)
+                                }
+                            }
+                            val values = listOf("", "1", "0")
+                            val labels = listOf("Use container default (" + (if (containerHdr) "On" else "Off") + ")", "On", "Off")
+                            DpDrop(
+                                dp, com.winlator.star.display.WaylandHdr.EXTRA,
+                                label = com.winlator.star.display.WaylandHdr.TITLE,
+                                options = labels,
+                                selected = labels[values.indexOf(waylandHdrOverride).coerceAtLeast(0)],
+                                onSelect = { waylandHdrOverride = values[labels.indexOf(it)] },
+                                enabled = hdrUnavailable == null,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                            if (hdrUnavailable != null) {
+                                Text(
+                                    hdrUnavailable,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Text(
+                                com.winlator.star.display.WaylandHdr.HELP_TEXT,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            val dxvkWarning = hdrDxvkWarning
+                            if (hdrOn && dxvkWarning != null) {
+                                Text(
+                                    dxvkWarning,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.error
+                                )
+                            }
                         }
                     }
 
