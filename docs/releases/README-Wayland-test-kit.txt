@@ -1,8 +1,14 @@
-Bannerlator Wayland test kit  (2026-09-13, phase 4 = pre-release 5)
+Bannerlator Wayland test kit  (2026-09-14, phase 4 = pre-release 6)
 ====================================================================
 
-1. Bannerlator-3.1.2-wayland-pre5-<flavour>.apk   (all three flavours on the GitHub pre-release)
+1. Bannerlator-3.1.2-wayland-pre6-<flavour>.apk   (all three flavours on the GitHub pre-release)
    versionCode 85 like 3.1.1, so you can go back to 3.1.1 or forward to the next stable.
+   New since pre-release 5 (NEEDS the v7 layer below):
+   - Games that use OpenGL directly now RENDER on Wayland. They were always a black window with
+     sound. Two faults: the compositor described its buffer sharing with an older protocol version
+     than Mesa's OpenGL needs to find the GPU, and our driver build then steered OpenGL into a
+     software renderer this layer does not contain. Both fixed; OpenGL now runs on the GPU via Zink.
+   - DirectX and Vulkan games are unaffected (different path), re-measured on the v7 layer.
    New since pre-release 4 (same v6 layer, app only):
    - Screen effects KEEP the game on its own display layer. A Look, a scaling mode or a filter used
      to drop the whole session back to the compositor's copy path; the chain now draws its result
@@ -47,7 +53,7 @@ Bannerlator Wayland test kit  (2026-09-13, phase 4 = pre-release 5)
      Wine's desktop no longer closes a second into a game's startup (32-bit games under FEX).
    - Keyboard layout names now come from xkb data bundled in the Proton (no longer forced to "us").
 
-2. proton-11.0-2.1-arm64ec-wayland-v6.wcp   (installs as Proton-11.0-2.1-arm64ec-6)
+2. proton-11.0-2.1-arm64ec-wayland-v7.wcp   (installs as Proton-11.0-2.1-arm64ec-7)
    Proton 11.0-2 + winewayland + EIGHT Wayland Turnips chosen under "Wayland game driver":
      Bundled                    upstream Mesa 7cda7850, no patches        Adreno 6xx, 730, 740, 750
      Bundled a7xx               Vauzi-17 "710" v3.6 recipe                  Adreno 710, 720, 722
@@ -59,7 +65,7 @@ Bannerlator Wayland test kit  (2026-09-13, phase 4 = pre-release 5)
      Bundled a8xx upstream      pure Mesa main @ bbc7792f (2026-09-13), no patches
    Also inside: the zero-copy swapchain patch in every driver, xkeyboard-config data, and the
    Wine fix restoring the 1 s desktop-close grace, and the drivers that follow the live zero-copy
-   switch. Remove older -1 … -5 entries on the Contents screen.
+   switch, and the EGL fix that lets OpenGL games render. Remove older -1 … -6 entries.
    All eight load and render on an Adreno 750; none has been run on real 710/720/722 or 830/840 yet.
 
 3. No Turnip zip needed: the compositor uses whatever Android Turnip you pick under
@@ -68,8 +74,8 @@ Bannerlator Wayland test kit  (2026-09-13, phase 4 = pre-release 5)
 Setup
 -----
 1. Install the APK for your flavour over 3.1.1 or an earlier pre-release.
-2. Contents > Proton > Install from file: the v6 wcp.
-3. Container: Proton = Proton-11.0-2.1-arm64ec-6, Display backend = Wayland, Compositor driver =
+2. Contents > Proton > Install from file: the v7 wcp.
+3. Container: Proton = Proton-11.0-2.1-arm64ec-7, Display backend = Wayland, Compositor driver =
    an Android Turnip, Wayland game driver = Auto (8xx owners: try the alternatives one by one),
    FEXCore = an installed version. DXVK / VKD3D / components / audio as on X11.
 4. Optional experiments via Env Vars: BANNER_WAYLAND_ZERO_COPY=1 (fullscreen games only),
@@ -92,6 +98,10 @@ Verified on this build (AYANEO Pocket FIT, Adreno 750)
   game frames still copy-free underneath.
   Refresh rate: 60 cap -> panel 60 (with zero-copy on), cap off -> 144, manual 90 -> 90,
   LSFG 2x on a 30 cap -> 60.
+  OpenGL on v7: a native GL game presents GPU frames through Wayland with the HUD armed and its
+  own picture on screen; Wine reports the GL device as "zink Vulkan 1.4 (Turnip Adreno 750)".
+  On v7, Half-Life 2 zero-copy 132-143 fps (v6: 124-142), effects chain 13 passes at 144 fps,
+  Notepad typing + clipboard both ways still fine.
 
 Known gaps
 ----------
@@ -99,6 +109,9 @@ Known gaps
   (no change, CPU-bound), GPU busy 79% vs 83%, GPU clock 944 vs 1000 MHz, power 16.3 W vs 16.8 W.
   Zero-copy removes the compositor's GPU work; fps gains need a GPU-bound game or a big panel.
 - Real Adreno 710/720/722 and 830/840 hardware untested: please report which a8xx build works best.
+- OpenGL is newly working, not broadly tested: a GL game can still fail for its own reasons (the
+  game used for this fix draws, then quits chasing an old NVIDIA Cg shader profile Zink lacks).
+  Reports from OpenGL games are the most useful thing to send right now.
 - bionic-fg stays X11-only; drag-and-drop, image clipboard and window decorations are not on Wayland yet.
 - With a window above the game, THIS panel hands the frame back to the GPU instead of composing two
   layers itself (the game still keeps its copy-free frames). Other panels may differ - please report.
