@@ -41,6 +41,11 @@ public final class WaylandCompositor {
         void onGameSurface(String window, String gpuName);
         /** One GPU frame from that window. Compositor thread — keep it cheap. */
         void onGameFrame();
+        /** The program behind that window, right after {@link #onGameSurface}: its Linux pid (the
+         *  Wayland client's credentials) and executable name ({@code ""} when unknown). The app arms its
+         *  launch-time CPU affinity on it — on X11 that comes from window events, which a Wayland session
+         *  has none of. Compositor thread — marshal to the UI thread. */
+        default void onGameProgram(int pid, String program) {}
     }
 
     private static volatile GameListener gameListener;
@@ -59,6 +64,13 @@ public final class WaylandCompositor {
     static void onGameFrame() {
         GameListener l = gameListener;
         if (l != null) l.onGameFrame();
+    }
+
+    /** Invoked from native (banner_on_game_program) once per game window that starts presenting. */
+    @SuppressWarnings("unused")
+    static void onGameProgram(int pid, String program) {
+        GameListener l = gameListener;
+        if (l != null) l.onGameProgram(pid, program != null ? program : "");
     }
 
     /** Pointer lock (zwp_pointer_constraints_v1) state, for the app's input path. */
@@ -220,6 +232,9 @@ public final class WaylandCompositor {
      *  HDR capability, which lives behind android.view.Display. Safe before the compositor thread is
      *  up (the line then only reaches logcat) and safe after it has gone. */
     public static native void nativeLogDisplay(String message);
+
+    /** The same under the "perf" area (e.g. the CPU cores Prefer Big Cores picked). Same safety. */
+    public static native void nativeLogPerf(String message);
 
     /** The container's screen size, advertised as the Wayland output's mode so Wine's display-mode
      *  list stops at the desktop size, as the X server's does on X11. Set before the compositor starts. */

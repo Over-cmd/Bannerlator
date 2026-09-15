@@ -2375,7 +2375,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // Non-root: this only feeds the existing taskAffinityMask path. Empty result (undetectable
         // topology) leaves the computed affinity untouched.
         if (preferBig) {
-            String bigList = com.winlator.star.perf.CpuTopology.INSTANCE.detectBigCoreCpuList();
+            String bigList = detectBigCoreCpuListLogged();
             if (bigList != null && !bigList.isEmpty()) {
                 taskAffinityMask = (short) ProcessHelper.getAffinityMask(bigList);
                 taskAffinityMaskWoW64 = taskAffinityMask;
@@ -7584,6 +7584,11 @@ public class XServerDisplayActivity extends AppCompatActivity {
                 android.os.Handler h = waylandHudSampler;
                 if (h != null && waylandHudSampleQueued.compareAndSet(false, true)) h.post(waylandHudSample);
             }
+            @Override public void onGameProgram(int pid, String program) {
+                // X11 arms the launch-time CPU affinity from window events (onMapWindow / _NET_WM_PID);
+                // a Wayland session has none, so the game's first presented frame arms it instead.
+                runOnUiThread(() -> assignWaylandTaskAffinity(pid, program));
+            }
         });
         if (waylandHudThread == null) {
             waylandHudThread = new android.os.HandlerThread("wayland-hud-sampler");
@@ -11845,7 +11850,7 @@ return true;
                 // Recompute the affinity mask the guest launcher reads (processes spawned after the
                 // flip + next launch)...
                 if (on) {
-                    String bigList = com.winlator.star.perf.CpuTopology.INSTANCE.detectBigCoreCpuList();
+                    String bigList = detectBigCoreCpuListLogged();
                     if (bigList != null && !bigList.isEmpty()) {
                         taskAffinityMask = (short) ProcessHelper.getAffinityMask(bigList);
                         taskAffinityMaskWoW64 = taskAffinityMask;
@@ -12913,6 +12918,60 @@ return true;
     }
 
     /**
+     * Wayland counterpart of {@link #assignTaskAffinity(Window)}. A Wayland session has no X window
+     * events, so before this the launch-time mask (container/shortcut CPU list, or Prefer Big Cores)
+     * was never applied there — only the in-game toggle and the Task Manager armed anything. The
+     * compositor reports the program behind the first game window that presents GPU frames: its Linux
+     * pid (the Wayland client's credentials, i.e. the real /proc pid, no exe scan needed) and its
+     * executable name. The mask goes Windows-side by name, as X11's class-name path does, and the
+     * host-side drift checker is armed on the pid. The compositor cannot tell a WoW64 program apart,
+     * so the 64-bit mask applies. UI thread.
+     */
+    private void assignWaylandTaskAffinity(int pid, String program) {
+        if (taskAffinityMask == 0) return;
+        final int processAffinity = taskAffinityMask;
+        String exe = program != null ? program.trim().toLowerCase(java.util.Locale.ROOT) : "";
+        int slash = Math.max(exe.lastIndexOf('/'), exe.lastIndexOf('\\'));
+        if (slash >= 0) exe = exe.substring(slash + 1);
+        if (!exe.isEmpty() && winHandler != null) winHandler.setProcessAffinity(exe, processAffinity);
+        boolean restrict = Integer.bitCount(processAffinity & 0xff) < Runtime.getRuntime().availableProcessors();
+        String msg = "launch CPU affinity for " + (exe.isEmpty() ? "an unnamed program" : exe) + " (pid " + pid
+                + "): mask 0x" + Integer.toHexString(processAffinity & 0xffff)
+                + (restrict ? ", kept on those cores by the drift checker" : " (every core: nothing to enforce)");
+        Log.i("XServerDisplayActivity", "wayland: " + msg);
+        try { com.winlator.star.wayland.WaylandCompositor.nativeLogPerf(msg); } catch (Throwable ignored) {}
+        if (!restrict) return;
+        if (!exe.isEmpty()) {
+            if (!exe.equals(affinityTargetExe)) affinityLinuxPid = -1; // new target -> re-resolve
+            affinityTargetExe = exe;
+            if (pid > 0) affinityLinuxPid = pid;
+            affinityTargetMask = processAffinity & 0xff;
+            startAffinityReapply();
+        } else if (pid > 0) {
+            // No name to re-resolve by if it restarts: pin it once, host-side.
+            ProcessHelper.setLinuxAffinity(pid, processAffinity & 0xff);
+        }
+    }
+
+    /**
+     * Prefer Big Cores' core list ({@link com.winlator.star.perf.CpuTopology}), and — once per session —
+     * which cores it picked and why, to logcat and, on Wayland, the session log.
+     */
+    private boolean bigCoresLogged = false;
+    private String detectBigCoreCpuListLogged() {
+        String list = com.winlator.star.perf.CpuTopology.INSTANCE.detectBigCoreCpuList();
+        if (!bigCoresLogged) {
+            bigCoresLogged = true;
+            String msg = "prefer big cores: " + com.winlator.star.perf.CpuTopology.INSTANCE.describeBigCores();
+            Log.i("XServerDisplayActivity", msg);
+            if (waylandMode) {
+                try { com.winlator.star.wayland.WaylandCompositor.nativeLogPerf(msg); } catch (Throwable ignored) {}
+            }
+        }
+        return list;
+    }
+
+    /**
      * Re-pin the ALREADY-RUNNING guest process tree when Prefer Big Cores is toggled mid-game (the old
      * behavior only changed the mask for newly-spawned processes, leaving the current game on 0-7).
      * Enumerates every guest process via the WinHandler process list and sets each one's affinity —
@@ -12925,7 +12984,7 @@ return true;
         if (!on && bigCoreAffinitySnapshot.isEmpty()) return; // nothing we changed -> nothing to revert
         final int bigMask;
         if (on) {
-            String bigList = com.winlator.star.perf.CpuTopology.INSTANCE.detectBigCoreCpuList();
+            String bigList = detectBigCoreCpuListLogged();
             if (bigList == null || bigList.isEmpty()) return; // topology unknown -> nothing to pin to
             bigMask = ProcessHelper.getAffinityMask(bigList);
         } else {
