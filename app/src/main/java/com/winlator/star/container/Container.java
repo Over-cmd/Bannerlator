@@ -80,7 +80,17 @@ public class Container {
      * overlay jumped size on the first metric toggle).
      */
     public static final int DEFAULT_HUD_SCALE = 100;
-    public static final String DEFAULT_FPS_COUNTER_CONFIG = "hudStyle=fusion,hudEnabled=1,hudMode=horizontal,showFPS=1,showCPULoad=1,showGPULoad=1,showRAM=1,showRenderer=1,showBatteryTemp=1,hudScale=" + DEFAULT_HUD_SCALE + ",hudSize=pill,showVram=1,showLow001=1,fpsDecimal=1,hudLocked=0,showPerCore=1,showSwap=1,showNet=1,showResolution=1,showProton=1,showWrapper=1,showDxVer=1,showSession=1";
+    /** Size a brand-new container's HUD starts at (the Fusion pill at 75%). */
+    public static final int NEW_CONTAINER_HUD_SCALE = 75;
+    /**
+     * The HUD a new container gets: Fusion pill at 75%, unlocked, with every Fusion metric on. Each
+     * key is written explicitly (both spellings where the editors emit two) so the editors show the
+     * same switches the overlay draws, instead of falling back to their own absent-key defaults.
+     */
+    public static final String DEFAULT_FPS_COUNTER_CONFIG = "hudStyle=fusion,hudEnabled=1,hudMode=horizontal,hudSize=pill,hudScale=" + NEW_CONTAINER_HUD_SCALE + ",hudLocked=0"
+            + ",showFPS=1,showFPSGraph=1,showCPUUsage=1,showCPULoad=1,showGPULoad=1,showRAM=1,showVram=1,showPower=1,showBattery=1"
+            + ",showTemp=1,showBatteryTemp=1,showGpuTemp=1,showEngine=1,showRenderer=1,showGpuModel=1,showLow001=1,fpsDecimal=1,showClock=1"
+            + ",showPerCore=1,showSwap=1,showNet=1,showResolution=1,showProton=1,showWrapper=1,showDxVer=1,showSession=1";
     public static final String DEFAULT_WINCOMPONENTS = "direct3d=1,directsound=0,directmusic=0,directshow=0,directplay=0,xaudio=0,vcrun2010=1";
     public static final String FALLBACK_WINCOMPONENTS = "direct3d=1,directsound=1,directmusic=1,directshow=1,directplay=1,xaudio=1,vcrun2010=1";
     public static final String DEFAULT_DRIVES = "F:"+Environment.getExternalStorageDirectory().getAbsolutePath()+"D:"+Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);

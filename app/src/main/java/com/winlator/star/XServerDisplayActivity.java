@@ -12606,13 +12606,15 @@ return true;
         FrameLayout rootView = findViewById(R.id.FLXServerDisplay);
         fusionHud = new com.winlator.star.widget.fusionhud.FusionHudView(this);
         fusionHud.setFpsCounter(fpsCounter);
+        // Fusion sits in the top-right corner until dragged, anchored on its right edge so a tap to a
+        // bigger size grows it leftward into the screen.
         FrameLayout.LayoutParams plp = new FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
-            android.view.Gravity.TOP | android.view.Gravity.START
+            android.view.Gravity.TOP | android.view.Gravity.END
         );
         plp.topMargin = 10;
-        plp.leftMargin = 10;
+        plp.rightMargin = 10;
         fusionHud.setLayoutParams(plp);
         fusionHud.applyConfig(fpsConfigString);
         if (hudEngineShort != null) fusionHud.setEngineLabel(hudEngineShort);
@@ -12627,6 +12629,16 @@ return true;
         fusionHud.setOnLockChangedListener((locked) -> persistHudConfigKey("hudLocked", locked ? "1" : "0"));
         fusionHud.setOnMovedListener((x, y) -> persistHudPosition("hudPosFusion", x, y));
         restoreHudPosition(fusionHud, "hudPosFusion");
+        // A dragged HUD keeps its right edge when it changes size, so a wider size could push it past
+        // the left edge. Pull it back on screen whenever its size changes (setX/setY don't relayout).
+        fusionHud.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
+            View parent = (View) v.getParent();
+            if (parent == null || v.getWidth() == 0 || v.getHeight() == 0) return;
+            float x = Math.max(0, Math.min(v.getX(), Math.max(0, parent.getWidth() - v.getWidth())));
+            float y = Math.max(0, Math.min(v.getY(), Math.max(0, parent.getHeight() - v.getHeight())));
+            if (x != v.getX()) v.setX(x);
+            if (y != v.getY()) v.setY(y);
+        });
         fusionHud.setVisibility(frameRatingWindowId != -1 && hudCounterEnabled ? View.VISIBLE : View.GONE);
         rootView.addView(fusionHud);
     }
