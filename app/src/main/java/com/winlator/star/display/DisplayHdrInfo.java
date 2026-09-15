@@ -41,13 +41,16 @@ public final class DisplayHdrInfo {
     public final boolean hdrSdrRatioAvailable;
     /** The current HDR/SDR ratio when available, else < 0. */
     public final float hdrSdrRatio;
+    /** The highest HDR/SDR ratio the display says it can reach (Display.getHighestHdrSdrRatio, Android 16+,
+     *  read by reflection), else < 0. 1.0 means the display gives no HDR boost at all. */
+    public final float highestHdrSdrRatio;
     /** Display id and name, for the log line. */
     public final int displayId;
     public final String displayName;
 
     private DisplayHdrInfo(String formats, boolean hasHdr, boolean supportsHdr10, float maxLuminance,
                            float maxAverageLuminance, float minLuminance, boolean hdrSdrRatioAvailable,
-                           float hdrSdrRatio, int displayId, String displayName) {
+                           float hdrSdrRatio, float highestHdrSdrRatio, int displayId, String displayName) {
         this.formats = formats;
         this.hasHdr = hasHdr;
         this.supportsHdr10 = supportsHdr10;
@@ -56,6 +59,7 @@ public final class DisplayHdrInfo {
         this.minLuminance = minLuminance;
         this.hdrSdrRatioAvailable = hdrSdrRatioAvailable;
         this.hdrSdrRatio = hdrSdrRatio;
+        this.highestHdrSdrRatio = highestHdrSdrRatio;
         this.displayId = displayId;
         this.displayName = displayName;
     }
@@ -63,7 +67,7 @@ public final class DisplayHdrInfo {
     /** Never returns null and never throws; an unreadable display comes back as "unknown". */
     @SuppressWarnings("deprecation")
     public static DisplayHdrInfo read(Display d) {
-        if (d == null) return new DisplayHdrInfo("unknown", false, false, -1f, -1f, -1f, false, -1f, -1, "—");
+        if (d == null) return new DisplayHdrInfo("unknown", false, false, -1f, -1f, -1f, false, -1f, -1f, -1, "—");
 
         int id = -1;
         String name = "—";
@@ -111,7 +115,7 @@ public final class DisplayHdrInfo {
         boolean hdr10 = false;
         if (types != null) for (int t : types) if (t == Display.HdrCapabilities.HDR_TYPE_HDR10) hdr10 = true;
         return new DisplayHdrInfo(typeList(types), hasHdr, hdr10, maxL, maxAvgL, minL,
-                ratioAvailable, ratio, id, name);
+                ratioAvailable, ratio, highestHdrSdrRatio(d), id, name);
     }
 
     /** The live HDR/SDR ratio of {@code d} (API 34+), or -1 when the display does not report one. It is
@@ -121,6 +125,18 @@ public final class DisplayHdrInfo {
         if (d == null || Build.VERSION.SDK_INT < 34) return -1f;
         try {
             return d.isHdrSdrRatioAvailable() ? d.getHdrSdrRatio() : -1f;
+        } catch (Throwable t) {
+            return -1f;
+        }
+    }
+
+    /** Display.getHighestHdrSdrRatio() where the platform has it (Android 16+; not in the compile SDK's
+     *  stubs, so by reflection), else -1. Never throws. */
+    public static float highestHdrSdrRatio(Display d) {
+        if (d == null || Build.VERSION.SDK_INT < 34) return -1f;
+        try {
+            Object r = Display.class.getMethod("getHighestHdrSdrRatio").invoke(d);
+            return r instanceof Float ? (Float) r : -1f;
         } catch (Throwable t) {
             return -1f;
         }
@@ -175,9 +191,13 @@ public final class DisplayHdrInfo {
         if (Build.VERSION.SDK_INT < 34) sb.append("not reportable below Android 14");
         else if (!hdrSdrRatioAvailable) sb.append("not available on this display");
         else sb.append(String.format(java.util.Locale.US, "available (ratio %.2f)", hdrSdrRatio));
+        if (highestHdrSdrRatio > 0f)
+            sb.append(String.format(java.util.Locale.US, ", highest ratio %.2f", highestHdrSdrRatio))
+              .append(highestHdrSdrRatio <= 1.01f ? " (no HDR boost at all: no app can raise HDR brightness here)" : "");
+        else if (Build.VERSION.SDK_INT >= 34) sb.append(", highest ratio not reported");
         sb.append(hasHdr
                 ? (supportsHdr10
-                    ? " -- the display accepts HDR10 (Wayland: BANNER_WAYLAND_HDR=1 lets games use it; see the 'color' lines)"
+                    ? " -- the display accepts HDR10 (Wayland: the HDR output setting offers it to games; see the 'color' lines)"
                     : " -- the display accepts HDR, but not HDR10, which is what games send")
                 : " -- SDR only: an HDR layer here would be tone-mapped and dropped to GPU composition");
         return sb.toString();

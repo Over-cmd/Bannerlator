@@ -463,6 +463,31 @@ Java_com_winlator_star_wayland_WaylandCompositor_nativeHdrEnvSample(JNIEnv *env,
                             (int)brightness, (int)mode);
 }
 
+/* Display.getHighestHdrSdrRatio() (Android 16+), <= 0 = not reported. */
+JNIEXPORT void JNICALL
+Java_com_winlator_star_wayland_WaylandCompositor_nativeSetHdrHighestRatio(JNIEnv *env, jclass clazz, jfloat ratio) {
+    banner_color_set_highest_ratio((float)ratio == (float)ratio ? (float)ratio : -1.0f);
+}
+
+/* The HDR headroom the screen surface should ask for (HDR10 swapchain frames in the last 1.5 s), 0 = none. */
+JNIEXPORT jfloat JNICALL
+Java_com_winlator_star_wayland_WaylandCompositor_nativeHdrScreenHeadroom(JNIEnv *env, jclass clazz) {
+    return (jfloat)banner_color_screen_headroom(NULL, 0);
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_winlator_star_wayland_WaylandCompositor_nativeHdrScreenHeadroomWhy(JNIEnv *env, jclass clazz) {
+    char why[200];
+    banner_color_screen_headroom(why, sizeof(why));
+    return (*env)->NewStringUTF(env, why);
+}
+
+/* The app's screen-surface request, for the no-headroom lines: > 0 asked, 0 cleared, -1 not possible. */
+JNIEXPORT void JNICALL
+Java_com_winlator_star_wayland_WaylandCompositor_nativeHdrNoteHeadroomRequest(JNIEnv *env, jclass clazz, jfloat ratio) {
+    banner_color_note_headroom_request((float)ratio);
+}
+
 /* kind 1 = screen recording state (1 / 0), kind 2 = screenshot taken. */
 JNIEXPORT void JNICALL
 Java_com_winlator_star_wayland_WaylandCompositor_nativeHdrEnvEvent(JNIEnv *env, jclass clazz, jint kind, jint state) {

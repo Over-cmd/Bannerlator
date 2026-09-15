@@ -300,6 +300,20 @@ public final class WaylandCompositor {
      *  screenshot was taken (state ignored). Logged in HDR sessions. */
     public static native void nativeHdrEnvEvent(int kind, int state);
 
+    /** Display.getHighestHdrSdrRatio() (Android 16+), <= 0 = not reported: the display's own ceiling, capped
+     *  into the headroom request and logged in the verdict. Any thread. */
+    public static native void nativeSetHdrHighestRatio(float ratio);
+
+    /** The HDR headroom the SCREEN surface should ask for while HDR frames go through the HDR10 swapchain
+     *  (frame generation), 0 = none; the app applies it (SurfaceView.setDesiredHdrHeadroom, API 35). */
+    public static native float nativeHdrScreenHeadroom();
+
+    /** Why that value ("content peak 1207 nits (max CLL) / SDR 203 ..."), for the log line. */
+    public static native String nativeHdrScreenHeadroomWhy();
+
+    /** What the app asked for on the screen surface: > 0 the ratio, 0 cleared, -1 not possible (< Android 15). */
+    public static native void nativeHdrNoteHeadroomRequest(float ratio);
+
     /** Fullscreen mode ({@code Container.FULLSCREEN_OFF/FIT/STRETCH/FILL/INTEGER}) and screen alignment
      *  ({@code Container.ALIGN_CENTER/TOP/BOTTOM}): how the compositor fits the desktop onto the screen,
      *  with the same arithmetic as {@code ViewTransformation} (which maps touch input), so the picture and

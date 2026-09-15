@@ -104,6 +104,20 @@ void banner_color_env_sample(int thermal, float headroom, int brightness, int bm
 /* kind 1 = screen recording (state 1 started / 0 not recording; Android 15+), kind 2 = a screenshot. */
 void banner_color_env_event(int kind, int state);
 
+/* ---- the explicit HDR headroom request (Android 15+: ASurfaceTransaction_setDesiredHdrHeadroom on the game
+ * layer, SurfaceView.setDesiredHdrHeadroom on the screen surface). Some phones only boost HDR when asked. */
+/* The ratio to ask for an HDR frame of `c`: content peak (max CLL, else mastering max, else the display's
+ * peak) / SDR white (203), capped at the display's highest ratio when it reports one; 0 = ask nothing
+ * (not HDR, or the display reports it cannot boost). `why` gets the one-line reason. Any thread. */
+float banner_color_desired_headroom(const struct banner_color *c, char *why, size_t n);
+/* What was last asked for (> 0 the ratio, 0 nothing, -1 the API is missing): for the no-headroom lines. */
+void banner_color_note_headroom_request(float ratio);
+/* Display.getHighestHdrSdrRatio() (Android 16+; <= 0 = not reported). Any thread; logged when it arrives. */
+void banner_color_set_highest_ratio(float ratio);
+/* The headroom the SCREEN surface should ask for (frames through the HDR10 swapchain in the last 1.5 s),
+ * 0 = none; `why` gets the reason. The app polls it and applies it. Any thread. */
+float banner_color_screen_headroom(char *why, size_t n);
+
 /* ---- compositor.c -> here */
 /* Decide the gate (call after ahb_swapchain_init) and create the global when it is open. */
 void banner_color_init(struct wl_display *display);

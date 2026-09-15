@@ -881,7 +881,25 @@ classic, GameHub and GameNative HUDs never received it and are untouched.
   cause (recording / hot / brightness at maximum) or say none is visible. The verdict lists only the
   paths that carried frames, to leave room for it.
 
-### 11.7 What is still NOT done / not proven
+### 11.7 Round 2e (headroom request, display ceiling, coverage)
+
+2d on the Fold: all pass (68 surface pairs, HDR10 swapchain A2B10G10R10, FP16 FG at 120 fps, 0 tone-mapped,
+VK_EXT_hdr_metadata, headroom 3.00 at brightness 255 **auto**). A tester's ROG Phone 9 Pro (Adreno 830,
+API 36): correct HDR frames, composed path, HDR layer ~80% of the 2400x1080 screen (windowed card), not
+hot, not recording, brightness 8-223 manual - and the HDR/SDR ratio at **1.00 the whole session**.
+- `ASurfaceTransaction_setDesiredHdrHeadroom` (API 35) on the game layer, per HDR frame, only on change:
+  content peak (max CLL, else mastering max, else the display's peak) / SDR white, capped at the display's
+  highest ratio; 0 (no preference) when the layer stops carrying HDR; re-sent on a fresh SurfaceControl.
+  The screen surface (HDR10 swapchain for frame generation) gets the same through
+  `SurfaceView.setDesiredHdrHeadroom` (API 35, reflection; `SurfaceControl.Transaction` fallback), applied
+  by the app from `banner_color_screen_headroom()`.
+- `Display.getHighestHdrSdrRatio()` (Android 16+, reflection) in the display line and the verdict; 1.00
+  means no boost at all, and the request is then not made.
+- HDR layer coverage in the dataspace line, the composed-picture line and on geometry changes.
+- "brightness at maximum" only for MANUAL >= 250/255; no visible cause -> "this phone may not boost HDR
+  from apps (the requested headroom was …, the display's highest ratio is …)".
+
+### 11.8 What is still NOT done / not proven
 
 - Round 2's composition, switch and HUD line were device-tested in parts on the Fold (setting-driven
   gate, auto environment, composed picture, headroom lines, HUD); 2d is CI only.

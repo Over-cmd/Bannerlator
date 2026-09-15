@@ -7021,6 +7021,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
             com.winlator.star.wayland.WaylandCompositor.nativeSetHdrDisplay(d.displayId, d.displayName, d.formats,
                     d.supportsHdr10, d.maxLuminance, d.maxAverageLuminance, d.minLuminance,
                     d.hdrSdrRatioAvailable, d.hdrSdrRatio, android.os.Build.VERSION.SDK_INT);
+            com.winlator.star.wayland.WaylandCompositor.nativeSetHdrHighestRatio(d.highestHdrSdrRatio);
         } catch (Throwable t) {
             Log.w("XServerDisplayActivity", "wayland: HDR display push failed", t);
         }
@@ -7206,6 +7207,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
                     // once a second), then the whole evidence set to the compositor (it logs changes only).
                     if (hdrEvidenceTick++ % 10 == 0) readHdrThermalHeadroom();
                     pushHdrEvidence();
+                    applyScreenHdrHeadroom();
                     float ratio = com.winlator.star.display.DisplayHdrInfo.liveHdrSdrRatio(d);
                     try { com.winlator.star.wayland.WaylandCompositor.nativeHdrSdrRatioSample(ratio, false); }
                     catch (Throwable ignored) {}
@@ -7345,6 +7347,64 @@ public class XServerDisplayActivity extends AppCompatActivity {
         }
         readHdrThermalHeadroom();
         pushHdrEvidence();
+    }
+
+    // ───── The screen surface's HDR headroom request (frames through the HDR10 swapchain) ─────
+    // The game's display layer asks for headroom itself (sc_layer.c, ASurfaceTransaction_setDesiredHdrHeadroom).
+    // Frame generation presents HDR through the compositor's own swapchain on this SurfaceView instead, so the
+    // request goes on the SurfaceView (API 35): content peak / SDR white, cleared when those frames stop. Some
+    // phones only boost HDR when a surface asks.
+    private float hdrScreenHeadroomApplied = -1f; // -1 = never set
+    private boolean hdrScreenHeadroomMissingSaid;
+
+    private void applyScreenHdrHeadroom() {
+        float want;
+        try { want = com.winlator.star.wayland.WaylandCompositor.nativeHdrScreenHeadroom(); }
+        catch (Throwable t) { return; }
+        if (hdrScreenHeadroomApplied < 0f && want <= 0f) return;            // never asked: leave it be
+        if (Math.abs(want - hdrScreenHeadroomApplied) < 0.005f) return;
+        android.view.SurfaceView sv = waylandSurfaceView;
+        if (sv == null) return;
+        String how = null;
+        if (android.os.Build.VERSION.SDK_INT >= 35) {
+            try {
+                android.view.SurfaceView.class.getMethod("setDesiredHdrHeadroom", float.class).invoke(sv, want);
+                how = "SurfaceView.setDesiredHdrHeadroom";
+            } catch (Throwable t) {
+                try {
+                    android.view.SurfaceControl sc = sv.getSurfaceControl();
+                    android.view.SurfaceControl.Transaction tx = new android.view.SurfaceControl.Transaction();
+                    android.view.SurfaceControl.Transaction.class.getMethod("setDesiredHdrHeadroom",
+                            android.view.SurfaceControl.class, float.class).invoke(tx, sc, want);
+                    tx.apply();
+                    how = "SurfaceControl.Transaction.setDesiredHdrHeadroom";
+                } catch (Throwable t2) {
+                    how = null;
+                }
+            }
+        }
+        hdrScreenHeadroomApplied = want;
+        try {
+            if (how == null) {
+                if (!hdrScreenHeadroomMissingSaid && want > 0f) {
+                    hdrScreenHeadroomMissingSaid = true;
+                    com.winlator.star.wayland.WaylandCompositor.nativeHdrNoteHeadroomRequest(-1f);
+                    com.winlator.star.wayland.WaylandCompositor.nativeLogColor("HDR headroom request on the screen surface "
+                            + "not available (Android < 15): frames through the HDR10 swapchain rely on Android's default");
+                }
+                return;
+            }
+            com.winlator.star.wayland.WaylandCompositor.nativeHdrNoteHeadroomRequest(want);
+            if (want > 0f) {
+                String why = com.winlator.star.wayland.WaylandCompositor.nativeHdrScreenHeadroomWhy();
+                com.winlator.star.wayland.WaylandCompositor.nativeLogColor(String.format(java.util.Locale.US,
+                        "requested HDR headroom %.1fx on the screen surface (HDR10 swapchain for frame generation; %s) via %s",
+                        want, why, how));
+            } else {
+                com.winlator.star.wayland.WaylandCompositor.nativeLogColor("HDR headroom request on the screen surface "
+                        + "cleared (no preference): no HDR frames go through the swapchain any more");
+            }
+        } catch (Throwable ignored) {}
     }
 
     private void readHdrThermalHeadroom() {

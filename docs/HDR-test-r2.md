@@ -6,6 +6,41 @@ stay as they are. It is not a Bannerlator release. Use it with the **Wayland lay
 published next to it (it tells Windows your screen's real brightness; everything else here also works
 on v9).
 
+## Round 2e — what changed, and what to check first
+
+**What changed**
+
+1. **The app now asks for HDR brightness explicitly.** Android 15+ lets a surface ask the display for a
+   given amount of HDR headroom; until now we never asked (Samsung boosts anyway — some other phones may
+   only boost when asked). The game's display layer and, with frame generation, the screen surface now
+   ask for *content peak ÷ 203 nits* (e.g. 1207 ÷ 203 ≈ 5.9×), capped at what the display says it can
+   reach, and the request is cleared when HDR stops.
+2. **The display's own ceiling** (Android 16+: "highest HDR/SDR ratio") is in the first log line and in
+   the verdict. If a phone reports 1.00 there, no app can get an HDR boost on it — the log says so.
+3. **How much of the screen the HDR layer covers** is logged (some phones only switch to HDR for a
+   large enough HDR area).
+4. **Cause wording:** "brightness at maximum" is only named for *manual* brightness at ≥ 250/255 (the
+   Fold kept 3.00× at 255 *auto*). With no visible cause the line now says the phone may not boost HDR
+   for apps, with what was asked and the display's ceiling.
+
+**ROG Phone 9 Pro tester (headroom stayed 1.00 in 2d)**
+
+- Run the AIO HDR card **fullscreen** (not windowed), once in **HDR10** mode and once in **SDR** mode.
+- In HDR10 mode, look at the **400 / 600 / 1000-nit patches**: are they visibly brighter than the
+  **203-nit** (paper white) patch? In SDR mode they will all look the same — that is the comparison.
+- Send the log (`Download/Wayland-logs/wayland-*.log`). The lines that matter:
+  - first line: `HDR capability of … | HDR/SDR headroom available (ratio 1.00), highest ratio X` — or
+    `highest ratio not reported`;
+  - `requested HDR headroom 5.9x on banner_wayland_game (content peak 1207 nits (max CLL) / SDR 203 …)`;
+  - `banner_wayland_game: dataspace BT2020_PQ … covers N% of the screen (…)`;
+  - `display HDR/SDR ratio …` — does it leave 1.00 now?
+  - the verdict `HDR on screen: …`.
+
+**Fold (regression, 1 minute)** — AIO HDR card fullscreen in HDR10: the ratio should still reach ~3.00,
+with a `requested HDR headroom …x on banner_wayland_game` line; then Frame Generation 2× for 20 s: a
+`requested HDR headroom …x on the screen surface (HDR10 swapchain for frame generation; …)` line and
+HUD `HDR`.
+
 ## Round 2d — what changed, and what to check first
 
 **What changed**

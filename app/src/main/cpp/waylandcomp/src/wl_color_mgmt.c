@@ -92,7 +92,8 @@ static struct {
     int display_id, hdr10, ratio_available, api;
     char display_name[96], formats[96];
     float max_lum, max_avg, min_lum, ratio;
-} g_req;
+    float highest_ratio;            /* Display.getHighestHdrSdrRatio() (Android 16+), < 0 = not reported */
+} g_req = {.highest_ratio = -1.0f};
 
 static _Atomic int g_gate = -1;     /* -1 undecided, 0 closed, 1 open */
 static char g_gate_why[320];        /* the closed gate's reason (for the summary) */
@@ -179,7 +180,9 @@ static struct {
     int brightness;         /* Settings.System.SCREEN_BRIGHTNESS (0..255), -1 unknown */
     int bmode;              /* SCREEN_BRIGHTNESS_MODE: 1 automatic, 0 manual, -1 unknown */
     int rec_known, recording; /* screen-recording detection (Android 15+) */
-} g_env = {0, -1, -1.0f, -1, -1, 0, 0};
+    float requested;        /* the last HDR headroom asked for (layer or screen surface): > 0 the ratio,
+                             * 0 none asked, -1 the API is missing on this Android (< 15) */
+} g_env = {0, -1, -1.0f, -1, -1, 0, 0, 0.0f};
 
 static const char *thermal_name(int t) {
     switch (t) {
@@ -202,7 +205,7 @@ static void env_text_locked(char *out, size_t n) {
 }
 
 /* What the evidence says about headroom lost with HDR frames on screen. Caller holds g_mu. */
-static void nohead_causes_locked(char *out, size_t n) {
+static void nohead_causes_locked(char *out, size_t n, int brief) {
     const char *parts[3];
     char hot[48];
     int np = 0;
@@ -211,15 +214,90 @@ static void nohead_causes_locked(char *out, size_t n) {
         snprintf(hot, sizeof(hot), "the device is hot (thermal %s)", thermal_name(g_env.thermal));
         parts[np++] = hot;
     }
-    if (g_env.brightness >= 250) parts[np++] = "brightness at maximum";
+    /* Maximum brightness only counts when it is MANUAL: the Fold kept 3.00 of headroom at 255 auto. */
+    if (g_env.brightness >= 250 && g_env.bmode == 0) parts[np++] = "brightness at maximum (manual)";
     if (np == 1) snprintf(out, n, "likely %s", parts[0]);
     else if (np == 2) snprintf(out, n, "likely %s and %s", parts[0], parts[1]);
     else if (np == 3) snprintf(out, n, "likely %s, %s and %s", parts[0], parts[1], parts[2]);
-    else if (g_env.known)
-        snprintf(out, n, "no cause the app can see (not hot, brightness below maximum%s)",
-                 g_env.rec_known ? ", not recording" : "; a screen recording cannot be detected here");
-    else
+    else if (g_env.known) {
+        char req[48], hi[48];
+        if (g_env.requested > 0.0f) snprintf(req, sizeof(req), "%.1fx", g_env.requested);
+        else snprintf(req, sizeof(req), "%s", g_env.requested < 0.0f ? "not possible below Android 15" : "none");
+        if (g_req.highest_ratio > 0.0f) snprintf(hi, sizeof(hi), "%.2f", g_req.highest_ratio);
+        else snprintf(hi, sizeof(hi), "not reported");
+        if (brief)
+            snprintf(out, n, "no visible cause; the phone may not boost HDR for apps (asked %s, highest ratio %s)", req, hi);
+        else
+            snprintf(out, n, "no cause the app can see; this phone may not boost HDR from apps (the requested headroom "
+                     "was %s, the display's highest ratio is %s)", req, hi);
+    } else
         snprintf(out, n, "screen brightness at maximum, a screen recording, or heat");
+}
+
+/* ---- the explicit HDR headroom request (API 35; sc_layer.c for the game layer, the app for the screen
+ * surface): content peak / SDR white, capped at the display's highest ratio when it reports one. */
+static _Atomic int g_screen_hr_x1000;       /* the screen surface's wanted headroom x1000 (HDR10 swapchain) */
+static _Atomic int64_t g_screen_hr_ns;      /* the last HDR10-swapchain frame */
+static char g_screen_hr_why[200];           /* under g_mu */
+
+static float peak_of(const struct banner_color *c, float disp_max, const char **src) {
+    if (c->max_cll > 0.0f) { *src = "max CLL"; return c->max_cll; }
+    if (c->has_st2086 && c->max_lum > 0.0f) { *src = "mastering max"; return c->max_lum; }
+    if (disp_max > 0.0f) { *src = "the display's peak"; return disp_max; }
+    *src = "assumed"; return 1000.0f;
+}
+
+float banner_color_desired_headroom(const struct banner_color *c, char *why, size_t n) {
+    if (!c || !c->dataspace) { if (why && n) why[0] = 0; return 0.0f; }
+    pthread_mutex_lock(&g_mu);
+    const float disp_max = g_req.max_lum, highest = g_req.highest_ratio;
+    pthread_mutex_unlock(&g_mu);
+    const char *src;
+    const float peak = peak_of(c, disp_max, &src), white = banner_color_sdr_white();
+    if (highest > 0.0f && highest <= 1.01f) {
+        if (why && n) snprintf(why, n, "the display reports its highest HDR/SDR ratio as %.2f: no app can get a "
+                               "boost here, so nothing is asked", highest);
+        return 0.0f;
+    }
+    float r = peak / (white > 0.0f ? white : 203.0f);
+    const int capped = highest > 1.0f && r > highest;
+    if (capped) r = highest;
+    if (r < 1.0f) r = 1.0f;
+    if (why && n) {
+        if (capped) snprintf(why, n, "content peak %.0f nits (%s) / SDR %.0f, capped at the display's highest ratio %.2f",
+                             peak, src, white, highest);
+        else snprintf(why, n, "content peak %.0f nits (%s) / SDR %.0f%s", peak, src, white,
+                      highest > 0.0f ? "" : "; the display reports no highest ratio");
+    }
+    return r;
+}
+
+void banner_color_note_headroom_request(float ratio) {
+    pthread_mutex_lock(&g_mu);
+    g_env.requested = ratio;
+    pthread_mutex_unlock(&g_mu);
+}
+
+void banner_color_set_highest_ratio(float ratio) {
+    pthread_mutex_lock(&g_mu);
+    const float was = g_req.highest_ratio;
+    g_req.highest_ratio = ratio > 0.0f ? ratio : -1.0f;
+    pthread_mutex_unlock(&g_mu);
+    if (ratio > 0.0f && (was < 0.0f || was != ratio) && atomic_load(&g_gate) == 1)
+        banner_log(TAG, "the display's highest HDR/SDR ratio is %.2f%s", ratio,
+                   ratio <= 1.01f ? " - it reports no HDR boost at all: no app can raise HDR highlights above SDR white here"
+                                  : " (the most HDR headroom it can give)");
+}
+
+float banner_color_screen_headroom(char *why, size_t n) {
+    const int64_t t = atomic_load(&g_screen_hr_ns);
+    if (!t || now_ns() - t > 1500000000LL) { if (why && n) why[0] = 0; return 0.0f; }
+    if (why && n) {
+        pthread_mutex_lock(&g_mu);
+        snprintf(why, n, "%s", g_screen_hr_why);
+        pthread_mutex_unlock(&g_mu);
+    }
+    return atomic_load(&g_screen_hr_x1000) / 1000.0f;
 }
 
 int banner_color_last_frame_age_ms(void) {
@@ -255,9 +333,10 @@ static void verdict_locked(char *out, size_t size) {
         char frames[340];
         snprintf(frames, sizeof(frames), "%llu frames of %s shown as BT2020_PQ (%s)",
                  (unsigned long long)g_hdr.layer_frames, who, paths);
-        char env[128] = "", causes[160] = "";
+        char env[128] = "", causes[256] = "";
         if (g_env.known) env_text_locked(env, sizeof(env));
-        if (g_hdr.nohead_said) nohead_causes_locked(causes, sizeof(causes));
+        /* Brief: the verdict has to fit one log line with everything else in it. */
+        if (g_hdr.nohead_said) nohead_causes_locked(causes, sizeof(causes), 1);
         /* Only readings taken while HDR frames were on screen count: the ratio says what the display did
          * with THEM, not with whatever else was up at another moment. And the share of that time with any
          * headroom, plus where it stands now: a ratio that rose once and then fell to 1.00 for minutes is
@@ -271,14 +350,21 @@ static void verdict_locked(char *out, size_t size) {
                      (long long)(g_hdr.headroom_ns / 1000000000LL), live_s, g_hdr.ratio_last,
                      g_hdr.nohead_said ? " - no headroom now: " : "", g_hdr.nohead_said ? causes : "",
                      env[0] ? " [" : "", env, env[0] ? "]" : "");
+        /* The display's own ceiling (Android 16+) and what was asked for, where known. */
+        char ceil[80] = "", req[48] = "";
+        if (g_req.highest_ratio > 0.0f) snprintf(ceil, sizeof(ceil), ", highest possible %.2f", g_req.highest_ratio);
+        if (g_env.requested > 0.0f) snprintf(req, sizeof(req), ", %.1fx requested", g_env.requested);
+        else if (g_env.requested < 0.0f) snprintf(req, sizeof(req), ", no request possible below Android 15");
         if (g_hdr.ratio_live_n && g_hdr.ratio_live_max > 1.01f)
             snprintf(out, size, "yes - %s; the display's HDR/SDR ratio rose to %.2f while they were on screen "
-                     "(1.00 = SDR only)%s", frames, g_hdr.ratio_live_max, share);
+                     "(1.00 = SDR only%s%s)%s", frames, g_hdr.ratio_live_max, g_hdr.nohead_said ? "" : ceil,
+                     g_hdr.nohead_said ? "" : req, share);
         else if (g_hdr.ratio_live_n)
             snprintf(out, size, "tagged but NOT confirmed - %s, but the display's HDR/SDR ratio stayed at %.2f while they "
-                     "were on screen: Android gave them no HDR headroom (brightness at maximum? a screen recording? heat? "
-                     "HDR off for this display?)%s%s%s", frames, g_hdr.ratio_live_max,
-                     env[0] ? " [" : "", env, env[0] ? "]" : "");
+                     "were on screen (%s%s%s): Android gave them no HDR headroom - %s%s%s%s", frames,
+                     g_hdr.ratio_live_max, g_req.highest_ratio > 0.0f ? "" : "highest ratio not reported",
+                     ceil[0] ? ceil + 2 : "", g_hdr.nohead_said ? "" : req, g_hdr.nohead_said ? causes : "brightness at maximum (manual)? a "
+                     "screen recording? heat? HDR off for this display?", env[0] ? " [" : "", env, env[0] ? "]" : "");
         else if (g_hdr.ratio_n)
             snprintf(out, size, "tagged, not measured - %s, but no HDR/SDR ratio reading was taken while they were on "
                      "screen (highest reading otherwise %.2f)", frames, g_hdr.ratio_max);
@@ -345,6 +431,7 @@ void banner_color_frame_shown(const struct banner_color *c, int path, uint32_t a
     case BANNER_HDR_SWAPCHAIN:
         g_hdr.swapchain++; g_hdr.win_swapchain++;
         snprintf(g_hdr.layer_fmt, sizeof(g_hdr.layer_fmt), "HDR10 swapchain");
+        atomic_store(&g_screen_hr_ns, now_ns());
         break;
     default: /* BANNER_HDR_TONEMAPPED: shown, but not as HDR */
         g_hdr.tonemapped++; g_hdr.win_tonemapped++;
@@ -357,6 +444,22 @@ void banner_color_frame_shown(const struct banner_color *c, int path, uint32_t a
     g_hdr.win_layer++;
     pthread_mutex_unlock(&g_mu);
     atomic_store(&g_last_frame_ns, now_ns());
+    if (path == BANNER_HDR_SWAPCHAIN) {
+        /* The screen surface's headroom request (the app applies it): worked out again when the
+         * description changes, else once a second. */
+        static uint32_t ident;
+        static int64_t calc_ns;
+        const int64_t t = now_ns();
+        if (c->identity != ident || t - calc_ns > 1000000000LL) {
+            char why[200];
+            const float r = banner_color_desired_headroom(c, why, sizeof(why));
+            ident = c->identity; calc_ns = t;
+            pthread_mutex_lock(&g_mu);
+            snprintf(g_screen_hr_why, sizeof(g_screen_hr_why), "%s", why);
+            pthread_mutex_unlock(&g_mu);
+            atomic_store(&g_screen_hr_x1000, (int)(r * 1000.0f + 0.5f));
+        }
+    }
     if (first8)
         banner_log(TAG, "HDR frames are reaching the display layer through the compositor's 8-bit layer copy (the game's "
                    "buffer is not a gralloc buffer this frame): colours stay correct (the frame keeps its BT2020_PQ tag), "
@@ -385,7 +488,7 @@ void banner_color_ratio_sample(float ratio, int listener) {
     int live = age >= 0 && age < 1500;
     int log_it = 0, periodic = 0, nohead_now = 0, head_back = 0;
     float was;
-    char env[128] = "", causes[160] = "";
+    char env[128] = "", causes[256] = "";
     pthread_mutex_lock(&g_mu);
     was = g_hdr.ratio_logged;
     if (ratio > 0.0f) {
@@ -426,14 +529,14 @@ void banner_color_ratio_sample(float ratio, int listener) {
         if (log_it) { g_hdr.ratio_logged = ratio; g_hdr.ratio_logged_ns = t; g_hdr.ratio_periodic_ns = t; }
         if (nohead_now || (periodic && live && ratio <= 1.01f)) {
             env_text_locked(env, sizeof(env));
-            nohead_causes_locked(causes, sizeof(causes));
+            nohead_causes_locked(causes, sizeof(causes), 0);
         }
     }
     pthread_mutex_unlock(&g_mu);
     if (nohead_now)
         banner_log(TAG, "no HDR headroom for 5 s while HDR frames are on screen (display HDR/SDR ratio %.2f): %s - Android "
-                   "drops HDR headroom while the screen is recorded, when the device is hot, and perhaps at maximum "
-                   "brightness; HDR highlights look no brighter until that ends [%s]", ratio, causes, env);
+                   "drops HDR headroom while the screen is recorded and when the device is hot, and some phones never "
+                   "boost HDR for apps; HDR highlights look no brighter until that ends [%s]", ratio, causes, env);
     if (head_back)
         banner_log(TAG, "HDR headroom is back: display HDR/SDR ratio %.2f with HDR frames on screen", ratio);
     if (!log_it) return;
@@ -459,9 +562,9 @@ void banner_color_stats_tick(void) {
     pthread_mutex_lock(&g_mu);
     any = g_hdr.win_layer || g_hdr.win_copy || g_hdr.win_tonemapped; /* the ratio alone is logged when it moves */
     if (any) {
-        char ratio[256] = "no HDR/SDR ratio reading", env[128] = "", causes[160] = "";
+        char ratio[256] = "no HDR/SDR ratio reading", env[128] = "", causes[256] = "";
         if (g_env.known) env_text_locked(env, sizeof(env));
-        if (g_hdr.nohead_said) nohead_causes_locked(causes, sizeof(causes));
+        if (g_hdr.nohead_said) nohead_causes_locked(causes, sizeof(causes), 1);
         if (g_hdr.win_ratio_n)
             snprintf(ratio, sizeof(ratio), "display HDR/SDR ratio %.2f-%.2f (now %.2f)%s%s", g_hdr.win_ratio_min,
                      g_hdr.win_ratio_max, g_hdr.ratio_last, g_hdr.nohead_said ? " - NO headroom: " : "",

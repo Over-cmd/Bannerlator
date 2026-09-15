@@ -12,6 +12,7 @@
 #include <android/rect.h>
 #include <dlfcn.h>
 #include <errno.h>
+#include <math.h>
 #include <poll.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -76,11 +77,11 @@ static struct {
     /* Not in the public NDK headers (vndk/hardware_buffer.h) but exported by libnativewindow.so on
      * every device; Mesa's Android WSI calls it for every gralloc buffer it imports. */
     const void *(*getNativeHandle)(const AHardwareBuffer *);
+    /* API 35: the HDR headroom this layer asks the display for (0 = no preference). Round 2e asks
+     * explicitly for every PQ layer - some phones only boost HDR when a layer asks. */
+    void (*setDesiredHdrHeadroom)(ASurfaceTransaction *, ASurfaceControl *, float);
     int state; /* 0 = untried, 1 = loaded, -1 = unavailable */
 } api;
-/* Only looked up for the log line (API 35): the PQ layer's headroom is left at the default (as much
- * as the display allows), so nothing calls it. */
-static int g_has_desired_headroom;
 
 #define ASC_VISIBILITY_HIDE 0
 #define ASC_VISIBILITY_SHOW 1
@@ -118,7 +119,7 @@ static int load_api(void) {
     SYM(setBufferDataSpace, "ASurfaceTransaction_setBufferDataSpace");
     SYM(setHdrMetadata_smpte2086, "ASurfaceTransaction_setHdrMetadata_smpte2086");
     SYM(setHdrMetadata_cta861_3, "ASurfaceTransaction_setHdrMetadata_cta861_3");
-    g_has_desired_headroom = dlsym(lib, "ASurfaceTransaction_setDesiredHdrHeadroom") != NULL;
+    SYM(setDesiredHdrHeadroom, "ASurfaceTransaction_setDesiredHdrHeadroom");
 #undef SYM
     if (!api.createFromWindow || !api.release || !api.txCreate || !api.txDelete || !api.txApply ||
         !api.setBuffer || !api.setZOrder || !api.setVisibility || !api.setGeometry ||
@@ -185,10 +186,12 @@ struct layer {
     int32_t ds_applied;         /* dataspace the live SurfaceControl carries; -1 = never set on it
                                  * (untouched, today's UNKNOWN), see apply_colour */
     uint32_t md_applied;        /* identity of the image description whose metadata it carries, 0 = none */
+    float hr_applied;           /* desired HDR headroom the live SurfaceControl carries; < 0 = never set */
 };
 
 static struct layer g_layers[SC_LAYER_COUNT];
 static void apply_frame_rate(ASurfaceTransaction *tx, struct layer *l);
+static void coverage_text(const struct layer *l, char *out, size_t n);
 static int g_layers_ready;
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER; /* pools + callback state */
 static int g_pending_cb;                                   /* OnComplete callbacks not yet delivered */
@@ -202,11 +205,11 @@ static void layers_init(void) {
     if (g_layers_ready) return;
     g_layers_ready = 1;
     g_layers[SC_LAYER_GAME] = (struct layer){.name = "banner_wayland_game", .z = 1, .pool_n = 3,
-                                             .cur_slot = -1, .votes_rate = 1, .fps_applied = -1.0f,
+                                             .cur_slot = -1, .votes_rate = 1, .fps_applied = -1.0f, .hr_applied = -1.0f,
                                              .ds_applied = -1};
     g_layers[SC_LAYER_OVERLAY] = (struct layer){.name = "banner_wayland_overlay", .z = 2, .pool_n = 3,
                                                 .cur_slot = -1, .votes_rate = 0, .fps_applied = -1.0f,
-                                                .ds_applied = -1};
+                                                .hr_applied = -1.0f, .ds_applied = -1};
     for (int i = 0; i < SC_LAYER_COUNT; i++)
         for (int j = 0; j < POOL_MAX; j++) g_layers[i].slots[j].release_fd = -1;
 }
@@ -322,7 +325,7 @@ static void retire_sc(struct layer *l) {
     l->shown = 0; l->cur_slot = -1; l->cur_token = NULL; l->geo_valid = 0;
     l->fps_applied = -1.0f; /* the next SurfaceControl carries no vote until it is re-applied */
     l->recreate_pending = 0; /* a fresh SurfaceControl is coming anyway */
-    l->ds_applied = -1; l->md_applied = 0; /* ...and no colour tag either */
+    l->ds_applied = -1; l->md_applied = 0; l->hr_applied = -1.0f; /* ...and no colour tag either */
 }
 
 /* Wait (bounded) for SurfaceFlinger to finish with every pool buffer of every layer, then free
@@ -474,7 +477,7 @@ static int ensure_sc(struct layer *l) {
         l->sc = api.createFromWindow(win, l->name);
         if (!l->sc) { banner_log("error", "layer: ASurfaceControl_createFromWindow(%s) failed", l->name); return -1; }
         l->win = win;
-        l->ds_applied = -1; l->md_applied = 0;
+        l->ds_applied = -1; l->md_applied = 0; l->hr_applied = -1.0f;
         ASurfaceTransaction *tx = api.txCreate();
         if (tx) {
             api.setZOrder(tx, l->sc, l->z);
@@ -506,8 +509,10 @@ static void apply_geometry(ASurfaceTransaction *tx, struct layer *l, const int r
     if (!l->geo_valid || memcmp(&srcR, &l->geo_src, sizeof(srcR)) || memcmp(&dstR, &l->geo_dst, sizeof(dstR))) {
         api.setGeometry(tx, l->sc, &srcR, &dstR, 0 /* no transform: the DPU scales, never rotates */);
         l->geo_src = srcR; l->geo_dst = dstR; l->geo_valid = 1;
-        banner_log("layer", "%s geometry: buffer %d,%d-%d,%d -> screen %d,%d-%d,%d", l->name,
-                   r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]);
+        char cov[96] = "";
+        if (l->ds_applied > 0) coverage_text(l, cov, sizeof(cov));
+        banner_log("layer", "%s geometry: buffer %d,%d-%d,%d -> screen %d,%d-%d,%d%s%s%s", l->name,
+                   r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], cov[0] ? " (HDR layer " : "", cov, cov[0] ? ")" : "");
     }
 }
 
@@ -536,11 +541,55 @@ static void apply_frame_rate(ASurfaceTransaction *tx, struct layer *l) {
  * the game's mastering / content-light metadata — in the same transaction as the buffer, so the
  * display never shows an HDR frame decoded as sRGB or the other way round. A layer that has never been
  * tagged is never touched: sessions without an HDR description make no colour call at all. */
+/* How much of the screen the layer's picture covers ("covers 80% of the screen (1920x1080 of 2400x1080)"):
+ * some phones only switch to HDR for an HDR layer above a minimum area. Empty when unknown. */
+static void coverage_text(const struct layer *l, char *out, size_t n) {
+    int ow = 0, oh = 0;
+    vkp_output_size(&ow, &oh);
+    if (!l->geo_valid || ow <= 0 || oh <= 0) { if (n) out[0] = 0; return; }
+    int w = l->geo_dst.right - l->geo_dst.left, h = l->geo_dst.bottom - l->geo_dst.top;
+    if (w < 0) w = 0;
+    if (h < 0) h = 0;
+    const double pct = 100.0 * ((double)w * h) / ((double)ow * oh);
+    snprintf(out, n, "covers %.0f%% of the screen (%dx%d of %dx%d)", pct > 100.0 ? 100.0 : pct, w, h, ow, oh);
+}
+
+/* API 35: ask the display for HDR headroom explicitly while the layer carries an HDR frame, and clear the
+ * request (0 = no preference) when it stops. Only on change; a layer never tagged is never touched. */
+static void apply_headroom(ASurfaceTransaction *tx, struct layer *l, const struct banner_color *c) {
+    static int said_missing;
+    if (!api.setDesiredHdrHeadroom) {
+        if (c && c->dataspace && !said_missing) {
+            said_missing = 1;
+            banner_color_note_headroom_request(-1.0f);
+            banner_log("color", "HDR headroom request not available on %s (Android < 15 has no "
+                       "ASurfaceTransaction_setDesiredHdrHeadroom): the layer relies on Android's default", l->name);
+        }
+        return;
+    }
+    const float want = (c && c->dataspace) ? banner_color_desired_headroom(c, NULL, 0) : 0.0f;
+    if (l->hr_applied < 0.0f && want == 0.0f && !(c && c->dataspace)) return; /* never asked: leave it be */
+    if (l->hr_applied >= 0.0f && fabsf(want - l->hr_applied) < 0.005f) return;
+    char why[200] = "";
+    if (c && c->dataspace) banner_color_desired_headroom(c, why, sizeof(why));
+    api.setDesiredHdrHeadroom(tx, l->sc, want);
+    const int first = l->hr_applied < 0.0f;
+    l->hr_applied = want;
+    banner_color_note_headroom_request(want);
+    if (want > 0.0f)
+        banner_log("color", "requested HDR headroom %.1fx on %s (%s)", want, l->name, why);
+    else if (c && c->dataspace)
+        banner_log("color", "no HDR headroom requested on %s: %s", l->name, why);
+    else if (!first)
+        banner_log("color", "HDR headroom request on %s cleared (no preference): the frame on the layer is not HDR", l->name);
+}
+
 static void apply_colour(ASurfaceTransaction *tx, struct layer *l, const struct banner_color *c) {
     int32_t want = c ? c->dataspace : BANNER_ADATASPACE_UNKNOWN;
     uint32_t md = (c && c->dataspace) ? c->identity : 0;
     if (!api.setBufferDataSpace) return;
     if (l->ds_applied < 0 && want == BANNER_ADATASPACE_UNKNOWN) return;   /* never tagged: leave it be */
+    apply_headroom(tx, l, want ? c : NULL);
     if (want == l->ds_applied && md == l->md_applied) return;
     api.setBufferDataSpace(tx, l->sc, want);
     struct banner_hdr_smpte2086 st;
@@ -556,13 +605,16 @@ static void apply_colour(ASurfaceTransaction *tx, struct layer *l, const struct 
     /* NULL clears what a previous description set: metadata never outlives the frame it belongs to. */
     if (api.setHdrMetadata_smpte2086) api.setHdrMetadata_smpte2086(tx, l->sc, st_on ? &st : NULL);
     if (api.setHdrMetadata_cta861_3) api.setHdrMetadata_cta861_3(tx, l->sc, cta_on ? &cta : NULL);
-    if (want)
-        banner_log("color", "%s: dataspace %s (%#x) set on the display layer for image description #%u; SMPTE 2086 "
+    if (want) {
+        char cov[96];
+        coverage_text(l, cov, sizeof(cov));
+        banner_log("color", "%s: dataspace %s (%#x) set on the display layer for image description #%u%s%s; SMPTE 2086 "
                    "%s, CTA-861.3 %s [%s]", l->name, want == BANNER_ADATASPACE_BT2020_PQ ? "BT2020_PQ" : "HDR",
-                   (unsigned)want, c->identity,
+                   (unsigned)want, c->identity, cov[0] ? ", " : "", cov,
                    st_on ? (api.setHdrMetadata_smpte2086 ? "sent" : "not supported by this Android") : "none given",
                    cta_on ? (api.setHdrMetadata_cta861_3 ? "sent" : "not supported by this Android") : "none given",
                    c->text);
+    }
     else
         banner_log("color", "%s: dataspace back to UNKNOWN (sRGB), HDR metadata cleared - the frame on the layer is "
                    "not an HDR frame", l->name);
@@ -577,7 +629,7 @@ void sc_layer_hdr_symbols(char *out, size_t size) {
     snprintf(out, size, "setBufferDataSpace %s, setHdrMetadata_smpte2086 %s, setHdrMetadata_cta861_3 %s, "
              "setDesiredHdrHeadroom %s", api.setBufferDataSpace ? "yes" : "NO",
              api.setHdrMetadata_smpte2086 ? "yes" : "no", api.setHdrMetadata_cta861_3 ? "yes" : "no",
-             g_has_desired_headroom ? "yes (left at the default: all the headroom the display allows)" : "no");
+             api.setDesiredHdrHeadroom ? "yes (asked for per HDR frame: content peak / SDR white)" : "no (Android < 15)");
 }
 
 /* Once, when a second layer first goes up: HWC only composes a few layers before SurfaceFlinger
@@ -633,7 +685,7 @@ static ASurfaceControl *swap_sc_begin(struct layer *l) {
     l->shown = 0;
     l->geo_valid = 0;
     l->fps_applied = -1.0f;
-    l->ds_applied = -1; l->md_applied = 0;
+    l->ds_applied = -1; l->md_applied = 0; l->hr_applied = -1.0f;
     banner_log("layer", "composition recovery: %s got a fresh SurfaceControl now that nothing is above "
                "the game (measured on this panel: hardware composition does NOT return from this alone)", l->name);
     return old;
@@ -716,7 +768,7 @@ int sc_layer_present_ahb(AHardwareBuffer *ahb, int w, int h, int acquire_fd, voi
                         l->cur_token == token ? NULL : l->cur_token, old ? 1 : 0) != 0) {
         api.txDelete(tx); /* the fence went with the transaction */
         if (old) api.release(old);
-        l->ds_applied = -1; l->md_applied = 0; /* the colour tag went with it too: re-send it next time */
+        l->ds_applied = -1; l->md_applied = 0; l->hr_applied = -1.0f; /* the colour tag went with it too: re-send it next time */
         return -1;
     }
     api.txApply(tx);
@@ -819,11 +871,15 @@ int sc_layer_present_hdr_scene(const struct vkp_draw *draws, int n, const struct
             banner_log("color", "tone-mapped picture on the game's display layer: %dx%d, %s 8-bit buffers, untagged "
                        "(sRGB) - HDR output is switched off", rw, rh,
                        l->pool_modifier == MOD_QCOM_COMPRESSED ? "UBWC" : "linear");
-        else
-            banner_log("color", "HDR picture on its own display layer: %dx%d, %s %s buffers, tagged %s", rw, rh,
+        else {
+            char cov[96];
+            coverage_text(l, cov, sizeof(cov));
+            banner_log("color", "HDR picture on its own display layer: %dx%d, %s %s buffers, tagged %s%s%s", rw, rh,
                        l->pool_modifier == MOD_QCOM_COMPRESSED ? "UBWC" : "linear",
                        g_hdr_pool_fmt == AHB_RGB10A2 ? "10-bit" : "8-bit",
-                       color && color->dataspace == BANNER_ADATASPACE_BT2020_PQ ? "BT2020_PQ" : "HDR");
+                       color && color->dataspace == BANNER_ADATASPACE_BT2020_PQ ? "BT2020_PQ" : "HDR",
+                       cov[0] ? ", " : "", cov);
+        }
     }
     if (!l->first_logged) { l->first_logged = 1; vkp_signal_first_frame(); }
     return 0;

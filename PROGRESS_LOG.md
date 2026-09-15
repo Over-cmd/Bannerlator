@@ -1,5 +1,10 @@
 # Star-Compose — Progress Log
 
+## 2026-09-15 — 🌈 **Wayland HDR round 2e: ask for HDR headroom explicitly (layer + screen surface), log the display's ceiling and the HDR layer's screen coverage, fix the no-headroom cause wording** (`feat/wayland-hdr`, on `527fa8f0`; CI only)
+
+> **2d results (lead):** the user's Fold passed everything (68 surface pairs → HDR10 swapchain A2B10G10R10, FG in FP16 at 120 fps with 600 HDR10-swapchain frames / 10 s and 0 tone-mapped, zero-copy 599 / 10 s, VK_EXT_hdr_metadata, headroom 3.00 steady, thermal NONE, brightness 255/255 auto still 3.00). A tester's ASUS ROG Phone 9 Pro (Adreno 830, API 36): HDR frames correct but the HDR/SDR ratio stayed 1.00 all session (not hot, not recording, brightness 8-223 manual, composed path, layer ~80% of 2400x1080, card windowed).
+> **Built:** `setDesiredHdrHeadroom` on the game layer (NDK, API 35) and on the SurfaceView for the HDR10 swapchain path (API 35, reflection) — content peak / 203 capped at the display's highest ratio, cleared when HDR stops, logged once per change; `Display.getHighestHdrSdrRatio()` (Android 16+, reflection) in the first display line and the verdict; the HDR layer's coverage %; "brightness at maximum" only for manual ≥ 250, else "this phone may not boost HDR from apps (asked …, highest ratio …)". Tester note: "Round 2e" (ROG: AIO card fullscreen, HDR10 vs SDR, 400/600/1000 vs 203 patches; Fold: 1-minute regression). `HDR_RECON.md` §11.7.
+
 ## 2026-09-15 — 🌈 **Wayland HDR round 2d: every surface format scanned (the "no HDR10 swapchain" was a 32-entry array), HDR10 swapchain metadata, FP16 frame generation for HDR, thermal/brightness/recording evidence beside the headroom** (`feat/wayland-hdr`, on the lead's `be2f4501`; CI only)
 
 > **Fold evidence (2c, lead):** the AIO HDR card held headroom 3.61; God of War fell to 1.00 within 30 s with fps 47 → 13 and GPU 95 % (heat/load, unprovable from the log). Test E (FG 2× on the card) logged `lists no HDR10 swapchain format (37/0 37/1000104001 … 37/1000104012)` and tone-mapped; the HUD read `HDR tone-mapped` correctly.
