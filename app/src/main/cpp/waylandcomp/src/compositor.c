@@ -50,6 +50,7 @@
 #include <pthread.h>
 #include "effects_chain.h"
 #include "banner_ext.h"
+#include "banner_color.h"
 
 #define WLOGI(...) __android_log_print(ANDROID_LOG_INFO, "BannerWayland", __VA_ARGS__)
 #define WLOGE(...) __android_log_print(ANDROID_LOG_ERROR, "BannerWayland", __VA_ARGS__)
@@ -181,6 +182,7 @@ static const char *client_name(struct wl_client *client) {
 static void on_client_destroyed(struct wl_listener *l, void *data) {
     struct client_info *ci = wl_container_of(l, ci, destroy), **pp;
     banner_log("program", "disconnected: %s (pid %d)", ci->name, (int)ci->pid);
+    banner_color_client_gone(ci->client); /* HDR summary for a program that presented HDR (gate open only) */
     for (pp = &g_clients; *pp; pp = &(*pp)->next)
         if (*pp == ci) { *pp = ci->next; break; }
     free(ci);
@@ -268,6 +270,7 @@ struct surface {
 
     char *title;                            /* xdg_toplevel title, for the session log */
     int announced_vulkan;                   /* logged its first dmabuf frame */
+    uint32_t hdr_fmt_logged;                /* HDR session: the buffer format last named in the log */
 };
 
 static struct wl_list g_surfaces;           /* every surface */
@@ -691,6 +694,22 @@ static void take_dmabuf(struct surface *s, struct dmabuf_buffer *b, struct wl_re
             banner_on_game_surface(name, vkp_gpu_name());
         }
     }
+    /* HDR session (gate open): a DXVK game switches to HDR by REBUILDING its swapchain on the same
+     * surface, so the one-shot line above never sees the 10-bit buffers - name every format change. */
+    if (b->format != s->hdr_fmt_logged && banner_color_hdr_open()) {
+        char name[160];
+        uint32_t af = ahb_swapchain_ahb_format(b);
+        int ten = b->format == FOURCC('A', 'B', '3', '0') || b->format == FOURCC('X', 'B', '3', '0');
+        describe(s, name, sizeof(name));
+        banner_log("color", "%s presents %dx%d buffers in %c%c%c%c (%s), %s%s%s; %s", name, b->width, b->height,
+                   b->format & 0xff, (b->format >> 8) & 0xff, (b->format >> 16) & 0xff, (b->format >> 24) & 0xff,
+                   ten ? "10-bit A2B10G10R10" : "8-bit", vkp_modifier_name(b->modifier),
+                   af ? ", gralloc " : ", no gralloc buffer (copy path only)", af ? banner_ahb_format_name(af) : "",
+                   b->img ? "the compositor imported it"
+                          : af ? "the compositor's driver could NOT import it (display layer only, fullscreen)"
+                               : "the compositor's driver could NOT import it (nothing can show it)");
+        s->hdr_fmt_logged = b->format;
+    }
     if (s == g_hud_surface && (b->img || ahb_swapchain_has_ahb(b))) banner_on_game_frame();
 }
 
@@ -706,6 +725,9 @@ void banner_release_buffer(struct surface *s, struct wl_resource *buffer, int pa
     else wl_buffer_send_release(buffer);
 }
 void banner_surface_describe(const struct surface *s, char *out, size_t size) { describe(s, out, size); }
+const struct banner_color *banner_surface_color(const struct surface *s) {
+    return s ? banner_color_of(s->resource) : NULL;
+}
 
 /* ------------------------------------------------------------------ wl_surface */
 
@@ -849,6 +871,7 @@ static void surface_commit(struct wl_client *c, struct wl_resource *r) {
     wl_list_insert_list(s->feedback.prev, &s->pending_feedback);
     wl_list_init(&s->pending_feedback);
     constraints_surface_commit(s);
+    banner_color_commit(s->resource); /* wp_color_management_surface_v1 state (returns at once when HDR is off) */
 
     if (s->role == ROLE_TOPLEVEL && s->xdg_toplevel) {
         if (s->has_content) map_toplevel(s);
@@ -1367,18 +1390,28 @@ static const struct zwp_linux_dmabuf_v1_interface dmabuf_impl = {
 /* The advertised format/modifier table, built at the first bind from what the renderer's driver
  * can import (vkp_dmabuf_modifiers). INVALID is always offered too (Mesa drops it; other clients
  * may use it for the implicit path). Without a renderer the list is LINEAR + INVALID, as before. */
-#define DMABUF_NFMT 4
+/* The last two rows are HDR10's (banner_color.h): A2B10G10R10 as AB30 (alpha) + XB30 (opaque) - Mesa
+ * lists a VkFormat only when both are advertised, and it is the one 10-bit layout our zero-copy WSI
+ * can put in a gralloc buffer (AHARDWAREBUFFER_FORMAT_R10G10B10A2_UNORM). They are advertised ONLY
+ * while the HDR gate is open, and after the 8-bit rows, so every other session - and every client that
+ * takes the first format it sees - gets exactly the table it always had. */
+#define DMABUF_NFMT_MAX 6
+#define DMABUF_NFMT_SDR 4
 #define DMABUF_NMOD 4
-static struct { uint32_t fmt; uint64_t mods[DMABUF_NMOD]; int n; } g_dmabuf_fmts[DMABUF_NFMT] = {
-    {DRM_ARGB8888}, {DRM_XRGB8888}, {DRM_ABGR8888}, {DRM_XBGR8888}};
+#define DRM_ABGR2101010 FOURCC('A', 'B', '3', '0')
+#define DRM_XBGR2101010 FOURCC('X', 'B', '3', '0')
+static struct { uint32_t fmt; uint64_t mods[DMABUF_NMOD]; int n; } g_dmabuf_fmts[DMABUF_NFMT_MAX] = {
+    {DRM_ARGB8888}, {DRM_XRGB8888}, {DRM_ABGR8888}, {DRM_XBGR8888}, {DRM_ABGR2101010}, {DRM_XBGR2101010}};
+static int g_dmabuf_nfmt = DMABUF_NFMT_SDR;   /* rows advertised: the SDR four, + 2 with the HDR gate open */
 static int g_dmabuf_fmts_ready;
 static void dmabuf_build_feedback(void);
 
 static void dmabuf_build_formats(void) {
-    char line[256];
+    char line[320];
     int pos = 0, compressed = 0;
     g_dmabuf_fmts_ready = 1;
-    for (int f = 0; f < DMABUF_NFMT; f++) {
+    g_dmabuf_nfmt = banner_color_hdr_open() ? DMABUF_NFMT_MAX : DMABUF_NFMT_SDR;
+    for (int f = 0; f < g_dmabuf_nfmt; f++) {
         uint64_t got[DMABUF_NMOD];
         int n = vkp_dmabuf_modifiers(g_dmabuf_fmts[f].fmt, got, DMABUF_NMOD), k = 0;
         /* LINEAR first: it is the layout every client and the shm fallback agree on, and the one
@@ -1405,6 +1438,17 @@ static void dmabuf_build_formats(void) {
     if (g_ubwc && !compressed)
         banner_log("dmabuf", "the compositor's driver (%s) reports no importable qcom_compressed layout: "
                    "game swapchains stay linear", vkp_gpu_name());
+    if (g_dmabuf_nfmt > DMABUF_NFMT_SDR) {
+        /* The rows above always carry LINEAR; say what the compositor's own driver can really import
+         * for 10-bit, since a gralloc buffer it cannot import is shown on the display layer only. */
+        uint64_t got[DMABUF_NMOD];
+        int n = vkp_dmabuf_modifiers(DRM_XBGR2101010, got, DMABUF_NMOD), ubwc10 = 0;
+        for (int i = 0; i < n; i++) if (got[i] == VKP_MOD_QCOM_COMPRESSED) ubwc10 = 1;
+        banner_log("color", "10-bit dma-buf formats AB30/XB30 advertised for HDR10; the compositor's driver (%s) "
+                   "imports XB30 %s", vkp_gpu_name(),
+                   n == 0 ? "with no layout it reports (copy path unlikely; display layer only)"
+                          : ubwc10 ? "linear and UBWC" : "linear only (UBWC 10-bit frames: display layer only)");
+    }
     dmabuf_build_feedback();
 }
 
@@ -1457,11 +1501,11 @@ static dev_t dmabuf_render_node(void) {
 }
 
 static void dmabuf_build_feedback(void) {
-    struct dmabuf_fmt_entry entries[DMABUF_NFMT * DMABUF_NMOD];
+    struct dmabuf_fmt_entry entries[DMABUF_NFMT_MAX * DMABUF_NMOD];
     int n = 0;
 
     g_main_device = dmabuf_render_node();
-    for (int f = 0; f < DMABUF_NFMT; f++)
+    for (int f = 0; f < g_dmabuf_nfmt; f++)
         for (int m = 0; m < g_dmabuf_fmts[f].n; m++) {
             if (g_dmabuf_fmts[f].mods[m] == MOD_INVALID) continue; /* never offer INVALID here */
             entries[n].format = g_dmabuf_fmts[f].fmt;
@@ -1557,7 +1601,7 @@ static void bind_dmabuf(struct wl_client *c, void *data, uint32_t ver, uint32_t 
     /* From version 4 the format and modifier events are gone: the client asks for feedback
      * instead, and sending both would only confuse it about which list is authoritative. */
     if (ver >= 4) return;
-    for (int f = 0; f < DMABUF_NFMT; f++) {
+    for (int f = 0; f < g_dmabuf_nfmt; f++) {
         zwp_linux_dmabuf_v1_send_format(r, g_dmabuf_fmts[f].fmt);
         if (ver >= 3)
             for (int m = 0; m < g_dmabuf_fmts[f].n; m++)
@@ -1593,12 +1637,38 @@ static struct vkp_image *surface_image(struct surface *s) {
     return s->dmabuf_buf ? s->dmabuf_buf->img : NULL;
 }
 
+/* HDR (gate open) only: the scene's HDR surface whose current frame is one of the game's gralloc buffers
+ * that the compositor's own driver could NOT import (a 10-bit UBWC layout it does not take, say). Such a
+ * frame has no draw, so neither layer_candidate() nor ahb_layer_only_candidate() (toplevels only) can
+ * find it - and a Vulkan game's swapchain is a SUBSURFACE of its window. Remembered here while the scene
+ * is built so it can still go on the display layer, which never needed the import. Reset per scene;
+ * never set while the HDR gate is closed. */
+static struct surface *g_hdr_unimported;
+static int g_hdr_unimported_rect[4], g_hdr_unimported_below; /* scene x,y,w,h; draws under it */
+
+static void note_hdr_unimported(const struct draw_list *dl, struct surface *s, int ox, int oy) {
+    if (!s->dmabuf_buf || s->dmabuf_buf->img || !ahb_swapchain_has_ahb(s->dmabuf_buf)) return;
+    const struct banner_color *c = banner_color_of(s->resource);
+    if (!c || !c->dataspace) return;
+    if (s->src_set && (s->src[0] != 0 || s->src[1] != 0 || (int)(s->src[2] + 0.5f) != s->buf_w ||
+                       (int)(s->src[3] + 0.5f) != s->buf_h)) return; /* cropped: the layer shows whole buffers */
+    int dw, dh;
+    surface_size(s, &dw, &dh);
+    g_hdr_unimported = s;
+    g_hdr_unimported_rect[0] = ox; g_hdr_unimported_rect[1] = oy;
+    g_hdr_unimported_rect[2] = dw; g_hdr_unimported_rect[3] = dh;
+    g_hdr_unimported_below = dl->n;
+}
+
 static void add_surface(struct draw_list *dl, struct surface *s, int ox, int oy) {
     struct vkp_image *img = surface_image(s);
     float sx = 0, sy = 0, sw = (float)s->buf_w, sh = (float)s->buf_h;
     int dw, dh;
 
-    if (!img) return;
+    if (!img) {
+        if (g_zero_copy && banner_color_hdr_open()) note_hdr_unimported(dl, s, ox, oy);
+        return;
+    }
     if (s->src_set) { sx = s->src[0]; sy = s->src[1]; sw = s->src[2]; sh = s->src[3]; }
     surface_size(s, &dw, &dh);
     if (dw <= 0 || dh <= 0 || sw <= 0 || sh <= 0) return;
@@ -1714,12 +1784,178 @@ static struct surface *ahb_layer_only_candidate(int scene_w, int scene_h) {
     return s;
 }
 
+/* ---- HDR (banner_color.h) in the scene
+ * An HDR frame is only right on the game's own display layer: everything the compositor draws itself -
+ * the scene blit, the effects chain, frame generation, its swapchain - is 8-bit sRGB, and a PQ-encoded
+ * frame pushed through it as it stands comes out washed out. So a scene with HDR in it takes one of
+ * three routes (hdr_plan):
+ *   0  the HDR game ALONE on its display layer (zero-copy, or one copy) - with at most one SDR window
+ *      above it on the overlay layer where this display can compose that. Best: nothing is converted.
+ *   1  the HDR PICTURE: everything else without frame generation - screen effects on, a window above
+ *      the game on a display that cannot take a second layer, a windowed game, zero-copy off. The whole
+ *      scene is composed into ONE 10-bit PQ BT.2020 picture (SDR content placed at the SDR white; the
+ *      effects run on it in 10-bit) and put on the game layer tagged BT2020_PQ (hdr_compose.h).
+ *   2  frame generation: its extra frames need presents of their own, so the scene is composed into PQ
+ *      and presented through an HDR10 swapchain - or, where the screen surface offers none,
+ *      tone-mapped to SDR (correct colours instead of washed out).
+ *   3  a frame the compositor could not import: only its display layer can show it, so effects and
+ *      frame generation are skipped for it (said in the log).
+ * The drawer's HDR output switch (banner_color_output) OFF: the same routes, tone-mapped - route 0
+ * becomes route 1 (the whole scene composed, tone-mapped to sRGB, onto the game layer UNtagged), route 2
+ * tone-maps into an SDR swapchain, route 3 cannot (nothing can read those frames) and stays HDR, said
+ * in the log. The game is told nothing; it keeps rendering HDR.
+ * Nothing here runs while the HDR gate is closed. */
+
+struct hdr_scene {
+    struct vkp_hdr_frame hf;
+    unsigned char *is_hdr;              /* per draw (calloc'd; free after the frame) */
+    int n_hdr;
+    const struct banner_color *color;   /* the topmost HDR draw's description: what the picture is tagged */
+    struct surface *who;                /* its surface, for the log */
+    const char *why;                    /* route 1: why the game cannot be alone on its layer */
+};
+
+/* The HDR surface note_hdr_unimported() saw in THIS scene, when it covers the whole scene at 0,0 and
+ * nothing is drawn above it: the display layer is the only place its frame can be shown. */
+static struct surface *hdr_unimported_fullscreen(const struct draw_list *dl, int w, int h) {
+    if (!g_hdr_unimported || g_hdr_unimported_below != dl->n) return NULL;
+    if (g_hdr_unimported_rect[0] != 0 || g_hdr_unimported_rect[1] != 0 ||
+        g_hdr_unimported_rect[2] != w || g_hdr_unimported_rect[3] != h) return NULL;
+    return g_hdr_unimported;
+}
+
+static int is_hdr_surface(struct surface *s) {
+    const struct banner_color *c = s ? banner_color_of(s->resource) : NULL;
+    return c && c->dataspace;
+}
+
+/* Which route this scene takes (see above); fills hs. 0 whenever the gate is closed or no HDR is drawn. */
+static int hdr_plan(const struct draw_list *dl, int w, int h, int fx_on, int framegen, struct hdr_scene *hs) {
+    memset(hs, 0, sizeof(*hs));
+    if (!banner_color_hdr_open()) return 0;
+    /* A fullscreen HDR frame this compositor could not import has no draw: layer only (route 3). */
+    struct surface *un = hdr_unimported_fullscreen(dl, w, h);
+    if (!un) {
+        struct surface *lo = ahb_layer_only_candidate(w, h);
+        if (lo && is_hdr_surface(lo)) un = lo;
+    }
+    if (un && g_zero_copy) { hs->color = banner_color_of(un->resource); hs->who = un; return 3; }
+    hs->hf.tonemap = !banner_color_output();
+    if (dl->n <= 0 || !(hs->is_hdr = calloc((size_t)dl->n, 1))) return 0;
+    for (int i = 0; i < dl->n; i++) {
+        struct surface *s = surface_for_image(dl->d[i].img);
+        if (!is_hdr_surface(s)) continue;
+        hs->is_hdr[i] = 1;
+        hs->n_hdr++;
+        hs->color = banner_color_of(s->resource); /* later draws are above: the topmost wins */
+        hs->who = s;
+    }
+    if (!hs->n_hdr) { free(hs->is_hdr); hs->is_hdr = NULL; return 0; }
+    hs->hf.is_hdr = hs->is_hdr;
+    hs->hf.color = hs->color;
+    hs->hf.peak_nits = hs->color->max_cll > 0.0f ? hs->color->max_cll
+                     : hs->color->has_st2086 ? hs->color->max_lum : 1000.0f;
+    if (framegen) return 2;
+    /* Route 0 when the game can be alone on its layer: no effects, zero-copy on, the fullscreen draw
+     * is the HDR game, and above it nothing - or one window the overlay layer can carry. Not while the
+     * HDR output switch is off: its frame as it stands is PQ, and only the composition can tone-map it. */
+    int li = g_zero_copy ? layer_candidate(dl, w, h) : -1;
+    int over = li >= 0 ? dl->n - 1 - li : 0;
+    if (!hs->hf.tonemap && !fx_on && li >= 0 && hs->is_hdr[li] &&
+        (over == 0 || (over == 1 && sc_layer_overlay_affordable())))
+        return 0;
+    hs->why = hs->hf.tonemap ? "HDR output is switched off in the drawer"
+            : fx_on ? "screen effects are on"
+            : !g_zero_copy ? "zero-copy presentation is off"
+            : (li >= 0 && hs->is_hdr[li]) ? "a window is above the game and this display cannot compose a second layer"
+            : "the HDR game is not one fullscreen window";
+    return 1;
+}
+
+/* One line per change of route (and of its reason, and of the HDR output switch). */
+static void hdr_note_route(int route, const struct hdr_scene *hs) {
+    static int said = -1, said_tm = -1;
+    static const char *said_why;
+    const int tm = route != 0 && !banner_color_output(); /* route 0 never runs with the switch off */
+    if (route == said && tm == said_tm && (route != 1 || hs->why == said_why)) return;
+    int was = said;
+    said = route; said_why = hs->why; said_tm = tm;
+    char name[160] = "the HDR game";
+    if (hs->who) describe(hs->who, name, sizeof(name));
+    switch (route) {
+    case 1:
+        if (tm)
+            banner_log("color", "tone-mapped picture for %s: %s - the whole scene is composed and tone-mapped to SDR "
+                       "(HDR peak %.0f nits rolled off to SDR white, screen effects applied after it) on the game's "
+                       "display layer, untagged", name, hs->why ? hs->why : "?", hs->hf.peak_nits);
+        else
+            banner_log("color", "HDR picture for %s: %s - the whole scene is composed into one 10-bit PQ BT.2020 picture "
+                       "(SDR content at %.0f nits, screen effects applied in 10-bit) on the game's display layer, tagged "
+                       "BT2020_PQ", name, hs->why ? hs->why : "?", banner_color_sdr_white());
+        break;
+    case 2:
+        if (tm)
+            banner_log("color", "HDR with frame generation for %s, HDR output switched off: the scene is tone-mapped to "
+                       "SDR and presented through an SDR screen swapchain", name);
+        else
+            banner_log("color", "HDR with frame generation for %s: the scene is composed into PQ and presented through "
+                       "the screen swapchain (HDR10 where the surface offers it, else tone-mapped to SDR)", name);
+        break;
+    case 3:
+        if (tm)
+            banner_log("color", "HDR output is switched off, but %s's HDR frames cannot be imported by the compositor, "
+                       "so nothing can tone-map them: they stay HDR on its own display layer", name);
+        break; /* otherwise hdr_note_precedence says it */
+    default:
+        if (was == 1 || was == 2)
+            banner_log("color", "%s is back on its own display layer (no composition needed)", name);
+        break;
+    }
+}
+
+/* Say when effects / frame generation start or stop being skipped for an HDR game (once per change). */
+static void hdr_note_precedence(struct surface *hs, int fx_on, int framegen) {
+    static int fx_said = -1, fg_said = -1;
+    int fx_skip = hs && fx_on, fg_skip = hs && framegen;
+    char name[160] = "the game";
+    if (hs) describe(hs, name, sizeof(name));
+    if (fx_skip != fx_said) {
+        if (fx_skip)
+            banner_log("color", "screen effects are NOT applied to %s: its HDR frames cannot be imported by the "
+                       "compositor, so only its own display layer can show them (as they are)", name);
+        else if (fx_said == 1)
+            banner_log("color", "screen effects apply to the scene again (no HDR game on its layer, or effects off)");
+        fx_said = fx_skip;
+    }
+    if (fg_skip != fg_said) {
+        if (fg_skip)
+            banner_log("color", "frame generation is NOT applied to %s: its HDR frames cannot be imported by the "
+                       "compositor, so only its own display layer can show them (as they are)", name);
+        else if (fg_said == 1)
+            banner_log("color", "frame generation applies again (no HDR game on its layer, or frame generation off)");
+        fg_said = fg_skip;
+    }
+}
+
+/* This scene went through the copy path: count every HDR-described surface in it, with the reason. */
+static void hdr_count_copied(const struct draw_list *dl, const char *reason) {
+    for (int i = 0; i < dl->n; i++) {
+        struct surface *s = surface_for_image(dl->d[i].img);
+        const struct banner_color *c = s ? banner_color_of(s->resource) : NULL;
+        if (!c || !c->dataspace) continue;
+        char name[160];
+        describe(s, name, sizeof(name));
+        banner_color_frame_copied(name, reason);
+    }
+}
+
 static void render_scene(void) {
     struct draw_list dl = {0};
     struct surface *s;
     int w, h;
 
     g_dirty = 0;
+    g_hdr_unimported = NULL; /* found again while the scene is built (HDR gate open only) */
     wl_list_for_each(s, &g_surfaces, link) s->drawn = 0;
     scene_size(&w, &h);
     if (w != g_scene_w || h != g_scene_h) {
@@ -1735,9 +1971,45 @@ static void render_scene(void) {
         add_tree(&dl, s, s->placed ? s->x : 0, s->placed ? s->y : 0, 0);
     }
 
-    int rendered;
-    const int fx_on = vkp_effects_active();
-    const int framegen = vkp_framegen_active();
+    int rendered = 0;
+    int fx_on = vkp_effects_active();
+    int framegen = vkp_framegen_active();
+    /* HDR (see hdr_plan): route 0 = the old paths below; 1 / 2 = composed; 3 = layer only, effects and
+     * frame generation skipped. Always 0 while the HDR gate is closed: nothing changes for that session. */
+    struct hdr_scene hs;
+    int hdr_route = hdr_plan(&dl, w, h, fx_on, framegen, &hs);
+    const char *hdr_copy = NULL;           /* why this scene's HDR frames (if any) took the copy path */
+    if (banner_color_hdr_open()) {
+        hdr_note_route(hdr_route, &hs);
+        hdr_note_precedence(hdr_route == 3 ? hs.who : NULL, fx_on, framegen);
+    }
+    const int hdr_alone = hdr_route == 3 || (hdr_route == 0 && hs.n_hdr > 0); /* an HDR game on its own layer */
+    if (hdr_route == 3) { fx_on = 0; framegen = 0; }
+    if (hdr_route == 1) {
+        static int fell_back;
+        vkp_apply_window_request();
+        sc_layer_hide_overlay();
+        if (sc_layer_present_hdr_scene(dl.d, dl.n, &hs.hf, w, h, hs.color) == 0) {
+            rendered = vkp_render_plain(w, h) == 0;
+            if (fell_back) { fell_back = 0; banner_log("color", "the composed picture is on the game's display layer again"); }
+        } else {
+            hdr_route = 2; /* no layer this frame: the picture goes through the swapchain instead */
+            if (!fell_back) {
+                fell_back = 1;
+                banner_log("color", "the composed picture could not go on the game's display layer (no layer, or the "
+                           "10-bit pass failed): it goes through the screen swapchain instead until that changes");
+            }
+        }
+    }
+    if (hdr_route == 2) {
+        int how = 0;
+        sc_layer_hide();
+        rendered = vkp_render_hdr(w, h, dl.d, dl.n, &hs.hf, &how) == 0;
+        if (rendered && how == 1) banner_color_frame_shown(hs.color, BANNER_HDR_SWAPCHAIN, 0);
+        else if (rendered && how == 2) banner_color_frame_shown(hs.color, BANNER_HDR_TONEMAPPED, 0);
+        else if (rendered) hdr_copy = "the HDR composition pass is unavailable on this driver";
+    }
+    if (hdr_route == 0 || hdr_route == 3) {
     /* What still forces the whole scene back through the compositor pass (and so through the app's
      * own swapchain), and what no longer does:
      *   - frame generation ALWAYS does: its extra frames each need a present of their own on
@@ -1775,6 +2047,9 @@ static void render_scene(void) {
     struct surface *ls = li >= 0 ? surface_for_image(dl.d[li].img) : NULL;
     /* A frame this renderer could not import can only be shown on the layer, effects or not. */
     if (li < 0) ls = ahb_layer_only_candidate(w, h);
+    /* HDR: the same, for a game's SUBSURFACE swapchain whose 10-bit frame the compositor could not
+     * import (NULL whenever the HDR gate is closed - nothing is ever noted then). */
+    if (li < 0 && !ls) ls = hdr_unimported_fullscreen(&dl, w, h);
     if (ls && pass_on && li < 0 && !g_zero_copy_fx_skip_said) {
         g_zero_copy_fx_skip_said = 1;
         banner_log(framegen ? "framegen" : "effects",
@@ -1804,7 +2079,7 @@ static void render_scene(void) {
             r = ahb_swapchain_present(ls->dmabuf_buf, ls, w, h);
         if (r != 0 && li >= 0)
             r = fx_on ? sc_layer_present_pass(&dl.d[li], 1, w, h)
-                      : sc_layer_present(dl.d[li].img, w, h);
+                      : sc_layer_present(dl.d[li].img, w, h, ls ? banner_surface_color(ls) : NULL);
         if (r == 0) {
             if (ls) ls->drawn = 1;
             /* The one window above the game keeps the game off the copy path entirely: it goes on
@@ -1816,15 +2091,29 @@ static void render_scene(void) {
             if (ov < 0) { /* the overlay layer refused it: draw the whole scene the old way */
                 sc_layer_hide();
                 rendered = vkp_render(w, h, dl.d, dl.n) == 0;
+                hdr_copy = "the overlay layer refused the window above it";
             } else {
-                /* Black under the opaque layers, and the vsync tick that paces this loop. */
-                rendered = vkp_render(w, h, NULL, 0) == 0;
+                /* Black under the opaque layers, and the vsync tick that paces this loop. Under an HDR
+                 * game it is a plain black frame: effects / frame generation must not run (or pace this
+                 * loop) on the base surface either. */
+                rendered = (hdr_alone ? vkp_render_plain(w, h) : vkp_render(w, h, NULL, 0)) == 0;
             }
-        } else rendered = vkp_render(w, h, dl.d, dl.n) == 0;
+        } else {
+            rendered = vkp_render(w, h, dl.d, dl.n) == 0;
+            hdr_copy = "its display layer was unavailable this frame";
+        }
     } else {
         sc_layer_hide();
         rendered = vkp_render(w, h, dl.d, dl.n) == 0;
+        hdr_copy = ov_blocks ? "a window is above it and this display cannot compose a second layer in hardware"
+                 : fx_blocks ? "a window is above it and screen effects need the whole scene"
+                 : !g_zero_copy ? "zero-copy presentation is off"
+                 : framegen ? "frame generation needs the compositor pass"
+                 : "it is not the one fullscreen window (only that one gets its own display layer)";
     }
+    } /* routes 0 and 3 */
+    free(hs.is_hdr);
+    if (hdr_copy && rendered && banner_color_hdr_open()) hdr_count_copied(&dl, hdr_copy);
     if (rendered) {
         int64_t t = now_ns();
         g_stat_frames++;
@@ -2651,6 +2940,7 @@ static int on_stats_timer(void *data) {
                    g_stat_frames + generated, (g_stat_frames + generated) / 10.0, g_stat_dmabuf, g_stat_shm, windows, extra);
     }
     g_stat_frames = g_stat_dmabuf = g_stat_shm = 0;
+    banner_color_stats_tick(); /* HDR evidence for the same window (nothing when the HDR gate is closed) */
     /* A program that asked for dma-buf feedback (EGL's GPU path does, first thing) but has drawn
      * only wl_shm frames since is an OpenGL program whose EGL gave up on the GPU. The software
      * path it fell to has no rasteriser in the Wayland layers, so what it commits is black. */
@@ -2798,6 +3088,10 @@ int banner_wayland_run(void) {
     ahb_swapchain_init(display); /* zero-copy layers: banner_ahb_v1, advertised whenever a display
                                   * layer is possible; the mode event carries the live switch
                                   * (ahb_swapchain.h) */
+    banner_color_init(display);  /* HDR10 (opt-in): decides the gate from the app's request + the
+                                  * display + the layer path above; creates wp_color_manager_v1
+                                  * only when it is open (banner_color.h). Before any client can
+                                  * bind zwp_linux_dmabuf_v1, whose table it widens. */
     wl_list_init(&g_pending_releases);
     g_release_timer_fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
     if (g_release_timer_fd >= 0)

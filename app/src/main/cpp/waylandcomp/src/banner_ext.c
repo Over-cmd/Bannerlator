@@ -15,8 +15,9 @@
 #include <android/log.h>
 #include "banner_ext.h"
 #include "ahb_swapchain.h"
+#include "banner_color.h"
 
-enum host_kind { HOST_CLIPBOARD = 1, HOST_TEXT_COMMIT, HOST_TEXT_PREEDIT, HOST_TEXT_DELETE, HOST_ZERO_COPY };
+enum host_kind { HOST_CLIPBOARD = 1, HOST_TEXT_COMMIT, HOST_TEXT_PREEDIT, HOST_TEXT_DELETE, HOST_ZERO_COPY, HOST_HDR_OUTPUT };
 
 struct host_msg {
     enum host_kind kind;
@@ -67,6 +68,9 @@ void banner_host_text_delete(int before, int after) {
 void banner_host_zero_copy(int on, int live) {
     host_post(HOST_ZERO_COPY, NULL, 0, on, live);
 }
+void banner_host_hdr_output(int on) {
+    host_post(HOST_HDR_OUTPUT, NULL, 0, on, 0);
+}
 
 static int on_wake(int fd, uint32_t mask, void *data) {
     char buf[64];
@@ -93,6 +97,9 @@ static int on_wake(int fd, uint32_t mask, void *data) {
             break;
         case HOST_ZERO_COPY:
             ahb_swapchain_set_mode(m->a, m->b);
+            break;
+        case HOST_HDR_OUTPUT:
+            banner_color_set_output(m->a);
             break;
         }
         free(m->text);

@@ -1362,8 +1362,48 @@ private fun GraphicsContent(state: XServerDrawerState) {
         }
     }
 
+    if (isWaylandSession) WaylandHdrOutputRow(state)
     if (isWaylandSession) WaylandZeroCopyRow(state, waylandEffectsOk)
     if (isWaylandSession) WaylandGlSafeModeRow(state)
+}
+
+// ───── Wayland: HDR output (live, HDR sessions only) ─────
+// Shown only while the compositor has HDR open for this session (the game's or container's "HDR output"
+// setting was on at launch AND this screen reports HDR10) - never on X11, never on an SDR screen. A live
+// switch: on = the game's HDR frames go to the display as real HDR; off = the SAME frames are shown as a
+// tone-mapped SDR picture. Nothing is relaunched and the game is not told (DXVK_HDR and the offer to the
+// game were decided at launch, so its own HDR setting is untouched). Per session: the next launch starts
+// on again, and whether HDR is offered at all stays the editors' setting.
+@Composable
+private fun WaylandHdrOutputRow(state: XServerDrawerState) {
+    val available by state.waylandHdrAvailable.collectAsState()
+    if (!available) return
+    val output by state.waylandHdrOutput.collectAsState()
+    val onScreen by state.waylandHdrOnScreen.collectAsState()
+    val noHeadroom by state.waylandHdrNoHeadroom.collectAsState()
+    val toneMapped by state.waylandHdrToneMapped.collectAsState()
+    var checked by remember(output) { mutableStateOf(output) }
+
+    Spacer(Modifier.height(6.dp))
+    ToggleRow("HDR output", checked) {
+        checked = it
+        state.setWaylandHdrOutput(it)
+        state.onWaylandHdrOutputToggle?.accept(it)
+    }
+    HelperText("On: HDR games show real HDR on this screen. Off: the same picture tone-mapped to SDR. " +
+        "Applies immediately, for this session only; the game's own HDR setting is left alone.")
+    HelperText(
+        when {
+            checked && onScreen    -> "On: HDR frames on screen now."
+            checked && noHeadroom  -> "On, but the screen gives HDR no headroom right now: brightness at maximum, " +
+                                      "or the screen is being recorded (Android turns HDR headroom off while recording)."
+            checked && toneMapped  -> "On, but shown tone-mapped: frame generation on a screen with no HDR swapchain."
+            checked                -> "On: no HDR frames right now (is HDR on in the game's settings?)."
+            onScreen || noHeadroom -> "Off, but these frames cannot be tone-mapped here: they stay HDR."
+            toneMapped             -> "Off: HDR frames shown tone-mapped to SDR."
+            else                   -> "Off: no HDR frames right now."
+        }
+    )
 }
 
 // ───── Wayland: OpenGL safe mode ─────

@@ -16,6 +16,9 @@ add_library(bannerwayland SHARED
         src/wl_clipboard.c
         src/wl_text_input.c
         src/wl_toplevel_icon.c
+        src/wl_color_mgmt.c
+        src/hdr_compose.c
+        generated/color-management-v1-protocol.c
         generated/xdg-shell-protocol.c
         generated/linux-dmabuf-v1-protocol.c
         generated/viewporter-protocol.c

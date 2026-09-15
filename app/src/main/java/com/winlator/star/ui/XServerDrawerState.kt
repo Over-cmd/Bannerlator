@@ -74,6 +74,25 @@ object XServerDrawerState {
     // when the guest's GL driver starts - so the row is a saved preference, not a live switch.
     private val _waylandGlSafeMode        = MutableStateFlow(true)
     val waylandGlSafeMode: StateFlow<Boolean> = _waylandGlSafeMode
+    // HDR output (Wayland, HDR sessions only). `available` = the compositor opened HDR for this session
+    // (the game/container setting was on AND this screen reports HDR10) - the row is shown only then.
+    // `output` = the live switch: on = the game's HDR frames go to the display as HDR, off = the same
+    // frames tone-mapped to SDR. Per session, starts on; the saved "HDR output" setting in the editors
+    // stays the next launch's choice. `onScreen` / `toneMapped` = what the compositor showed in the
+    // last ~1.5 s (the row's status line), refreshed once a second by the activity.
+    private val _waylandHdrAvailable      = MutableStateFlow(false)
+    val waylandHdrAvailable: StateFlow<Boolean> = _waylandHdrAvailable
+    private val _waylandHdrOutput         = MutableStateFlow(true)
+    val waylandHdrOutput: StateFlow<Boolean> = _waylandHdrOutput
+    private val _waylandHdrOnScreen       = MutableStateFlow(false)
+    val waylandHdrOnScreen: StateFlow<Boolean> = _waylandHdrOnScreen
+    // HDR frames on screen but the display has given them no headroom for 5 s+ (HDR/SDR ratio 1.00) -
+    // the brightness slider at maximum, or a screen recording (Android turns HDR headroom off while the
+    // screen is recorded - found on the Fold).
+    private val _waylandHdrNoHeadroom     = MutableStateFlow(false)
+    val waylandHdrNoHeadroom: StateFlow<Boolean> = _waylandHdrNoHeadroom
+    private val _waylandHdrToneMapped     = MutableStateFlow(false)
+    val waylandHdrToneMapped: StateFlow<Boolean> = _waylandHdrToneMapped
 
     private val _isMouseDisabled         = MutableStateFlow(false)
     val isMouseDisabled: StateFlow<Boolean> = _isMouseDisabled
@@ -456,6 +475,9 @@ object XServerDrawerState {
     // OpenGL safe mode toggle: saves GALLIUM_THREAD=0 on/off to the shortcut (else the container)
     // as the next launch's default. Nothing is applied to the running game.
     @JvmField var onWaylandGlSafeModeToggle: java.util.function.Consumer<Boolean>? = null
+    // HDR output switch: applied to the RUNNING compositor at once (nativeSetHdrOutput); nothing is
+    // saved - it lasts for this session only.
+    @JvmField var onWaylandHdrOutputToggle: java.util.function.Consumer<Boolean>? = null
 
     // Whether the active renderer supports Native Rendering (direct scanout). True for Vulkan;
     // false for OpenGL (GL scanout is disabled for now — bespoke path, unresolved brightness).
@@ -508,6 +530,11 @@ object XServerDrawerState {
     fun setWaylandZeroCopyFrames(v: Int)        { _waylandZeroCopyFrames.value = v }
     fun setWaylandZeroCopyLive(v: Boolean)      { _waylandZeroCopyLive.value = v }
     fun setWaylandGlSafeMode(v: Boolean)        { _waylandGlSafeMode.value = v }
+    fun setWaylandHdrAvailable(v: Boolean)      { _waylandHdrAvailable.value = v }
+    fun setWaylandHdrOutput(v: Boolean)         { _waylandHdrOutput.value = v }
+    fun setWaylandHdrOnScreen(v: Boolean)       { _waylandHdrOnScreen.value = v }
+    fun setWaylandHdrNoHeadroom(v: Boolean)     { _waylandHdrNoHeadroom.value = v }
+    fun setWaylandHdrToneMapped(v: Boolean)     { _waylandHdrToneMapped.value = v }
     fun setIsMouseDisabled(v: Boolean)         { _isMouseDisabled.value = v }
     fun setMoveCursorToTouchpoint(v: Boolean)  { _moveCursorToTouchpoint.value = v }
     fun setGestureDragSelect(v: Boolean)          { _gestureDragSelect.value = v }
@@ -659,6 +686,11 @@ object XServerDrawerState {
         _waylandZeroCopyFrames.value = 0
         _waylandZeroCopyLive.value = false
         _waylandGlSafeMode.value = true
+        _waylandHdrAvailable.value = false
+        _waylandHdrOutput.value = true
+        _waylandHdrOnScreen.value = false
+        _waylandHdrNoHeadroom.value = false
+        _waylandHdrToneMapped.value = false
         _isMouseDisabled.value = false
         _moveCursorToTouchpoint.value = false
         _gestureDragSelect.value = true
@@ -724,6 +756,7 @@ object XServerDrawerState {
         onNativeRenderingToggle = null; onFpsConfigApply = null
         onWaylandZeroCopyToggle = null; onWaylandZeroCopyPoll = null
         onWaylandGlSafeModeToggle = null
+        onWaylandHdrOutputToggle = null
         onBionicFgConfigChange = null; onFpsLimitChange = null
         onPresentModeChange = null
         onMatchRefreshChange = null

@@ -16,6 +16,7 @@
 #include "ahb_swapchain.h"
 #include "sc_layer.h"
 #include "effects_chain.h"
+#include "banner_color.h"
 
 extern int banner_wayland_run(void);
 extern void banner_wayland_send_pointer(int action, int x, int y);
@@ -372,6 +373,131 @@ Java_com_winlator_star_wayland_WaylandCompositor_nativeLogDisplay(JNIEnv *env, j
     char *s = dup_jstr(env, message);
     if (s) banner_log("display", "%s", s);
     free(s);
+}
+
+/* ---- HDR10 output, round 1 (banner_color.h / wl_color_mgmt.c) ---- */
+
+/* The opt-in: mode 0 off, 1 BANNER_WAYLAND_HDR=1, 2 =force (testing). Before the compositor starts. */
+JNIEXPORT void JNICALL
+Java_com_winlator_star_wayland_WaylandCompositor_nativeSetHdrRequest(JNIEnv *env, jclass clazz, jint mode,
+        jstring source, jboolean dxvkHdr, jboolean zeroCopyForced) {
+    char *s = dup_jstr(env, source);
+    banner_color_set_request((int)mode, s, dxvkHdr ? 1 : 0, zeroCopyForced ? 1 : 0);
+    free(s);
+}
+
+/* The game's display as android.view.Display reports it (before the start; again on every change). */
+JNIEXPORT void JNICALL
+Java_com_winlator_star_wayland_WaylandCompositor_nativeSetHdrDisplay(JNIEnv *env, jclass clazz, jint id, jstring name,
+        jstring formats, jboolean hdr10, jfloat maxLum, jfloat maxAvg, jfloat minLum, jboolean ratioAvailable,
+        jfloat ratio, jint api) {
+    char *n = dup_jstr(env, name), *f = dup_jstr(env, formats);
+    banner_color_set_display((int)id, n, f, hdr10 ? 1 : 0, (float)maxLum, (float)maxAvg, (float)minLum,
+                             ratioAvailable ? 1 : 0, (float)ratio, (int)api);
+    free(n); free(f);
+}
+
+/* One Display.getHdrSdrRatio() reading (listener = from the display's ratio listener). Any thread. */
+JNIEXPORT void JNICALL
+Java_com_winlator_star_wayland_WaylandCompositor_nativeHdrSdrRatioSample(JNIEnv *env, jclass clazz, jfloat ratio,
+        jboolean listener) {
+    banner_color_ratio_sample((float)ratio, listener ? 1 : 0);
+}
+
+/* ms since an HDR frame last reached a display layer, -1 = never this session. Any thread. */
+JNIEXPORT jint JNICALL
+Java_com_winlator_star_wayland_WaylandCompositor_nativeHdrLastFrameAgeMs(JNIEnv *env, jclass clazz) {
+    return (jint)banner_color_last_frame_age_ms();
+}
+
+/* -1 = not decided yet, 0 = closed, 1 = open. Any thread. */
+JNIEXPORT jint JNICALL
+Java_com_winlator_star_wayland_WaylandCompositor_nativeHdrGateState(JNIEnv *env, jclass clazz) {
+    return (jint)banner_color_gate_state();
+}
+
+/* The session is ending: the "HDR on screen: ..." summary line. Any thread, once. */
+JNIEXPORT void JNICALL
+Java_com_winlator_star_wayland_WaylandCompositor_nativeHdrSessionEnd(JNIEnv *env, jclass clazz) {
+    banner_color_session_end();
+}
+
+/* HDR frames really on screen right now (the HUD badge). Any thread. */
+JNIEXPORT jboolean JNICALL
+Java_com_winlator_star_wayland_WaylandCompositor_nativeHdrOnScreen(JNIEnv *env, jclass clazz) {
+    return banner_color_hdr_on_screen() ? JNI_TRUE : JNI_FALSE;
+}
+
+/* One "color" line in the session log from Java. */
+JNIEXPORT void JNICALL
+Java_com_winlator_star_wayland_WaylandCompositor_nativeLogColor(JNIEnv *env, jclass clazz, jstring message) {
+    char *s = dup_jstr(env, message);
+    if (s) banner_log("color", "%s", s);
+    free(s);
+}
+
+/* SDR content's level inside an HDR picture, in nits (default 203). */
+JNIEXPORT void JNICALL
+Java_com_winlator_star_wayland_WaylandCompositor_nativeSetHdrSdrWhite(JNIEnv *env, jclass clazz, jfloat nits) {
+    banner_color_set_sdr_white((float)nits);
+}
+
+/* The drawer's live HDR output switch: on = HDR frames as HDR, off = the same frames tone-mapped to SDR.
+ * Applied on the compositor thread (logged there, with a redraw). */
+JNIEXPORT void JNICALL
+Java_com_winlator_star_wayland_WaylandCompositor_nativeSetHdrOutput(JNIEnv *env, jclass clazz, jboolean on) {
+    if (banner_get_display()) banner_host_hdr_output(on ? 1 : 0);
+    else banner_color_set_output(on ? 1 : 0); /* no compositor thread yet: nothing is drawing either */
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_winlator_star_wayland_WaylandCompositor_nativeHdrOutput(JNIEnv *env, jclass clazz) {
+    return banner_color_output() ? JNI_TRUE : JNI_FALSE;
+}
+
+/* Device evidence for the HDR lines: thermal status + headroom, brightness + mode. */
+JNIEXPORT void JNICALL
+Java_com_winlator_star_wayland_WaylandCompositor_nativeHdrEnvSample(JNIEnv *env, jclass clazz, jint thermal,
+                                                                   jfloat headroom, jint brightness, jint mode) {
+    banner_color_env_sample((int)thermal, (float)headroom != (float)headroom ? -1.0f : (float)headroom,
+                            (int)brightness, (int)mode);
+}
+
+/* Display.getHighestHdrSdrRatio() (Android 16+), <= 0 = not reported. */
+JNIEXPORT void JNICALL
+Java_com_winlator_star_wayland_WaylandCompositor_nativeSetHdrHighestRatio(JNIEnv *env, jclass clazz, jfloat ratio) {
+    banner_color_set_highest_ratio((float)ratio == (float)ratio ? (float)ratio : -1.0f);
+}
+
+/* The HDR headroom the screen surface should ask for (HDR10 swapchain frames in the last 1.5 s), 0 = none. */
+JNIEXPORT jfloat JNICALL
+Java_com_winlator_star_wayland_WaylandCompositor_nativeHdrScreenHeadroom(JNIEnv *env, jclass clazz) {
+    return (jfloat)banner_color_screen_headroom(NULL, 0);
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_winlator_star_wayland_WaylandCompositor_nativeHdrScreenHeadroomWhy(JNIEnv *env, jclass clazz) {
+    char why[200];
+    banner_color_screen_headroom(why, sizeof(why));
+    return (*env)->NewStringUTF(env, why);
+}
+
+/* The app's screen-surface request, for the no-headroom lines: > 0 asked, 0 cleared, -1 not possible. */
+JNIEXPORT void JNICALL
+Java_com_winlator_star_wayland_WaylandCompositor_nativeHdrNoteHeadroomRequest(JNIEnv *env, jclass clazz, jfloat ratio) {
+    banner_color_note_headroom_request((float)ratio);
+}
+
+/* 0 none, 1 HDR frames on screen with headroom, 2 HDR frames on screen without headroom for 5 s+. */
+JNIEXPORT jint JNICALL
+Java_com_winlator_star_wayland_WaylandCompositor_nativeHdrState(JNIEnv *env, jclass clazz) {
+    return (jint)banner_color_hdr_state();
+}
+
+/* An HDR game's frames were shown tone-mapped to SDR in the last 1.5 s (the drawer's status line). */
+JNIEXPORT jboolean JNICALL
+Java_com_winlator_star_wayland_WaylandCompositor_nativeHdrToneMappedOnScreen(JNIEnv *env, jclass clazz) {
+    return banner_color_tonemapped_on_screen() ? JNI_TRUE : JNI_FALSE;
 }
 
 /* The Look the controls currently match (null = Custom) — only named in the session log. */

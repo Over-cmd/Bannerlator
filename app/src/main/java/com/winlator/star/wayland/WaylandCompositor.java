@@ -225,6 +225,91 @@ public final class WaylandCompositor {
      *  list stops at the desktop size, as the X server's does on X11. Set before the compositor starts. */
     public static native void nativeSetOutputSize(int width, int height);
 
+    // ── HDR10 output, round 1 (waylandcomp/src/banner_color.h, wl_color_mgmt.c) ─────────────────
+    // Opt-in: BANNER_WAYLAND_HDR=1 in the container's or shortcut's env vars. The compositor offers
+    // games HDR10 (wp_color_manager_v1 + 10-bit buffers, frames tagged BT2020_PQ on the game's own
+    // display layer) only when the game's display lists HDR10 as well; otherwise nothing changes and
+    // the session log says why. Not the drawer's "HDR" effect, which is an SDR bloom/contrast filter.
+
+    /** HDR_MODE_OFF / HDR_MODE_ON (BANNER_WAYLAND_HDR=1) / HDR_MODE_FORCE (=force: skip the display
+     *  check, for testing the negotiation on an SDR panel). */
+    public static final int HDR_MODE_OFF = 0, HDR_MODE_ON = 1, HDR_MODE_FORCE = 2;
+
+    /** The opt-in: mode, where it came from ("container env" / "shortcut env"), whether DXVK_HDR=1 is
+     *  in the game's environment, and whether the app turned zero-copy on for this session because HDR
+     *  needs it. Set before the compositor starts. */
+    public static native void nativeSetHdrRequest(int mode, String source, boolean dxvkHdr, boolean zeroCopyForced);
+
+    /** The game's display as {@code android.view.Display} reports it. Before the compositor starts (it
+     *  feeds the gate) and again whenever it changes (logged; the gate is decided once per session). */
+    public static native void nativeSetHdrDisplay(int displayId, String name, String formats, boolean hdr10,
+                                                  float maxLuminance, float maxAverageLuminance, float minLuminance,
+                                                  boolean hdrSdrRatioAvailable, float hdrSdrRatio, int apiLevel);
+
+    /** One {@code Display.getHdrSdrRatio()} reading ({@code < 0} = not available); {@code listener} = it
+     *  came from the display's ratio listener rather than the periodic sampler. Any thread. */
+    public static native void nativeHdrSdrRatioSample(float ratio, boolean listener);
+
+    /** Milliseconds since an HDR frame last reached a display layer; -1 = none this session. Any thread. */
+    public static native int nativeHdrLastFrameAgeMs();
+
+    /** -1 = the compositor has not decided the HDR gate yet, 0 = closed, 1 = open. Any thread. */
+    public static native int nativeHdrGateState();
+
+    /** The session is ending: the compositor writes its "HDR on screen: …" summary line. Once. */
+    public static native void nativeHdrSessionEnd();
+
+    /** True while HDR frames are really on screen: frames tagged BT2020_PQ reached the display in the
+     *  last 1.5 s and, where the display reports an HDR/SDR ratio, it is above 1 (the HUD's badge). */
+    public static native boolean nativeHdrOnScreen();
+
+    /** One "color" line in the session log, from Java (the HDR environment, the DXVK warning). */
+    public static native void nativeLogColor(String message);
+
+    /** Nits at which SDR content is placed when the compositor composes an HDR picture (a window over
+     *  an HDR game, the desktop around a windowed one). Default 203 (BT.2408). Before the start. */
+    public static native void nativeSetHdrSdrWhite(float nits);
+
+    /** The in-game drawer's HDR output switch (only meaningful while the HDR gate is open; per session,
+     *  starts on). On = the game's HDR frames go to the display as HDR; off = the same frames are shown
+     *  tone-mapped to SDR. Live, any thread (queued to the compositor, which logs the flip); the game is
+     *  told nothing - DXVK_HDR and the colour-manager offer were decided at launch. */
+    public static native void nativeSetHdrOutput(boolean on);
+
+    /** The HDR output switch's current state (any thread). */
+    public static native boolean nativeHdrOutput();
+
+    /** True while an HDR game's frames are being shown tone-mapped to SDR (the last one under 1.5 s ago). */
+    public static native boolean nativeHdrToneMappedOnScreen();
+
+    /** 0 = no HDR frames on screen (or not confirmed yet), 1 = HDR frames on screen with HDR headroom,
+     *  2 = HDR frames on screen but the display has given them no headroom (HDR/SDR ratio 1.00) for 5 s
+     *  or more - the brightness slider at maximum, or a screen recording (Android turns HDR headroom off
+     *  while the screen is recorded). The HUD badge and the drawer's HDR row. */
+    public static native int nativeHdrState();
+
+    /** Device evidence beside the HDR/SDR headroom, HDR sessions only (any thread): PowerManager thermal
+     *  status (0..6, -1 unknown) and getThermalHeadroom(10) (NaN / negative = not available), and
+     *  Settings.System SCREEN_BRIGHTNESS (0..255, -1 unknown) + SCREEN_BRIGHTNESS_MODE (1 auto, 0 manual,
+     *  -1 unknown). The compositor logs changes of status and brightness and puts the values on every
+     *  no-headroom line, the 10 s HDR line and the verdict. */
+    public static native void nativeHdrEnvSample(int thermalStatus, float thermalHeadroom, int brightness,
+                                                 int brightnessMode);
+
+    /** Display.getHighestHdrSdrRatio() (Android 16+), <= 0 = not reported: the display's own ceiling, capped
+     *  into the headroom request and logged in the verdict. Any thread. */
+    public static native void nativeSetHdrHighestRatio(float ratio);
+
+    /** The HDR headroom the SCREEN surface should ask for while HDR frames go through the HDR10 swapchain
+     *  (frame generation), 0 = none; the app applies it (SurfaceView.setDesiredHdrHeadroom, API 35). */
+    public static native float nativeHdrScreenHeadroom();
+
+    /** Why that value ("content peak 1207 nits (max CLL) / SDR 203 ..."), for the log line. */
+    public static native String nativeHdrScreenHeadroomWhy();
+
+    /** What the app asked for on the screen surface: > 0 the ratio, 0 cleared, -1 not possible (< Android 15). */
+    public static native void nativeHdrNoteHeadroomRequest(float ratio);
+
     /** Fullscreen mode ({@code Container.FULLSCREEN_OFF/FIT/STRETCH/FILL/INTEGER}) and screen alignment
      *  ({@code Container.ALIGN_CENTER/TOP/BOTTOM}): how the compositor fits the desktop onto the screen,
      *  with the same arithmetic as {@code ViewTransformation} (which maps touch input), so the picture and

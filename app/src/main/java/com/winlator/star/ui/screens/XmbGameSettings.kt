@@ -19,6 +19,7 @@ import androidx.compose.material.icons.filled.Event
 import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Gamepad
+import androidx.compose.material.icons.filled.HdrOn
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Label
@@ -53,6 +54,7 @@ import com.winlator.star.core.DirectAudioSupport
 import com.winlator.star.core.StringUtils
 import com.winlator.star.core.WineInfo
 import com.winlator.star.core.WinePath
+import com.winlator.star.display.WaylandHdr
 import com.winlator.star.midi.MidiManager
 import com.winlator.star.store.SteamStoreSearch
 import com.winlator.star.ui.components.AUDIO_PRESETS
@@ -97,6 +99,9 @@ internal class XmbPrefs(val context: Context, val shortcut: Shortcut) {
     // async facts the editor loads in the background
     var arm64ec by mutableStateOf<Boolean?>(null)
     var midiList by mutableStateOf<List<String>>(emptyList())
+
+    /** Why the device's screen can't show HDR10 (the HDR row is greyed with it), null when it can. Read once. */
+    val hdrUnavailableReason: String? by lazy { WaylandHdr.unavailableReason(context) }
 }
 
 private fun XmbPrefs.loadAsync(xmb: XmbScope) {
@@ -355,6 +360,16 @@ private fun generalRows(xmb: XmbScope, p: XmbPrefs, host: XmbGameHost): List<Xmb
             wgdLabels[wgdValues.indexOf(wgdOverride).coerceAtLeast(0)],
             subtitle = com.winlator.star.core.WaylandGameDriver.HELP_TEXT) { v ->
             xmb.set(p, "waylandGameDriver", wgdValues[wgdLabels.indexOf(v)].ifEmpty { null })
+        }
+        // HDR output (per-game override of the container's waylandHdr; "" = container default, "1" on,
+        // "0" off) — same options as the pop-up editor (WaylandHdr). Greyed with the reason on a screen
+        // that doesn't report HDR10, still showing what is stored.
+        val hdrValues = listOf("", "1", "0")
+        val hdrLabels = listOf("Container default (" + (if (c.isWaylandHdr()) "On" else "Off") + ")", "On", "Off")
+        rows += XmbRow.Choice(WaylandHdr.EXTRA, WaylandHdr.TITLE, Icons.Filled.HdrOn, hdrLabels,
+            hdrLabels[hdrValues.indexOf(WaylandHdr.shortcutChoice(s)).coerceAtLeast(0)],
+            subtitle = WaylandHdr.HELP_SHORT, disabledReason = p.hdrUnavailableReason) { v ->
+            xmb.set(p, WaylandHdr.EXTRA, hdrValues[hdrLabels.indexOf(v)].ifEmpty { null })
         }
     } else {
         rows += XmbRow.Choice("gfxDriver", p.str(R.string.graphics_driver), Icons.Filled.Memory, gfxEntries, p.labelFor(gfxEntries, gfxId)) { v ->

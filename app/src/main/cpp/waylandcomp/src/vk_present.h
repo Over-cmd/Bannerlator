@@ -94,6 +94,31 @@ int vkp_device_lost(void);
 // Clear to black, blit the draws in order (first = bottom) and present.
 // Returns 0 on success, -1 if nothing could be presented (no window yet, etc.).
 int vkp_render(int scene_w, int scene_h, const struct vkp_draw *draws, int n);
+/* A black frame with no compositor pass (no effects, no frame generation), whatever is armed: the
+ * base surface under an HDR game that keeps its display layer (compositor.c). */
+int vkp_render_plain(int scene_w, int scene_h);
+
+/* ---- HDR composition (hdr_compose.h) ----
+ * An HDR game that cannot be alone on its display layer: the scene is composed into ONE encoding. */
+struct banner_color;
+struct vkp_hdr_frame {
+    const unsigned char *is_hdr; /* per draw: 1 = its image holds PQ BT.2020 (the surface's description) */
+    float peak_nits;             /* the HDR content's peak, for a tone-map (max CLL / mastering max; 0 = 1000) */
+    int tonemap;                 /* 1 = the drawer's HDR output switch is off: tone-map to SDR, never PQ */
+    const struct banner_color *color; /* the topmost HDR draw's description: an HDR10 swapchain's metadata */
+};
+/* vkp_render for a scene with HDR draws (frame generation): composed into PQ and presented through an
+ * HDR10 swapchain where the surface offers one (and hf->tonemap is 0), else tone-mapped into the ordinary
+ * one. *how = 1 HDR10, 2 tone-mapped, 0 the HDR pass was unavailable (shown the old way). Same return as
+ * vkp_render. */
+int vkp_render_hdr(int scene_w, int scene_h, const struct vkp_draw *draws, int n,
+                   const struct vkp_hdr_frame *hf, int *how);
+/* vkp_pass_begin for a scene with HDR draws: composed into a 10-bit picture - PQ BT.2020, or sRGB
+ * tone-mapped when hf->tonemap - the effects run on it in 10-bit, the result (rw x rh, A2B10G10R10) is
+ * left for vkp_pass_copy_to() into a layer buffer (a blit: 10-bit or 8-bit). -1 = not possible (nothing
+ * recorded). */
+int vkp_pass_begin_hdr(int scene_w, int scene_h, const struct vkp_draw *draws, int n,
+                       const struct vkp_hdr_frame *hf, int *rw, int *rh);
 
 /* ---- layer mode helpers (sc_layer.c; compositor thread) ---- */
 /* Whole-image copy of src into dst (a blit-destination dmabuf image), waited for on the CPU. */

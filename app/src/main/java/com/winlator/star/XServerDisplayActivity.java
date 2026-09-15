@@ -4883,6 +4883,11 @@ public class XServerDisplayActivity extends AppCompatActivity {
         eaRefusalHandler.removeCallbacks(eaRefusalWatchRunnable);
         if (exiting) return;
         exiting = true;
+        // Wayland HDR output: the session's "HDR on screen: ..." line, written while the game is still
+        // connected (the compositor writes it once; onDestroy's call is the fallback).
+        if (waylandMode) {
+            try { com.winlator.star.wayland.WaylandCompositor.nativeHdrSessionEnd(); } catch (Throwable ignored) {}
+        }
         // A frozen (SIGSTOP'd) guest can't act on the SIGTERM below — resume before tearing down so
         // graceful termination isn't stuck waiting on a suspended process (any pending pulse aside).
         reshadePulseInProgress = false;
@@ -6867,6 +6872,161 @@ public class XServerDisplayActivity extends AppCompatActivity {
         return zc != null && (zc.equals("1") || zc.equalsIgnoreCase("true"));
     }
 
+    /** The effective env (container first, shortcut second, so the shortcut wins), or null. */
+    private EnvVars effectiveUserEnv() {
+        if (container == null) return null;
+        String raw = container.getEnvVars();
+        if (shortcut != null) {
+            String sv = shortcut.getExtra("envVars", "");
+            if (sv != null && !sv.isEmpty()) raw = (raw == null ? "" : raw + " ") + sv;
+        }
+        return raw != null && !raw.isEmpty() ? new EnvVars(raw) : null;
+    }
+
+    /** The Wayland compositor's HDR10 output for this launch (waylandcomp/src/banner_color.h,
+     *  display.WaylandHdr). The "HDR output" setting decides — the game shortcut's own choice, else the
+     *  container's, the same owner the editors write — and BANNER_WAYLAND_HDR in the container's or
+     *  shortcut's environment variables overrides it: 1/true/on = on, 0/false/off = off, force = on
+     *  whatever the display says (testing the negotiation on an SDR panel). "On" still only turns
+     *  anything on where the game's display lists HDR10 (startWaylandCompositor). */
+    private int resolvedWaylandHdrMode() {
+        EnvVars env = effectiveUserEnv();
+        if (env != null && env.has("BANNER_WAYLAND_HDR")) {
+            String v = env.get("BANNER_WAYLAND_HDR").trim();
+            if (v.equalsIgnoreCase("force")) return com.winlator.star.wayland.WaylandCompositor.HDR_MODE_FORCE;
+            if (v.equals("1") || v.equalsIgnoreCase("true") || v.equalsIgnoreCase("on"))
+                return com.winlator.star.wayland.WaylandCompositor.HDR_MODE_ON;
+            return com.winlator.star.wayland.WaylandCompositor.HDR_MODE_OFF;
+        }
+        return com.winlator.star.display.WaylandHdr.effective(shortcut, container)
+                ? com.winlator.star.wayland.WaylandCompositor.HDR_MODE_ON
+                : com.winlator.star.wayland.WaylandCompositor.HDR_MODE_OFF;
+    }
+
+    /** What decided resolvedWaylandHdrMode(), for the session log. */
+    private String waylandHdrSource() {
+        EnvVars env = effectiveUserEnv();
+        if (env != null && env.has("BANNER_WAYLAND_HDR")) {
+            if (shortcut != null) {
+                String sv = shortcut.getExtra("envVars", "");
+                if (sv != null && !sv.isEmpty() && new EnvVars(sv).has("BANNER_WAYLAND_HDR")) return "shortcut env var";
+            }
+            return "container env var";
+        }
+        return !com.winlator.star.display.WaylandHdr.shortcutChoice(shortcut).isEmpty()
+                ? "the game's HDR output setting" : "the container's HDR output setting";
+    }
+
+    /** Set in startWaylandCompositor: HDR output is really on for this session (the switch resolved on,
+     *  AND the game's display lists HDR10, or =force). Read by setupXEnvironment (worker thread, later). */
+    private volatile boolean waylandHdrActive = false;
+    /** The display reading startWaylandCompositor made (the brightness hand-off exports it). */
+    private volatile com.winlator.star.display.DisplayHdrInfo waylandHdrDisplay;
+
+    /** DXVK_HDR=1 in the effective env: DXVK then reports an HDR display through DXGI. */
+    private boolean isDxvkHdrEnvOn() {
+        EnvVars env = effectiveUserEnv();
+        String v = env != null ? env.get("DXVK_HDR") : null;
+        return v != null && (v.equals("1") || v.equalsIgnoreCase("true"));
+    }
+
+    /** Set in startWaylandCompositor: the HDR opt-in turned zero-copy presentation on for this session
+     *  (the guest half, BANNER_WSI_AHB=1, is exported in setupXEnvironment, which runs after it). */
+    private volatile boolean waylandHdrZeroCopyForced = false;
+    /** The HDR opt-in mode this session started with (the ratio sampler runs only when it is on). */
+    private int waylandHdrMode = com.winlator.star.wayland.WaylandCompositor.HDR_MODE_OFF;
+
+    /** The Wayland session's HDR environment (launch worker thread, after the user's env vars are
+     *  merged, so an explicit value of theirs always wins):
+     *  - HDR output on for this session -> DXVK_HDR=1, so DXVK tells the game its display is HDR;
+     *  - every Wayland session whose display lists HDR10 -> BANNER_WAYLAND_HDR_MAX_NITS /
+     *    _MAX_AVG_NITS / _MIN_NITS (decimal nits from Display.getHdrCapabilities(); a value that is
+     *    unknown is left out, and so is a max or max-average of 0). The Wayland layer from versionCode
+     *    10 describes the monitor to Windows with them (EDID HDR metadata), so DXGI reports this
+     *    screen's real peak instead of DXVK's 1499-nit stand-in. Never on a display without HDR10: its
+     *    EDID would then claim PQ support the screen does not have. Android reports no LIVE brightness
+     *    in nits; the live HDR/SDR ratio is what the compositor logs instead. */
+    private void applyWaylandHdrEnv(EnvVars envVars) {
+        try {
+            StringBuilder said = new StringBuilder();
+            if (waylandHdrActive) {
+                if (envVars.has("DXVK_HDR")) {
+                    said.append("DXVK_HDR=").append(envVars.get("DXVK_HDR")).append(" (yours, kept)");
+                } else {
+                    envVars.put("DXVK_HDR", "1");
+                    said.append("DXVK_HDR=1");
+                }
+            }
+            com.winlator.star.display.DisplayHdrInfo d = waylandHdrDisplay;
+            if (d == null) d = com.winlator.star.display.DisplayHdrInfo.read(hdrTargetDisplay());
+            String[][] nits = {
+                    {"BANNER_WAYLAND_HDR_MAX_NITS", d.maxLuminance > 0f ? com.winlator.star.display.WaylandHdr.nits(d.maxLuminance) : null},
+                    {"BANNER_WAYLAND_HDR_MAX_AVG_NITS", d.maxAverageLuminance > 0f ? com.winlator.star.display.WaylandHdr.nits(d.maxAverageLuminance) : null},
+                    {"BANNER_WAYLAND_HDR_MIN_NITS", d.minLuminance >= 0f ? com.winlator.star.display.WaylandHdr.nits(d.minLuminance) : null}};
+            if (d.supportsHdr10 && d.maxLuminance > 0f) { // HDR10 displays only; no peak = nothing worth describing
+                for (String[] kv : nits) {
+                    if (kv[1] == null) continue;
+                    if (said.length() > 0) said.append(' ');
+                    if (envVars.has(kv[0])) {
+                        said.append(kv[0]).append('=').append(envVars.get(kv[0])).append(" (yours, kept)");
+                    } else {
+                        envVars.put(kv[0], kv[1]);
+                        said.append(kv[0]).append('=').append(kv[1]);
+                    }
+                }
+            }
+            if (said.length() > 0) {
+                String line = "session environment: " + said + " - from \"" + d.displayName + "\" (Android reports no live "
+                        + "brightness in nits; the HDR/SDR ratio lines are the live reading)";
+                Log.i("XServerDisplayActivity", "wayland HDR " + line);
+                com.winlator.star.wayland.WaylandCompositor.nativeLogColor(line);
+            }
+        } catch (Throwable t) {
+            Log.w("XServerDisplayActivity", "wayland: HDR environment failed", t);
+        }
+    }
+
+    /** The HUD's display-server label: "X11" / "Wayland" (the HDR state has a line of its own). */
+    private String hudDisplayServerLabel() {
+        return waylandMode ? "Wayland" : "X11";
+    }
+
+    /** The Fusion HUD's HDR line, directly under latency · display server - only in sessions whose HDR
+     *  gate is open (everywhere else FusionHdr.NONE: no line, the HUD exactly as before):
+     *  "HDR" while HDR frames are really on screen with HDR headroom; "HDR (no headroom)" while they are
+     *  on screen but the display has given them none for 5 s+ (brightness at maximum, or a screen
+     *  recording: Android turns HDR headroom off while the screen is recorded); "HDR off" while the
+     *  drawer's HDR output switch is off (tone-mapped to SDR); "HDR tone-mapped" while the switch is on
+     *  but the frames are tone-mapped anyway (frame generation on a screen with no HDR10 swapchain);
+     *  "HDR ready" otherwise (no HDR frames on screen right now). What is on screen wins: frames that
+     *  stay HDR with the switch off read "HDR". */
+    private volatile int hudHdrState = 0;          // WaylandCompositor.nativeHdrState()
+    private volatile boolean hudHdrToneMapped = false; // WaylandCompositor.nativeHdrToneMappedOnScreen()
+    private volatile boolean hudHdrGateOpen = false; // the compositor opened HDR for this session
+    /** The drawer's HDR output switch (per session, starts on; only offered while the HDR gate is open). */
+    private volatile boolean waylandHdrOutputOn = true;
+    private int hudHdrCode() {
+        if (!waylandMode || !hudHdrGateOpen) return com.winlator.star.widget.fusionhud.FusionHdr.NONE;
+        if (hudHdrState == 1) return com.winlator.star.widget.fusionhud.FusionHdr.ON;
+        if (hudHdrState == 2) return com.winlator.star.widget.fusionhud.FusionHdr.NO_HEADROOM;
+        if (!waylandHdrOutputOn) return com.winlator.star.widget.fusionhud.FusionHdr.OFF;
+        return hudHdrToneMapped ? com.winlator.star.widget.fusionhud.FusionHdr.TONEMAPPED
+                                : com.winlator.star.widget.fusionhud.FusionHdr.READY;
+    }
+
+    /** Tell the compositor what the game's display reports (the HDR gate's input; logged on change). */
+    private void pushWaylandHdrDisplay(com.winlator.star.display.DisplayHdrInfo d) {
+        if (!waylandMode || d == null) return;
+        try {
+            com.winlator.star.wayland.WaylandCompositor.nativeSetHdrDisplay(d.displayId, d.displayName, d.formats,
+                    d.supportsHdr10, d.maxLuminance, d.maxAverageLuminance, d.minLuminance,
+                    d.hdrSdrRatioAvailable, d.hdrSdrRatio, android.os.Build.VERSION.SDK_INT);
+            com.winlator.star.wayland.WaylandCompositor.nativeSetHdrHighestRatio(d.highestHdrSdrRatio);
+        } catch (Throwable t) {
+            Log.w("XServerDisplayActivity", "wayland: HDR display push failed", t);
+        }
+    }
+
     /** The in-game drawer's Wayland rows (Graphics tab): seed the Zero-copy toggle from the effective
      *  env and wire its live switch + writer + the frame-count poll. Runs from setupUI, after the
      *  container and shortcut are resolved and after the drawer's reset() in onCreate. */
@@ -6935,6 +7095,23 @@ public class XServerDisplayActivity extends AppCompatActivity {
             }
         };
 
+        // HDR output (HDR sessions only: the row is shown once the sampler below sees the gate open).
+        // A live, per-session switch - nothing is saved: the editors' "HDR output" setting stays the
+        // next launch's choice (DXVK_HDR and the colour-manager offer are decided at launch).
+        waylandHdrOutputOn = true;
+        state.setWaylandHdrOutput(true);
+        state.onWaylandHdrOutputToggle = on -> {
+            waylandHdrOutputOn = on;
+            try {
+                com.winlator.star.wayland.WaylandCompositor.nativeSetHdrOutput(on);
+            } catch (Throwable t) {
+                Log.e("XServerDisplayActivity", "wayland: live HDR output switch failed", t);
+            }
+            Log.i("XServerDisplayActivity", "wayland: HDR output " + (on ? "on" : "off (tone-mapped to SDR)")
+                    + " for this session");
+            if (fusionHud != null) fusionHud.setHdrState(hudHdrCode());
+        };
+
         // Last-10-s zero-copy frame count, straight from the compositor's stats window, plus whether
         // a zero-copy frame reached the display layer just now. The 10 s counter cannot show a switch
         // that happened two seconds ago; the age can, so the row says "switching..." only for as long
@@ -6975,12 +7152,281 @@ public class XServerDisplayActivity extends AppCompatActivity {
             Log.w("XServerDisplayActivity", "HDR: display listener unavailable", t);
         }
         reportHdrCapability("session start");
+        if (waylandMode && waylandHdrMode != com.winlator.star.wayland.WaylandCompositor.HDR_MODE_OFF)
+            startHdrRatioSampler();
     }
 
     private void stopHdrCapabilityReport() {
+        stopHdrRatioSampler();
+        if (waylandMode) {
+            // The compositor's "HDR on screen: ..." summary (once; a no-op when HDR was never asked for).
+            try { com.winlator.star.wayland.WaylandCompositor.nativeHdrSessionEnd(); } catch (Throwable ignored) {}
+        }
         if (hdrDisplayManager == null) return;
         try { hdrDisplayManager.unregisterDisplayListener(hdrDisplayListener); } catch (Throwable ignored) {}
         hdrDisplayManager = null;
+    }
+
+    // ───── HDR evidence on Wayland: the display's live HDR/SDR ratio (API 34+) ─────
+    // The one platform reading that says an HDR layer is really being SHOWN as HDR: 1.0 while only SDR
+    // is on screen, above 1.0 once the display grants the picture HDR headroom. The compositor tags the
+    // game's frames and counts them; this feeds it what the display did with them, so the session log
+    // (and its "HDR on screen: ..." line) can tell "tagged" from "shown". Runs only while the HDR switch
+    // is on, stops by itself when the compositor reports the gate closed, and never throws.
+    private final android.os.Handler hdrRatioHandler = new android.os.Handler(android.os.Looper.getMainLooper());
+    private Runnable hdrRatioSampler;
+    private java.util.function.Consumer<android.view.Display> hdrRatioListener;
+    private android.view.Display hdrRatioDisplay;
+
+    private void startHdrRatioSampler() {
+        if (hdrRatioSampler != null) return;
+        hdrRatioSampler = new Runnable() {
+            @Override public void run() {
+                if (hdrRatioSampler != this) return;
+                int gate;
+                try { gate = com.winlator.star.wayland.WaylandCompositor.nativeHdrGateState(); }
+                catch (Throwable t) { gate = 0; }
+                if (gate == 0) {  // closed: nothing to prove this session, and no drawer switch / HUD line
+                    XServerDrawerState.INSTANCE.setWaylandHdrAvailable(false);
+                    if (hudHdrGateOpen) {
+                        hudHdrGateOpen = false;
+                        if (fusionHud != null) fusionHud.setHdrState(hudHdrCode());
+                    }
+                    stopHdrRatioSampler();
+                    return;
+                }
+                if (gate == 1) {
+                    XServerDrawerState drawer = XServerDrawerState.INSTANCE;
+                    drawer.setWaylandHdrAvailable(true);
+                    boolean hudChanged = !hudHdrGateOpen;
+                    hudHdrGateOpen = true;
+                    android.view.Display d = hdrTargetDisplay();
+                    armHdrRatioListener(d);
+                    armHdrEvidence();
+                    // Thermal headroom: at most every 10 s (Android returns NaN when asked more often than
+                    // once a second), then the whole evidence set to the compositor (it logs changes only).
+                    if (hdrEvidenceTick++ % 10 == 0) readHdrThermalHeadroom();
+                    pushHdrEvidence();
+                    applyScreenHdrHeadroom();
+                    float ratio = com.winlator.star.display.DisplayHdrInfo.liveHdrSdrRatio(d);
+                    try { com.winlator.star.wayland.WaylandCompositor.nativeHdrSdrRatioSample(ratio, false); }
+                    catch (Throwable ignored) {}
+                    // The HUD's HDR line (hudHdrCode) and the drawer row: "HDR" while HDR frames are
+                    // really on screen (the compositor's verdict: frames tagged BT2020_PQ in the last
+                    // 1.5 s and, where Android reports it, an HDR/SDR ratio above 1), "HDR (no headroom)"
+                    // after 5 s of ratio 1.00 with HDR frames on screen.
+                    int state;
+                    boolean toneMapped;
+                    try { state = com.winlator.star.wayland.WaylandCompositor.nativeHdrState(); }
+                    catch (Throwable t) { state = 0; }
+                    try { toneMapped = com.winlator.star.wayland.WaylandCompositor.nativeHdrToneMappedOnScreen(); }
+                    catch (Throwable t) { toneMapped = false; }
+                    drawer.setWaylandHdrOnScreen(state == 1);
+                    drawer.setWaylandHdrNoHeadroom(state == 2);
+                    drawer.setWaylandHdrToneMapped(toneMapped);
+                    if (state != hudHdrState) { hudHdrState = state; hudChanged = true; }
+                    if (toneMapped != hudHdrToneMapped) { hudHdrToneMapped = toneMapped; hudChanged = true; }
+                    if (hudChanged && fusionHud != null) fusionHud.setHdrState(hudHdrCode());
+                }
+                hdrRatioHandler.postDelayed(this, 1000);
+            }
+        };
+        hdrRatioHandler.postDelayed(hdrRatioSampler, 1000);
+    }
+
+    /** Register the display's own ratio listener (changes arrive at once, not a second later); moves with
+     *  the game to another display. Silently nothing where the display has no ratio (API < 34 / SDR).
+     *  Reached by reflection: Display.registerHdrSdrRatioListener is not in the compile SDK's stubs,
+     *  and where it is missing the one-second sampler above is all there is (nothing is lost but speed). */
+    private void armHdrRatioListener(android.view.Display d) {
+        if (android.os.Build.VERSION.SDK_INT < 34 || d == null || d == hdrRatioDisplay) return;
+        disarmHdrRatioListener();
+        hdrRatioDisplay = d; // whatever happens below, do not retry every second
+        try {
+            if (!d.isHdrSdrRatioAvailable()) return;
+            java.util.function.Consumer<android.view.Display> l = disp -> {
+                float r = com.winlator.star.display.DisplayHdrInfo.liveHdrSdrRatio(disp);
+                try { com.winlator.star.wayland.WaylandCompositor.nativeHdrSdrRatioSample(r, true); }
+                catch (Throwable ignored) {}
+            };
+            java.util.concurrent.Executor ex = hdrRatioHandler::post;
+            android.view.Display.class.getMethod("registerHdrSdrRatioListener",
+                    java.util.concurrent.Executor.class, java.util.function.Consumer.class).invoke(d, ex, l);
+            hdrRatioListener = l;
+        } catch (Throwable t) {
+            hdrRatioListener = null;
+            Log.w("XServerDisplayActivity", "HDR: ratio listener unavailable (sampling once a second instead)", t);
+        }
+    }
+
+    private void disarmHdrRatioListener() {
+        if (hdrRatioDisplay != null && hdrRatioListener != null) {
+            try {
+                android.view.Display.class.getMethod("unregisterHdrSdrRatioListener", java.util.function.Consumer.class)
+                        .invoke(hdrRatioDisplay, hdrRatioListener);
+            } catch (Throwable ignored) {}
+        }
+        hdrRatioListener = null;
+        hdrRatioDisplay = null;
+    }
+
+    private void stopHdrRatioSampler() {
+        if (hdrRatioSampler != null) hdrRatioHandler.removeCallbacks(hdrRatioSampler);
+        hdrRatioSampler = null;
+        disarmHdrRatioListener();
+        disarmHdrEvidence();
+    }
+
+    // ───── HDR evidence beside the headroom (HDR sessions only; non-root APIs, no permission) ─────
+    // The Fold lost HDR headroom with HDR frames on screen in three ways: a screen recording (Android turns
+    // headroom off for it), heat under load, and possibly the brightness slider at maximum. So the session
+    // log carries what the device says about heat and brightness - PowerManager thermal status (+ a
+    // listener) and thermal headroom, the brightness setting and its mode (+ an observer). A screenshot or
+    // a screen recording is not detected in this build (that needs extra permissions); the log names it as
+    // a possible cause instead. Nothing here prompts.
+    private boolean hdrEvidenceArmed;
+    private Object hdrThermalListener;          // PowerManager.OnThermalStatusChangedListener (API 29)
+    private android.database.ContentObserver hdrBrightnessObserver;
+    private float hdrThermalHeadroom = Float.NaN;
+    private int hdrEvidenceTick;
+
+    private void armHdrEvidence() {
+        if (hdrEvidenceArmed) return;
+        hdrEvidenceArmed = true;
+        java.util.concurrent.Executor ex = hdrRatioHandler::post;
+        if (android.os.Build.VERSION.SDK_INT >= 29) {
+            try {
+                android.os.PowerManager pm = (android.os.PowerManager) getSystemService(android.content.Context.POWER_SERVICE);
+                if (pm != null) {
+                    android.os.PowerManager.OnThermalStatusChangedListener l = status -> pushHdrEvidence();
+                    pm.addThermalStatusListener(ex, l);
+                    hdrThermalListener = l;
+                }
+            } catch (Throwable t) {
+                Log.w("XServerDisplayActivity", "HDR evidence: no thermal status listener", t);
+            }
+        }
+        try {
+            hdrBrightnessObserver = new android.database.ContentObserver(hdrRatioHandler) {
+                @Override public void onChange(boolean selfChange) { pushHdrEvidence(); }
+            };
+            android.content.ContentResolver cr = getContentResolver();
+            cr.registerContentObserver(android.provider.Settings.System.getUriFor(
+                    android.provider.Settings.System.SCREEN_BRIGHTNESS), false, hdrBrightnessObserver);
+            cr.registerContentObserver(android.provider.Settings.System.getUriFor(
+                    android.provider.Settings.System.SCREEN_BRIGHTNESS_MODE), false, hdrBrightnessObserver);
+        } catch (Throwable t) {
+            hdrBrightnessObserver = null;
+            Log.w("XServerDisplayActivity", "HDR evidence: no brightness observer", t);
+        }
+        readHdrThermalHeadroom();
+        pushHdrEvidence();
+    }
+
+    // ───── The screen surface's HDR headroom request (frames through the HDR10 swapchain) ─────
+    // The game's display layer asks for headroom itself (sc_layer.c, ASurfaceTransaction_setDesiredHdrHeadroom).
+    // Frame generation presents HDR through the compositor's own swapchain on this SurfaceView instead, so the
+    // request goes on the SurfaceView (API 35): content peak / SDR white, cleared when those frames stop. Some
+    // phones only boost HDR when a surface asks.
+    private float hdrScreenHeadroomApplied = -1f; // -1 = never set
+    private boolean hdrScreenHeadroomMissingSaid;
+
+    private void applyScreenHdrHeadroom() {
+        float want;
+        try { want = com.winlator.star.wayland.WaylandCompositor.nativeHdrScreenHeadroom(); }
+        catch (Throwable t) { return; }
+        if (hdrScreenHeadroomApplied < 0f && want <= 0f) return;            // never asked: leave it be
+        if (Math.abs(want - hdrScreenHeadroomApplied) < 0.005f) return;
+        android.view.SurfaceView sv = waylandSurfaceView;
+        if (sv == null) return;
+        String how = null;
+        if (android.os.Build.VERSION.SDK_INT >= 35) {
+            try {
+                android.view.SurfaceView.class.getMethod("setDesiredHdrHeadroom", float.class).invoke(sv, want);
+                how = "SurfaceView.setDesiredHdrHeadroom";
+            } catch (Throwable t) {
+                try {
+                    android.view.SurfaceControl sc = sv.getSurfaceControl();
+                    android.view.SurfaceControl.Transaction tx = new android.view.SurfaceControl.Transaction();
+                    android.view.SurfaceControl.Transaction.class.getMethod("setDesiredHdrHeadroom",
+                            android.view.SurfaceControl.class, float.class).invoke(tx, sc, want);
+                    tx.apply();
+                    how = "SurfaceControl.Transaction.setDesiredHdrHeadroom";
+                } catch (Throwable t2) {
+                    how = null;
+                }
+            }
+        }
+        hdrScreenHeadroomApplied = want;
+        try {
+            if (how == null) {
+                if (!hdrScreenHeadroomMissingSaid && want > 0f) {
+                    hdrScreenHeadroomMissingSaid = true;
+                    com.winlator.star.wayland.WaylandCompositor.nativeHdrNoteHeadroomRequest(-1f);
+                    com.winlator.star.wayland.WaylandCompositor.nativeLogColor("HDR headroom request on the screen surface "
+                            + "not available (Android < 15): frames through the HDR10 swapchain rely on Android's default");
+                }
+                return;
+            }
+            com.winlator.star.wayland.WaylandCompositor.nativeHdrNoteHeadroomRequest(want);
+            if (want > 0f) {
+                String why = com.winlator.star.wayland.WaylandCompositor.nativeHdrScreenHeadroomWhy();
+                com.winlator.star.wayland.WaylandCompositor.nativeLogColor(String.format(java.util.Locale.US,
+                        "requested HDR headroom %.1fx on the screen surface (HDR10 swapchain for frame generation; %s) via %s",
+                        want, why, how));
+            } else {
+                com.winlator.star.wayland.WaylandCompositor.nativeLogColor("HDR headroom request on the screen surface "
+                        + "cleared (no preference): no HDR frames go through the swapchain any more");
+            }
+        } catch (Throwable ignored) {}
+    }
+
+    private void readHdrThermalHeadroom() {
+        if (android.os.Build.VERSION.SDK_INT < 30) return;
+        try {
+            android.os.PowerManager pm = (android.os.PowerManager) getSystemService(android.content.Context.POWER_SERVICE);
+            if (pm != null) hdrThermalHeadroom = pm.getThermalHeadroom(10);
+        } catch (Throwable t) {
+            hdrThermalHeadroom = Float.NaN;
+        }
+    }
+
+    /** Thermal status + headroom and the brightness setting to the compositor (it logs changes only). */
+    private void pushHdrEvidence() {
+        int thermal = -1, brightness = -1, mode = -1;
+        if (android.os.Build.VERSION.SDK_INT >= 29) {
+            try {
+                android.os.PowerManager pm = (android.os.PowerManager) getSystemService(android.content.Context.POWER_SERVICE);
+                if (pm != null) thermal = pm.getCurrentThermalStatus();
+            } catch (Throwable ignored) {}
+        }
+        try {
+            brightness = android.provider.Settings.System.getInt(getContentResolver(),
+                    android.provider.Settings.System.SCREEN_BRIGHTNESS, -1);
+            mode = android.provider.Settings.System.getInt(getContentResolver(),
+                    android.provider.Settings.System.SCREEN_BRIGHTNESS_MODE, -1);
+        } catch (Throwable ignored) {}
+        float headroom = hdrThermalHeadroom;
+        if (Float.isNaN(headroom) || Float.isInfinite(headroom)) headroom = -1f;
+        try { com.winlator.star.wayland.WaylandCompositor.nativeHdrEnvSample(thermal, headroom, brightness, mode); }
+        catch (Throwable ignored) {}
+    }
+
+    private void disarmHdrEvidence() {
+        if (!hdrEvidenceArmed) return;
+        hdrEvidenceArmed = false;
+        if (android.os.Build.VERSION.SDK_INT >= 29 && hdrThermalListener != null) {
+            try {
+                android.os.PowerManager pm = (android.os.PowerManager) getSystemService(android.content.Context.POWER_SERVICE);
+                if (pm != null) pm.removeThermalStatusListener(
+                        (android.os.PowerManager.OnThermalStatusChangedListener) hdrThermalListener);
+            } catch (Throwable ignored) {}
+        }
+        hdrThermalListener = null;
+        if (hdrBrightnessObserver != null) {
+            try { getContentResolver().unregisterContentObserver(hdrBrightnessObserver); } catch (Throwable ignored) {}
+            hdrBrightnessObserver = null;
+        }
     }
 
     /** The display the game is on: the TV when it has been moved there, else this activity's. */
@@ -7009,6 +7455,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
             if (waylandMode) {
                 try { com.winlator.star.wayland.WaylandCompositor.nativeLogDisplay(line); }
                 catch (Throwable t) { Log.w("XServerDisplayActivity", "HDR: session-log write failed", t); }
+                if (!first) pushWaylandHdrDisplay(now); // the HDR output hears about a new display too
             }
             // The Task Manager header is built once at launch; refresh it so a screen plugged in
             // mid-game updates the row instead of showing the handheld's answer for ever.
@@ -7304,6 +7751,42 @@ public class XServerDisplayActivity extends AppCompatActivity {
             }
             EnvVars env = raw != null && !raw.isEmpty() ? new EnvVars(raw) : null;
             boolean zeroCopy = isWaylandZeroCopyRequested();
+            // HDR10 output (opt-in: the game's / container's HDR output setting, BANNER_WAYLAND_HDR overrides
+            // it): the compositor decides the gate when it starts, from this request plus the display the
+            // game is on. The best path is the game's own 10-bit frames straight on its display layer, so
+            // when HDR can be on, zero-copy presentation is turned on for this session too (whatever needs
+            // the compositor - effects, windows, frame generation - gets the composed HDR picture). Without
+            // the setting, or on a display without HDR10, nothing here changes anything.
+            waylandHdrMode = resolvedWaylandHdrMode();
+            com.winlator.star.display.DisplayHdrInfo hdrDisp =
+                    com.winlator.star.display.DisplayHdrInfo.read(hdrTargetDisplay());
+            boolean hdrPossible = waylandHdrMode == com.winlator.star.wayland.WaylandCompositor.HDR_MODE_FORCE
+                    || (waylandHdrMode == com.winlator.star.wayland.WaylandCompositor.HDR_MODE_ON && hdrDisp.supportsHdr10);
+            waylandHdrActive = hdrPossible;
+            waylandHdrDisplay = hdrDisp;
+            // SDR content composed into an HDR picture (a window over the game, the desktop around a
+            // windowed game) is placed at this many nits; BT.2408's 203 unless the user says otherwise.
+            if (hdrPossible && env != null && env.has("BANNER_WAYLAND_HDR_SDR_NITS")) {
+                try {
+                    com.winlator.star.wayland.WaylandCompositor.nativeSetHdrSdrWhite(
+                            Float.parseFloat(env.get("BANNER_WAYLAND_HDR_SDR_NITS").trim()));
+                } catch (NumberFormatException ignored) {}
+            }
+            waylandHdrZeroCopyForced = hdrPossible && !zeroCopy;
+            if (waylandHdrZeroCopyForced) {
+                zeroCopy = true;
+                XServerDrawerState.INSTANCE.setWaylandZeroCopyRequested(true);
+                Log.i("XServerDisplayActivity", "wayland: HDR output requested on an HDR10 display - zero-copy on for this session");
+            }
+            pushWaylandHdrDisplay(hdrDisp);
+            // DXVK_HDR=1 reaches the game when the user set it, or when HDR is on and the user did not
+            // set it at all (setupXEnvironment exports it then; an explicit DXVK_HDR=0 stays 0).
+            boolean dxvkHdrInSession = isDxvkHdrEnvOn() || (hdrPossible && (env == null || !env.has("DXVK_HDR")));
+            com.winlator.star.wayland.WaylandCompositor.nativeSetHdrRequest(waylandHdrMode, waylandHdrSource(),
+                    dxvkHdrInSession, waylandHdrZeroCopyForced);
+            if (waylandHdrMode != com.winlator.star.wayland.WaylandCompositor.HDR_MODE_OFF)
+                Log.i("XServerDisplayActivity", "wayland: BANNER_WAYLAND_HDR mode " + waylandHdrMode + " on \""
+                        + hdrDisp.displayName + "\" (HDR types " + hdrDisp.formats + ", HDR10 " + hdrDisp.supportsHdr10 + ")");
             com.winlator.star.wayland.WaylandCompositor.nativeSetZeroCopy(zeroCopy);
             XServerDrawerState.INSTANCE.setWaylandZeroCopyActive(zeroCopy);
             if (zeroCopy) Log.i("XServerDisplayActivity", "wayland: zero-copy layer mode requested");
@@ -7706,7 +8189,9 @@ public class XServerDisplayActivity extends AppCompatActivity {
             // its own Android layer (startWaylandCompositor) also tells our Wayland Turnip's WSI to
             // allocate the game's swapchain images as gralloc buffers and hand them to the compositor
             // (banner_ahb_v1), so the layer shows the game's own buffer without a copy.
-            if (waylandMode && isWaylandZeroCopyRequested()) envVars.put("BANNER_WSI_AHB", "1");
+            // The HDR opt-in (startWaylandCompositor, which runs first) can turn zero-copy on too.
+            if (waylandMode && (isWaylandZeroCopyRequested() || waylandHdrZeroCopyForced)) envVars.put("BANNER_WSI_AHB", "1");
+            if (waylandMode) applyWaylandHdrEnv(envVars);
 
             // OpenGL safe mode (Wayland only, default ON): GALLIUM_THREAD=0 removes Mesa's
             // u_threaded_context helper thread. That thread is a plain pthread with no Wine TEB, so a
@@ -12606,18 +13091,21 @@ return true;
         FrameLayout rootView = findViewById(R.id.FLXServerDisplay);
         fusionHud = new com.winlator.star.widget.fusionhud.FusionHudView(this);
         fusionHud.setFpsCounter(fpsCounter);
+        // Fusion sits in the top-right corner until dragged, anchored on its right edge so a tap to a
+        // bigger size grows it leftward into the screen.
         FrameLayout.LayoutParams plp = new FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
-            android.view.Gravity.TOP | android.view.Gravity.START
+            android.view.Gravity.TOP | android.view.Gravity.END
         );
         plp.topMargin = 10;
-        plp.leftMargin = 10;
+        plp.rightMargin = 10;
         fusionHud.setLayoutParams(plp);
         fusionHud.applyConfig(fpsConfigString);
         if (hudEngineShort != null) fusionHud.setEngineLabel(hudEngineShort);
         if (hudGpuName != null) fusionHud.setGpuModel(hudGpuName);
-        fusionHud.setDisplayServer(waylandMode ? "Wayland" : "X11");
+        fusionHud.setDisplayServer(hudDisplayServerLabel());
+        fusionHud.setHdrState(hudHdrCode());
         // Mega stack-layer versions: Proton/Wine, the graphics-driver wrapper package, and DX wrapper.
         if (wineInfo != null) fusionHud.setWineVersion(wineInfo.toString());
         fusionHud.setGraphicsWrapper(friendlyGraphicsWrapper());
@@ -12627,6 +13115,16 @@ return true;
         fusionHud.setOnLockChangedListener((locked) -> persistHudConfigKey("hudLocked", locked ? "1" : "0"));
         fusionHud.setOnMovedListener((x, y) -> persistHudPosition("hudPosFusion", x, y));
         restoreHudPosition(fusionHud, "hudPosFusion");
+        // A dragged HUD keeps its right edge when it changes size, so a wider size could push it past
+        // the left edge. Pull it back on screen whenever its size changes (setX/setY don't relayout).
+        fusionHud.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
+            View parent = (View) v.getParent();
+            if (parent == null || v.getWidth() == 0 || v.getHeight() == 0) return;
+            float x = Math.max(0, Math.min(v.getX(), Math.max(0, parent.getWidth() - v.getWidth())));
+            float y = Math.max(0, Math.min(v.getY(), Math.max(0, parent.getHeight() - v.getHeight())));
+            if (x != v.getX()) v.setX(x);
+            if (y != v.getY()) v.setY(y);
+        });
         fusionHud.setVisibility(frameRatingWindowId != -1 && hudCounterEnabled ? View.VISIBLE : View.GONE);
         rootView.addView(fusionHud);
     }

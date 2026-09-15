@@ -55,6 +55,12 @@ VkImage vkp_effects_run(VkCommandBuffer cmd, VkImage scene, int scene_w, int sce
 /* Compositor thread: drop every Vulkan object (device teardown / device lost). */
 void vkp_effects_destroy(void);
 
+/* Compositor thread, before vkp_effects_run(): the format of the scene image it will be handed and the
+ * format its own targets use. R8G8B8A8 / R8G8B8A8 for every SDR frame (the default); A2B10G10R10 /
+ * A2B10G10R10 while an HDR picture runs through it (hdr_compose.h). A target-format change rebuilds the
+ * chain's objects on its next run (once per switch). */
+void vkp_effects_set_formats(VkFormat scene_fmt, VkFormat target_fmt);
+
 /* ---- settings (any thread; values 1:1 with the X11 Vulkan renderer's setters) ---- */
 /* 0=None 1=Linear 2=Nearest 3=SGSR 4=FSR 5=FSR Fit 6=Sharpen 7=NIS 8=SGSR HQ */
 void vkp_effects_set_scaling(int mode);
