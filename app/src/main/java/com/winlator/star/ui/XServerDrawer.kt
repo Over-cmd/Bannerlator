@@ -1380,6 +1380,7 @@ private fun WaylandHdrOutputRow(state: XServerDrawerState) {
     if (!available) return
     val output by state.waylandHdrOutput.collectAsState()
     val onScreen by state.waylandHdrOnScreen.collectAsState()
+    val noHeadroom by state.waylandHdrNoHeadroom.collectAsState()
     val toneMapped by state.waylandHdrToneMapped.collectAsState()
     var checked by remember(output) { mutableStateOf(output) }
 
@@ -1394,9 +1395,11 @@ private fun WaylandHdrOutputRow(state: XServerDrawerState) {
     HelperText(
         when {
             checked && onScreen    -> "On: HDR frames on screen now."
+            checked && noHeadroom  -> "On, but the screen gives HDR no headroom right now (brightness at maximum?): " +
+                                      "lower the brightness a little to see HDR highlights."
             checked && toneMapped  -> "On, but shown tone-mapped: frame generation on a screen with no HDR swapchain."
             checked                -> "On: no HDR frames right now (is HDR on in the game's settings?)."
-            onScreen               -> "Off, but these frames cannot be tone-mapped here: they stay HDR."
+            onScreen || noHeadroom -> "Off, but these frames cannot be tone-mapped here: they stay HDR."
             toneMapped             -> "Off: HDR frames shown tone-mapped to SDR."
             else                   -> "Off: no HDR frames right now."
         }

@@ -6986,15 +6986,18 @@ public class XServerDisplayActivity extends AppCompatActivity {
         }
     }
 
-    /** The HUD's display-server label: "Wayland · HDR" while HDR frames are really on screen, "Wayland ·
-     *  HDR off" while the drawer's HDR output switch is off (the picture is tone-mapped to SDR), else
-     *  "Wayland". What is on screen wins: frames that stay HDR with the switch off still read "HDR". */
-    private volatile boolean hudHdrOnScreen = false;
+    /** The HUD's display-server label: "Wayland · HDR" while HDR frames are really on screen with HDR
+     *  headroom, "Wayland · HDR (no headroom)" while they are on screen but the display has given them
+     *  none for 5 s+ (typically the brightness slider at maximum), "Wayland · HDR off" while the drawer's
+     *  HDR output switch is off (the picture is tone-mapped to SDR), else "Wayland". What is on screen
+     *  wins: frames that stay HDR with the switch off still read "HDR". */
+    private volatile int hudHdrState = 0;   // WaylandCompositor.nativeHdrState()
     /** The drawer's HDR output switch (per session, starts on; only offered while the HDR gate is open). */
     private volatile boolean waylandHdrOutputOn = true;
     private String hudDisplayServerLabel() {
         if (!waylandMode) return "X11";
-        if (hudHdrOnScreen) return "Wayland · HDR";
+        if (hudHdrState == 1) return "Wayland · HDR";
+        if (hudHdrState == 2) return "Wayland · HDR (no headroom)";
         return waylandHdrOutputOn ? "Wayland" : "Wayland · HDR off";
     }
 
@@ -7185,15 +7188,17 @@ public class XServerDisplayActivity extends AppCompatActivity {
                     // HUD badge: "Wayland · HDR" while HDR frames are really on screen (the compositor's
                     // verdict: frames tagged BT2020_PQ in the last 1.5 s and, where Android reports it,
                     // an HDR/SDR ratio above 1).
-                    boolean on, toneMapped;
-                    try { on = com.winlator.star.wayland.WaylandCompositor.nativeHdrOnScreen(); }
-                    catch (Throwable t) { on = false; }
+                    int state;
+                    boolean toneMapped;
+                    try { state = com.winlator.star.wayland.WaylandCompositor.nativeHdrState(); }
+                    catch (Throwable t) { state = 0; }
                     try { toneMapped = com.winlator.star.wayland.WaylandCompositor.nativeHdrToneMappedOnScreen(); }
                     catch (Throwable t) { toneMapped = false; }
-                    drawer.setWaylandHdrOnScreen(on);
+                    drawer.setWaylandHdrOnScreen(state == 1);
+                    drawer.setWaylandHdrNoHeadroom(state == 2);
                     drawer.setWaylandHdrToneMapped(toneMapped);
-                    if (on != hudHdrOnScreen) {
-                        hudHdrOnScreen = on;
+                    if (state != hudHdrState) {
+                        hudHdrState = state;
                         if (fusionHud != null) fusionHud.setDisplayServer(hudDisplayServerLabel());
                     }
                 }

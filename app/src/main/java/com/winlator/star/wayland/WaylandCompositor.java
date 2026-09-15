@@ -282,6 +282,11 @@ public final class WaylandCompositor {
     /** True while an HDR game's frames are being shown tone-mapped to SDR (the last one under 1.5 s ago). */
     public static native boolean nativeHdrToneMappedOnScreen();
 
+    /** 0 = no HDR frames on screen (or not confirmed yet), 1 = HDR frames on screen with HDR headroom,
+     *  2 = HDR frames on screen but the display has given them no headroom (HDR/SDR ratio 1.00) for 5 s
+     *  or more - typically the brightness slider at maximum. The HUD badge and the drawer's HDR row. */
+    public static native int nativeHdrState();
+
     /** Fullscreen mode ({@code Container.FULLSCREEN_OFF/FIT/STRETCH/FILL/INTEGER}) and screen alignment
      *  ({@code Container.ALIGN_CENTER/TOP/BOTTOM}): how the compositor fits the desktop onto the screen,
      *  with the same arithmetic as {@code ViewTransformation} (which maps touch input), so the picture and

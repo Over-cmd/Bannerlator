@@ -455,6 +455,12 @@ Java_com_winlator_star_wayland_WaylandCompositor_nativeHdrOutput(JNIEnv *env, jc
     return banner_color_output() ? JNI_TRUE : JNI_FALSE;
 }
 
+/* 0 none, 1 HDR frames on screen with headroom, 2 HDR frames on screen without headroom for 5 s+. */
+JNIEXPORT jint JNICALL
+Java_com_winlator_star_wayland_WaylandCompositor_nativeHdrState(JNIEnv *env, jclass clazz) {
+    return (jint)banner_color_hdr_state();
+}
+
 /* An HDR game's frames were shown tone-mapped to SDR in the last 1.5 s (the drawer's status line). */
 JNIEXPORT jboolean JNICALL
 Java_com_winlator_star_wayland_WaylandCompositor_nativeHdrToneMappedOnScreen(JNIEnv *env, jclass clazz) {

@@ -820,7 +820,20 @@ launch). The HUD reads `Wayland · HDR` while HDR frames are on screen (tagged i
 ratio > 1.01 where reported), `Wayland · HDR off` while the switch is off. Frames tone-mapped by the
 switch are counted separately in the verdict.
 
-### 11.4 What is still NOT done / not proven
+### 11.4 Live headroom (lead's addition after the second Fold run)
+
+The Fold's second run (brightness slider at maximum) showed the ratio at 3.23 for a minute and then
+**1.00 for 3+ minutes with HDR frames on screen the whole time**, while the verdict kept saying "rose to
+3.23". Android simply gave the layer no headroom (SDR white already at the panel's limit). Now, from the
+ratio samples the app already sends (1 s + the display listener): the time with HDR frames on screen and
+the part of it with ratio > 1.01; a no-headroom streak (HDR frames on screen, ratio <= 1.01) that after
+5 s writes `no HDR headroom for 5 s … the screen brightness is probably at maximum …` (and `HDR headroom
+is back …` when it ends), tags the 10 s line and the steady ratio line, puts the HUD on `Wayland · HDR
+(no headroom)` and the drawer row on the same hint (`banner_color_hdr_state` = 2); and the verdict
+reports `headroom above 1.00 for P% of the HDR time (a of b s), now R` plus the hint while the streak
+lasts. Cheap: no new sampling, a few integers under the existing lock.
+
+### 11.5 What is still NOT done / not proven
 
 - Nothing of round 2 has run on a device yet (CI only). The Fold test note is `docs/HDR-test-r2.md`.
 - Frame generation runs on 8-bit PQ (the engines' format); a 10-bit engine path would need the

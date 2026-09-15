@@ -86,6 +86,10 @@ object XServerDrawerState {
     val waylandHdrOutput: StateFlow<Boolean> = _waylandHdrOutput
     private val _waylandHdrOnScreen       = MutableStateFlow(false)
     val waylandHdrOnScreen: StateFlow<Boolean> = _waylandHdrOnScreen
+    // HDR frames on screen but the display has given them no headroom for 5 s+ (HDR/SDR ratio 1.00) -
+    // typically the brightness slider at maximum.
+    private val _waylandHdrNoHeadroom     = MutableStateFlow(false)
+    val waylandHdrNoHeadroom: StateFlow<Boolean> = _waylandHdrNoHeadroom
     private val _waylandHdrToneMapped     = MutableStateFlow(false)
     val waylandHdrToneMapped: StateFlow<Boolean> = _waylandHdrToneMapped
 
@@ -528,6 +532,7 @@ object XServerDrawerState {
     fun setWaylandHdrAvailable(v: Boolean)      { _waylandHdrAvailable.value = v }
     fun setWaylandHdrOutput(v: Boolean)         { _waylandHdrOutput.value = v }
     fun setWaylandHdrOnScreen(v: Boolean)       { _waylandHdrOnScreen.value = v }
+    fun setWaylandHdrNoHeadroom(v: Boolean)     { _waylandHdrNoHeadroom.value = v }
     fun setWaylandHdrToneMapped(v: Boolean)     { _waylandHdrToneMapped.value = v }
     fun setIsMouseDisabled(v: Boolean)         { _isMouseDisabled.value = v }
     fun setMoveCursorToTouchpoint(v: Boolean)  { _moveCursorToTouchpoint.value = v }
@@ -683,6 +688,7 @@ object XServerDrawerState {
         _waylandHdrAvailable.value = false
         _waylandHdrOutput.value = true
         _waylandHdrOnScreen.value = false
+        _waylandHdrNoHeadroom.value = false
         _waylandHdrToneMapped.value = false
         _isMouseDisabled.value = false
         _moveCursorToTouchpoint.value = false
