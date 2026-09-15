@@ -150,7 +150,11 @@ void sc_layer_set_frame_rate(float fps) {
 
 /* ---- the layers and their buffer pools -------------------------------------------------------- */
 
-#define POOL_MAX 3
+/* Five for the game layer: one on screen, one queued, and the ones SurfaceFlinger has not reported
+ * back yet (its OnComplete for a transaction arrives only after the NEXT frame is presented), with
+ * room to spare, so a free buffer is nearly always one the display already let go of. With three,
+ * a late callback left none free ("no free layer buffer … frame dropped"). */
+#define POOL_MAX 5
 
 struct slot {
     AHardwareBuffer *ahb;
@@ -175,10 +179,15 @@ struct layer {
     void *cur_token;            /* zero-copy: the game's buffer on the layer (NULL = a pool slot) */
     ARect geo_src, geo_dst;
     int geo_valid;
-    int linear;                 /* 1: gralloc refused/failed UBWC, this pool is linear */
+    int alloc_tier;             /* how pool buffers are asked of gralloc (TIER_*), lowered on failure */
     uint64_t pool_modifier;
     int first_logged;
     int64_t drop_logged_ns;
+    unsigned drops_unlogged;    /* frames dropped since the last "no free layer buffer" line */
+    /* The last pool layout written to the log, so a line is written per change, not per buffer. */
+    int logged_w, logged_h, logged_tier;
+    uint32_t logged_fmt;
+    uint64_t logged_mod;
     int votes_rate;             /* 1: this layer carries the game's cadence (the game layer) */
     float fps_applied;          /* the vote the live SurfaceControl already carries (-1 = none yet) */
     int recreate_pending;       /* composition recovery: swap this layer's SurfaceControl for a fresh
@@ -204,7 +213,7 @@ static AHardwareBuffer *g_blank;
 static void layers_init(void) {
     if (g_layers_ready) return;
     g_layers_ready = 1;
-    g_layers[SC_LAYER_GAME] = (struct layer){.name = "banner_wayland_game", .z = 1, .pool_n = 3,
+    g_layers[SC_LAYER_GAME] = (struct layer){.name = "banner_wayland_game", .z = 1, .pool_n = POOL_MAX,
                                              .cur_slot = -1, .votes_rate = 1, .fps_applied = -1.0f, .hr_applied = -1.0f,
                                              .ds_applied = -1};
     g_layers[SC_LAYER_OVERLAY] = (struct layer){.name = "banner_wayland_overlay", .z = 2, .pool_n = 3,
@@ -350,6 +359,7 @@ static void drain_and_free_pools(void) {
             s->release_fd = -1;
         }
         g_layers[i].first_logged = 0;
+        g_layers[i].logged_w = g_layers[i].logged_h = 0; /* the next pool's layout is logged again */
     }
     pthread_mutex_unlock(&g_lock);
 }
@@ -367,18 +377,42 @@ static int sniff_modifier(const struct banner_native_handle *h, uint64_t *mod) {
 
 static int g_alloc_failed; /* set by alloc_slot when gralloc or the import refused a buffer */
 
+/* How a layer's pool buffers are asked of gralloc, best first; a layer only ever moves down.
+ *   TIER_UBWC   GPU render target + sampled + composer overlay + AHARDWAREBUFFER_USAGE_VENDOR_0 (bit 28):
+ *               QTI gralloc's GRALLOC_USAGE_PRIVATE_ALLOC_UBWC. Without it QTI gralloc allocates LINEAR even
+ *               for a GPU render target (gr_allocator.cpp IsUBwcEnabled: an explicit UBWC format, the
+ *               private UBWC bit or CLIENT_TARGET, and no CPU bit). Whether gralloc really compressed the
+ *               buffer is read back from its handle (sniff_modifier), never assumed.
+ *   TIER_PLAIN  the same without the vendor bit (a gralloc that refuses unknown bits; what we asked before).
+ *   TIER_LINEAR plus a CPU bit, so the layout is known to be linear even when the handle is unreadable. */
+enum { TIER_UBWC, TIER_PLAIN, TIER_LINEAR };
+#define BANNER_AHB_USAGE_VENDOR_UBWC (1ULL << 28) /* AHARDWAREBUFFER_USAGE_VENDOR_0 */
+
+static const char *tier_name(int tier) {
+    return tier == TIER_UBWC ? "asked for UBWC" : tier == TIER_PLAIN ? "no UBWC request" : "linear by request (CPU bit)";
+}
+
 static int alloc_slot(struct layer *l, struct slot *s, int w, int h, uint32_t fmt) {
     g_alloc_failed = 0;
-    for (int attempt = 0; attempt < 2; attempt++) {
+    while (l->alloc_tier <= TIER_LINEAR) {
+        const int tier = l->alloc_tier;
         AHardwareBuffer_Desc d = {
             .width = (uint32_t)w, .height = (uint32_t)h, .layers = 1,
             .format = fmt,
-            /* GPU render target (the blit writes it) + sampled (SurfaceFlinger's GPU fallback reads
-             * it). A CPU usage bit makes QTI gralloc allocate linear instead of UBWC. */
+            /* GPU render target (the blit writes it) + sampled (SurfaceFlinger's GPU fallback reads it) +
+             * composer overlay (the display scans it out). See the tiers above for the rest. */
             .usage = AHARDWAREBUFFER_USAGE_GPU_COLOR_OUTPUT | AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE |
-                     (l->linear ? AHARDWAREBUFFER_USAGE_CPU_READ_RARELY : 0)};
+                     AHARDWAREBUFFER_USAGE_COMPOSER_OVERLAY |
+                     (tier == TIER_UBWC ? BANNER_AHB_USAGE_VENDOR_UBWC : 0) |
+                     (tier == TIER_LINEAR ? AHARDWAREBUFFER_USAGE_CPU_READ_RARELY : 0)};
         AHardwareBuffer *ahb = NULL;
         if (AHardwareBuffer_allocate(&d, &ahb) != 0 || !ahb) {
+            if (tier < TIER_LINEAR) {
+                banner_log("layer", "%s: gralloc refused a %dx%d pool buffer (%s): trying %s", l->name, w, h,
+                           tier_name(tier), tier_name(tier + 1));
+                l->alloc_tier = tier + 1;
+                continue;
+            }
             banner_log("error", "layer: %s: AHardwareBuffer_allocate %dx%d (format %#x) failed", l->name, w, h, fmt);
             g_alloc_failed = 1;
             return -1;
@@ -386,64 +420,103 @@ static int alloc_slot(struct layer *l, struct slot *s, int w, int h, uint32_t fm
         AHardwareBuffer_Desc got; AHardwareBuffer_describe(ahb, &got);
         const struct banner_native_handle *nh = api.getNativeHandle(ahb);
         uint64_t mod = MOD_LINEAR;
-        int known = sniff_modifier(nh, &mod);
-        if (!known) {
-            /* Not a QTI handle: the only layout we can assume is linear, and only if the buffer was
-             * asked for with a CPU bit (gralloc must not have compressed it). */
-            if (!l->linear) { AHardwareBuffer_release(ahb); l->linear = 1;
+        if (!sniff_modifier(nh, &mod)) {
+            /* Not a handle we can read: the only layout we can assume is linear, and only if the buffer
+             * was asked for with a CPU bit (gralloc must not have compressed it). */
+            if (tier < TIER_LINEAR) {
+                AHardwareBuffer_release(ahb);
+                l->alloc_tier = TIER_LINEAR;
                 banner_log("layer", "%s: gralloc handle layout unknown (%d fds, %d ints): using linear pool buffers",
                            l->name, nh ? nh->numFds : -1, nh ? nh->numInts : -1);
-                continue; }
+                continue;
+            }
             mod = MOD_LINEAR;
         }
         int fd = (nh && nh->numFds > 0) ? nh->data[0] : -1;
+        /* The test create: vkp_image_import_dmabuf creates the image with gralloc's explicit layout, so a
+         * layout the compositor's Turnip refuses falls back a tier instead of drawing garbage. */
         struct vkp_image *img = fd >= 0 ? vkp_image_import_dmabuf(fd, fmt == AHB_RGB10A2 ? DRM_ABGR2101010 : DRM_ABGR8888,
                                                                   mod, w, h, got.stride * 4, 0, 1) : NULL;
         if (!img) {
             banner_log("layer", "%s: import of a %s %dx%d pool buffer (stride %u px) into the compositor's Turnip failed",
                        l->name, mod == MOD_QCOM_COMPRESSED ? "UBWC" : "linear", w, h, got.stride);
             AHardwareBuffer_release(ahb);
-            if (!l->linear) { l->linear = 1; continue; } /* retry once with a linear buffer */
+            if (tier < TIER_LINEAR) { l->alloc_tier = tier + 1; continue; }
             g_alloc_failed = 1;
             return -1;
         }
         s->ahb = ahb; s->img = img; s->w = w; s->h = h; s->fmt = fmt; s->release_fd = -1; s->busy = 0;
         l->pool_modifier = mod;
-        banner_log("layer", "%s: pool buffer %dx%d %s%s, stride %u px (gralloc handle %d fds / %d ints)",
-                   l->name, w, h, mod == MOD_QCOM_COMPRESSED ? "UBWC (QCOM_COMPRESSED)" : "linear",
-                   fmt == AHB_RGB10A2 ? " 10-bit RGBA1010102" : "",
-                   got.stride, nh ? nh->numFds : -1, nh ? nh->numInts : -1);
+        if (l->logged_w != w || l->logged_h != h || l->logged_fmt != fmt || l->logged_mod != mod ||
+            l->logged_tier != tier) {
+            l->logged_w = w; l->logged_h = h; l->logged_fmt = fmt; l->logged_mod = mod; l->logged_tier = tier;
+            banner_log("layer", "%s: pool buffers %dx%d%s: %s (%s), stride %u px, up to %d buffers (gralloc handle %d fds / %d ints)",
+                       l->name, w, h, fmt == AHB_RGB10A2 ? " 10-bit RGBA1010102" : "",
+                       mod == MOD_QCOM_COMPRESSED ? "UBWC (QCOM_COMPRESSED)" : "linear", tier_name(tier),
+                       got.stride, l->pool_n, nh ? nh->numFds : -1, nh ? nh->numInts : -1);
+        }
         return 0;
     }
+    g_alloc_failed = 1;
     return -1;
 }
 
-/* A slot SurfaceFlinger is done with (waits briefly on its release fence), holding a w x h buffer of
- * AHB format fmt. -1 = none free (or the buffer could not be made). */
-static int take_free_slot(struct layer *l, int w, int h, uint32_t fmt) {
-    int idx = -1, fd = -1;
+/* 1 when a sync_file has signalled (the display has stopped reading that buffer). */
+static int fence_signalled(int fd) {
+    struct pollfd p = {.fd = fd, .events = POLLIN};
+    int r;
+    do { r = poll(&p, 1, 0); } while (r < 0 && errno == EINTR);
+    return r > 0;
+}
+
+/* A slot SurfaceFlinger has handed back, holding a w x h buffer of AHB format fmt. -1 = none free (or
+ * the buffer could not be made). A free slot whose release fence has already signalled is preferred;
+ * otherwise the fence of the first free one is handed back in *wait_fd for the copy to wait on ON THE
+ * GPU (vkp_blit_image / vkp_pass_copy_to consume it), so the compositor thread no longer blocks here.
+ * Only a driver without VK_KHR_external_semaphore_fd still waits on the CPU, bounded, as before.
+ * *wait_fd is -1 whenever nothing needs waiting for (and on every failure). */
+static int take_free_slot(struct layer *l, int w, int h, uint32_t fmt, int *wait_fd) {
+    int idx = -1, pending = -1, fd = -1;
+    *wait_fd = -1;
     pthread_mutex_lock(&g_lock);
     for (int i = 0; i < l->pool_n; i++) {
         if (i == l->cur_slot || l->slots[i].busy) continue;
-        idx = i; fd = l->slots[i].release_fd; l->slots[i].release_fd = -1;
-        break;
+        const int rf = l->slots[i].release_fd;
+        if (rf < 0 || fence_signalled(rf)) { idx = i; break; }
+        if (pending < 0) pending = i;
     }
+    if (idx < 0) idx = pending;
+    if (idx >= 0) { fd = l->slots[idx].release_fd; l->slots[idx].release_fd = -1; }
     pthread_mutex_unlock(&g_lock);
     if (idx < 0) return -1;
-    if (fd >= 0) {
-        struct pollfd p = {.fd = fd, .events = POLLIN};
-        int r;
-        do { r = poll(&p, 1, 100); } while (r < 0 && errno == EINTR);
-        close(fd);
-        if (r == 0) return -1; /* still read by the display: leave it, drop this frame */
-    }
+    if (fd >= 0 && fence_signalled(fd)) { close(fd); fd = -1; }
     struct slot *s = &l->slots[idx];
     if (s->ahb && (s->w != w || s->h != h || s->fmt != fmt)) {
-        /* Size or format change: this slot is free, so it can be replaced at once. */
+        /* Size or format change: this slot is free, so it can be replaced at once (the display keeps its
+         * own reference to the old buffer for as long as it reads it; the new one needs no wait). */
+        if (fd >= 0) { close(fd); fd = -1; }
         vkp_image_destroy(s->img); AHardwareBuffer_release(s->ahb);
         memset(s, 0, sizeof(*s)); s->release_fd = -1;
     }
-    if (!s->ahb && alloc_slot(l, s, w, h, fmt) != 0) return -1;
+    if (fd >= 0 && !vkp_can_wait_sync_fd()) {
+        struct pollfd p = {.fd = fd, .events = POLLIN};
+        int r;
+        do { r = poll(&p, 1, 100); } while (r < 0 && errno == EINTR);
+        if (r == 0) {
+            /* Still read by the display: keep its fence with it (the next use waits again), drop this frame. */
+            pthread_mutex_lock(&g_lock);
+            if (s->release_fd < 0) s->release_fd = fd; else close(fd);
+            pthread_mutex_unlock(&g_lock);
+            return -1;
+        }
+        close(fd);
+        fd = -1;
+    }
+    if (!s->ahb && alloc_slot(l, s, w, h, fmt) != 0) {
+        if (fd >= 0) close(fd);
+        return -1;
+    }
+    *wait_fd = fd;
     return idx;
 }
 
@@ -723,13 +796,26 @@ static int present_slot(struct layer *l, int idx, const int r[8], const struct b
     return 0;
 }
 
-/* No free buffer this frame: the display still holds all of them. Logged at most every 5 s. */
+/* No free buffer this frame: the display still holds all of them. Counted for the 10 s perf line, and
+ * logged at most every 30 s with the number of frames dropped since the last line. */
+static unsigned g_pool_drops;
 static void log_drop(struct layer *l) {
+    g_pool_drops++;
+    l->drops_unlogged++;
     int64_t t = now_ns();
-    if (t - l->drop_logged_ns > 5000000000LL) {
+    if (!l->drop_logged_ns || t - l->drop_logged_ns > 30000000000LL) {
+        banner_log("layer", "%s: no free layer buffer (display still holds all %d): %u frame%s dropped%s", l->name,
+                   l->pool_n, l->drops_unlogged, l->drops_unlogged == 1 ? "" : "s",
+                   l->drop_logged_ns ? " since the last such line" : "");
         l->drop_logged_ns = t;
-        banner_log("layer", "%s: no free layer buffer (display still holds all %d): frame dropped", l->name, l->pool_n);
+        l->drops_unlogged = 0;
     }
+}
+
+unsigned sc_layer_drops_take(void) {
+    unsigned n = g_pool_drops;
+    g_pool_drops = 0;
+    return n;
 }
 
 int sc_layer_present_ahb(AHardwareBuffer *ahb, int w, int h, int acquire_fd, void *token, int scene_w, int scene_h,
@@ -793,9 +879,10 @@ int sc_layer_present(struct vkp_image *src, int scene_w, int scene_h, const stru
     if (g < 0) return -1;
     if (g == 0) { sc_layer_hide(); return 0; } /* nothing of it is on screen */
 
-    int idx = take_free_slot(l, sw, sh, AHB_RGBA8);
+    int wait_fd;
+    int idx = take_free_slot(l, sw, sh, AHB_RGBA8, &wait_fd);
     if (idx < 0) { log_drop(l); return 0; }
-    if (vkp_blit_image(src, l->slots[idx].img) != 0) return -1;
+    if (vkp_blit_image(src, l->slots[idx].img, wait_fd) != 0) return -1;
     if (present_slot(l, idx, r, color) != 0) return -1;
     if (color && color->dataspace) banner_color_frame_shown(color, BANNER_HDR_LAYER_COPY, AHB_RGBA8);
     if (!l->first_logged) {
@@ -817,9 +904,10 @@ int sc_layer_present_pass(const struct vkp_draw *draws, int n, int scene_w, int 
      * the scene's mapped output size) decides how big the layer buffer has to be. */
     if (vkp_pass_begin(scene_w, scene_h, draws, n, &rw, &rh) != 0) return -1;
     if (!vkp_map_rect(rw, rh, scene_w, scene_h, r)) { vkp_pass_abort(); sc_layer_hide(); return 0; }
-    int idx = take_free_slot(l, rw, rh, AHB_RGBA8);
+    int wait_fd;
+    int idx = take_free_slot(l, rw, rh, AHB_RGBA8, &wait_fd);
     if (idx < 0) { vkp_pass_abort(); log_drop(l); return 0; }
-    if (vkp_pass_copy_to(l->slots[idx].img) != 0) return -1;
+    if (vkp_pass_copy_to(l->slots[idx].img, wait_fd) != 0) return -1;
     if (present_slot(l, idx, r, NULL) != 0) return -1; /* the effects chain's result is 8-bit sRGB */
     if (!l->first_logged) {
         l->first_logged = 1;
@@ -852,15 +940,16 @@ int sc_layer_present_hdr_scene(const struct vkp_draw *draws, int n, const struct
     const int tm = hf->tonemap;
     const uint32_t fmt = tm ? AHB_RGBA8 : g_hdr_pool_fmt;
     g_alloc_failed = 0;
-    int idx = take_free_slot(l, rw, rh, fmt);
+    int wait_fd;
+    int idx = take_free_slot(l, rw, rh, fmt, &wait_fd);
     if (idx < 0 && g_alloc_failed && fmt == AHB_RGB10A2) {
         g_hdr_pool_fmt = AHB_RGBA8;
         banner_log("color", "%s: this device will not make a 10-bit layer buffer (RGBA1010102): the HDR picture goes "
                    "on 8-bit buffers instead (still tagged BT2020_PQ; less precision)", l->name);
-        idx = take_free_slot(l, rw, rh, g_hdr_pool_fmt);
+        idx = take_free_slot(l, rw, rh, g_hdr_pool_fmt, &wait_fd);
     }
     if (idx < 0) { vkp_pass_abort(); log_drop(l); return 0; }
-    if (vkp_pass_copy_to(l->slots[idx].img) != 0) return -1;
+    if (vkp_pass_copy_to(l->slots[idx].img, wait_fd) != 0) return -1;
     if (present_slot(l, idx, r, tm ? NULL : color) != 0) return -1; /* tone-mapped = plain sRGB: no tag */
     if (color && color->dataspace)
         banner_color_frame_shown(color, tm ? BANNER_HDR_TONEMAPPED : BANNER_HDR_COMPOSED, tm ? AHB_RGBA8 : g_hdr_pool_fmt);
@@ -951,11 +1040,12 @@ int sc_layer_present_overlay(struct vkp_image *src, const int geo[8]) {
     if (ensure_sc(l) != 0) return -1;
     int sw = vkp_image_width(src), sh = vkp_image_height(src);
     if (sw <= 0 || sh <= 0) return -1;
-    int idx = take_free_slot(l, sw, sh, AHB_RGBA8);
+    int wait_fd;
+    int idx = take_free_slot(l, sw, sh, AHB_RGBA8, &wait_fd);
     if (idx < 0) { log_drop(l); return 0; }
     /* The window is copied into the layer buffer 1:1; `geo` crops it and places it, so the layer
      * is exactly the window's rectangle on screen and nothing else is blended anywhere. */
-    if (vkp_blit_image(src, l->slots[idx].img) != 0) return -1;
+    if (vkp_blit_image(src, l->slots[idx].img, wait_fd) != 0) return -1;
     if (present_slot(l, idx, geo, NULL) != 0) return -1;
     if (!l->first_logged) {
         l->first_logged = 1;

@@ -69,8 +69,9 @@ void banner_dmabuf_size(const struct dmabuf_buffer *b, int *w, int *h);
 void **banner_dmabuf_ahb_slot(struct dmabuf_buffer *b);                  /* this module's per-buffer state */
 void banner_dmabuf_ref(struct dmabuf_buffer *b);
 void banner_dmabuf_unref(struct dmabuf_buffer *b);
-/* Give a wl_buffer back to its client now (paced = 0) or on the FPS limiter's cadence (s != NULL). */
-void banner_release_buffer(struct surface *s, struct wl_resource *buffer, int paced);
+/* Give a wl_buffer back to its client now (paced = 0) or on the FPS limiter's cadence (s != NULL).
+ * since_ns = when the compositor let go of it (CLOCK_MONOTONIC; the perf line's release latency). */
+void banner_release_buffer(struct surface *s, struct wl_resource *buffer, int paced, int64_t since_ns);
 /* Redraw the scene on the next tick (the present path may have changed). */
 void banner_request_redraw(void);
 /* "<title>" (program) of the window a surface belongs to, for the log. */

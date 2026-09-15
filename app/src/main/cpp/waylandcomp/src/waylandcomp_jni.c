@@ -5,10 +5,13 @@
  * the server so a Wayland client (eventually winewayland.drv) can connect.
  */
 #include <jni.h>
+#include <errno.h>
 #include <stdint.h>
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+#include <sys/resource.h>
 #include <android/log.h>
 #include <android/native_window_jni.h>
 #include "vk_present.h"
@@ -39,6 +42,7 @@ static jclass g_compositor_cls;      /* global ref */
 static jmethodID g_on_first_frame;   /* static void onFirstFramePresented() */
 static jmethodID g_on_game_surface;  /* static void onGameSurface(String, String) */
 static jmethodID g_on_game_frame;    /* static void onGameFrame() */
+static jmethodID g_on_game_program;  /* static void onGameProgram(int, String) */
 static jmethodID g_on_pointer_lock;  /* static void onPointerLock(boolean, int, int) */
 static jmethodID g_on_clipboard;     /* static void onClipboardText(byte[]) */
 static jmethodID g_on_text_input;    /* static void onTextInput(boolean, String, int, int, int, int) */
@@ -56,6 +60,9 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
             g_on_game_surface = (*env)->GetStaticMethodID(env, g_compositor_cls, "onGameSurface",
                                                           "(Ljava/lang/String;Ljava/lang/String;)V");
             g_on_game_frame = (*env)->GetStaticMethodID(env, g_compositor_cls, "onGameFrame", "()V");
+            g_on_game_program = (*env)->GetStaticMethodID(env, g_compositor_cls, "onGameProgram",
+                                                          "(ILjava/lang/String;)V");
+            if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); g_on_game_program = NULL; }
             g_on_pointer_lock = (*env)->GetStaticMethodID(env, g_compositor_cls, "onPointerLock", "(ZII)V");
             g_on_clipboard = (*env)->GetStaticMethodID(env, g_compositor_cls, "onClipboardText", "([B)V");
             g_on_text_input = (*env)->GetStaticMethodID(env, g_compositor_cls, "onTextInput",
@@ -110,6 +117,17 @@ void banner_on_game_surface(const char *window, const char *gpu) {
     if (jg) (*env)->DeleteLocalRef(env, jg);
 }
 
+/* The program behind the game window that just started presenting: its Linux pid and executable name
+ * ("" = unknown). The app arms its launch-time CPU affinity on it. Compositor thread. */
+void banner_on_game_program(int pid, const char *program) {
+    JNIEnv *env;
+    if (!g_compositor_cls || !g_on_game_program || !(env = thread_env())) return;
+    jstring jp = (*env)->NewStringUTF(env, program ? program : "");
+    (*env)->CallStaticVoidMethod(env, g_compositor_cls, g_on_game_program, (jint)pid, jp);
+    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    if (jp) (*env)->DeleteLocalRef(env, jp);
+}
+
 /* One GPU frame from that window. */
 void banner_on_game_frame(void) {
     JNIEnv *env;
@@ -153,9 +171,28 @@ void banner_on_text_input(int enabled, const char *program, int x, int y, int w,
     if (jp) (*env)->DeleteLocalRef(env, jp);
 }
 
+/* android.os.Process.THREAD_PRIORITY_URGENT_DISPLAY: the level the hwui RenderThread runs at. */
+#define COMPOSITOR_NICE (-8)
+
 static void *comp_thread(void *arg) {
     (void)arg;
     __android_log_print(ANDROID_LOG_INFO, TAG, "compositor thread starting");
+    /* Every buffer release, frame callback and layer transaction of the session goes through this one
+     * thread. It is named, so `ps -T`, the logs and the drawer's Thread Priority Boost (PerfPriority
+     * matches thread names) can find it, and it runs at display priority instead of whatever the
+     * thread that started it had. Never lowered: a thread that already runs hotter keeps its value. */
+    pthread_setname_np(pthread_self(), "wl-compositor");
+    const id_t tid = (id_t)gettid();
+    errno = 0;
+    const int before = getpriority(PRIO_PROCESS, tid);
+    int refused = 0;
+    if (before > COMPOSITOR_NICE && setpriority(PRIO_PROCESS, tid, COMPOSITOR_NICE) != 0) refused = errno ? errno : -1;
+    const int after = getpriority(PRIO_PROCESS, tid);
+    if (refused)
+        banner_log("perf", "compositor thread %d \"wl-compositor\": stays at nice %d, a higher priority was refused (%s)",
+                   (int)tid, after, refused > 0 ? strerror(refused) : "?");
+    else
+        banner_log("perf", "compositor thread %d \"wl-compositor\": nice %d -> %d", (int)tid, before, after);
     banner_wayland_run();
     __android_log_print(ANDROID_LOG_INFO, TAG, "compositor thread exited");
     if (t_attached) (*g_jvm)->DetachCurrentThread(g_jvm);
@@ -372,6 +409,15 @@ JNIEXPORT void JNICALL
 Java_com_winlator_star_wayland_WaylandCompositor_nativeLogDisplay(JNIEnv *env, jclass clazz, jstring message) {
     char *s = dup_jstr(env, message);
     if (s) banner_log("display", "%s", s);
+    free(s);
+}
+
+/* The same under the "perf" area: facts the app knows about the session's performance setup (the CPU
+ * cores the game is pinned to, say). Same safety as nativeLogDisplay. */
+JNIEXPORT void JNICALL
+Java_com_winlator_star_wayland_WaylandCompositor_nativeLogPerf(JNIEnv *env, jclass clazz, jstring message) {
+    char *s = dup_jstr(env, message);
+    if (s) banner_log("perf", "%s", s);
     free(s);
 }
 

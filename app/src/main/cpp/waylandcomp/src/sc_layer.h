@@ -167,5 +167,8 @@ void sc_layer_window_gone(void);
  * pass) since the last call — the zero-copy frames ahb_swapchain.c counts are NOT included.
  * For the 10 s summary. */
 unsigned sc_layer_frames_take(void);
+/* Frames dropped since the last call because every layer buffer was still held by the display (the
+ * 10 s perf line; the "no free layer buffer" log line itself is rate-limited). */
+unsigned sc_layer_drops_take(void);
 
 #endif

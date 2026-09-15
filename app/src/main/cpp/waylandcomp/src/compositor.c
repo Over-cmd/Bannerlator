@@ -330,6 +330,7 @@ struct pending_release {
     struct wl_listener destroy;
     struct surface *surface;                /* NULL once the surface is gone */
     int64_t at_ns;
+    int64_t since_ns;                       /* when the compositor let go of it (the perf line) */
     struct wl_list link;
 };
 static struct wl_list g_pending_releases;
@@ -339,11 +340,34 @@ static int g_scene_w, g_scene_h;            /* size of the last drawn scene */
 static int g_desktop_w, g_desktop_h;        /* last size the desktop had content at */
 static unsigned g_stat_frames, g_stat_dmabuf, g_stat_shm; /* since the last 10 s summary */
 
+/* The 10 s `perf` line (on_stats_timer): where the compositor thread's time goes and how long games
+ * wait for their buffers back. The driver-side times (acquire, present, fence waits) are counted in
+ * vk_present.c (vkp_perf_take). Compositor thread only. */
+static struct {
+    unsigned ticks;                          /* screen refreshes (Choreographer ticks) */
+    unsigned scenes;                         /* render_scene() calls ... */
+    int64_t scene_ns, scene_max_ns;          /* ... and their wall time */
+    unsigned copy_scenes;                    /* scenes drawn into the screen swapchain (the copy path) */
+    unsigned releases, releases_held;        /* wl_buffer.release after a replacement; held = 1 ms or more */
+    int64_t release_ns, release_max_ns;      /* replaced (or taken off the layer) -> released to the game */
+} g_perf;
+
 static void schedule_render(void);
 
 static int64_t now_ns(void) {
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
     return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+}
+
+/* A game got a replaced buffer back; since_ns = when the compositor let go of it (0 = not counted). */
+static void perf_note_release(int64_t since_ns) {
+    if (since_ns <= 0) return;
+    int64_t d = now_ns() - since_ns;
+    if (d < 0) d = 0;
+    g_perf.releases++;
+    g_perf.release_ns += d;
+    if (d > g_perf.release_max_ns) g_perf.release_max_ns = d;
+    if (d >= 1000000LL) g_perf.releases_held++;
 }
 
 /* ------------------------------------------------------------------ buffer release pacing */
@@ -386,6 +410,7 @@ static int on_release_timer(int fd, uint32_t mask, void *data) {
     wl_list_for_each_safe(pr, tmp, &g_pending_releases, link) {
         if (pr->at_ns <= now) {
             wl_buffer_send_release(pr->buffer);
+            perf_note_release(pr->since_ns);
             pending_release_free(pr);
         }
     }
@@ -404,9 +429,9 @@ static int on_release_timer(int fd, uint32_t mask, void *data) {
  * one interval. Without that bound the schedule kept slots that were consumed but never
  * delivered (a swapchain rebuild destroys buffers with queued releases) or that a coarser earlier
  * limit had spaced out, and the game's first frames after that waited on empty slots. */
-static void release_buffer(struct surface *s, struct wl_resource *buffer) {
+static void release_buffer(struct surface *s, struct wl_resource *buffer, int64_t since_ns) {
     int limit = g_fps_limit;
-    if (limit <= 0 || g_release_timer_fd < 0) { wl_buffer_send_release(buffer); return; }
+    if (limit <= 0 || g_release_timer_fd < 0) { wl_buffer_send_release(buffer); perf_note_release(since_ns); return; }
     int64_t interval = 1000000000LL / limit, now = now_ns();
     int64_t at = s->next_release_ns + interval;
     int64_t latest = now + interval * (int64_t)(s->releases_pending + 1);
@@ -414,10 +439,11 @@ static void release_buffer(struct surface *s, struct wl_resource *buffer) {
     if (at > latest) at = latest;
     s->next_release_ns = at;
     struct pending_release *pr = calloc(1, sizeof(*pr));
-    if (!pr) { wl_buffer_send_release(buffer); return; }
+    if (!pr) { wl_buffer_send_release(buffer); perf_note_release(since_ns); return; }
     pr->buffer = buffer;
     pr->surface = s;
     pr->at_ns = at;
+    pr->since_ns = since_ns;
     pr->destroy.notify = on_pending_release_buffer_destroyed;
     wl_resource_add_destroy_listener(buffer, &pr->destroy);
     wl_list_insert(g_pending_releases.prev, &pr->link);
@@ -581,7 +607,7 @@ static void drop_dmabuf(struct surface *s, int paced) {
         /* A buffer on the zero-copy layer is the display's until SurfaceFlinger says otherwise:
          * ahb_swapchain.c releases it then. */
         if (!ahb_swapchain_defer_release(s->dmabuf_buf, s->dmabuf, s, paced)) {
-            if (paced) release_buffer(s, s->dmabuf);
+            if (paced) release_buffer(s, s->dmabuf, now_ns());
             else wl_buffer_send_release(s->dmabuf);
         }
         s->dmabuf = NULL;
@@ -646,6 +672,9 @@ static void take_shm(struct surface *s, struct wl_shm_buffer *shm, struct wl_res
 static struct surface *g_hud_surface;
 extern void banner_on_game_surface(const char *window, const char *gpu); /* window NULL = gone */
 extern void banner_on_game_frame(void);
+/* The program behind that window: its Linux pid (the Wayland client's credentials) and executable name
+ * ("" when /proc gave none) - the app arms its CPU affinity on it (X11 does that from window events). */
+extern void banner_on_game_program(int pid, const char *program);
 
 static void take_dmabuf(struct surface *s, struct dmabuf_buffer *b, struct wl_resource *buffer) {
     if (s->dmabuf != buffer || s->dmabuf_buf != b) {
@@ -676,10 +705,14 @@ static void take_dmabuf(struct surface *s, struct dmabuf_buffer *b, struct wl_re
         s->announced_vulkan = 1;
         describe(s, name, sizeof(name));
         if (b->img)
-            banner_log("vulkan", "%s is presenting GPU frames through Wayland: %dx%d, format %c%c%c%c, %s (zero-copy)",
+            /* Imported for the copy path. Whether its frames ALSO go on the display layer without a copy
+             * is decided per frame (fullscreen, zero-copy on) and counted in the 10 s lines. */
+            banner_log("vulkan", "%s is presenting GPU frames through Wayland: %dx%d, format %c%c%c%c, %s (%s)",
                        name, b->width, b->height, b->format & 0xff, (b->format >> 8) & 0xff,
                        (b->format >> 16) & 0xff, (b->format >> 24) & 0xff,
-                       vkp_modifier_name(b->modifier));
+                       vkp_modifier_name(b->modifier),
+                       ahb_swapchain_has_ahb(b) ? "gralloc buffers: can go on the display layer without a copy"
+                                                : "dma-buf: copied into the screen swapchain");
         else if (ahb_swapchain_has_ahb(b))
             banner_log("vulkan", "%s is presenting GPU frames through Wayland: %dx%d on its own display layer only "
                        "(gralloc buffers the compositor cannot import for the copy path)",
@@ -692,6 +725,8 @@ static void take_dmabuf(struct surface *s, struct dmabuf_buffer *b, struct wl_re
         if (b->img || ahb_swapchain_has_ahb(b)) {
             g_hud_surface = s;
             banner_on_game_surface(name, vkp_gpu_name());
+            struct client_info *ci = client_info_of(wl_resource_get_client(s->resource));
+            if (ci) banner_on_game_program((int)ci->pid, strncmp(ci->name, "pid ", 4) ? ci->name : "");
         }
     }
     /* HDR session (gate open): a DXVK game switches to HDR by REBUILDING its swapchain on the same
@@ -720,9 +755,9 @@ void banner_dmabuf_size(const struct dmabuf_buffer *b, int *w, int *h) { *w = b-
 void **banner_dmabuf_ahb_slot(struct dmabuf_buffer *b) { return &b->ahb_state; }
 void banner_dmabuf_ref(struct dmabuf_buffer *b) { b->refs++; }
 void banner_dmabuf_unref(struct dmabuf_buffer *b) { dmabuf_buffer_unref(b); }
-void banner_release_buffer(struct surface *s, struct wl_resource *buffer, int paced) {
-    if (paced && s) release_buffer(s, buffer);
-    else wl_buffer_send_release(buffer);
+void banner_release_buffer(struct surface *s, struct wl_resource *buffer, int paced, int64_t since_ns) {
+    if (paced && s) release_buffer(s, buffer, since_ns);
+    else { wl_buffer_send_release(buffer); perf_note_release(since_ns); }
 }
 void banner_surface_describe(const struct surface *s, char *out, size_t size) { describe(s, out, size); }
 const struct banner_color *banner_surface_color(const struct surface *s) {
@@ -1953,6 +1988,8 @@ static void render_scene(void) {
     struct draw_list dl = {0};
     struct surface *s;
     int w, h;
+    const int64_t t_scene = now_ns();
+    int copy = 0; /* this scene went through the screen swapchain (the perf line's "copy") */
 
     g_dirty = 0;
     g_hdr_unimported = NULL; /* found again while the scene is built (HDR gate open only) */
@@ -1983,14 +2020,13 @@ static void render_scene(void) {
         hdr_note_route(hdr_route, &hs);
         hdr_note_precedence(hdr_route == 3 ? hs.who : NULL, fx_on, framegen);
     }
-    const int hdr_alone = hdr_route == 3 || (hdr_route == 0 && hs.n_hdr > 0); /* an HDR game on its own layer */
     if (hdr_route == 3) { fx_on = 0; framegen = 0; }
     if (hdr_route == 1) {
         static int fell_back;
         vkp_apply_window_request();
         sc_layer_hide_overlay();
         if (sc_layer_present_hdr_scene(dl.d, dl.n, &hs.hf, w, h, hs.color) == 0) {
-            rendered = vkp_render_plain(w, h) == 0;
+            rendered = vkp_base_black(w, h) == 0; /* black under the composed picture, presented only when it is not already */
             if (fell_back) { fell_back = 0; banner_log("color", "the composed picture is on the game's display layer again"); }
         } else {
             hdr_route = 2; /* no layer this frame: the picture goes through the swapchain instead */
@@ -2005,6 +2041,7 @@ static void render_scene(void) {
         int how = 0;
         sc_layer_hide();
         rendered = vkp_render_hdr(w, h, dl.d, dl.n, &hs.hf, &how) == 0;
+        copy = 1;
         if (rendered && how == 1) banner_color_frame_shown(hs.color, BANNER_HDR_SWAPCHAIN, 0);
         else if (rendered && how == 2) banner_color_frame_shown(hs.color, BANNER_HDR_TONEMAPPED, 0);
         else if (rendered) hdr_copy = "the HDR composition pass is unavailable on this driver";
@@ -2091,20 +2128,26 @@ static void render_scene(void) {
             if (ov < 0) { /* the overlay layer refused it: draw the whole scene the old way */
                 sc_layer_hide();
                 rendered = vkp_render(w, h, dl.d, dl.n) == 0;
+                copy = 1;
                 hdr_copy = "the overlay layer refused the window above it";
             } else {
-                /* Black under the opaque layers, and the vsync tick that paces this loop. Under an HDR
-                 * game it is a plain black frame: effects / frame generation must not run (or pace this
-                 * loop) on the base surface either. */
-                rendered = (hdr_alone ? vkp_render_plain(w, h) : vkp_render(w, h, NULL, 0)) == 0;
+                /* Black under the opaque layers. It is a plain black frame (no effects, no frame
+                 * generation on it: they would only run on black), and it is presented only when the
+                 * base surface does not already show one - entering layer mode, after a copy-path or
+                 * frame-generation frame, after a swapchain rebuild. Every other layer frame draws and
+                 * presents nothing here: the display layers are all that changes on screen. This loop
+                 * is paced by the Choreographer's ticks (on_vsync), not by this present. */
+                rendered = vkp_base_black(w, h) == 0;
             }
         } else {
             rendered = vkp_render(w, h, dl.d, dl.n) == 0;
+            copy = 1;
             hdr_copy = "its display layer was unavailable this frame";
         }
     } else {
         sc_layer_hide();
         rendered = vkp_render(w, h, dl.d, dl.n) == 0;
+        copy = 1;
         hdr_copy = ov_blocks ? "a window is above it and this display cannot compose a second layer in hardware"
                  : fx_blocks ? "a window is above it and screen effects need the whole scene"
                  : !g_zero_copy ? "zero-copy presentation is off"
@@ -2137,6 +2180,11 @@ static void render_scene(void) {
     }
     free(dl.d);
     wl_display_flush_clients(g_display);
+    if (rendered && copy) g_perf.copy_scenes++;
+    g_perf.scenes++;
+    const int64_t scene_ns = now_ns() - t_scene;
+    g_perf.scene_ns += scene_ns;
+    if (scene_ns > g_perf.scene_max_ns) g_perf.scene_max_ns = scene_ns;
 }
 
 static int on_fallback_timer(void *data) {
@@ -2162,6 +2210,7 @@ static void schedule_render(void) {
 /* A screen refresh (Choreographer tick): draw the newest state once. */
 static void on_vsync(int64_t frame_time_ns) {
     int64_t now = now_ns();
+    g_perf.ticks++;
     if (g_last_vsync_ns) {
         int64_t d = now - g_last_vsync_ns;
         if (d > 3000000LL && d < 40000000LL) g_refresh_ns = (g_refresh_ns * 7 + d) / 8;
@@ -2938,6 +2987,30 @@ static int on_stats_timer(void *data) {
         if (generated) snprintf(extra + off, sizeof(extra) - (size_t)off, " | %u generated frames", generated);
         banner_log("stats", "last 10 s: %u frames on screen (%.1f fps) | %u GPU frames from games | %u window redraws | %d windows open%s",
                    g_stat_frames + generated, (g_stat_frames + generated) / 10.0, g_stat_dmabuf, g_stat_shm, windows, extra);
+    }
+    /* The perf line, next to the stats line and only when something happened: the compositor thread's
+     * time per scene and inside the driver (avg/max), what the base surface did, and how long games
+     * waited for their buffers back. See the audit memory for how to read it. */
+    {
+        struct vkp_perf vp;
+        vkp_perf_take(&vp);
+        const unsigned drops = sc_layer_drops_take();
+#define PERF_MS(sum, n) ((n) ? (double)(sum) / 1e6 / (double)(n) : 0.0)
+        if (g_perf.scenes || vp.presents || g_perf.releases || drops)
+            banner_log("perf", "last 10 s: %u ticks, %u scenes, %u on screen (copy %u, zero-copy %u, layer copy %u) | "
+                       "render_scene %.2f/%.2f ms | base %u black kept, %u presented | acquire %.2f/%.2f ms | "
+                       "present %.2f/%.2f ms (%u) | fence wait %.2f/%.2f ms (%u, %u GPU release waits) | "
+                       "release %.2f/%.2f ms (%u, %u held) | %u pool drops",
+                       g_perf.ticks, g_perf.scenes, g_stat_frames, g_perf.copy_scenes, zero_copy, layer_frames,
+                       PERF_MS(g_perf.scene_ns, g_perf.scenes), (double)g_perf.scene_max_ns / 1e6,
+                       vp.base_kept, vp.base_presents,
+                       PERF_MS(vp.acquire_ns, vp.acquires), (double)vp.acquire_max_ns / 1e6,
+                       PERF_MS(vp.present_ns, vp.presents), (double)vp.present_max_ns / 1e6, vp.presents,
+                       PERF_MS(vp.wait_ns, vp.waits), (double)vp.wait_max_ns / 1e6, vp.waits, vp.gpu_release_waits,
+                       PERF_MS(g_perf.release_ns, g_perf.releases), (double)g_perf.release_max_ns / 1e6,
+                       g_perf.releases, g_perf.releases_held, drops);
+#undef PERF_MS
+        memset(&g_perf, 0, sizeof(g_perf));
     }
     g_stat_frames = g_stat_dmabuf = g_stat_shm = 0;
     banner_color_stats_tick(); /* HDR evidence for the same window (nothing when the HDR gate is closed) */

@@ -44,6 +44,7 @@ struct ahb_buf {
     struct wl_listener resource_destroy;
     int on_layer;                       /* set on the SurfaceControl (or not yet released by SurfaceFlinger) */
     int release_pending;                /* the surface let go of it while on the layer */
+    int64_t deferred_ns;                /* when it did (the perf line: how long the display kept it) */
     struct surface *surface;            /* for the paced release; NULL = release at once */
     struct wl_event_source *fence_src;  /* fallback: waiting the release fence in the event loop */
     int fence_fd;
@@ -112,7 +113,7 @@ static void on_buffer_resource_destroyed(struct wl_listener *l, void *data) {
 
 static void send_deferred_release(struct ahb_buf *ab) {
     if (ab->release_pending && ab->resource)
-        banner_release_buffer(ab->surface, ab->resource, ab->surface != NULL);
+        banner_release_buffer(ab->surface, ab->resource, ab->surface != NULL, ab->deferred_ns);
     ab->release_pending = 0;
     ab->surface = NULL;
 }
@@ -247,6 +248,7 @@ int ahb_swapchain_defer_release(struct dmabuf_buffer *b, struct wl_resource *buf
     struct ahb_buf *ab = b ? *banner_dmabuf_ahb_slot(b) : NULL;
     if (!ab || !ab->on_layer || !buffer || ab->resource != buffer) return 0;
     ab->release_pending = 1;
+    ab->deferred_ns = now_ns();
     ab->surface = paced ? s : NULL;
     return 1;
 }
