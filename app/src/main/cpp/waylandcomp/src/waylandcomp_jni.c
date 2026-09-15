@@ -488,12 +488,6 @@ Java_com_winlator_star_wayland_WaylandCompositor_nativeHdrNoteHeadroomRequest(JN
     banner_color_note_headroom_request((float)ratio);
 }
 
-/* kind 1 = screen recording state (1 / 0), kind 2 = screenshot taken. */
-JNIEXPORT void JNICALL
-Java_com_winlator_star_wayland_WaylandCompositor_nativeHdrEnvEvent(JNIEnv *env, jclass clazz, jint kind, jint state) {
-    banner_color_env_event((int)kind, (int)state);
-}
-
 /* 0 none, 1 HDR frames on screen with headroom, 2 HDR frames on screen without headroom for 5 s+. */
 JNIEXPORT jint JNICALL
 Java_com_winlator_star_wayland_WaylandCompositor_nativeHdrState(JNIEnv *env, jclass clazz) {

@@ -296,10 +296,6 @@ public final class WaylandCompositor {
     public static native void nativeHdrEnvSample(int thermalStatus, float thermalHeadroom, int brightness,
                                                  int brightnessMode);
 
-    /** kind 1 = screen recording (state 1 = this app is being recorded, 0 = not; Android 15+), kind 2 = a
-     *  screenshot was taken (state ignored). Logged in HDR sessions. */
-    public static native void nativeHdrEnvEvent(int kind, int state);
-
     /** Display.getHighestHdrSdrRatio() (Android 16+), <= 0 = not reported: the display's own ceiling, capped
      *  into the headroom request and logged in the verdict. Any thread. */
     public static native void nativeSetHdrHighestRatio(float ratio);

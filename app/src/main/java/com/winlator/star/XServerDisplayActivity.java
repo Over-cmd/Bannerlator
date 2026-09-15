@@ -7277,17 +7277,16 @@ public class XServerDisplayActivity extends AppCompatActivity {
         disarmHdrEvidence();
     }
 
-    // ───── HDR evidence beside the headroom (HDR sessions only; non-root, install-time APIs) ─────
+    // ───── HDR evidence beside the headroom (HDR sessions only; non-root APIs, no permission) ─────
     // The Fold lost HDR headroom with HDR frames on screen in three ways: a screen recording (Android turns
     // headroom off for it), heat under load, and possibly the brightness slider at maximum. So the session
-    // log carries what the device says about each - PowerManager thermal status (+ a listener) and thermal
-    // headroom, the brightness setting and its mode (+ an observer), and where Android offers it with a
-    // normal permission, screenshots (API 34) and screen recording (API 35). Nothing here prompts.
+    // log carries what the device says about heat and brightness - PowerManager thermal status (+ a
+    // listener) and thermal headroom, the brightness setting and its mode (+ an observer). A screenshot or
+    // a screen recording is not detected in this build (that needs extra permissions); the log names it as
+    // a possible cause instead. Nothing here prompts.
     private boolean hdrEvidenceArmed;
     private Object hdrThermalListener;          // PowerManager.OnThermalStatusChangedListener (API 29)
     private android.database.ContentObserver hdrBrightnessObserver;
-    private Object hdrScreenCaptureCallback;     // Activity.ScreenCaptureCallback (API 34)
-    private java.util.function.Consumer<Integer> hdrRecordingCallback; // WindowManager, API 35 (reflection)
     private float hdrThermalHeadroom = Float.NaN;
     private int hdrEvidenceTick;
 
@@ -7319,31 +7318,6 @@ public class XServerDisplayActivity extends AppCompatActivity {
         } catch (Throwable t) {
             hdrBrightnessObserver = null;
             Log.w("XServerDisplayActivity", "HDR evidence: no brightness observer", t);
-        }
-        if (android.os.Build.VERSION.SDK_INT >= 34) {
-            try { // DETECT_SCREEN_CAPTURE (normal, install-time)
-                android.app.Activity.ScreenCaptureCallback cb =
-                        () -> com.winlator.star.wayland.WaylandCompositor.nativeHdrEnvEvent(2, 1);
-                registerScreenCaptureCallback(ex, cb);
-                hdrScreenCaptureCallback = cb;
-            } catch (Throwable t) {
-                Log.w("XServerDisplayActivity", "HDR evidence: no screenshot callback", t);
-            }
-        }
-        if (android.os.Build.VERSION.SDK_INT >= 35) {
-            try { // DETECT_SCREEN_RECORDING (normal, install-time); not in the compile SDK's stubs
-                java.util.function.Consumer<Integer> cb = state ->
-                        com.winlator.star.wayland.WaylandCompositor.nativeHdrEnvEvent(1, state != null && state == 1 ? 1 : 0);
-                Object r = android.view.WindowManager.class.getMethod("addScreenRecordingCallback",
-                        java.util.concurrent.Executor.class, java.util.function.Consumer.class)
-                        .invoke(getWindowManager(), ex, cb);
-                hdrRecordingCallback = cb;
-                int st = r instanceof Integer ? (Integer) r : 0;
-                com.winlator.star.wayland.WaylandCompositor.nativeHdrEnvEvent(1, st == 1 ? 1 : 0);
-            } catch (Throwable t) {
-                hdrRecordingCallback = null;
-                Log.w("XServerDisplayActivity", "HDR evidence: no screen-recording callback", t);
-            }
         }
         readHdrThermalHeadroom();
         pushHdrEvidence();
@@ -7452,18 +7426,6 @@ public class XServerDisplayActivity extends AppCompatActivity {
         if (hdrBrightnessObserver != null) {
             try { getContentResolver().unregisterContentObserver(hdrBrightnessObserver); } catch (Throwable ignored) {}
             hdrBrightnessObserver = null;
-        }
-        if (android.os.Build.VERSION.SDK_INT >= 34 && hdrScreenCaptureCallback != null) {
-            try { unregisterScreenCaptureCallback((android.app.Activity.ScreenCaptureCallback) hdrScreenCaptureCallback); }
-            catch (Throwable ignored) {}
-        }
-        hdrScreenCaptureCallback = null;
-        if (hdrRecordingCallback != null) {
-            try {
-                android.view.WindowManager.class.getMethod("removeScreenRecordingCallback", java.util.function.Consumer.class)
-                        .invoke(getWindowManager(), hdrRecordingCallback);
-            } catch (Throwable ignored) {}
-            hdrRecordingCallback = null;
         }
     }
 

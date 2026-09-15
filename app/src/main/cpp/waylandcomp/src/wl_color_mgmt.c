@@ -179,10 +179,9 @@ static struct {
     float headroom;         /* PowerManager.getThermalHeadroom(10), < 0 = not available */
     int brightness;         /* Settings.System.SCREEN_BRIGHTNESS (0..255), -1 unknown */
     int bmode;              /* SCREEN_BRIGHTNESS_MODE: 1 automatic, 0 manual, -1 unknown */
-    int rec_known, recording; /* screen-recording detection (Android 15+) */
     float requested;        /* the last HDR headroom asked for (layer or screen surface): > 0 the ratio,
                              * 0 none asked, -1 the API is missing on this Android (< 15) */
-} g_env = {0, -1, -1.0f, -1, -1, 0, 0, 0.0f};
+} g_env = {0, -1, -1.0f, -1, -1, 0.0f};
 
 static const char *thermal_name(int t) {
     switch (t) {
@@ -191,7 +190,7 @@ static const char *thermal_name(int t) {
     }
 }
 
-/* "thermal MODERATE (headroom 0.83), brightness 180/255 manual" (+ ", screen recording"). Caller holds g_mu. */
+/* "thermal MODERATE (headroom 0.83), brightness 180/255 manual". Caller holds g_mu. */
 static void env_text_locked(char *out, size_t n) {
     char t[48], b[40];
     if (g_env.thermal < 0) snprintf(t, sizeof(t), "thermal ?");
@@ -201,15 +200,16 @@ static void env_text_locked(char *out, size_t n) {
     if (g_env.brightness < 0) snprintf(b, sizeof(b), "brightness ?");
     else snprintf(b, sizeof(b), "brightness %d/255%s", g_env.brightness,
                   g_env.bmode == 1 ? " auto" : g_env.bmode == 0 ? " manual" : "");
-    snprintf(out, n, "%s, %s%s", t, b, g_env.rec_known && g_env.recording ? ", screen recording" : "");
+    snprintf(out, n, "%s, %s", t, b);
 }
 
-/* What the evidence says about headroom lost with HDR frames on screen. Caller holds g_mu. */
+/* What the evidence says about headroom lost with HDR frames on screen. A screenshot or a screen recording
+ * is not detected in this build (that needs extra permissions), so it is named as a possibility when
+ * nothing the app can measure explains the loss. Caller holds g_mu. */
 static void nohead_causes_locked(char *out, size_t n, int brief) {
-    const char *parts[3];
+    const char *parts[2];
     char hot[48];
     int np = 0;
-    if (g_env.rec_known && g_env.recording) parts[np++] = "the screen is being recorded";
     if (g_env.thermal >= 2) {
         snprintf(hot, sizeof(hot), "the device is hot (thermal %s)", thermal_name(g_env.thermal));
         parts[np++] = hot;
@@ -218,7 +218,6 @@ static void nohead_causes_locked(char *out, size_t n, int brief) {
     if (g_env.brightness >= 250 && g_env.bmode == 0) parts[np++] = "brightness at maximum (manual)";
     if (np == 1) snprintf(out, n, "likely %s", parts[0]);
     else if (np == 2) snprintf(out, n, "likely %s and %s", parts[0], parts[1]);
-    else if (np == 3) snprintf(out, n, "likely %s, %s and %s", parts[0], parts[1], parts[2]);
     else if (g_env.known) {
         char req[48], hi[48];
         if (g_env.requested > 0.0f) snprintf(req, sizeof(req), "%.1fx", g_env.requested);
@@ -226,12 +225,14 @@ static void nohead_causes_locked(char *out, size_t n, int brief) {
         if (g_req.highest_ratio > 0.0f) snprintf(hi, sizeof(hi), "%.2f", g_req.highest_ratio);
         else snprintf(hi, sizeof(hi), "not reported");
         if (brief)
-            snprintf(out, n, "no visible cause; the phone may not boost HDR for apps (asked %s, highest ratio %s)", req, hi);
+            snprintf(out, n, "no visible cause (a screenshot or recording? no HDR boost for apps?) - asked %s, highest "
+                     "ratio %s", req, hi);
         else
-            snprintf(out, n, "no cause the app can see; this phone may not boost HDR from apps (the requested headroom "
-                     "was %s, the display's highest ratio is %s)", req, hi);
+            snprintf(out, n, "no cause the app can see (not hot, brightness below maximum): a screenshot or screen "
+                     "recording, or this phone does not boost HDR from apps (the requested headroom was %s, the "
+                     "display's highest ratio is %s)", req, hi);
     } else
-        snprintf(out, n, "screen brightness at maximum, a screen recording, or heat");
+        snprintf(out, n, "a screenshot or screen recording, heat, or manual brightness at maximum");
 }
 
 /* ---- the explicit HDR headroom request (API 35; sc_layer.c for the game layer, the app for the screen
@@ -363,8 +364,9 @@ static void verdict_locked(char *out, size_t size) {
             snprintf(out, size, "tagged but NOT confirmed - %s, but the display's HDR/SDR ratio stayed at %.2f while they "
                      "were on screen (%s%s%s): Android gave them no HDR headroom - %s%s%s%s", frames,
                      g_hdr.ratio_live_max, g_req.highest_ratio > 0.0f ? "" : "highest ratio not reported",
-                     ceil[0] ? ceil + 2 : "", g_hdr.nohead_said ? "" : req, g_hdr.nohead_said ? causes : "brightness at maximum (manual)? a "
-                     "screen recording? heat? HDR off for this display?", env[0] ? " [" : "", env, env[0] ? "]" : "");
+                     ceil[0] ? ceil + 2 : "", g_hdr.nohead_said ? "" : req, g_hdr.nohead_said ? causes : "a screenshot or "
+                     "screen recording? heat? brightness at maximum (manual)? HDR off for this display?",
+                     env[0] ? " [" : "", env, env[0] ? "]" : "");
         else if (g_hdr.ratio_n)
             snprintf(out, size, "tagged, not measured - %s, but no HDR/SDR ratio reading was taken while they were on "
                      "screen (highest reading otherwise %.2f)", frames, g_hdr.ratio_max);
@@ -643,26 +645,6 @@ void banner_color_env_sample(int thermal, float headroom, int brightness, int bm
     }
     pthread_mutex_unlock(&g_mu);
     for (int i = 0; i < nmsg; i++) banner_log(TAG, "%s", msg[i]);
-}
-
-void banner_color_env_event(int kind, int state) {
-    if (atomic_load(&g_gate) != 1) return;
-    if (kind == 2) {
-        banner_log(TAG, "screenshot taken (a screenshot is SDR; Android may drop HDR headroom for a moment)");
-        return;
-    }
-    if (kind != 1) return;
-    pthread_mutex_lock(&g_mu);
-    const int was_known = g_env.rec_known, was = g_env.recording;
-    g_env.rec_known = 1;
-    g_env.recording = state ? 1 : 0;
-    pthread_mutex_unlock(&g_mu);
-    if (!was_known && !state)
-        banner_log(TAG, "screen-recording detection on (Android 15+): a recording that starts is logged here");
-    else if (state != was || !was_known)
-        banner_log(TAG, state ? "screen recording started - Android turns HDR headroom off while the screen is recorded "
-                                "(the recording itself is SDR)"
-                              : "screen recording stopped - HDR headroom can come back");
 }
 
 int banner_color_tonemapped_on_screen(void) {

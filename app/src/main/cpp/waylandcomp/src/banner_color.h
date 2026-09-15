@@ -101,8 +101,6 @@ int banner_color_tonemapped_on_screen(void);
  * Changes of status and brightness are logged; every no-headroom line, the 10 s line and the verdict
  * carry the last values. */
 void banner_color_env_sample(int thermal, float headroom, int brightness, int bmode);
-/* kind 1 = screen recording (state 1 started / 0 not recording; Android 15+), kind 2 = a screenshot. */
-void banner_color_env_event(int kind, int state);
 
 /* ---- the explicit HDR headroom request (Android 15+: ASurfaceTransaction_setDesiredHdrHeadroom on the game
  * layer, SurfaceView.setDesiredHdrHeadroom on the screen surface). Some phones only boost HDR when asked. */
