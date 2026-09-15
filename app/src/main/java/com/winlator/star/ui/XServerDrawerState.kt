@@ -87,7 +87,8 @@ object XServerDrawerState {
     private val _waylandHdrOnScreen       = MutableStateFlow(false)
     val waylandHdrOnScreen: StateFlow<Boolean> = _waylandHdrOnScreen
     // HDR frames on screen but the display has given them no headroom for 5 s+ (HDR/SDR ratio 1.00) -
-    // typically the brightness slider at maximum.
+    // the brightness slider at maximum, or a screen recording (Android turns HDR headroom off while the
+    // screen is recorded - found on the Fold).
     private val _waylandHdrNoHeadroom     = MutableStateFlow(false)
     val waylandHdrNoHeadroom: StateFlow<Boolean> = _waylandHdrNoHeadroom
     private val _waylandHdrToneMapped     = MutableStateFlow(false)

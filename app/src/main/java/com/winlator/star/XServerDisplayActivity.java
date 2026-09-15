@@ -6988,7 +6988,8 @@ public class XServerDisplayActivity extends AppCompatActivity {
 
     /** The HUD's display-server label: "Wayland · HDR" while HDR frames are really on screen with HDR
      *  headroom, "Wayland · HDR (no headroom)" while they are on screen but the display has given them
-     *  none for 5 s+ (typically the brightness slider at maximum), "Wayland · HDR off" while the drawer's
+     *  none for 5 s+ (brightness at maximum, or a screen recording: Android turns HDR headroom off while
+     *  the screen is recorded), "Wayland · HDR off" while the drawer's
      *  HDR output switch is off (the picture is tone-mapped to SDR), else "Wayland". What is on screen
      *  wins: frames that stay HDR with the switch off still read "HDR". */
     private volatile int hudHdrState = 0;   // WaylandCompositor.nativeHdrState()

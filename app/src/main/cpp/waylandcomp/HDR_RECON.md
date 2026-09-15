@@ -833,6 +833,12 @@ is back …` when it ends), tags the 10 s line and the steady ratio line, puts t
 reports `headroom above 1.00 for P% of the HDR time (a of b s), now R` plus the hint while the streak
 lasts. Cheap: no new sampling, a few integers under the existing lock.
 
+**Round-2 Fold run (20:23, run 34911468350):** the first no-headroom streak was a **screen recording**,
+not the brightness: the user's recording (210.8 s, BT.709 SDR H.264, finalised 20:27:30, so started
+~20:23:59) lines up with the ratio falling 2.98 → 1.00 at 20:24:00.9 and staying there to the end. So
+Android (at least Samsung's) turns HDR headroom off while the screen is recorded. Every hint now names
+both causes; whether maximum brightness does it too is still unmeasured (tester note step H).
+
 ### 11.5 What is still NOT done / not proven
 
 - Nothing of round 2 has run on a device yet (CI only). The Fold test note is `docs/HDR-test-r2.md`.

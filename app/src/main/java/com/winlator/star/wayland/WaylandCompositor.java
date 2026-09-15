@@ -284,7 +284,8 @@ public final class WaylandCompositor {
 
     /** 0 = no HDR frames on screen (or not confirmed yet), 1 = HDR frames on screen with HDR headroom,
      *  2 = HDR frames on screen but the display has given them no headroom (HDR/SDR ratio 1.00) for 5 s
-     *  or more - typically the brightness slider at maximum. The HUD badge and the drawer's HDR row. */
+     *  or more - the brightness slider at maximum, or a screen recording (Android turns HDR headroom off
+     *  while the screen is recorded). The HUD badge and the drawer's HDR row. */
     public static native int nativeHdrState();
 
     /** Fullscreen mode ({@code Container.FULLSCREEN_OFF/FIT/STRETCH/FILL/INTEGER}) and screen alignment

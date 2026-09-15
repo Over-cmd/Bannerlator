@@ -77,7 +77,8 @@ void banner_color_session_end(void);
 int banner_color_hdr_on_screen(void);
 /* The HUD / drawer state: 0 = no HDR frames on screen (or not confirmed yet), 1 = HDR frames on screen
  * with headroom (as banner_color_hdr_on_screen), 2 = HDR frames on screen but the display has given
- * them NO headroom (ratio <= 1.01) for 5 s or more - typically the brightness slider at maximum. */
+ * them NO headroom (ratio <= 1.01) for 5 s or more - the brightness slider at maximum, or a screen
+ * recording (Android turns HDR headroom off while the screen is recorded). */
 int banner_color_hdr_state(void);
 /* Nits SDR content is placed at inside an HDR picture (default 203, BT.2408); any thread. */
 void banner_color_set_sdr_white(float nits);

@@ -20,8 +20,9 @@ on v9).
    launch starts On again).
 4. **HUD badge:** the HUD's display line reads **`Wayland · HDR`** while HDR frames are really on
    screen with HDR headroom, **`Wayland · HDR (no headroom)`** while HDR frames are on screen but
-   Android has given them no extra brightness for 5 s or more (HDR/SDR ratio 1.00 — seen in round 2's
-   first run with the brightness slider at maximum), **`Wayland · HDR off`** while the drawer switch is
+   Android has given them no extra brightness for 5 s or more (HDR/SDR ratio 1.00 — Android does this
+   while the screen is being **recorded**, and possibly with the brightness slider at maximum),
+   **`Wayland · HDR off`** while the drawer switch is
    off, plain `Wayland` otherwise. The session log says the same, and its summary gives the share of
    the HDR time that really had headroom.
 5. **HDR no longer switches off effects and the rest.** Screen effects, a window over the game, a
@@ -47,7 +48,9 @@ on v9).
 4. *Settings → Log Manager*: keep **"DXVK & VKD3D"** logs on (default).
 5. HUD on (drawer → *HUD*), default **Fusion** style, so you can see the `DISP` line.
 6. Screen brightness **around 70–80 %, auto-brightness off**, for the main tests (step H checks what
-   happens at maximum).
+   happens at maximum). **Do not record the screen** during steps A–G: Android turns HDR headroom off
+   while recording (the first round-2 run lost it the second the recording started, and the video is SDR
+   anyway). Step H records on purpose.
 
 Use a **DirectX 11 game with an HDR option**; **God of War** with **DXVK v3.1-gplasync** is the known
 good one. Leave the drawer's "HDR" *screen effect* **off** unless a step says otherwise (that one is a
@@ -67,7 +70,7 @@ asks). Stand somewhere **bright** (sky, sun, fire, lights) and keep that view fo
 | **E** | Drawer → *Graphics* → **Frame Generation 2×** (any engine that is offered) for 60 s, then off | **Either** still HDR (HUD `Wayland · HDR`) **or** a correct SDR picture (HUD `Wayland`). Both are fine — we need to know which | `HDR with frame generation for …`, then **either** `screen swapchain built as HDR10 (format 64, HDR10_ST2084) …` **or** `the screen surface lists no HDR10 swapchain format (…): frames with frame generation are tone-mapped to SDR instead` |
 | **F** | *(optional)* A window over the game: drawer → *Task Manager* → **New Task…** → `notepad` → OK; look, then close Notepad | Still HDR around the window; Notepad itself looks normal (white, not grey) | `HDR picture for …: a window is above the game …` — or no new line if your screen can show the window on a second layer (also HDR) |
 | **G** | *(optional)* The game's own **windowed** mode, if it has one | Still HDR inside the window | `HDR picture for …: the HDR game is not one fullscreen window` |
-| **H** | Brightness slider to **maximum** for 30 s on the bright scene, then back to ~70 % | If Android stops giving HDR extra brightness at maximum: after ~5 s the HUD reads `Wayland · HDR (no headroom)` and the drawer row says so; back at ~70 % it returns to `Wayland · HDR`. If nothing changes, that is an answer too | `no HDR headroom for 5 s while HDR frames are on screen (display HDR/SDR ratio 1.00): the screen brightness is probably at maximum …`, then `HDR headroom is back: display HDR/SDR ratio …` |
+| **H** | Brightness slider to **maximum** for 30 s on the bright scene, then back to ~70 %. Then a **20 s screen recording**, stopped | Recording: after ~5 s the HUD reads `Wayland · HDR (no headroom)` and the drawer row says so; after stopping it returns to `Wayland · HDR`. Maximum brightness: the same if Android also drops headroom there — if nothing changes, that is an answer too | `no HDR headroom for 5 s while HDR frames are on screen (display HDR/SDR ratio 1.00): the screen brightness is probably at maximum …`, then `HDR headroom is back: display HDR/SDR ratio …` |
 | **I** | *(optional)* Same game with DXVK **2.4.1** instead of v3.1, relaunch | Note whether the game offers its HDR option (round 1 it did not; the cause is not known yet) | send the DXVK logs of this run too |
 
 Some games minimise when another window takes focus (step F). If the game vanishes, close Notepad and
@@ -110,8 +113,8 @@ Every 10 s while anything HDR happens:
 - `HDR10 swapchain` = step E where the screen offers HDR10.
 - `tone-mapped to SDR` = step B off, or step E where it does not.
 - `washed-out copies` should stay **0** the whole session. If it is not, the line before it says why.
-- `(now 1.00) - NO headroom while HDR frames are on screen: screen brightness probably at maximum …` =
-  step H (or brightness left at maximum).
+- `(now 1.00) - NO headroom while HDR frames are on screen: screen brightness at maximum, or the screen is
+  being recorded …` = step H, a screen recording, or brightness left at maximum.
 
 At the end: `color  HDR on screen: yes - N frames of "God of War" (GoW.exe) shown as BT2020_PQ (… 10-bit zero-copy, … 8-bit layer copy, … composed, … HDR10 swapchain; … more tone-mapped, … with HDR output off); the display's HDR/SDR ratio rose to X while they were on screen (1.00 = SDR only); headroom above 1.00 for P% of the HDR time (a of b s), now R` — the last `HDR on screen:` line is the verdict. A low P% with brightness below maximum is worth telling us about.
 

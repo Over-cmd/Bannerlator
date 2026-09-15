@@ -1395,8 +1395,8 @@ private fun WaylandHdrOutputRow(state: XServerDrawerState) {
     HelperText(
         when {
             checked && onScreen    -> "On: HDR frames on screen now."
-            checked && noHeadroom  -> "On, but the screen gives HDR no headroom right now (brightness at maximum?): " +
-                                      "lower the brightness a little to see HDR highlights."
+            checked && noHeadroom  -> "On, but the screen gives HDR no headroom right now: brightness at maximum, " +
+                                      "or the screen is being recorded (Android turns HDR headroom off while recording)."
             checked && toneMapped  -> "On, but shown tone-mapped: frame generation on a screen with no HDR swapchain."
             checked                -> "On: no HDR frames right now (is HDR on in the game's settings?)."
             onScreen || noHeadroom -> "Off, but these frames cannot be tone-mapped here: they stay HDR."

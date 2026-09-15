@@ -155,10 +155,11 @@ static struct {
     float ratio_min, ratio_max, ratio_last, win_ratio_min, win_ratio_max, ratio_logged;
     float ratio_live_max;           /* highest reading taken WHILE HDR frames were on screen (the verdict's) */
     int64_t ratio_logged_ns, ratio_periodic_ns;
-    /* Live headroom. The display may grant HDR frames no headroom at all while they are on screen (seen on
-     * the Fold with the brightness slider at maximum: SDR white already at the panel's limit), so "the
-     * ratio rose once" is not enough for a reader at minute 3: time with HDR frames on screen, the part of
-     * it with the ratio above 1, and the current no-headroom streak. */
+    /* Live headroom. The display may grant HDR frames no headroom at all while they are on screen - seen
+     * on the Fold while the screen was being RECORDED (Android turns HDR headroom off for a recording,
+     * which is SDR), and plausibly with the brightness slider at maximum (SDR white already at the panel's
+     * limit) - so "the ratio rose once" is not enough for a reader at minute 3: time with HDR frames on
+     * screen, the part of it with the ratio above 1, and the current no-headroom streak. */
     int64_t prev_sample_ns; int prev_live; float prev_ratio;
     int64_t live_ns, headroom_ns;
     int64_t nohead_since_ns;        /* HDR frames on screen and ratio <= 1.01 since then (0 = not now) */
@@ -193,21 +194,21 @@ static void verdict_locked(char *out, size_t size) {
          * with THEM, not with whatever else was up at another moment. And the share of that time with any
          * headroom, plus where it stands now: a ratio that rose once and then fell to 1.00 for minutes is
          * not the same answer. */
-        char share[200] = "";
+        char share[256] = "";
         const long long live_s = (long long)(g_hdr.live_ns / 1000000000LL);
         if (g_hdr.live_ns >= 1000000000LL)
             snprintf(share, sizeof(share), "; headroom above 1.00 for %d%% of the HDR time (%lld of %lld s), now %.2f%s",
                      (int)(100.0 * (double)g_hdr.headroom_ns / (double)g_hdr.live_ns + 0.5),
                      (long long)(g_hdr.headroom_ns / 1000000000LL), live_s, g_hdr.ratio_last,
-                     g_hdr.nohead_said ? " - no headroom now: the screen brightness is probably at maximum, and HDR "
-                                         "highlights need it below max" : "");
+                     g_hdr.nohead_said ? " - no headroom now: screen brightness at maximum, or the screen is being "
+                                         "recorded (Android turns HDR headroom off while recording)" : "");
         if (g_hdr.ratio_live_n && g_hdr.ratio_live_max > 1.01f)
             snprintf(out, size, "yes - %s; the display's HDR/SDR ratio rose to %.2f while they were on screen "
                      "(1.00 = SDR only)%s", frames, g_hdr.ratio_live_max, share);
         else if (g_hdr.ratio_live_n)
             snprintf(out, size, "tagged but NOT confirmed - %s, but the display's HDR/SDR ratio stayed at %.2f while they "
-                     "were on screen: Android gave them no HDR headroom (screen brightness at maximum? power saving? HDR "
-                     "off for this display?)", frames, g_hdr.ratio_live_max);
+                     "were on screen: Android gave them no HDR headroom (screen brightness at maximum? a screen recording? "
+                     "power saving? HDR off for this display?)", frames, g_hdr.ratio_live_max);
         else if (g_hdr.ratio_n)
             snprintf(out, size, "tagged, not measured - %s, but no HDR/SDR ratio reading was taken while they were on "
                      "screen (highest reading otherwise %.2f)", frames, g_hdr.ratio_max);
@@ -356,8 +357,9 @@ void banner_color_ratio_sample(float ratio, int listener) {
     pthread_mutex_unlock(&g_mu);
     if (nohead_now)
         banner_log(TAG, "no HDR headroom for 5 s while HDR frames are on screen (display HDR/SDR ratio %.2f): the screen "
-                   "brightness is probably at maximum - SDR white is already at the panel's limit, so HDR highlights "
-                   "look no brighter; lower the brightness a little to get them back", ratio);
+                   "brightness is probably at maximum, or the screen is being recorded (Android turns HDR headroom off "
+                   "while recording) - HDR highlights look no brighter until that ends; lower the brightness a little "
+                   "or stop the recording to get them back", ratio);
     if (head_back)
         banner_log(TAG, "HDR headroom is back: display HDR/SDR ratio %.2f with HDR frames on screen", ratio);
     if (!log_it) return;
@@ -366,7 +368,7 @@ void banner_color_ratio_sample(float ratio, int listener) {
     else snprintf(when, sizeof(when), "%s, last one %d ms ago", live ? "yes" : "no", age);
     if (periodic)
         banner_log(TAG, "display HDR/SDR ratio %.2f (steady; HDR frames on screen: %s)%s", ratio, when,
-                   live && ratio <= 1.01f ? " - no HDR headroom (screen brightness at maximum?)" : "");
+                   live && ratio <= 1.01f ? " - no HDR headroom (screen brightness at maximum, or a screen recording?)" : "");
     else if (was > 0.0f)
         banner_log(TAG, "display HDR/SDR ratio %.2f (was %.2f; HDR frames on screen: %s) [%s]", ratio, was, when,
                    listener ? "display listener" : "sampler");
@@ -382,12 +384,13 @@ void banner_color_stats_tick(void) {
     pthread_mutex_lock(&g_mu);
     any = g_hdr.win_layer || g_hdr.win_copy || g_hdr.win_tonemapped; /* the ratio alone is logged when it moves */
     if (any) {
-        char ratio[224] = "no HDR/SDR ratio reading";
+        char ratio[256] = "no HDR/SDR ratio reading";
         if (g_hdr.win_ratio_n)
             snprintf(ratio, sizeof(ratio), "display HDR/SDR ratio %.2f-%.2f (now %.2f)%s", g_hdr.win_ratio_min,
                      g_hdr.win_ratio_max, g_hdr.ratio_last,
-                     g_hdr.nohead_said ? " - NO headroom while HDR frames are on screen: screen brightness probably at "
-                                         "maximum (HDR highlights need it below max)" : "");
+                     g_hdr.nohead_said ? " - NO headroom while HDR frames are on screen: screen brightness at maximum, "
+                                         "or the screen is being recorded (Android turns HDR headroom off while "
+                                         "recording)" : "");
         snprintf(line, sizeof(line), "HDR last 10 s: %u frames shown as BT2020_PQ (zero-copy %u, 8-bit layer copy %u, "
                  "composed picture %u, HDR10 swapchain %u; last buffer %s) | %u tone-mapped to SDR | %u washed-out "
                  "copies | %s",
