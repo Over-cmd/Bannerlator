@@ -1,5 +1,18 @@
 # Star-Compose — Progress Log
 
+## 2026-09-15 10:25 — 🧪 **AIO Graphics Test v2.1.0 (the HDR test card) released and baked into new containers; "AIO Graphics Test (HDR)" in the Start menu**
+
+> - **AIO v2.1.0** is Latest in The412Banner/AIO-Graphics-Test (tag `2.1.0` → `582454dc`; build run 34979767242, release run 34980102732). Its new `release.yml` publishes server-side.
+>   - Assets: `AIO-Graphics-Test-64bit.exe` (4,289,335 B, sha256 `1c27a4a7…`) and `-32bit.exe` (4,367,103 B, sha256 `d8fa9b02…`).
+>   - The HDR card is Display Tests → HDR; `--hdr` opens straight on it.
+> - **Container template:** the new `bake-aio.yml` workflow (`82059399`) re-baked `container_pattern_common.tzst` on the runner (run 34980372357, commit `69ec7ca5`), with no 84 MB upload from the phone.
+>   - It swapped only the two exes under `drive_c/AIO Graphics Test v2/` for 2.1.0, with the siblings' owner and mode.
+>   - Still 237 entries; the embedded exes' sha256 match the release; the template is now 84,885,816 B.
+> - **Start menu:** a new "AIO Graphics Test (HDR)" group (32/64-bit, `--hdr`), commit `abb98231`.
+> - CI build of the branch: run 34980627779, all three flavours green. main fast-forwarded `82059399` → `69ec7ca5`.
+> - New containers only: existing containers keep the AIO they were created with. The new exe is on the AIO release page.
+> - The Gamehub-Components HDR test release was deleted (tag kept); pre-release 8 replaces it.
+
 ## 2026-09-15 07:20 — 🏁 **Wayland pre-release 8 live: real HDR10, layer v11, HDR test card; the code is merged to main**
 
 > **Release `3.1.2-wayland-pre8`** (pre-release, not Latest; 3.1.1 stays Latest)
