@@ -367,8 +367,12 @@ void vkp_effects_set_formats(VkFormat scene_fmt, VkFormat target_fmt) {
         g_fx_fmt = target_fmt;
         g_scene_fmt = scene_fmt;
         if (g_dev)
-            banner_log("effects", "chain now works in %s (%s)", target_fmt == FX_FORMAT ? "8-bit RGBA" : "10-bit RGB",
-                       target_fmt == FX_FORMAT ? "SDR frames" : "the HDR composition's picture: PQ, or tone-mapped SDR with HDR output off");
+            banner_log("effects", "chain now works in %s (%s)",
+                       target_fmt == FX_FORMAT ? "8-bit RGBA"
+                       : target_fmt == VK_FORMAT_R16G16B16A16_SFLOAT ? "FP16 RGBA" : "10-bit RGB",
+                       target_fmt == FX_FORMAT ? "SDR frames"
+                       : target_fmt == VK_FORMAT_R16G16B16A16_SFLOAT ? "the HDR picture for frame generation"
+                       : "the HDR composition's picture: PQ, or tone-mapped SDR with HDR output off");
     } else if (scene_fmt != g_scene_fmt) {
         scene_release();
         g_scene_fmt = scene_fmt;

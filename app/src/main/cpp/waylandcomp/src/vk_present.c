@@ -78,8 +78,12 @@ static struct { VkImage img; VkDeviceMemory mem; int w, h; } g_scene;
  * ("mixed"), and the 10-bit HDR picture the encode pass makes of it for the game's display layer. Only
  * ever created while an HDR game shares the scene with something the display layer cannot show alone. */
 struct vkp_img_slot { VkImage img; VkDeviceMemory mem; int w, h; VkFormat fmt; };
-static struct vkp_img_slot g_mixed, g_hdrscene;
+static struct vkp_img_slot g_mixed, g_hdrscene, g_fgscene;
 #define HDR_FMT VK_FORMAT_A2B10G10R10_UNORM_PACK32
+/* Frame generation with HDR frames through an HDR10 swapchain: the scene, the effects and the engine's
+ * frames in FP16 - the format lsfg-vk itself uses for HDR - where the engine can build its chain in it,
+ * so the PQ picture keeps more than 8 bits through interpolation (framegen_bridge.h). */
+#define FG_HDR_FMT VK_FORMAT_R16G16B16A16_SFLOAT
 
 /* HDR10 swapchain (frame generation with an HDR game): VK_EXT_swapchain_colorspace is enabled on the
  * instance only when the session asked for HDR; the swapchain is built as A2B10G10R10 + HDR10_ST2084
@@ -89,6 +93,12 @@ static int g_colorspace_ext;       /* the instance has VK_EXT_swapchain_colorspa
 static int g_swap_hdr_want;        /* the next swapchain should be HDR10 */
 static int g_swap_is_hdr;          /* the live swapchain is HDR10 */
 static int g_swap_hdr_unavailable; /* this surface lists no HDR10 format: tone-map instead (said once) */
+static VkFormat g_swap_fmt;        /* the live swapchain's format */
+/* VK_EXT_hdr_metadata (HDR sessions, where the device offers it): the HDR10 swapchain carries the game's
+ * mastering metadata, sent once per swapchain and image description. */
+static PFN_vkSetHdrMetadataEXT g_set_hdr_metadata;
+static uint32_t g_swap_md_identity;
+static int g_surface_formats_said;
 static const char *vk_result_name(VkResult r);
 
 /* The Android surface is created/destroyed on the app's UI thread while the compositor thread
@@ -173,6 +183,7 @@ static void destroy_swapchain(void) {
     reset_sync();
     if (g_swapchain) g_vk.DestroySwapchainKHR(g_dev, g_swapchain, NULL);
     g_swapchain = VK_NULL_HANDLE;
+    g_swap_md_identity = 0; /* a new swapchain gets the metadata again */
     if (g_surface) g_vk.DestroySurfaceKHR(g_inst, g_surface, NULL);
     g_surface = VK_NULL_HANDLE;
     free(g_images);
@@ -385,16 +396,23 @@ static int dev_init(void) {
     g_vk.GetPhysicalDeviceMemoryProperties(g_pd, &g_memprops);
 
     /* Verify the dmabuf-import extensions are present, and log any that are missing. */
-    const char *dev_exts[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME, "VK_KHR_external_memory_fd",
-                              "VK_EXT_external_memory_dma_buf", "VK_EXT_image_drm_format_modifier",
-                              "VK_KHR_image_format_list"};
+    const char *dev_exts[6] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME, "VK_KHR_external_memory_fd",
+                               "VK_EXT_external_memory_dma_buf", "VK_EXT_image_drm_format_modifier",
+                               "VK_KHR_image_format_list", NULL};
+    uint32_t n_dev_exts = 5;
     uint32_t ne = 0;
     g_vk.EnumerateDeviceExtensionProperties(g_pd, NULL, &ne, NULL);
-    VkExtensionProperties *exts = calloc(ne, sizeof(*exts));
+    VkExtensionProperties *exts = calloc(ne ? ne : 1, sizeof(*exts));
     g_vk.EnumerateDeviceExtensionProperties(g_pd, NULL, &ne, exts);
     for (unsigned i = 0; i < 5; i++)
         if (!has_ext(exts, ne, dev_exts[i]))
             LOGE("present: driver MISSING %s (dmabuf import will fail)", dev_exts[i]);
+    /* HDR sessions only: the HDR10 swapchain (frame generation) can carry the game's metadata. */
+    int want_hdr_md = 0;
+    if (banner_color_requested()) {
+        want_hdr_md = has_ext(exts, ne, VK_EXT_HDR_METADATA_EXTENSION_NAME);
+        if (want_hdr_md) dev_exts[n_dev_exts++] = VK_EXT_HDR_METADATA_EXTENSION_NAME;
+    }
     free(exts);
 
     float prio = 1.0f;
@@ -407,7 +425,7 @@ static int dev_init(void) {
     const void *fg_features = vkp_framegen_device_features(g_inst, vk_loader_gipa(), g_pd);
     VkDeviceCreateInfo dci = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = fg_features,
                               .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci,
-                              .enabledExtensionCount = 5, .ppEnabledExtensionNames = dev_exts};
+                              .enabledExtensionCount = n_dev_exts, .ppEnabledExtensionNames = dev_exts};
     VkResult dr = g_vk.CreateDevice(g_pd, &dci, NULL, &g_dev);
     if (dr != VK_SUCCESS && fg_features) {
         banner_log("framegen", "the driver refused the LSFG feature set (%s); device created without it",
@@ -421,6 +439,12 @@ static int dev_init(void) {
     }
     vk_loader_load_device(g_dev);
     g_vk.GetDeviceQueue(g_dev, g_qfam, 0, &g_queue);
+    if (want_hdr_md)
+        g_set_hdr_metadata = (PFN_vkSetHdrMetadataEXT)g_vk.GetDeviceProcAddr(g_dev, "vkSetHdrMetadataEXT");
+    if (banner_color_requested())
+        banner_log("color", "compositor device %s VK_EXT_hdr_metadata (the HDR10 swapchain for frame generation %s)",
+                   g_set_hdr_metadata ? "enables" : "has no",
+                   g_set_hdr_metadata ? "carries the game's mastering metadata" : "goes without the game's metadata");
 
     VkCommandPoolCreateInfo pci = {.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
                                    .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
@@ -467,6 +491,88 @@ static int swap_init(void) {
 }
 
 #define SWLOGE(...) do { if (!g_swap_fail_logged) LOGE(__VA_ARGS__); } while (0)
+
+/* Short names for the session log (the formats and colour spaces an Android surface lists). */
+static void vk_format_short(VkFormat f, char *out, size_t n) {
+    const char *s = NULL;
+    switch (f) {
+    case VK_FORMAT_R8G8B8A8_UNORM: s = "RGBA8"; break;
+    case VK_FORMAT_R8G8B8A8_SRGB: s = "RGBA8_SRGB"; break;
+    case VK_FORMAT_B8G8R8A8_UNORM: s = "BGRA8"; break;
+    case VK_FORMAT_B8G8R8A8_SRGB: s = "BGRA8_SRGB"; break;
+    case VK_FORMAT_R5G6B5_UNORM_PACK16: s = "RGB565"; break;
+    case VK_FORMAT_A2B10G10R10_UNORM_PACK32: s = "A2B10G10R10"; break;
+    case VK_FORMAT_A2R10G10B10_UNORM_PACK32: s = "A2R10G10B10"; break;
+    case VK_FORMAT_R16G16B16A16_SFLOAT: s = "RGBA16F"; break;
+    default: break;
+    }
+    if (s) snprintf(out, n, "%s", s); else snprintf(out, n, "format%d", (int)f);
+}
+static int vk_format_bits(VkFormat f) {
+    switch (f) {
+    case VK_FORMAT_A2B10G10R10_UNORM_PACK32: case VK_FORMAT_A2R10G10B10_UNORM_PACK32: return 10;
+    case VK_FORMAT_R16G16B16A16_SFLOAT: return 16;
+    default: return 8;
+    }
+}
+static const char *vk_colorspace_short(VkColorSpaceKHR c) {
+    switch ((int)c) {
+    case VK_COLOR_SPACE_SRGB_NONLINEAR_KHR: return "sRGB";
+    case VK_COLOR_SPACE_DISPLAY_P3_NONLINEAR_EXT: return "P3";
+    case VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT: return "extended-sRGB-linear";
+    case VK_COLOR_SPACE_DISPLAY_P3_LINEAR_EXT: return "P3-linear";
+    case VK_COLOR_SPACE_DCI_P3_NONLINEAR_EXT: return "DCI-P3";
+    case VK_COLOR_SPACE_BT709_LINEAR_EXT: return "BT709-linear";
+    case VK_COLOR_SPACE_BT709_NONLINEAR_EXT: return "BT709";
+    case VK_COLOR_SPACE_BT2020_LINEAR_EXT: return "BT2020-linear";
+    case VK_COLOR_SPACE_HDR10_ST2084_EXT: return "HDR10";
+    case VK_COLOR_SPACE_DOLBYVISION_EXT: return "DolbyVision";
+    case VK_COLOR_SPACE_HDR10_HLG_EXT: return "HLG";
+    case VK_COLOR_SPACE_ADOBERGB_LINEAR_EXT: return "AdobeRGB-linear";
+    case VK_COLOR_SPACE_ADOBERGB_NONLINEAR_EXT: return "AdobeRGB";
+    case VK_COLOR_SPACE_PASS_THROUGH_EXT: return "pass-through";
+    case VK_COLOR_SPACE_EXTENDED_SRGB_NONLINEAR_EXT: return "extended-sRGB";
+    default: return NULL;
+    }
+}
+/* One line: the total, how many colour spaces each format comes with, and every HDR-capable pair
+ * (HDR10 / HLG / extended sRGB, any format) - never "the first N pairs". */
+static int hdr_capable_space(VkColorSpaceKHR cs) {
+    int c = (int)cs;
+    return c == VK_COLOR_SPACE_HDR10_ST2084_EXT || c == VK_COLOR_SPACE_HDR10_HLG_EXT ||
+           c == VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT || c == VK_COLOR_SPACE_EXTENDED_SRGB_NONLINEAR_EXT;
+}
+static void log_surface_formats(const VkSurfaceFormatKHR *f, uint32_t n) {
+    char per[200] = "", hdr[256] = "";
+    size_t pp = 0, hp = 0;
+    unsigned hdr_n = 0, hdr_cut = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        int first = 1;
+        for (uint32_t j = 0; j < i; j++) if (f[j].format == f[i].format) { first = 0; break; }
+        if (first && pp < sizeof(per) - 32) {
+            unsigned cnt = 0;
+            for (uint32_t j = i; j < n; j++) if (f[j].format == f[i].format) cnt++;
+            char nm[24];
+            vk_format_short(f[i].format, nm, sizeof(nm));
+            pp += (size_t)snprintf(per + pp, sizeof(per) - pp, "%s%s x%u", pp ? ", " : "", nm, cnt);
+        }
+    }
+    /* The deep formats (10-bit, FP16) first, so a long list never pushes them out of the line. */
+    for (int pass = 0; pass < 2; pass++)
+        for (uint32_t i = 0; i < n; i++) {
+            if (!hdr_capable_space(f[i].colorSpace) || (vk_format_bits(f[i].format) > 8) != (pass == 0)) continue;
+            hdr_n++;
+            char nm[24];
+            vk_format_short(f[i].format, nm, sizeof(nm));
+            if (hp < sizeof(hdr) - 48)
+                hp += (size_t)snprintf(hdr + hp, sizeof(hdr) - hp, "%s%s/%s", hp ? ", " : "", nm,
+                                       vk_colorspace_short(f[i].colorSpace));
+            else hdr_cut++;
+        }
+    banner_log("color", "screen surface lists %u format/colour-space pairs (%s); HDR-capable: %s%s", n, per,
+               hdr_n ? hdr : "none", hdr_cut ? " (+more)" : "");
+}
+
 static int swap_init_locked(void) {
 
     VkAndroidSurfaceCreateInfoKHR aci = {
@@ -486,38 +592,55 @@ static int swap_init_locked(void) {
      * to decide whether a second layer is affordable — see sc_layer_present_overlay(). */
     g_surface_transform = caps.currentTransform;
     g_surface_transform_known = 1;
+    /* Every format/colour-space pair the surface lists. With VK_EXT_swapchain_colorspace the Android
+     * WSI lists each format once per colour space (the Fold: 11 per format), so a fixed-size array
+     * silently drops the 10-bit and FP16 rows - which is where HDR10 lives. */
     uint32_t nfmt = 0;
     g_vk.GetPhysicalDeviceSurfaceFormatsKHR(g_pd, g_surface, &nfmt, NULL);
-    VkSurfaceFormatKHR fmts[32]; if (nfmt > 32) nfmt = 32;
-    g_vk.GetPhysicalDeviceSurfaceFormatsKHR(g_pd, g_surface, &nfmt, fmts);
+    VkSurfaceFormatKHR *fmts = nfmt ? calloc(nfmt, sizeof(*fmts)) : NULL;
+    if (!fmts) { SWLOGE("present: the surface lists no formats"); return -1; }
+    if (g_vk.GetPhysicalDeviceSurfaceFormatsKHR(g_pd, g_surface, &nfmt, fmts) < 0 || !nfmt) {
+        free(fmts); SWLOGE("present: vkGetPhysicalDeviceSurfaceFormatsKHR failed"); return -1;
+    }
     VkSurfaceFormatKHR chosen = fmts[0];
-    /* HDR10 for frame generation with an HDR game (render_impl sets g_swap_hdr_want): the first
-     * A2B10G10R10 (else FP16) entry the surface lists with VK_COLOR_SPACE_HDR10_ST2084_EXT. None listed
-     * -> the frames are tone-mapped into the ordinary swapchain, and that is said once. */
+    const VkSurfaceFormatKHR sdr_choice = fmts[0];
+    if (banner_color_requested() && (!g_surface_formats_said || g_swap_hdr_want)) {
+        g_surface_formats_said = 1;
+        log_surface_formats(fmts, nfmt);
+    }
+    /* HDR10 for frame generation with an HDR game (render_impl sets g_swap_hdr_want): the best format
+     * the surface lists with VK_COLOR_SPACE_HDR10_ST2084_EXT - 10-bit, then FP16, then 8-bit (still a
+     * PQ BT.2020 picture, with less precision). None listed -> the frames are tone-mapped into the
+     * ordinary swapchain, and that is said once. */
     g_swap_is_hdr = 0;
     if (g_swap_hdr_want) {
+        static const VkFormat pref[] = {VK_FORMAT_A2B10G10R10_UNORM_PACK32, VK_FORMAT_A2R10G10B10_UNORM_PACK32,
+                                        VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R8G8B8A8_UNORM,
+                                        VK_FORMAT_B8G8R8A8_UNORM};
         int pick = -1;
-        char seen[160] = "";
-        int pos = 0;
-        for (uint32_t i = 0; i < nfmt; i++) {
-            if (pos < (int)sizeof(seen) - 16)
-                pos += snprintf(seen + pos, sizeof(seen) - (size_t)pos, "%s%d/%d", i ? " " : "",
-                                (int)fmts[i].format, (int)fmts[i].colorSpace);
-            if (fmts[i].colorSpace != VK_COLOR_SPACE_HDR10_ST2084_EXT) continue;
-            if (fmts[i].format == VK_FORMAT_A2B10G10R10_UNORM_PACK32) { pick = (int)i; break; }
-            if (fmts[i].format == VK_FORMAT_R16G16B16A16_SFLOAT && pick < 0) pick = (int)i;
-        }
+        for (unsigned k = 0; k < sizeof(pref) / sizeof(pref[0]) && pick < 0; k++)
+            for (uint32_t i = 0; i < nfmt; i++)
+                if (fmts[i].colorSpace == VK_COLOR_SPACE_HDR10_ST2084_EXT && fmts[i].format == pref[k]) {
+                    pick = (int)i; break;
+                }
         if (pick >= 0) {
             chosen = fmts[pick];
             g_swap_is_hdr = 1;
-            banner_log("color", "screen swapchain built as HDR10 (format %d, HDR10_ST2084): frame-generated HDR frames "
-                       "reach the display as PQ BT.2020", (int)chosen.format);
+            char fname[24];
+            vk_format_short(chosen.format, fname, sizeof(fname));
+            banner_log("color", "screen swapchain built as HDR10 (format %d %s, HDR10_ST2084): frame-generated HDR "
+                       "frames reach the display as PQ BT.2020%s", (int)chosen.format, fname,
+                       vk_format_bits(chosen.format) <= 8 ? " - an 8-bit swapchain: banding possible in smooth gradients"
+                                                          : "");
         } else {
             g_swap_hdr_unavailable = 1;
-            banner_log("color", "the screen surface lists no HDR10 swapchain format (format/colour-space pairs: %s): "
-                       "frames with frame generation are tone-mapped to SDR instead", seen);
+            banner_log("color", "the screen surface lists no HDR10 swapchain format among its %u format/colour-space "
+                       "pairs (see the line above): frames with frame generation are tone-mapped to SDR instead",
+                       nfmt);
         }
     }
+    free(fmts);
+    g_swap_fmt = chosen.format;
 
     g_extent = caps.currentExtent;
     if (g_extent.width == 0xFFFFFFFF) {
@@ -548,6 +671,19 @@ static int swap_init_locked(void) {
         .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
         .presentMode = VK_PRESENT_MODE_FIFO_KHR, .clipped = VK_TRUE};
     VkResult cr = g_vk.CreateSwapchainKHR(g_dev, &sci, NULL, &g_swapchain);
+    if (cr != VK_SUCCESS && g_swap_is_hdr) {
+        /* The surface listed the HDR10 pair but refused the swapchain: say so, never ask again this
+         * surface, and build the ordinary one now (frames tone-mapped) - never a black screen. */
+        banner_log("color", "the driver refused the HDR10 swapchain (%s): frames with frame generation are "
+                   "tone-mapped to SDR instead", vk_result_name(cr));
+        g_swap_is_hdr = 0;
+        g_swap_hdr_unavailable = 1;
+        g_swapchain = VK_NULL_HANDLE;
+        sci.imageFormat = sdr_choice.format;
+        sci.imageColorSpace = sdr_choice.colorSpace;
+        g_swap_fmt = sdr_choice.format;
+        cr = g_vk.CreateSwapchainKHR(g_dev, &sci, NULL, &g_swapchain);
+    }
     if (cr != VK_SUCCESS) {
         g_swapchain = VK_NULL_HANDLE;
         SWLOGE("present: vkCreateSwapchainKHR failed (%d)", (int)cr);
@@ -880,7 +1016,9 @@ static int ensure_img(struct vkp_img_slot *s, int w, int h, VkFormat fmt, VkImag
     }
     g_vk.BindImageMemory(g_dev, s->img, s->mem, 0);
     s->w = w; s->h = h; s->fmt = fmt;
-    banner_log("color", "%s image %dx%d (10-bit)", what, w, h);
+    char fname[24];
+    vk_format_short(fmt, fname, sizeof(fname));
+    banner_log("color", "%s image %dx%d (%s)", what, w, h, fname);
     return 0;
 }
 
@@ -1063,6 +1201,42 @@ int vkp_render_plain(int scene_w, int scene_h) {
     return r;
 }
 
+/* The HDR10 swapchain's metadata: the game's SMPTE 2086 / CTA-861.3 values (its image description) via
+ * VK_EXT_hdr_metadata, once per swapchain and description. A game that gave none gets none. */
+static void send_hdr_metadata(const struct banner_color *c) {
+    static int said_none, said_nodesc;
+    if (!c) return;
+    if (!g_set_hdr_metadata) {
+        if (!said_none) { said_none = 1; banner_log("color", "HDR10 swapchain without the game's metadata: this device "
+                                                    "has no VK_EXT_hdr_metadata (the display uses its defaults)"); }
+        return;
+    }
+    if (!c->has_st2086 && !c->has_cta861) {
+        if (said_nodesc != (int)c->identity) {
+            said_nodesc = (int)c->identity;
+            banner_log("color", "HDR10 swapchain: image description #%u carries no HDR metadata (the game sent none), "
+                       "so none is set - the display uses its defaults", c->identity);
+        }
+        return;
+    }
+    VkHdrMetadataEXT md = {.sType = VK_STRUCTURE_TYPE_HDR_METADATA_EXT};
+    if (c->has_st2086) {
+        md.displayPrimaryRed = (VkXYColorEXT){c->red[0], c->red[1]};
+        md.displayPrimaryGreen = (VkXYColorEXT){c->green[0], c->green[1]};
+        md.displayPrimaryBlue = (VkXYColorEXT){c->blue[0], c->blue[1]};
+        md.whitePoint = (VkXYColorEXT){c->white[0], c->white[1]};
+        md.maxLuminance = c->max_lum;
+        md.minLuminance = c->min_lum;
+    }
+    if (c->has_cta861) {
+        md.maxContentLightLevel = c->max_cll;
+        md.maxFrameAverageLightLevel = c->max_fall;
+    }
+    g_set_hdr_metadata(g_dev, 1, &g_swapchain, &md);
+    banner_log("color", "HDR10 swapchain: the game's metadata set via VK_EXT_hdr_metadata (image description #%u: %s)",
+               c->identity, c->text);
+}
+
 /* The whole present: vkp_render (hf == NULL, exactly as it always was) and vkp_render_hdr (a scene with
  * HDR draws: composed into one encoding, hdr_compose.h). */
 static int render_impl(int scene_w, int scene_h, const struct vkp_draw *draws, int n,
@@ -1095,6 +1269,11 @@ static int render_impl(int scene_w, int scene_h, const struct vkp_draw *draws, i
     VkResult ar;
     if (acquire_image(0, 1, &img, &ar) != 0) return -1;
     update_map(scene_w, scene_h);
+    /* A new HDR10 swapchain, or a new image description on it: hand the game's metadata over. */
+    if (g_swap_is_hdr && hf && hf->color && hf->color->identity != g_swap_md_identity) {
+        g_swap_md_identity = hf->color->identity;
+        send_hdr_metadata(hf->color);
+    }
 
     /* The compositor pass - scene -> effects -> frame generation -> mapping/blit -> swapchain -
      * composes the scene off-screen when either stage needs the whole frame: the screen-effect
@@ -1103,8 +1282,32 @@ static int render_impl(int scene_w, int scene_h, const struct vkp_draw *draws, i
      * blit filter follows the scaling mode. */
     const int fx = !g_plain_frame && vkp_effects_active();
     const int fg = !g_plain_frame && vkp_framegen_active();
+    /* HDR frames with frame generation through an HDR10 swapchain: the scene, the effects and the
+     * engine's frames in FP16 (FG_HDR_FMT) where the engine can take that format - more than 8 bits of
+     * PQ through interpolation - else the 8-bit scene, as before. */
+    const int deep = hf && n > 0 && fg && g_swap_is_hdr && !hf->tonemap && vkp_framegen_format_ok(FG_HDR_FMT) &&
+                     ensure_img(&g_fgscene, scene_w, scene_h, FG_HDR_FMT,
+                                VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                                VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                                "HDR frame generation (scene)") == 0;
+    {
+        static int said = -1;
+        if (fg && hf && g_swap_is_hdr && deep != said) {
+            said = deep;
+            char sw[24];
+            vk_format_short(g_swap_fmt, sw, sizeof(sw));
+            if (deep)
+                banner_log("color", "frame generation runs on the HDR picture in FP16 (RGBA16F): more than 8 bits of PQ "
+                           "through interpolation, into the HDR10 swapchain (%s)", sw);
+            else
+                banner_log("color", "frame generation runs on the HDR picture in 8 bits (the engine cannot take FP16 here), "
+                           "into the HDR10 swapchain (%s): banding possible in smooth gradients", sw);
+        }
+    }
     /* An HDR scene always takes the pass: its draws are composed into one encoding first. */
-    const int pass = (fx || fg || (hf && n > 0)) && ensure_scene_image(scene_w, scene_h) == 0;
+    const int pass = deep || ((fx || fg || (hf && n > 0)) && ensure_scene_image(scene_w, scene_h) == 0);
+    VkImage scene_img = deep ? g_fgscene.img : g_scene.img;
+    const VkFormat scene_fmt = deep ? FG_HDR_FMT : SCENE_FMT;
     const VkFilter blit_filter = vkp_effects_blit_filter();
 
     VkCommandBuffer cmd = g_cmds[0];
@@ -1125,7 +1328,7 @@ static int render_impl(int scene_w, int scene_h, const struct vkp_draw *draws, i
         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
         .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .image = pass ? g_scene.img : g_images[img], .subresourceRange = range,
+        .image = pass ? scene_img : g_images[img], .subresourceRange = range,
         .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT};
     for (int i = 0; i < n; i++) {
         struct vkp_image *im = draws[i].img;
@@ -1155,7 +1358,7 @@ static int render_impl(int scene_w, int scene_h, const struct vkp_draw *draws, i
 
     /* Clear the composition target to black (the letterbox on the direct path, the desktop's
      * background on the pass) before the draws land on it. */
-    VkImage target = pass ? g_scene.img : g_images[img];
+    VkImage target = pass ? scene_img : g_images[img];
     VkClearColorValue black = {.float32 = {0.0f, 0.0f, 0.0f, 1.0f}};
     g_vk.CmdClearColorImage(cmd, target, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &range);
     {
@@ -1173,7 +1376,7 @@ static int render_impl(int scene_w, int scene_h, const struct vkp_draw *draws, i
     int drawn = 0;
     int hdr_how = 0;
     if (hf && pass && n > 0 &&
-        compose_hdr(cmd, draws, n, hf, scene_w, scene_h, g_scene.img, VK_FORMAT_R8G8B8A8_UNORM,
+        compose_hdr(cmd, draws, n, hf, scene_w, scene_h, scene_img, scene_fmt,
                     g_swap_is_hdr ? HDRC_OUT_PQ : HDRC_OUT_SDR) == 0) {
         hdr_how = g_swap_is_hdr ? 1 : 2;
         drawn = n;
@@ -1191,7 +1394,7 @@ static int render_impl(int scene_w, int scene_h, const struct vkp_draw *draws, i
 
     int ngen = 0;
     VkImage gens[VKP_FG_MAX_GENERATIONS] = {VK_NULL_HANDLE};
-    VkImage result = g_scene.img;
+    VkImage result = scene_img;
     int rw = scene_w, rh = scene_h;
     if (!pass) {
         VkImageMemoryBarrier b_present = {
@@ -1210,8 +1413,8 @@ static int render_impl(int scene_w, int scene_h, const struct vkp_draw *draws, i
             int mapped_w = (int)(scene_w * g_map.kx + 0.5f), mapped_h = (int)(scene_h * g_map.ky + 0.5f);
             /* This path's scene is 8-bit. Set only where the chain really runs: a plain frame (the black
              * base under an HDR picture) must not flip the chain's format back every frame. */
-            vkp_effects_set_formats(VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM);
-            result = vkp_effects_run(cmd, g_scene.img, scene_w, scene_h, mapped_w, mapped_h, &rw, &rh);
+            vkp_effects_set_formats(scene_fmt, scene_fmt);
+            result = vkp_effects_run(cmd, scene_img, scene_w, scene_h, mapped_w, mapped_h, &rw, &rh);
             result_layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
         }
         /* Hand-off: from here the frame lives in GENERAL - the frame-generation engines copy and
@@ -1231,7 +1434,7 @@ static int render_impl(int scene_w, int scene_h, const struct vkp_draw *draws, i
         /* 3. Frame generation (the hook): the result is frame N; the engine interpolates between
          *    N-1 and N and hands back the frames that belong in between. Shown first, N last. */
         if (fg) {
-            ngen = vkp_framegen_run(cmd, result, VK_NULL_HANDLE, rw, rh, SCENE_FMT, gens);
+            ngen = vkp_framegen_run(cmd, result, VK_NULL_HANDLE, rw, rh, scene_fmt, gens);
             if (ngen < 0) ngen = 0;
             if (ngen > VKP_FG_MAX_GENERATIONS) ngen = VKP_FG_MAX_GENERATIONS;
         }

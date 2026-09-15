@@ -28,15 +28,16 @@ static VkPipelineLayout g_pl;
 static VkDescriptorPool g_dpool;
 static VkShaderModule g_vert, g_frag;
 
-/* One render pass + pipeline per output format (the HDR scene is 10-bit, frame generation's 8-bit). */
-#define NFMT 2
+/* One render pass + pipeline per output format: the HDR picture is 10-bit, frame generation's scene
+ * 8-bit - or FP16 where the engine takes it (vk_present.c FG_HDR_FMT). */
+#define NFMT 3
 static struct { VkFormat fmt; VkRenderPass rp; VkPipeline pipe; } g_out[NFMT] = {
-    {VK_FORMAT_A2B10G10R10_UNORM_PACK32}, {VK_FORMAT_R8G8B8A8_UNORM}};
+    {VK_FORMAT_A2B10G10R10_UNORM_PACK32}, {VK_FORMAT_R8G8B8A8_UNORM}, {VK_FORMAT_R16G16B16A16_SFLOAT}};
 
 /* The mixed image's view + descriptor, and each output image's view + framebuffer: kept while the
  * image handle (and size) stays the same, rebuilt when vk_present re-creates the image. */
 static struct { VkImage img; int w, h; VkImageView view; VkDescriptorSet ds; } g_src;
-#define NOUT 2
+#define NOUT 3
 static struct { VkImage img; VkFormat fmt; int w, h; VkImageView view; VkFramebuffer fb; } g_dst[NOUT];
 static int g_dst_next;
 

@@ -35,6 +35,9 @@ void fge_device_ready(PFN_vkGetInstanceProcAddr gipa, VkInstance inst, VkPhysica
 int fge_caps_ok(int kind);
 /* Why the LSFG gates fail ("supported" when they pass); static string. */
 const char *fge_caps_reason(void);
+/* 1 when the engines can generate in `fmt` on this device (storage + linear sampling), beyond the
+ * ring format probed at fge_probe - the FP16 scene of HDR frames (vk_present.c). */
+int fge_format_ok(VkFormat fmt);
 
 /* Create engine `kind` (LSFG needs the cache path; Win-FG ignores it). 0 = ready, -1 = failed.
  * Only one engine holds GPU resources at a time; a different kind replaces it. */

@@ -144,6 +144,11 @@ int fge_caps_ok(int kind) {
 
 const char *fge_caps_reason(void) { return g_caps.reason; }
 
+int fge_format_ok(VkFormat fmt) {
+    if (!g_ready || !g_table.GetPhysicalDeviceFormatProperties || fmt == VK_FORMAT_UNDEFINED) return 0;
+    return lsfg::probeStorageFormat(g_table, g_pd, fmt) && lsfg::probeLinearBlit(g_table, g_pd, fmt) ? 1 : 0;
+}
+
 int fge_start(int kind, const char *cache_path) {
     fge_stop();
     if (!g_ready) return -1;

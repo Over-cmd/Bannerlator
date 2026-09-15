@@ -100,10 +100,12 @@ int vkp_render_plain(int scene_w, int scene_h);
 
 /* ---- HDR composition (hdr_compose.h) ----
  * An HDR game that cannot be alone on its display layer: the scene is composed into ONE encoding. */
+struct banner_color;
 struct vkp_hdr_frame {
     const unsigned char *is_hdr; /* per draw: 1 = its image holds PQ BT.2020 (the surface's description) */
     float peak_nits;             /* the HDR content's peak, for a tone-map (max CLL / mastering max; 0 = 1000) */
     int tonemap;                 /* 1 = the drawer's HDR output switch is off: tone-map to SDR, never PQ */
+    const struct banner_color *color; /* the topmost HDR draw's description: an HDR10 swapchain's metadata */
 };
 /* vkp_render for a scene with HDR draws (frame generation): composed into PQ and presented through an
  * HDR10 swapchain where the surface offers one (and hf->tonemap is 0), else tone-mapped into the ordinary

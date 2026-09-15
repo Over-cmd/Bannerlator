@@ -1852,6 +1852,7 @@ static int hdr_plan(const struct draw_list *dl, int w, int h, int fx_on, int fra
     }
     if (!hs->n_hdr) { free(hs->is_hdr); hs->is_hdr = NULL; return 0; }
     hs->hf.is_hdr = hs->is_hdr;
+    hs->hf.color = hs->color;
     hs->hf.peak_nits = hs->color->max_cll > 0.0f ? hs->color->max_cll
                      : hs->color->has_st2086 ? hs->color->max_lum : 1000.0f;
     if (framegen) return 2;

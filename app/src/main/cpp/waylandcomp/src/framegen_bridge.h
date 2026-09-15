@@ -81,5 +81,10 @@ int vkp_framegen_run(VkCommandBuffer cmd, VkImage scene, VkImageView scene_view,
 /* After the presents of one scene frame: how many generated frames actually reached the
  * swapchain (rate tracking + the stats counters). */
 void vkp_framegen_presented(int generated);
+/* 1 when vkp_framegen_run can be fed `fmt` (the 8-bit scene always; FP16 for HDR frames where the
+ * device can generate in it and the engine has not refused it this session). A chain that fails to
+ * build in a deeper format is not an engine failure: the engine restarts and the format is refused,
+ * so the caller goes back to 8 bits. */
+int vkp_framegen_format_ok(VkFormat fmt);
 
 #endif
