@@ -1,5 +1,38 @@
 # Star-Compose — Progress Log
 
+## 2026-09-15 12:40 — 🔖 **CHECKPOINT before Wayland performance Phase 1** (the fallback point)
+
+> **Tips.**
+> - Bannerlator main `0f2d47b1`: the pre-release 8 code, AIO 2.1.0 baked into the container template, and the Start-menu "AIO Graphics Test (HDR)" entry; versionName 3.1.1, vc85.
+> - Pre-release `3.1.2-wayland-pre8` is live (tag → `35b496a2`); 3.1.1 is Latest.
+> - proton-wine Wayland line `825a546ca3a` = layer v11; the next layer build stamps versionCode 12.
+> - AIO-Graphics-Test main `582454dc` = release 2.1.0.
+> - The Pocket FIT runs the pre8 pubg APK with layers -9/-10/-11; the user's containers 3/4/6/7 are untouched.
+>
+> **Saved AIO baselines** (Pocket FIT, Adreno 750, one launch cycling all eight APIs, same container and Proton), X11 vs Wayland copy path:
+>
+> | API | X11 | Wayland |
+> |---|---|---|
+> | Vulkan | 752 | 596 |
+> | OpenGL | 172 | 230 |
+> | D3D12 | 430 | 336 |
+> | D3D11 | 2298 | 2144 |
+> | D3D10 | 396 | 303 |
+> | D3D9 | 292 | 284 |
+> | D3D8 | 291 | 288 |
+> | DirectDraw | 224 | 231 |
+>
+> **Why Wayland isn't faster yet.** Two read-only audits looked at our code and four other projects (GameNative, WinNative, StevenMXZ Ludashi, Pipetto). Proven in code:
+> - zero-copy renders into linear gralloc buffers: the Turnip patch never sets the UBWC usage bit, and the `TU_DEBUG=noconform,sysmem` default forces bypass rendering;
+> - the compositor clears and presents a black base frame every refresh with a CPU fence wait, even in zero-copy;
+> - one compositor thread does everything (X11 renders on its own thread with 2 frames in flight);
+> - the container's `mailbox` present mode reaches Wayland games;
+> - CPU affinity never arms on Wayland, and "prefer big cores" pins to a single core on 8 Gen 3.
+>
+> **Phase 1** (approved): measurement hooks, skip the black base during zero-copy, UBWC for zero-copy, the CPU affinity / big-core / thread-priority fixes, more pool buffers, and A/B of existing settings. It will be device-tested on the Pocket FIT with the AIO Graphics Test on Wayland (8 APIs × 10–15 s) against the table above.
+>
+> **Roll back:** main `0f2d47b1`, the pre8 APK, layer `-11`.
+
 ## 2026-09-15 10:25 — 🧪 **AIO Graphics Test v2.1.0 (the HDR test card) released and baked into new containers; "AIO Graphics Test (HDR)" in the Start menu**
 
 > - **AIO v2.1.0** is Latest in The412Banner/AIO-Graphics-Test (tag `2.1.0` → `582454dc`; build run 34979767242, release run 34980102732). Its new `release.yml` publishes server-side.
