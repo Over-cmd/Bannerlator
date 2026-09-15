@@ -1,5 +1,21 @@
 # Star-Compose — Progress Log
 
+## 2026-09-15 — ⚙️ **Wayland performance Phase 1, app/compositor half: branch `feat/wayland-perf-p1`** (off `8fd31faa`; CI only, not device-tested, not merged)
+
+> **What changed (code `0255dfea` compositor, `3c4b8983` app):**
+> - **`perf` line every 10 s** in `Download/Wayland-logs/wayland-*.log`, next to the stats line:
+>   `perf  last 10 s: T ticks, S scenes, N on screen (copy C, zero-copy Z, layer copy L) | render_scene a/m ms | base K black kept, P presented | acquire a/m ms | present a/m ms (n) | fence wait a/m ms (n, G GPU release waits) | release a/m ms (n, h held) | D pool drops` (a/m = average/max).
+> - The GPU-frame import line no longer says "(zero-copy)" on the copy path.
+> - **Zero-copy: the black base frame is presented once and kept**, not cleared and presented every refresh; effects / frame generation no longer run on it. A resized surface is noticed by asking it (every 100 ms at most).
+> - **Copy path: only the letterbox bars are blacked** when one draw covers the scene.
+> - **Layer pool: 5 buffers**, release fences waited for on the GPU (VK_KHR_external_semaphore_fd) instead of a CPU poll; the pool asks gralloc for UBWC (`AHARDWAREBUFFER_USAGE_VENDOR_0` + `COMPOSER_OVERLAY`) with the plain and linear requests as fallbacks, and logs the layout it got.
+> - **Compositor thread** named `wl-compositor`, asks for THREAD_PRIORITY_URGENT_DISPLAY; Thread Priority Boost matches it.
+> - **CPU affinity now arms on Wayland** (from the game's first presented frame: pid + executable from the compositor).
+> - **Prefer big cores = every core ≥ 70% of the peak max frequency** (both backends; 8 Gen 3: cpu7 → cpus 2-7), logged once per session.
+> - Not changed: presentMode and TU_DEBUG defaults (A/B with env vars in a test container), the Turnip zero-copy bit (Track B, layer v12).
+>
+> **Status:** CI dispatched on this branch; the Pocket FIT device test is a separate agent. **Roll back:** main `8fd31faa`.
+
 ## 2026-09-15 12:40 — 🔖 **CHECKPOINT before Wayland performance Phase 1** (the fallback point)
 
 > **Tips.**
