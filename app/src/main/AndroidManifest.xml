@@ -60,6 +60,11 @@
          extraction (UnpackService) isn't paused/killed by aggressive OEM power managers. -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- Wayland HDR evidence (normal, install-time, never prompted): a screenshot (Android 14+) and a
+         screen recording (Android 15+) are logged beside the HDR/SDR headroom, because Android turns
+         HDR headroom off while the screen is recorded. Ignored on older Android. -->
+    <uses-permission android:name="android.permission.DETECT_SCREEN_CAPTURE" />
+    <uses-permission android:name="android.permission.DETECT_SCREEN_RECORDING" />
     <uses-permission
         android:name="android.permission.WRITE_SECURE_SETTINGS"
         tools:ignore="ProtectedPermissions" />

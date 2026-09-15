@@ -95,6 +95,14 @@ void banner_color_set_output(int on);
 int banner_color_output(void);
 /* 1 while an HDR game's frames are being shown tone-mapped to SDR (the last one < 1.5 s ago); any thread. */
 int banner_color_tonemapped_on_screen(void);
+/* Device evidence beside the HDR/SDR headroom (the app, non-root APIs; any thread; HDR sessions only):
+ * PowerManager thermal status (0..6, -1 unknown) + getThermalHeadroom(10) (< 0 = not available),
+ * Settings.System SCREEN_BRIGHTNESS (0..255, -1 unknown) + SCREEN_BRIGHTNESS_MODE (1 auto, 0 manual).
+ * Changes of status and brightness are logged; every no-headroom line, the 10 s line and the verdict
+ * carry the last values. */
+void banner_color_env_sample(int thermal, float headroom, int brightness, int bmode);
+/* kind 1 = screen recording (state 1 started / 0 not recording; Android 15+), kind 2 = a screenshot. */
+void banner_color_env_event(int kind, int state);
 
 /* ---- compositor.c -> here */
 /* Decide the gate (call after ahb_swapchain_init) and create the global when it is open. */

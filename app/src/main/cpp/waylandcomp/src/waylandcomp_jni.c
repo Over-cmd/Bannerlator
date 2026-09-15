@@ -455,6 +455,20 @@ Java_com_winlator_star_wayland_WaylandCompositor_nativeHdrOutput(JNIEnv *env, jc
     return banner_color_output() ? JNI_TRUE : JNI_FALSE;
 }
 
+/* Device evidence for the HDR lines: thermal status + headroom, brightness + mode. */
+JNIEXPORT void JNICALL
+Java_com_winlator_star_wayland_WaylandCompositor_nativeHdrEnvSample(JNIEnv *env, jclass clazz, jint thermal,
+                                                                   jfloat headroom, jint brightness, jint mode) {
+    banner_color_env_sample((int)thermal, (float)headroom != (float)headroom ? -1.0f : (float)headroom,
+                            (int)brightness, (int)mode);
+}
+
+/* kind 1 = screen recording state (1 / 0), kind 2 = screenshot taken. */
+JNIEXPORT void JNICALL
+Java_com_winlator_star_wayland_WaylandCompositor_nativeHdrEnvEvent(JNIEnv *env, jclass clazz, jint kind, jint state) {
+    banner_color_env_event((int)kind, (int)state);
+}
+
 /* 0 none, 1 HDR frames on screen with headroom, 2 HDR frames on screen without headroom for 5 s+. */
 JNIEXPORT jint JNICALL
 Java_com_winlator_star_wayland_WaylandCompositor_nativeHdrState(JNIEnv *env, jclass clazz) {

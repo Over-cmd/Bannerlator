@@ -288,6 +288,18 @@ public final class WaylandCompositor {
      *  while the screen is recorded). The HUD badge and the drawer's HDR row. */
     public static native int nativeHdrState();
 
+    /** Device evidence beside the HDR/SDR headroom, HDR sessions only (any thread): PowerManager thermal
+     *  status (0..6, -1 unknown) and getThermalHeadroom(10) (NaN / negative = not available), and
+     *  Settings.System SCREEN_BRIGHTNESS (0..255, -1 unknown) + SCREEN_BRIGHTNESS_MODE (1 auto, 0 manual,
+     *  -1 unknown). The compositor logs changes of status and brightness and puts the values on every
+     *  no-headroom line, the 10 s HDR line and the verdict. */
+    public static native void nativeHdrEnvSample(int thermalStatus, float thermalHeadroom, int brightness,
+                                                 int brightnessMode);
+
+    /** kind 1 = screen recording (state 1 = this app is being recorded, 0 = not; Android 15+), kind 2 = a
+     *  screenshot was taken (state ignored). Logged in HDR sessions. */
+    public static native void nativeHdrEnvEvent(int kind, int state);
+
     /** Fullscreen mode ({@code Container.FULLSCREEN_OFF/FIT/STRETCH/FILL/INTEGER}) and screen alignment
      *  ({@code Container.ALIGN_CENTER/TOP/BOTTOM}): how the compositor fits the desktop onto the screen,
      *  with the same arithmetic as {@code ViewTransformation} (which maps touch input), so the picture and

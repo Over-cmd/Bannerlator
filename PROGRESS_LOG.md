@@ -1,5 +1,10 @@
 # Star-Compose — Progress Log
 
+## 2026-09-15 — 🌈 **Wayland HDR round 2d: every surface format scanned (the "no HDR10 swapchain" was a 32-entry array), HDR10 swapchain metadata, FP16 frame generation for HDR, thermal/brightness/recording evidence beside the headroom** (`feat/wayland-hdr`, on the lead's `be2f4501`; CI only)
+
+> **Fold evidence (2c, lead):** the AIO HDR card held headroom 3.61; God of War fell to 1.00 within 30 s with fps 47 → 13 and GPU 95 % (heat/load, unprovable from the log). Test E (FG 2× on the card) logged `lists no HDR10 swapchain format (37/0 37/1000104001 … 37/1000104012)` and tone-mapped; the HUD read `HDR tone-mapped` correctly.
+> **Built:** (1) `swap_init` reads all pairs (the Fold lists 11 colour spaces per format; the old `fmts[32]` dropped the 10-bit/FP16 rows) and logs the total, colour spaces per format and every HDR-capable pair; HDR10 pick A2B10G10R10 → A2R10G10B10 → FP16 → 8-bit, SDR fallback if the driver refuses. (2) `VK_EXT_hdr_metadata` in HDR sessions: the game's metadata on the HDR10 swapchain. (3) FG on HDR frames in FP16 where the engine can (lsfg-vk's own HDR format): FP16 scene + encode output + effects + ring; a failed FP16 chain refuses the format and restarts the engine in 8 bits. (4) Evidence: thermal status + listener + headroom, brightness + mode + observer, screenshot (API 34) and screen recording (API 35) callbacks (normal permissions) → the no-headroom lines, the 10 s line and the verdict name the likely cause. Tester note: "Round 2d" section at the top of `docs/HDR-test-r2.md`. Details: `HDR_RECON.md` §11.6.
+
 ## 2026-09-14 23:55 — 🌈 **HDR10 on Wayland, round 2: a real setting, HDR kept through effects / windows / zero-copy off / frame generation, and a live in-game switch** (`feat/wayland-hdr`; testing build for the user's Galaxy Fold, NOT for main; CI only, nothing device-proven yet)
 
 > **Round 1 is proven on the Fold** (God of War + DXVK v3.1: 10-bit zero-copy, `BT2020_PQ`, HDR/SDR ratio 1.00 → 2.51, `HDR on screen: yes`). DXVK 2.4.1 showed no HDR option (`VK_EXT_swapchain_colorspace supported: 0`) — the Wine specialist fixes that in layer v10.

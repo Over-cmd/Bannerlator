@@ -6,6 +6,43 @@ stay as they are. It is not a Bannerlator release. Use it with the **Wayland lay
 published next to it (it tells Windows your screen's real brightness; everything else here also works
 on v9).
 
+## Round 2d — what changed, and what to check first
+
+**What changed**
+
+1. **Frame generation can now keep real HDR.** Round 2c's test E logged `the screen surface lists no
+   HDR10 swapchain format (… 37/0 37/1000104001 …)` and tone-mapped. That was the compositor reading
+   only the first 32 of the screen's format/colour-space pairs — your Fold lists every format once per
+   colour space (11 each), so the 10-bit and FP16 rows, where HDR10 lives, were never looked at. Now
+   every pair is read. If the screen offers HDR10, frame generation goes through an HDR10 swapchain
+   (10-bit preferred, then FP16, then 8-bit) and carries the game's HDR metadata where the device
+   supports `VK_EXT_hdr_metadata`.
+2. **Frame generation works on the HDR picture in FP16** (16-bit float, the format lsfg-vk uses for
+   HDR) where the engine can, instead of 8 bits — less banding in smooth gradients. If the engine
+   can't build its chain in FP16, it restarts in 8 bits by itself (logged).
+3. **Why headroom drops is now in the log.** Next to every no-headroom line, the 10 s HDR line and the
+   final verdict: the phone's **thermal status** (and thermal headroom), the **brightness setting**
+   (value and auto/manual), and — on Android 15+ — **screen recording started/stopped**, plus
+   **screenshot taken** (Android 14+). No permission prompts (install-time permissions only).
+
+**What to check** (AIO HDR test card, the light DX11 PQ scene, then God of War if you like)
+
+- **Test E first:** Frame Generation 2× with the AIO HDR card. Expect the HUD line to stay **`HDR`**
+  (not `HDR tone-mapped`), and in the log:
+  - `screen surface lists N format/colour-space pairs (RGBA8 x11, …, A2B10G10R10 x11, RGBA16F x11);
+    HDR-capable: A2B10G10R10/HDR10, …` — **send this line whatever it says**;
+  - `screen swapchain built as HDR10 (format 64 A2B10G10R10, HDR10_ST2084) …` (or another format);
+  - `compositor device enables VK_EXT_hdr_metadata …` and `HDR10 swapchain: the game's metadata set …`;
+  - `frame generation runs on the HDR picture in FP16 (RGBA16F) …` and
+    `generating: LSFG Native x2 at WxH (…, FP16: the HDR picture)`.
+  If instead you still see `lists no HDR10 swapchain format among its N … pairs`, the list line above
+  it says what the screen really offers.
+- **Then look at the AIO card's banding strips** with frame generation on and off: FP16 through the
+  engine should band no worse than without frame generation. Note what you see (a photo is fine).
+- **God of War fading to no headroom:** play until it happens and send the log. The 5 s line now says
+  e.g. `no HDR headroom for 5 s … likely the device is hot (thermal SEVERE) … [thermal SEVERE
+  (headroom 1.02), brightness 180/255 manual]`, which tells heat, brightness and recording apart.
+
 ## What is new since round 1
 
 1. **A real setting instead of environment variables.** *HDR output (HDR10)* in the container editor,
@@ -75,7 +112,7 @@ asks). Stand somewhere **bright** (sky, sun, fire, lights) and keep that view fo
 | **B** | Drawer → *Graphics* → **HDR output Off**. Wait 20 s. Then **On** again. Repeat once. | Off: highlights drop to SDR, colours stay correct (**not** grey/washed out), HUD `HDR off`, row says *"Off: HDR frames shown tone-mapped to SDR."* On: HDR comes back, HUD `HDR` | `HDR output switched OFF in the drawer …`, `tone-mapped picture for …: HDR output is switched off in the drawer …`, ratio back to `1.00`; then `HDR output switched ON …`, `… is back on its own display layer`, ratio up again |
 | **C** | Drawer → *Graphics* → turn on **Sharpen (CAS)** or **FXAA** for 30 s, then off | Still HDR (bright highlights), the effect visible | `HDR picture for …: screen effects are on - the whole scene is composed into one 10-bit PQ BT.2020 picture …`, `effects  chain now works in 10-bit RGB …`, `HDR picture on its own display layer: …, 10-bit buffers, tagged BT2020_PQ` |
 | **D** | Drawer → *Graphics* → **Zero-copy presentation Off** for 30 s, then **On** | Still HDR | `HDR picture for …: zero-copy presentation is off …`; on again: `… is back on its own display layer` |
-| **E** | Drawer → *Graphics* → **Frame Generation 2×** (any engine that is offered) for 60 s, then off | **Either** still HDR (HUD `HDR`) **or** a correct SDR picture (HUD `HDR tone-mapped`). Both are fine — we need to know which | `HDR with frame generation for …`, then **either** `screen swapchain built as HDR10 (format 64, HDR10_ST2084) …` **or** `the screen surface lists no HDR10 swapchain format (…): frames with frame generation are tone-mapped to SDR instead` |
+| **E** | Drawer → *Graphics* → **Frame Generation 2×** (any engine that is offered) for 60 s, then off | **Either** still HDR (HUD `HDR`) **or** a correct SDR picture (HUD `HDR tone-mapped`). Both are fine — we need to know which | `screen surface lists N format/colour-space pairs (…); HDR-capable: …`, `HDR with frame generation for …`, then **either** `screen swapchain built as HDR10 (format 64 A2B10G10R10, HDR10_ST2084) …` + `frame generation runs on the HDR picture in FP16 …` **or** `the screen surface lists no HDR10 swapchain format among its N … pairs …: tone-mapped to SDR instead` |
 | **F** | *(optional)* A window over the game: drawer → *Task Manager* → **New Task…** → `notepad` → OK; look, then close Notepad | Still HDR around the window; Notepad itself looks normal (white, not grey) | `HDR picture for …: a window is above the game …` — or no new line if your screen can show the window on a second layer (also HDR) |
 | **G** | *(optional)* The game's own **windowed** mode, if it has one | Still HDR inside the window | `HDR picture for …: the HDR game is not one fullscreen window` |
 | **H** | Brightness slider to **maximum** for 30 s on the bright scene, then back to ~70 %. Then a **20 s screen recording**, stopped | Recording: after ~5 s the HUD reads `HDR (no headroom)` and the drawer row says so; after stopping it returns to `HDR`. Maximum brightness: the same if Android also drops headroom there — if nothing changes, that is an answer too | `no HDR headroom for 5 s while HDR frames are on screen (display HDR/SDR ratio 1.00): the screen brightness is probably at maximum …`, then `HDR headroom is back: display HDR/SDR ratio …` |

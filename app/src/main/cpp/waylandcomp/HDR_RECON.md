@@ -853,11 +853,40 @@ two rounded ends (plus the outline and 2 sp) and shifts/widens the pill until no
 fragment after `DISP` in the bottom band. Only the Fusion HUD shows the display server at all; the
 classic, GameHub and GameNative HUDs never received it and are untouched.
 
-### 11.6 What is still NOT done / not proven
+### 11.6 Round 2d (Fold evidence from 2c)
 
-- Nothing of round 2 has run on a device yet (CI only). The Fold test note is `docs/HDR-test-r2.md`.
-- Frame generation runs on 8-bit PQ (the engines' format); a 10-bit engine path would need the
-  engines to take `A2B10G10R10`.
+- **The format scan was a false negative.** FG with the AIO HDR card logged `lists no HDR10 swapchain
+  format (37/0 37/1000104001 … 37/1000104012)`: `swap_init` read the surface's list into
+  `VkSurfaceFormatKHR fmts[32]`, and with `VK_EXT_swapchain_colorspace` the Android WSI lists every
+  format once per colour space (11 on the Fold) - the 10-bit/FP16 rows were past entry 32, and the log's
+  160-char buffer cut the list too. Now: all pairs read (heap), one line with the total, colour spaces
+  per format and every HDR-capable pair (10-bit/FP16 first); HDR10 pick A2B10G10R10 → A2R10G10B10 →
+  FP16 → 8-bit; a driver that refuses the HDR10 swapchain gets the SDR one at once. The only other
+  fixed array near it (queue families, 16) does not hold surface formats or present modes; FIFO is the
+  only present mode used, so no list is read.
+- **VK_EXT_hdr_metadata** enabled in HDR sessions where the device lists it; the HDR10 swapchain gets the
+  game's SMPTE 2086 / CTA-861.3 once per swapchain and image description (none if the game sent none).
+- **FP16 frame generation for HDR.** The bridge and both engines already take a format (the chain,
+  the ring); lsfg-vk itself runs HDR in `R16G16B16A16_SFLOAT`. With HDR frames through an HDR10
+  swapchain the scene (`g_fgscene`), the encode pass (new FP16 output), the effects and the engine run
+  in FP16 where `fge_format_ok` (storage + linear sampling) passes; the PQ signal is fed as-is (the
+  shaders' own HDR flags stay off - PQ is already perceptual). A chain that fails to build in FP16 is
+  sticky inside both engines, so the bridge refuses the format for the session and restarts the engine
+  in 8 bits instead of marking frame generation failed.
+- **Evidence beside the headroom** (app, non-root): PowerManager thermal status (+ listener) and
+  `getThermalHeadroom(10)` every 10 s, `Settings.System` brightness + mode (+ observer), screenshots
+  (`registerScreenCaptureCallback`, API 34) and screen recording (`addScreenRecordingCallback`, API 35,
+  reflection) with the normal `DETECT_SCREEN_CAPTURE` / `DETECT_SCREEN_RECORDING` permissions. Changes
+  are logged; the no-headroom lines, the 10 s line and the verdict carry the values and name the likely
+  cause (recording / hot / brightness at maximum) or say none is visible. The verdict lists only the
+  paths that carried frames, to leave room for it.
+
+### 11.7 What is still NOT done / not proven
+
+- Round 2's composition, switch and HUD line were device-tested in parts on the Fold (setting-driven
+  gate, auto environment, composed picture, headroom lines, HUD); 2d is CI only.
+- The engines' own HDR flags (lsfg `hdr_support` / FSR3 HDR input) stay off: the PQ signal is treated as
+  perceptual SDR-like data. If interpolation artefacts show only in HDR, that is the next thing to try.
 - Colour effects (brightness/contrast/saturation/gamma, the "HDR" bloom) operate on the PQ signal in
   route 1 and look stronger than in SDR; sharpening/AA/CRT/upscalers are perceptually fine.
 - scRGB (FP16) swapchains (Phase C) — unchanged: needs FP16 gralloc and a layer change.
