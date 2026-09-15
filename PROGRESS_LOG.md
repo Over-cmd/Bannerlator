@@ -1,5 +1,33 @@
 # Star-Compose — Progress Log
 
+## 2026-09-15 16:10 — 🔀 **Merged to main: Wayland performance Phase 1 + Wayland driver settings (GPU spoof) + Unreal Engine HDR with bundled dxvk-nvapi** (user: "merge it to main branch")
+
+> **main** fast-forwarded `8fd31faa` → `2541e7fb` (= `feat/wayland-gpu-spoof`, built green in CI run 35017580310; the checkpoint before it is `8fd31faa`). versionName stays 3.1.1, vc85; no DETECT_SCREEN_* permissions. Test build for the Fold: Gamehub-Components `bannerlator-wl-test-r1`.
+>
+> **What's in it:**
+> - **Phase 1:**
+>   - the compositor `perf` line;
+>   - the black base kept under the zero-copy layer, and letterbox-only clears;
+>   - a 5-buffer layer pool with GPU-side release waits and UBWC requests;
+>   - the named `wl-compositor` thread;
+>   - CPU affinity armed on Wayland;
+>   - "Prefer big cores" = every core ≥70% of peak.
+>
+>   Pocket FIT AIO copy path vs pre-release 8: Vulkan +9%, D3D12 +12%, DirectDraw +20%, higher 1% lows on every API.
+> - **Wayland driver settings gear:**
+>   - GPU spoof through DXVK `dxgi.*` + `d3d9.custom*`;
+>   - max device memory;
+>   - present mode (mailbox/FIFO);
+>   - the UBWC flag hint.
+> - **Unreal Engine HDR:** Off / DirectX 12 fix (`DXVK_ENABLE_NVAPI=1`) / DirectX 11 (experimental), which swaps in the bundled dxvk-nvapi v0.9.2 (fetched in CI with pinned hashes) with backup/restore.
+>
+> **Not device-tested yet:** the spoof, the Unreal Engine HDR modes, and Phase 1's zero-copy changes. Phase 1's copy path is proven on the Pocket FIT.
+>
+> **Still open:**
+> - Unreal Engine HDR currently shows on X11 too (proposed: Wayland-only);
+> - layer v12 (UBWC zero-copy) is built but untested;
+> - the native-Vulkan spoof + extension blacklist → layer v13.
+
 ## 2026-09-15 — 🎛️ **Wayland driver settings (GPU name spoof) + "Unreal Engine HDR" (DirectX 12 fix / DirectX 11 with bundled dxvk-nvapi): branch `feat/wayland-gpu-spoof`** (on top of `feat/wayland-perf-p1` `b612a869`; CI only, not device-tested, not merged)
 
 > **Wayland driver settings: the gear next to "Wayland game driver"** (container editor, game editor, XMB). Same `graphicsDriverConfig` keys as X11's driver configuration, so choices follow a game across backends; OK writes only these keys.
