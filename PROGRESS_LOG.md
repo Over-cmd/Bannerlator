@@ -1,5 +1,39 @@
 # Star-Compose — Progress Log
 
+## 2026-09-15 00:05 — 🔖 **CHECKPOINT: HDR round 2d + Wayland layer v11 + HDR test card published for the Fold; untested overnight** (nothing merged to main, no Bannerlator release)
+
+> **Where things are.**
+> - Bannerlator: `feat/wayland-hdr` = `527fa8f0` (round 2d, CI 34925154897), not merged. `feat/fusion-hud-defaults` = `d41a86da` (code `1a9dbe57`), not merged; it rides the HDR branch through merge `be2f4501`.
+> - proton-wine: `fix/wayland-hdr-edid-v11` = `825a546ca3a` (code `48fb81bc902`, CI 34925241464, wcp sha256 `7f58c98d4482e54d6acbb588e65b93efade4a7cb3e152e19227dd2312620309e`, installs as `Proton-11.0-2.1-arm64ec-11`). `feat/winewayland-desktop-11.0-2` is still `459bf7a8a7c` (v9).
+> - AIO-Graphics-Test: `feat/hdr-test-scene` = `52f317c1` (CI 34924769970), no AIO release.
+> - All three are on the test pre-release `bannerlator-hdr-test-r1` in The412Banner/Gamehub-Components, together with SHA256SUMS; older test builds were removed from it. Pre-release 7 stays the public Wayland tester link and 3.1.1 stays Latest.
+>
+> **Proven on the Galaxy Z Fold 8 Ultra so far** (non-rooted, Adreno 840, HDR10/HLG/HDR10+, Android reports 1351 nits):
+> - HDR10 end to end: a game's own 10-bit PQ frames go zero-copy to a BT2020_PQ display layer.
+> - The drawer HDR output switch tone-maps correctly.
+> - Screen effects and windowed programs stay HDR through the composed 10-bit picture.
+> - Every HUD HDR state was seen, including `HDR tone-mapped`.
+> - DXVK 2.4.1 does HDR10.
+> - Zero washed-out frames in every run.
+>
+> Android's HDR/SDR headroom drops for screen captures (screenshots matched to the second) and for heat. A light test card holds 3.61x steady, while God of War loses it within 30 s as the phone throttles.
+>
+> **What round 2d, v11 and the test card change (all untested):**
+> 1. **Frame generation can keep HDR.** The compositor read only the first 32 surface format/colour-space pairs, and the phone lists 11 colour spaces per format, so the HDR pairs were missed. It now reads all pairs, picks A2B10G10R10/HDR10 (then FP16, then 8-bit), passes VK_EXT_hdr_metadata when available, and runs frame generation on HDR frames in FP16. If a chain fails to build, it falls back to 8-bit.
+> 2. **Headroom evidence in the log.** Thermal status and thermal headroom, brightness and its mode, and screenshot/recording callbacks are logged beside the headroom lines. The no-headroom lines name the likely cause. The two DETECT_SCREEN_* permissions are for test builds only and must be removed before HDR is merged to main.
+> 3. **Layer v11: games now see the real screen.** The Wayland session runs as a Windows virtual desktop. win32u's `add_virtual_source()` built the only active monitor from an empty `gdi_monitor`, so it got `Default_Monitor` + `BAD_EDID`. DXVK read that monitor and fell back to 1499/799/0.01 nits. The virtual monitor now inherits the primary monitor's EDID. It carries into v8 together with v10's `612401793ce`.
+> 4. **HDR test card (DX11 PQ scene):** a true fullscreen mode (a borderless popup covering the whole desktop, so the compositor can use zero-copy), a report rewritten every few seconds, and a clean exit.
+>
+> **Morning test on the Fold:**
+> - The card should say "DXGI reports your screen (~1345 nits)" and `fullscreen: yes (1280 x 960 at 0,0)`.
+> - With frame generation on, the HUD should read `HDR` and the 10-bit banding strip should stay smooth.
+> - wine_debug should show the `win32u: display update … on a virtual desktop … Device Parameters\EDID 256 bytes` line.
+> - The Wayland log should show `screen swapchain built as HDR10 …` and the FP16 frame-generation lines.
+>
+> **Afterwards:** fast-forward the Wayland layer line to v11. Queued for later: Auto HDR for SDR games in the compositor.
+>
+> **Rollback:** app = the round 2c build (`be2f4501`, run 34915289832) or pre-release 7; layer = `-10` / `-9` via the card's revert; test card = run 34921945484.
+
 ## 2026-09-14 17:25 — 🌈 **HDR round 1 in flight** (branch `feat/wayland-hdr`; nothing merged, no Bannerlator release)
 
 > **Why now.** `app/src/main/cpp/waylandcomp/HDR_RECON.md` parked HDR until an HDR panel was in the loop and multi-layer presentation had landed. Both are now true: the user's Galaxy Fold (Adreno 840, API 37) reports `HDR10, HLG, HDR10+ | 1351 nits | HDR/SDR headroom available`.
