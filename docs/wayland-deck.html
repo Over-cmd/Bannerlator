@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
-<meta name="description" content="Bannerlator X11 versus Wayland: measured frame rates, what shipped in the 3.1.2 Wayland pre-releases, root causes fixed, what is left, and what Wayland can do that X11 cannot.">
+<meta name="description" content="Bannerlator X11 versus Wayland: measured frame rates, what shipped in the 3.1.2 Wayland pre-releases, real HDR in testing, root causes fixed, what is left, and what Wayland can do that X11 cannot.">
 <title>Bannerlator Wayland Deck</title>
 <style>html{color-scheme:light dark}body{margin:0}img{max-width:100%}</style>
 </head>
@@ -83,7 +83,10 @@ th{font-family:var(--mono);font-size:12px;letter-spacing:.08em;text-transform:up
 td.num{font-family:var(--mono);font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}
 th.num{text-align:right}
 .grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+.grid2{display:grid;grid-template-columns:repeat(2,1fr);gap:14px}
 .tile{padding:16px 18px;background:var(--panel);border:1px solid var(--rule)}
+.tile .n{display:block;font-family:var(--mono);font-size:12px;color:var(--way);margin-bottom:6px}
+.tile p + p{margin-top:10px}
 .tile h3{font-size:17px;margin-bottom:8px}
 .tile p,.tile li{font-size:14.5px}
 .ranked{counter-reset:n;display:grid;gap:10px;padding:0;list-style:none}
@@ -109,7 +112,7 @@ th.num{text-align:right}
 @media (max-width:760px){
   .deck{grid-template-columns:1fr}
   .rail{display:none}
-  .two,.grid3{grid-template-columns:1fr}
+  .two,.grid3,.grid2{grid-template-columns:1fr}
   .pipe-row{grid-template-columns:1fr}
   .slide{min-height:0;padding-block:40px 28px}
   .counter{display:none}
@@ -118,16 +121,16 @@ th.num{text-align:right}
 
 <div class="deck">
 <nav class="rail" aria-label="Slides">
-  <a href="#s1" data-i="1">1</a><a href="#s2" data-i="2">2</a><a href="#s3" data-i="3">3</a><a href="#s4" data-i="4">4</a><a href="#s5" data-i="5">5</a><a href="#s6" data-i="6">6</a><a href="#s7" data-i="7">7</a><a href="#s8" data-i="8">8</a><a href="#s9" data-i="9">9</a><a href="#s10" data-i="10">10</a><a href="#s11" data-i="11">11</a>
+  <a href="#s1" data-i="1">1</a><a href="#s2" data-i="2">2</a><a href="#s3" data-i="3">3</a><a href="#s4" data-i="4">4</a><a href="#s5" data-i="5">5</a><a href="#s6" data-i="6">6</a><a href="#s7" data-i="7">7</a><a href="#s8" data-i="8">8</a><a href="#s9" data-i="9">9</a><a href="#s10" data-i="10">10</a><a href="#s11" data-i="11">11</a><a href="#s12" data-i="12">12</a>
 </nav>
 <main class="slides">
 
 <section class="slide" id="s1">
-  <div class="eyebrow">Bannerlator · 3.1.2 Wayland pre-release 7 · 14 September 2026</div>
+  <div class="eyebrow">Bannerlator · 3.1.2 Wayland pre-release 7 + HDR test builds · 14 September 2026</div>
   <h1>Two display backends, one handheld</h1>
-  <p class="lede">X11 is the mature path every Bannerlator game has used until now. Wayland is a second backend that runs Windows games through a compositor Bannerlator carries itself. This deck compares the two as they stand after pre-release 7, lists what shipped, shows the measured zero-copy result, and is honest about what is left.</p>
+  <p class="lede">X11 is the mature path every Bannerlator game has used until now. Wayland is a second backend that runs Windows games through a compositor Bannerlator carries itself. This deck compares the two as they stand after pre-release 7, lists what shipped, shows the measured zero-copy result and the first real HDR, and is honest about what is left.</p>
   <div class="legend"><span><i class="x"></i>X11: Java X server + libwinlator</span><span><i class="w"></i>Wayland: winewayland + embedded compositor</span></div>
-  <p class="note">Every number and claim here comes from one device: an AYANEO Pocket FIT with an Adreno 750. Nothing else has run it yet.</p>
+  <p class="note">Most numbers and claims here come from one device, an AYANEO Pocket FIT with an Adreno 750. The OpenGL fix for phones with no display device and real HDR were also proven on an Adreno 840 phone.</p>
 </section>
 
 <section class="slide" id="s2">
@@ -212,14 +215,14 @@ th.num{text-align:right}
     <tbody>
       <tr><td>Vulkan, OpenGL, D3D12 to DirectDraw, switching in one session</td><td>Yes</td><td>Yes, proven with all eight in one launch</td></tr>
       <tr><td>Mouse-look and pointer capture</td><td>Yes, cursor-warp based</td><td>Yes, as a protocol: pointer constraints and relative motion</td></tr>
-      <tr><td>Keyboard</td><td>Yes</td><td>Yes since this release. Two root causes fixed, see slide 8</td></tr>
+      <tr><td>Keyboard</td><td>Yes</td><td>Yes since this release. Two root causes fixed, see slide 9</td></tr>
       <tr><td>Clipboard with Android</td><td>Yes</td><td>Yes, text both ways</td></tr>
       <tr><td>Soft keyboard on a text field</td><td>Manual toggle</td><td>Opens by itself when a field takes focus</td></tr>
       <tr><td>Fullscreen modes and screen alignment</td><td>Yes</td><td>Yes, live from the drawer, touch mapped to match</td></tr>
       <tr><td>FPS cap, HOME and back, swapchain rebuilds</td><td>Yes</td><td>Yes, fixed this release</td></tr>
       <tr><td>Driver for the game</td><td>Any Android Turnip you install</td><td>Eight Turnips built into the Proton, or an imported Linux driver</td></tr>
       <tr><td>Frame generation (LSFG Native, Win-FG Native)</td><td>Yes</td><td>Yes since pre-release 3, armed from the drawer. Half-Life 2 at 30 fps shown at 60, 90 and 120 fps</td></tr>
-      <tr><td>Scaling modes and screen effects (SGSR, FSR, NIS, CAS, HDR, Looks, CRT and the rest)</td><td>Yes</td><td>Yes since pre-release 3, live from the drawer, a 13-pass Vulkan chain in the compositor</td></tr>
+      <tr><td>Scaling modes and screen effects (SGSR, FSR, NIS, CAS, the HDR look, Looks, CRT and the rest)</td><td>Yes</td><td>Yes since pre-release 3, live from the drawer, a 13-pass Vulkan chain in the compositor</td></tr>
       <tr><td>Zero-copy toggle and display backend row in the drawer</td><td>Native Rendering</td><td>Yes, and since pre-release 4 it switches live mid-game</td></tr>
       <tr><td>Screen effects without giving up the hardware-composed path</td><td>No, X11 always composites itself</td><td>Yes since pre-release 5, the chain draws into the game's display layer</td></tr>
       <tr><td>Match the panel rate to the game (and to frame generation)</td><td>Yes</td><td>Yes, fixed on Wayland in pre-release 5, including the game's own layer</td></tr>
@@ -228,6 +231,7 @@ th.num{text-align:right}
       <tr><td>Drag-and-drop, image clipboard</td><td>Partly</td><td>No, text only</td></tr>
       <tr><td>Window icons and decorations</td><td>Yes</td><td>Missing, cosmetic</td></tr>
       <tr><td>Game on its own hardware layer, no copy</td><td>Impossible, the X server sits in between</td><td>Working behind a flag, measured above</td></tr>
+      <tr><td>Real HDR output (HDR10) on an HDR screen</td><td>No, X11 has no HDR at all</td><td>In testing, separate from pre-release 7. Proven on an Adreno 840 phone, see slide 6</td></tr>
     </tbody>
   </table></div>
 </section>
@@ -251,7 +255,35 @@ th.num{text-align:right}
 </section>
 
 <section class="slide" id="s6">
-  <div class="eyebrow">Slide 6 · The drivers inside the Proton layer</div>
+  <div class="eyebrow">Slide 6 · Real HDR · in testing, separate from pre-release 7</div>
+  <h2>Real HDR on Wayland</h2>
+  <p class="lede">On an HDR screen, highlights can go brighter than normal white and colours reach further. X11 has no way to do this at all. On Wayland the game's 10-bit HDR frames go straight to the display hardware, tagged so the phone shows them as HDR.</p>
+  <div class="two">
+    <div class="col">
+      <span class="tag way">Proven on a device</span>
+      <ul>
+        <li>God of War on an Adreno 840 Galaxy Fold: 10-bit BT.2020 PQ frames on the game's own display layer, with no copy.</li>
+        <li>The screen switched into HDR while the game ran: its headroom went from 1.0 to between 2.5 and 3 times normal white. Frame rate did not change.</li>
+        <li>The round 2 build turned HDR on from the new setting alone, with no environment variables, and the HUD showed the HDR state.</li>
+      </ul>
+    </div>
+    <div class="col">
+      <span class="tag x11">Built, not all tested yet</span>
+      <ul>
+        <li>An "HDR output (HDR10)" setting for the container, the shortcut and the game. It is greyed, with the reason, on a screen without HDR10, and it turns on DXVK's HDR for you.</li>
+        <li>A live "HDR output" switch in the drawer. Off shows the same frames tone-mapped to the normal range, without a relaunch.</li>
+        <li>A HUD line that reads HDR, HDR (no headroom) or HDR off.</li>
+        <li>Screen effects, frame generation, a window on top, windowed games and zero-copy off all keep HDR, by composing one 10-bit picture.</li>
+        <li>Layer v10 tells the game the screen's real peak brightness: the Fold's 1,351 nits reach it as about 1,345.</li>
+      </ul>
+    </div>
+  </div>
+  <div class="callout way"><p><b>HDR on a TV from the handheld.</b> The Pocket FIT's own panel has no HDR, but plugged into a TCL TV over USB-C to HDMI it reports HDR10 and HLG. A handheld can drive an HDR TV; it has not been tried with a game yet.</p></div>
+  <p class="note">Tips from the first runs. Don't screen-record while testing: Android turns HDR headroom off while it records, and the HUD then says no headroom. Maximum brightness leaves no headroom either. God of War offered its HDR option with DXVK v3.1 but not with the DXVK 2.4.1 gplasync build, and the cause is not known yet. The drawer's "HDR" screen effect is a different thing: a bloom filter on a normal picture, not HDR output.</p>
+</section>
+
+<section class="slide" id="s7">
+  <div class="eyebrow">Slide 7 · The drivers inside the Proton layer</div>
   <h2>Eight Turnips, six sources</h2>
   <div class="tablewrap"><table>
     <thead><tr><th>Picker choice</th><th>Built from</th><th>Mesa</th><th>Adreno target</th></tr></thead>
@@ -269,8 +301,8 @@ th.num{text-align:right}
   <p class="note">All eight are rebuilt from those sources as Wayland, Linux drivers with the KGSL backend and Wayland WSI. The Android zips those projects publish cannot run inside Proton. Vauzi recommends TU_DEBUG=sysmem on 710, 720 and 722 if you see artifacts. All eight load and render on the 750; none has been run on its own 7xx or 8xx silicon yet.</p>
 </section>
 
-<section class="slide" id="s7">
-  <div class="eyebrow">Slide 7 · Setup and files</div>
+<section class="slide" id="s8">
+  <div class="eyebrow">Slide 8 · Setup and files</div>
   <h2>How a tester gets going</h2>
   <div class="two">
     <div class="col">
@@ -296,8 +328,8 @@ th.num{text-align:right}
   </div>
 </section>
 
-<section class="slide" id="s8">
-  <div class="eyebrow">Slide 8 · What broke and why, in the order it was found today</div>
+<section class="slide" id="s9">
+  <div class="eyebrow">Slide 9 · What broke and why, in the order it was found</div>
   <h2>Root causes</h2>
   <ul class="timeline">
     <li><b>API switch</b><span>Switching graphics APIs killed the session because the bundled Termux Turnip could not survive a device destroy and re-create. Fixed by building our own Wayland Turnip. The same driver swap fixed DiRT Rally 2.0 stalling on its splash.</span></li>
@@ -316,8 +348,8 @@ th.num{text-align:right}
   </ul>
 </section>
 
-<section class="slide" id="s9">
-  <div class="eyebrow">Slide 9 · Fixes and performance, ranked</div>
+<section class="slide" id="s10">
+  <div class="eyebrow">Slide 10 · Fixes and performance, ranked</div>
   <h2>What is left</h2>
   <ol class="ranked">
     <li><span><b>Turn zero-copy on by default</b> once more GPUs have run it, and measure it where it can show: a GPU-bound game and a large panel. Both performance paths are in and proven.</span></li>
@@ -325,26 +357,41 @@ th.num{text-align:right}
         <li><span><b>Guest-side leak on every API switch</b>, a few dozen file descriptors and threads. X11 leaks more, so not Wayland-specific.</span></li>
     <li><span><b>Screen effects on GPUs whose buffers the compositor cannot import</b>, now within reach thanks to the display-layer machinery.</span></li>
     <li><span><b>Fix the OpenGL threaded-driver crash itself</b> so safe mode can default to off. Needs a driver rebuild that can report a fault on a thread Wine does not manage.</span></li>
-    <li><span><b>Real HDR.</b> The game side already works today: the bundled driver carries colour management and the HDR Vulkan extensions. What is missing is colour management in our compositor and a 10-bit path. Blocked on hardware that can actually show it.</span></li>
+    <li><span><b>Finish real HDR</b> (slide 6). Run round 2's remaining checks on the Fold and on a TV: the drawer switch, screen effects, frame generation, windowed games and a window on top. Prove the v10 layer on a device, find out why DXVK 2.4.1 hides God of War's HDR option, then bring HDR into a pre-release.</span></li>
+    <li><span><b>Mali and other non-Adreno GPUs.</b> Wayland needs a game driver built for it, and today that means Turnip, so Mali phones stay on X11. The likeliest route is the Vulkan wrapper Mali users already run on X11, rebuilt for Wayland.</span></li>
   </ol>
 </section>
 
-<section class="slide" id="s10">
-  <div class="eyebrow">Slide 10 · What Wayland can do that X11 never could</div>
-  <h2>Future possibilities</h2>
+<section class="slide" id="s11">
+  <div class="eyebrow">Slide 11 · In plain words</div>
+  <h2>What Wayland can do that X11 can't</h2>
+  <p class="lede">Or can't do well. A few of these have a weaker X11 version; none of them work as well there.</p>
+  <h3>Working on Wayland today</h3>
+  <div class="grid2">
+    <div class="tile"><span class="n">01</span><h3>Real HDR</h3><p>On an HDR screen: brighter highlights, deeper darks and richer colour. X11 has no way to do HDR at all. Proven on an Adreno 840 phone with God of War.</p><p><span class="tag way">In testing · slide 6</span></p></div>
+    <div class="tile"><span class="n">02</span><h3>Less copying of every frame</h3><p>The game's picture goes straight to the phone's display hardware instead of being redrawn by the compositor first. Less GPU work and a little less battery drain. This is the zero-copy switch measured on slide 3.</p></div>
+    <div class="tile"><span class="n">03</span><h3>Exact "your frame is on screen" reports</h3><p>Wayland tells the game precisely when each frame reached the screen. This fixed an early frame-rate cap, and it is the base for smoother frame pacing later.</p></div>
+    <div class="tile"><span class="n">04</span><h3>Fewer middlemen</h3><p>No X server sits between the game and the screen, so every frame and every tap takes fewer steps.</p></div>
+  </div>
+  <h3>Possible with Wayland, not built yet</h3>
   <div class="grid3">
-    <div class="tile"><h3>Zero-copy presentation</h3><p>Each window buffer becomes its own Android layer composed by the display hardware. Now working behind a flag: same frames, four points less GPU busy and three percent less power on a CPU-bound game.</p></div>
-    <div class="tile"><h3>Even frame pacing</h3><p>The compositor already serves presentation feedback, so a game can learn when a frame hit the glass. The parked pacing work resumes on Wayland first.</p></div>
-    <div class="tile"><h3>Tearing control</h3><p>Lowest-latency fullscreen on request, as a protocol rather than a hack.</p></div>
-    <div class="tile"><h3>Native multi-touch</h3><p>Real touch events instead of touch-as-mouse.</p></div>
-    <div class="tile"><h3>HDR and colour management</h3><p>No X11 equivalent exists at all. It plugs into the layer path once that exists.</p></div>
-    <div class="tile"><h3>Fewer hops</h3><p>No X server in the loop means every input event and every frame takes one process fewer. Overlays can live as their own layers instead of being drawn into the game frame.</p></div>
+    <div class="tile"><span class="n">05</span><h3>Even frame pacing</h3><p>Frames spaced out evenly for smoother-looking motion, using those "it's on the screen" reports.</p></div>
+    <div class="tile"><span class="n">06</span><h3>Tearing control</h3><p>A game can ask for the lowest possible input lag and accept a little screen tearing in return.</p></div>
+    <div class="tile"><span class="n">07</span><h3>Real multi-touch</h3><p>Your fingers reach the game as real touches, not as a pretend mouse.</p></div>
+    <div class="tile"><span class="n">08</span><h3>Separate scaling per window</h3><p>The game can run at one resolution while its menus or other windows use another.</p></div>
+    <div class="tile"><span class="n">09</span><h3>Explicit sync</h3><p>A cleaner hand-off between the game and the display, so fewer hitches. Needs graphics-driver support first.</p></div>
+    <div class="tile"><span class="n">10</span><h3>Overlays as their own layers</h3><p>The HUD or a picture-in-picture window shown on top by the phone itself, instead of being painted into the game.</p></div>
+  </div>
+  <h3>In general</h3>
+  <div class="grid2">
+    <div class="tile"><span class="n">11</span><h3>Windows stay private</h3><p>Under X11 any program can peek at other windows and keystrokes. Under Wayland it can't. It matters less inside Bannerlator, but it is a real difference.</p></div>
+    <div class="tile"><span class="n">12</span><h3>Where Wine's new work is going</h3><p>Wine's developers are building new display features on Wayland. The X11 driver mostly gets maintenance now.</p></div>
   </div>
   <div class="callout way"><p><b>Is Wayland redundant next to the X11 and EGL work?</b> For raw frame rate, X11 is fine and stays fine. Wayland earns its place on the things above, which an X server in the middle structurally prevents. The two are not competing for the same job: X11 is the mature path, Wayland is the one that can still grow.</p></div>
 </section>
 
-<section class="slide" id="s11">
-  <div class="eyebrow">Slide 11 · Realistic expectations</div>
+<section class="slide" id="s12">
+  <div class="eyebrow">Slide 12 · Realistic expectations</div>
   <h2>What to tell people</h2>
   <div class="two">
     <div class="col">
@@ -353,24 +400,25 @@ th.num{text-align:right}
         <li>Run DXVK, VKD3D and Zink games on Wayland with the same drivers and settings you use on X11.</li>
         <li>Switch graphics APIs freely, mouse-look, type, copy and paste, use fullscreen modes and the FPS cap, every scaling mode and screen effect, LSFG Native and Win-FG Native frame generation, background and resume.</li>
         <li>Pick a bundled driver per game, or import a Wayland-built driver.</li>
+        <li>Show real HDR on an HDR10 screen, in the separate HDR test builds. Proven on one Adreno 840 phone so far.</li>
       </ul>
     </div>
     <div class="col">
       <span class="tag x11">It cannot yet</span>
       <ul>
         <li>Beat X11 on frame rate yet. Zero-copy saves GPU work, not frames, on a CPU-bound game; expect a few percent either way in real games and about 20 percent lower on synthetic Vulkan and D3D12 numbers with the default path.</li>
-        <li>Promise anything on a GPU other than the Adreno 750 it was built on.</li>
+        <li>Promise much beyond the Adreno 750 it was built on. One Adreno 840 phone has also run OpenGL and HDR. Mali and other non-Adreno GPUs have no Wayland game driver yet.</li>
         <li>Drag-and-drop, the image clipboard and window decorations.</li>
       </ul>
     </div>
   </div>
-  <div class="callout"><p>The honest pitch is latency, battery and headroom, not a headline frame rate. The zero-copy path is in; on a GPU-bound game or a large panel that is where the gap should close, with lower input latency and a modest battery gain from one less copy and one less process.</p></div>
-  <p class="note">Pre-release 2, not offered by the in-app updater. 3.1.1 stays the stable release.</p>
+  <div class="callout"><p>The honest pitch is latency, battery, headroom and HDR, not a headline frame rate. HDR is the one X11 cannot do at all. The zero-copy path is in; on a GPU-bound game or a large panel that is where the gap should close, with lower input latency and a modest battery gain from one less copy and one less process.</p></div>
+  <p class="note">Pre-release 7, not offered by the in-app updater. The HDR test builds are separate from it. 3.1.1 stays the stable release.</p>
 </section>
 
 </main>
 </div>
-<div class="counter" id="counter">1 / 11</div>
+<div class="counter" id="counter">1 / 12</div>
 <div class="toolbar"><button id="prev" aria-label="Previous slide">↑</button><button id="next" aria-label="Next slide">↓</button></div>
 
 <script>
