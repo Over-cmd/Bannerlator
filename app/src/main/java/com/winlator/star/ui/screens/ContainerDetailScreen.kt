@@ -1054,22 +1054,42 @@ private fun TopLevelFields(
             // Wayland game driver: what the GAME renders on (winewayland sets VK_ICD_FILENAMES from
             // it). Auto / the three bundled Turnip variants / each imported Linux ICD. A stored
             // imported:<id> whose import is gone is still listed (labelled missing) so the editor
-            // shows what is saved; launch falls back to Auto for it.
+            // shows what is saved; launch falls back to Auto for it. The gear opens the settings that
+            // reach a Wayland game (GPU name spoof, memory cap, present mode, UBWC hint), stored in
+            // the same graphicsDriverConfig keys as X11's driver configuration.
             run {
                 val stored = viewModel.waylandGameDriver
                 val values = if (stored in waylandGameDriverValues) waylandGameDriverValues
                              else waylandGameDriverValues + stored
                 val labels = values.map { com.winlator.star.core.WaylandGameDriver.optionLabel(context, it, waylandAutoPick) }
-                LabeledDropdown(
-                    label = "Wayland game driver",
-                    options = labels,
-                    selectedOption = labels[values.indexOf(stored)],
-                    onSelect = { viewModel.waylandGameDriver = values[labels.indexOf(it)] }
-                )
+                var showWaylandDriverSettings by remember { mutableStateOf(false) }
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    LabeledDropdown(
+                        label = "Wayland game driver",
+                        options = labels,
+                        selectedOption = labels[values.indexOf(stored)],
+                        onSelect = { viewModel.waylandGameDriver = values[labels.indexOf(it)] },
+                        modifier = Modifier.weight(1f)
+                    )
+                    IconButton(onClick = { showWaylandDriverSettings = true }) {
+                        Icon(Icons.Default.Settings, contentDescription = "Wayland driver settings")
+                    }
+                }
                 Text(
                     com.winlator.star.core.WaylandGameDriver.HELP_TEXT,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                val spoof = com.winlator.star.core.GpuSpoof.gpuNameOf(viewModel.graphicsDriverConfig)
+                if (com.winlator.star.core.GpuSpoof.isSpoofing(spoof)) Text(
+                    "GPU name spoof: $spoof (the gear)",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                if (showWaylandDriverSettings) WaylandDriverSettingsDialog(
+                    initialConfig = viewModel.graphicsDriverConfig,
+                    onConfirm = { viewModel.graphicsDriverConfig = it; showWaylandDriverSettings = false },
+                    onDismiss = { showWaylandDriverSettings = false }
                 )
             }
             Spacer(Modifier.height(8.dp))
@@ -1104,6 +1124,29 @@ private fun TopLevelFields(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
+        }
+        // Unreal Engine HDR (both backends; under HDR output on Wayland): Off / DirectX 12 fix /
+        // DirectX 11 (experimental, NVAPI). See core.UnrealHdr; the DirectX 11 mode swaps the bundled
+        // dxvk-nvapi into the prefix at launch (core.DxvkNvapi) and Off puts the prefix's files back.
+        run {
+            Spacer(Modifier.height(8.dp))
+            val modes = com.winlator.star.core.UnrealHdr.MODES
+            val labels = modes.map { com.winlator.star.core.UnrealHdr.label(it) }
+            LabeledDropdown(
+                label = com.winlator.star.core.UnrealHdr.TITLE,
+                options = labels,
+                selectedOption = com.winlator.star.core.UnrealHdr.label(viewModel.unrealHdr),
+                onSelect = { viewModel.unrealHdr = modes[labels.indexOf(it)] }
+            )
+            if (viewModel.unrealHdr == com.winlator.star.core.UnrealHdr.DX11) UnrealHdrDx11Notes(
+                gpuName = com.winlator.star.core.GpuSpoof.gpuNameOf(viewModel.graphicsDriverConfig),
+                wayland = compositorDriverOnly
+            )
+            Text(
+                com.winlator.star.core.UnrealHdr.help(compositorDriverOnly),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
         if (showWrapperManager) WrapperManagerDialog(onDismiss = {
             showWrapperManager = false
@@ -2889,11 +2932,217 @@ private fun CompactDropdown(
  * absent); every other key/value is kept byte-for-byte. Used by the Wayland "Compositor driver"
  * pickers, which must not disturb the X11 game-driver options stored alongside.
  */
-internal fun withGraphicsDriverVersion(config: String, version: String): String {
+internal fun withGraphicsDriverVersion(config: String, version: String): String =
+    withGraphicsDriverKeys(config, mapOf("version" to version))
+
+/**
+ * [config] (`k=v;k=v`) with each key of [values] replaced in place, or appended when absent; every
+ * other key/value is kept byte-for-byte. The Wayland pickers and driver settings write through this,
+ * so the X11 game-driver options stored in the same string are never disturbed.
+ */
+internal fun withGraphicsDriverKeys(config: String, values: Map<String, String>): String {
     val parts = config.split(";").filter { it.isNotEmpty() }.toMutableList()
-    val idx = parts.indexOfFirst { it.substringBefore("=") == "version" }
-    if (idx >= 0) parts[idx] = "version=$version" else parts.add("version=$version")
+    for ((key, value) in values) {
+        val idx = parts.indexOfFirst { it.substringBefore("=") == key }
+        if (idx >= 0) parts[idx] = "$key=$value" else parts.add("$key=$value")
+    }
     return parts.joinToString(";")
+}
+
+/**
+ * Present modes a Wayland game can use: Mesa's Wayland WSI offers mailbox and fifo; immediate (and
+ * relaxed) need the tearing-control protocol, which the compositor doesn't offer, and Mesa ignores a
+ * MESA_VK_WSI_PRESENT_MODE the surface can't do. The same presentMode key as X11.
+ */
+internal val WAYLAND_PRESENT_MODES = listOf("mailbox", "fifo")
+
+internal const val WAYLAND_DRIVER_SETTINGS_HELP =
+    "For games that refuse to start or misbehave on an Adreno GPU. GPU name makes DirectX games (DXVK, " +
+        "and D3D12 through it) see another graphics card; native Vulkan and OpenGL games still see the real " +
+        "one for now. Off by default (Device). Warning: an NVIDIA name can make a game try NVAPI, DLSS or " +
+        "Reflex, and an AMD name can send it down AMD AGS paths; go back to Device if a game misbehaves. " +
+        "These are the X11 driver configuration's settings, so they follow the game across backends."
+
+/**
+ * The Wayland game driver's settings (the gear next to "Wayland game driver"): the graphicsDriverConfig
+ * keys that reach a Wayland game — gpuName (the spoof, handed to DXVK through DXVK_CONFIG),
+ * maxDeviceMemory (dxgi.maxDeviceMemory), presentMode (MESA_VK_WSI_PRESENT_MODE) and fdDevFeatures
+ * (FD_DEV_FEATURES for the game's Turnip). Same keys as GraphicsDriverConfigDialog, so a choice
+ * survives switching backends; OK writes only these back (withGraphicsDriverKeys). The X11 wrapper
+ * plumbing (extensions, BCn, resource type, sync/present-wait) and Vulkan version are left out: nothing
+ * on the Wayland path reads them, and the Wayland Turnips ignore MESA_VK_VERSION_OVERRIDE.
+ */
+@Composable
+internal fun WaylandDriverSettingsDialog(
+    initialConfig: String,
+    onConfirm: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val context = LocalContext.current
+    val cfg = remember(initialConfig) {
+        initialConfig.split(";").associate { elem ->
+            val parts = elem.split("=")
+            parts[0] to if (parts.size > 1) parts[1] else ""
+        }
+    }
+    var gpuName by remember(initialConfig) { mutableStateOf(com.winlator.star.core.GpuSpoof.gpuNameOf(initialConfig)) }
+    val storedPresent = cfg["presentMode"]?.ifEmpty { null } ?: "mailbox"
+    var presentMode by remember(initialConfig) { mutableStateOf(storedPresent) }
+    var fdDevFeatures by remember(initialConfig) { mutableStateOf(cfg["fdDevFeatures"] == "1") }
+    val deviceMemoryEntries = remember { context.resources.getStringArray(R.array.device_memory_entries).toList() }
+    var memoryEntry by remember(initialConfig) {
+        val stored = cfg["maxDeviceMemory"] ?: "0"
+        mutableStateOf(deviceMemoryEntries.firstOrNull { StringUtils.parseNumber(it) == stored } ?: deviceMemoryEntries.first())
+    }
+    var gpuNames by remember { mutableStateOf(listOf(com.winlator.star.core.GpuSpoof.DEVICE)) }
+    LaunchedEffect(Unit) {
+        gpuNames = withContext(Dispatchers.IO) { com.winlator.star.core.GpuSpoof.names(context) }
+    }
+    var vendorWarning by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(gpuName) {
+        vendorWarning = withContext(Dispatchers.IO) { com.winlator.star.core.GpuSpoof.vendorWarning(context, gpuName) }
+    }
+    // A stored X11-only mode (immediate / relaxed) stays listed, labelled, so OK keeps it for X11.
+    val presentValues = WAYLAND_PRESENT_MODES + (if (storedPresent in WAYLAND_PRESENT_MODES) emptyList() else listOf(storedPresent))
+    val presentLabels = presentValues.map { if (it in WAYLAND_PRESENT_MODES) it else "$it (X11 only, not used here)" }
+
+    var helpRes by remember { mutableStateOf<Int?>(null) }
+    helpRes?.let { HelpDialog(it) { helpRes = null } }
+
+    OutlinedAlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Wayland driver settings") },
+        text = {
+            val maxContentHeight = (LocalConfiguration.current.screenHeightDp * 0.7f).dp
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = maxContentHeight)
+                    .verticalScroll(rememberScrollState())
+            ) {
+                Text(
+                    WAYLAND_DRIVER_SETTINGS_HELP,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    LabeledDropdown(
+                        stringResource(R.string.gpu_name) + " (spoof)",
+                        if (gpuName in gpuNames) gpuNames else gpuNames + gpuName,
+                        gpuName, { gpuName = it }, modifier = Modifier.weight(1f)
+                    )
+                    IconButton(onClick = { helpRes = R.string.help_gpu_name }) {
+                        Icon(Icons.Default.Help, contentDescription = "What is this?", modifier = Modifier.size(18.dp))
+                    }
+                }
+                vendorWarning?.let {
+                    Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                }
+                Spacer(Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    LabeledDropdown(
+                        stringResource(R.string.graphics_driver_max_device_memory), deviceMemoryEntries,
+                        memoryEntry, { memoryEntry = it }, modifier = Modifier.weight(1f)
+                    )
+                    IconButton(onClick = { helpRes = R.string.help_max_device_memory }) {
+                        Icon(Icons.Default.Help, contentDescription = "What is this?", modifier = Modifier.size(18.dp))
+                    }
+                }
+                Text(
+                    "What DirectX games are told the GPU's memory is (DXVK's dxgi.maxDeviceMemory).",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    LabeledDropdown(
+                        stringResource(R.string.graphics_driver_present_modes), presentLabels,
+                        presentLabels[presentValues.indexOf(presentMode).coerceAtLeast(0)],
+                        { presentMode = presentValues[presentLabels.indexOf(it)] }, modifier = Modifier.weight(1f)
+                    )
+                    IconButton(onClick = { helpRes = R.string.help_wrapper_present_modes }) {
+                        Icon(Icons.Default.Help, contentDescription = "What is this?", modifier = Modifier.size(18.dp))
+                    }
+                }
+                Text(
+                    "Wayland offers mailbox and fifo only: immediate needs tearing, which the compositor doesn't allow.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = fdDevFeatures, onCheckedChange = { fdDevFeatures = it })
+                    Text("OneUI / HyperOS Fix (UBWC flag hint)", modifier = Modifier.weight(1f))
+                    IconButton(onClick = { helpRes = R.string.help_oneui_hyperos_fix }) {
+                        Icon(Icons.Default.Help, contentDescription = "What is this?", modifier = Modifier.size(18.dp))
+                    }
+                }
+                Text(
+                    "Gives the game's Turnip FD_DEV_FEATURES=enable_tp_ubwc_flag_hint=1, for Samsung and Xiaomi " +
+                        "phones whose games show corrupt textures; leave off otherwise.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                onConfirm(
+                    withGraphicsDriverKeys(
+                        initialConfig,
+                        linkedMapOf(
+                            "gpuName" to gpuName,
+                            "maxDeviceMemory" to StringUtils.parseNumber(memoryEntry),
+                            "presentMode" to presentMode,
+                            "fdDevFeatures" to if (fdDevFeatures) "1" else "0",
+                        )
+                    )
+                )
+            }) { Text(stringResource(android.R.string.ok)) }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text(stringResource(android.R.string.cancel)) }
+        }
+    )
+}
+
+/**
+ * Notes under an "Unreal Engine HDR" picker set to DirectX 11: a hint to spoof an NVIDIA GPU while
+ * none is reported (UE4 takes its NVAPI path only on one; never forced), and a build that carries no
+ * dxvk-nvapi. Both facts are read off the main thread.
+ */
+@Composable
+internal fun UnrealHdrDx11Notes(gpuName: String, wayland: Boolean) {
+    val context = LocalContext.current
+    var nvidia by remember(gpuName) { mutableStateOf(true) }
+    var bundled by remember { mutableStateOf<String?>("") } // "" = not read yet, null = not in this build
+    LaunchedEffect(gpuName) {
+        val facts = withContext(Dispatchers.IO) {
+            com.winlator.star.core.GpuSpoof.isNvidia(context, gpuName) to
+                com.winlator.star.core.DxvkNvapi.bundledVersion(context)
+        }
+        nvidia = facts.first
+        bundled = facts.second
+    }
+    when (val b = bundled) {
+        null -> Text(
+            "This build carries no dxvk-nvapi: DirectX 11 mode installs nothing and only the DirectX 12 fix applies.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error
+        )
+        "" -> {}
+        else -> Text(
+            "Bundled: dxvk-nvapi $b.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+    if (!nvidia) Text(
+        com.winlator.star.core.UnrealHdr.nvidiaHint(wayland),
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.primary
+    )
 }
 
 /**

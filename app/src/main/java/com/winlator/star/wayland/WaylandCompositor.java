@@ -281,6 +281,12 @@ public final class WaylandCompositor {
     /** One "color" line in the session log, from Java (the HDR environment, the DXVK warning). */
     public static native void nativeLogColor(String message);
 
+    /** One line in the session log under {@code area} (the log's 9-character column: "gpu", "nvapi"),
+     *  from Java: launch facts the app decides (the GPU name spoof, the Unreal Engine HDR mode). Like
+     *  {@link #nativeLogDisplay}, safe before the session file exists (the line is written when it
+     *  opens) and after it has gone. */
+    public static native void nativeLog(String area, String message);
+
     /** Nits at which SDR content is placed when the compositor composes an HDR picture (a window over
      *  an HDR game, the desktop around a windowed one). Default 203 (BT.2408). Before the start. */
     public static native void nativeSetHdrSdrWhite(float nits);

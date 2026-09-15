@@ -24,3 +24,7 @@
 /app/src/main/cpp/bl-steam-client/rust/target/
 /app/src/main/jniLibs/arm64-v8a/libblsteam.so
 scratchpad/
+
+# dxvk-nvapi dlls: fetched and sha256-checked by _build.yml from the release pinned in
+# app/src/main/assets/dxvk-nvapi/manifest.json, never committed.
+app/src/main/assets/dxvk-nvapi/*.dll

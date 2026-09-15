@@ -482,6 +482,16 @@ Java_com_winlator_star_wayland_WaylandCompositor_nativeLogColor(JNIEnv *env, jcl
     free(s);
 }
 
+/* One line in the session log under an area Java names ("gpu", "nvapi"): launch facts the app decides.
+ * The area is the log's 9-character column; an empty one reads "app". */
+JNIEXPORT void JNICALL
+Java_com_winlator_star_wayland_WaylandCompositor_nativeLog(JNIEnv *env, jclass clazz, jstring area, jstring message) {
+    char *a = dup_jstr(env, area), *s = dup_jstr(env, message);
+    if (s) banner_log(a && a[0] ? a : "app", "%s", s);
+    free(a);
+    free(s);
+}
+
 /* SDR content's level inside an HDR picture, in nits (default 203). */
 JNIEXPORT void JNICALL
 Java_com_winlator_star_wayland_WaylandCompositor_nativeSetHdrSdrWhite(JNIEnv *env, jclass clazz, jfloat nits) {

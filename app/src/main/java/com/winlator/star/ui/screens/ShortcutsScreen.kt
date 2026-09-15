@@ -6257,6 +6257,9 @@ internal fun ShortcutSettingsDialogScreen(
     // HDR output override (per-game, same extra name as the container's): "" = the container's,
     // "1" on, "0" off. Only shown when the effective backend is Wayland; see display.WaylandHdr.
     var waylandHdrOverride by remember { mutableStateOf(com.winlator.star.display.WaylandHdr.shortcutChoice(shortcut)) }
+    // Unreal Engine HDR override (per-game, same extra name as the container's): "" = the container's,
+    // else off / dx12 / dx11. Both backends; see core.UnrealHdr.
+    var unrealHdrOverride by remember { mutableStateOf(com.winlator.star.core.UnrealHdr.shortcutChoice(shortcut)) }
 
     // Gyro (motion aim) per-game overrides — seeded from the shortcut extra, falling back to the
     // container's value. Only the game-facing half lives here (deadzone/smoothing stay container-wide,
@@ -6566,6 +6569,9 @@ internal fun ShortcutSettingsDialogScreen(
 
     // Sub-dialog show states
     var showGfxConfig by remember { mutableStateOf(false) }
+    // The Wayland game driver's gear (WaylandDriverSettingsDialog: GPU name spoof, memory cap, present
+    // mode, UBWC hint), editing the same graphicsDriverConfig as the X11 dialog above.
+    var showWaylandDriverCfg by remember { mutableStateOf(false) }
     var showDxvkConfig by remember { mutableStateOf(false) }
     var showWineD3DConfig by remember { mutableStateOf(false) }
     // Per-field "?" help (helpRes) + the newcomer glossary ("What is all this?"), mirrored from the
@@ -6722,6 +6728,8 @@ internal fun ShortcutSettingsDialogScreen(
             putExtra("waylandGameDriver", waylandGameDriverOverride.ifEmpty { null })
             // HDR output override: "" clears the extra (container default).
             putExtra(com.winlator.star.display.WaylandHdr.EXTRA, waylandHdrOverride.ifEmpty { null })
+            // Unreal Engine HDR override: "" clears the extra (container default).
+            putExtra(com.winlator.star.core.UnrealHdr.EXTRA, unrealHdrOverride.ifEmpty { null })
             putExtra("renderer", StringUtils.parseIdentifier(selectedRenderer))
             putExtra("sfCompatMode", if (sfCompatMode) "1" else "0")
             // Gyro per-game overrides (read by the launch resolver in XServerDisplayActivity).
@@ -6822,8 +6830,9 @@ internal fun ShortcutSettingsDialogScreen(
                 if (selectedScreenSize == "Custom") { add("customW"); add("customH") }
                 add("screenAlignment")
                 add("selectIcon"); add("displayBackend"); add("gfxDriver")
-                if (effectiveWaylandShortcut) { add("waylandGameDriver"); add(com.winlator.star.display.WaylandHdr.EXTRA) }
+                if (effectiveWaylandShortcut) { add("waylandGameDriver"); add("waylandDriverCfg"); add(com.winlator.star.display.WaylandHdr.EXTRA) }
                 if (!effectiveWaylandShortcut) { add("gfxWrapper"); add("gfxConfig") } // hidden on Wayland (X11 shims/tuning)
+                add(com.winlator.star.core.UnrealHdr.EXTRA)
                 add("dxWrapper"); add("dxConfig"); add("renderer")
                 if (!effectiveWaylandShortcut && selectedRenderer == "SurfaceFlinger") add("sfCompat")
                 if (!effectiveWaylandShortcut && selectedRenderer == "Vulkan") { add("vkNative"); add("vkColors"); add("vkPresent"); if (vkNative) add("vkBackend"); add("vkDriver") }
@@ -7320,16 +7329,33 @@ internal fun ShortcutSettingsDialogScreen(
                                 if (it.isEmpty()) "Use container default (" + com.winlator.star.core.WaylandGameDriver.optionLabel(gfxContext, containerChoice, waylandAutoPick) + ")"
                                 else com.winlator.star.core.WaylandGameDriver.optionLabel(gfxContext, it, waylandAutoPick)
                             }
-                            DpDrop(
-                                dp, "waylandGameDriver",
-                                label = "Wayland game driver",
-                                options = labels,
-                                selected = labels[values.indexOf(waylandGameDriverOverride).coerceAtLeast(0)],
-                                onSelect = { waylandGameDriverOverride = values[labels.indexOf(it)] },
-                                modifier = Modifier.fillMaxWidth()
-                            )
+                            // The gear: this game's Wayland driver settings (GPU name spoof, memory cap,
+                            // present mode, UBWC hint) in its graphicsDriverConfig, like X11's per-game
+                            // driver configuration.
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                DpDrop(
+                                    dp, "waylandGameDriver",
+                                    label = "Wayland game driver",
+                                    options = labels,
+                                    selected = labels[values.indexOf(waylandGameDriverOverride).coerceAtLeast(0)],
+                                    onSelect = { waylandGameDriverOverride = values[labels.indexOf(it)] },
+                                    modifier = Modifier.weight(1f),
+                                    onRightId = "waylandDriverCfg"
+                                )
+                                DpButton(dp, "waylandDriverCfg", onActivate = { showWaylandDriverCfg = true }, onLeftId = "waylandGameDriver") {
+                                    IconButton(onClick = { showWaylandDriverCfg = true }) {
+                                        Icon(Icons.Default.Settings, contentDescription = "Wayland driver settings")
+                                    }
+                                }
+                            }
                             Text(
                                 com.winlator.star.core.WaylandGameDriver.HELP_TEXT,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            val spoof = com.winlator.star.core.GpuSpoof.gpuNameOf(graphicsDriverConfig)
+                            if (com.winlator.star.core.GpuSpoof.isSpoofing(spoof)) Text(
+                                "GPU name spoof: $spoof (the gear)",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -7365,6 +7391,36 @@ internal fun ShortcutSettingsDialogScreen(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
+                    }
+
+                    // Unreal Engine HDR (per-game, both backends; under HDR output on Wayland):
+                    // "Use container default (<its mode>)" / Off / DirectX 12 fix / DirectX 11. See
+                    // core.UnrealHdr; the DirectX 11 notes follow this game's GPU name spoof.
+                    run {
+                        val containerMode = com.winlator.star.core.UnrealHdr.containerMode(shortcut.container)
+                        val values = listOf("") + com.winlator.star.core.UnrealHdr.MODES
+                        val labels = values.map {
+                            if (it.isEmpty()) "Use container default (" + com.winlator.star.core.UnrealHdr.label(containerMode) + ")"
+                            else com.winlator.star.core.UnrealHdr.label(it)
+                        }
+                        DpDrop(
+                            dp, com.winlator.star.core.UnrealHdr.EXTRA,
+                            label = com.winlator.star.core.UnrealHdr.TITLE,
+                            options = labels,
+                            selected = labels[values.indexOf(unrealHdrOverride).coerceAtLeast(0)],
+                            onSelect = { unrealHdrOverride = values[labels.indexOf(it)] },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        val effectiveMode = unrealHdrOverride.ifEmpty { containerMode }
+                        if (effectiveMode == com.winlator.star.core.UnrealHdr.DX11) UnrealHdrDx11Notes(
+                            gpuName = com.winlator.star.core.GpuSpoof.gpuNameOf(graphicsDriverConfig),
+                            wayland = effectiveWaylandShortcut
+                        )
+                        Text(
+                            com.winlator.star.core.UnrealHdr.help(effectiveWaylandShortcut),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
 
                     // DX Wrapper
@@ -8297,6 +8353,13 @@ internal fun ShortcutSettingsDialogScreen(
             onConfirm = { graphicsDriverConfig = it; showGfxConfig = false },
             onDismiss = { showGfxConfig = false },
             waylandCompositorNote = effectiveWaylandShortcut
+        )
+    }
+    if (showWaylandDriverCfg) {
+        WaylandDriverSettingsDialog(
+            initialConfig = graphicsDriverConfig,
+            onConfirm = { graphicsDriverConfig = it; showWaylandDriverCfg = false },
+            onDismiss = { showWaylandDriverCfg = false }
         )
     }
     val isVegasCfg = StringUtils.parseIdentifier(selectedDxWrapper).contains("vegas")

@@ -154,6 +154,9 @@ class ContainerDetailViewModel(app: Application) : AndroidViewModel(app) {
     // HDR output (extra "waylandHdr": "1" on, absent off). Same rules as waylandGameDriver: only
     // shown on the Wayland backend, kept as stored on X11. See display.WaylandHdr.
     var waylandHdr by mutableStateOf(false)
+    // Unreal Engine HDR (extra "unrealHdr": off | dx12 | dx11, absent = off). Shown and applied on
+    // both backends. See core.UnrealHdr.
+    var unrealHdr by mutableStateOf(com.winlator.star.core.UnrealHdr.OFF)
 
     // Wayland COMPOSITOR driver default. The compositor puts the game's frames on screen through the
     // adrenotools driver named by graphicsDriverConfig's "version"; empty/"System" is the system
@@ -583,6 +586,7 @@ class ContainerDetailViewModel(app: Application) : AndroidViewModel(app) {
         displayBackend           = seed?.getDisplayBackend() ?: Container.DISPLAY_BACKEND_X11
         waylandGameDriver        = seed?.getWaylandGameDriver() ?: Container.WAYLAND_GAME_DRIVER_AUTO
         waylandHdr               = seed?.isWaylandHdr() ?: false
+        unrealHdr                = seed?.getUnrealHdr() ?: com.winlator.star.core.UnrealHdr.OFF
         renderScale              = seed?.getExtra("renderScale", "1.0") ?: "1.0"
         autoCloseOnExit          = (seed?.getExtra("autoCloseOnExit", "1") ?: "1") == "1"
         selectedDXWrapper        = identifierToDisplay(seed?.getDXWrapper() ?: Container.DEFAULT_DXWRAPPER, dxWrapperEntries)
@@ -1236,6 +1240,7 @@ class ContainerDetailViewModel(app: Application) : AndroidViewModel(app) {
         c.setDisplayBackend(if (isWaylandBackend) Container.DISPLAY_BACKEND_WAYLAND else Container.DISPLAY_BACKEND_X11)
         c.setWaylandGameDriver(waylandGameDriver)   // "auto" clears the extra
         c.setWaylandHdr(waylandHdr)                 // off clears the extra
+        c.setUnrealHdr(unrealHdr)                   // off clears the extra
         c.putExtra("renderScale", if (renderScale == "1.0") null else renderScale)
         c.putExtra("autoCloseOnExit", if (autoCloseOnExit) null else "0")  // default ON
         c.setInputType(inputType)

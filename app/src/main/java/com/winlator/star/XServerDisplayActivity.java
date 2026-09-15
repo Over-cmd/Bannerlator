@@ -6704,6 +6704,15 @@ public class XServerDisplayActivity extends AppCompatActivity {
             }
         }
 
+        // Unreal Engine HDR, DirectX 11 mode: the bundled dxvk-nvapi into this prefix, or the prefix's
+        // own nvapi files back when the game isn't in that mode (core.DxvkNvapi). Every launch, after
+        // the DX wrapper step above so a DXVK package carrying its own nvapi can't undo it; idempotent,
+        // and it finishes or undoes whatever an interrupted launch left half-done. setupXEnvironment
+        // sets the matching env and writes the session log line.
+        unrealHdrMode = com.winlator.star.core.UnrealHdr.effective(shortcut, container);
+        nvapiSync = com.winlator.star.core.DxvkNvapi.sync(this, new File(imageFs.getRootDir(), ImageFs.WINEPREFIX),
+                com.winlator.star.core.UnrealHdr.usesDxvkNvapi(unrealHdrMode));
+
         String wincomponents = shortcut != null ? shortcut.getExtra("wincomponents", container.getWinComponents()) : container.getWinComponents();
         if (!wincomponents.equals(container.getExtra("wincomponents"))) {
             extractWinComponentFiles();
@@ -6983,6 +6992,135 @@ public class XServerDisplayActivity extends AppCompatActivity {
             }
         } catch (Throwable t) {
             Log.w("XServerDisplayActivity", "wayland: HDR environment failed", t);
+        }
+    }
+
+    /** This launch's Unreal Engine HDR mode (core.UnrealHdr) and what setupWineSystemFiles did to the
+     *  prefix for it (core.DxvkNvapi); both are read by setupXEnvironment on the same launch thread. */
+    private String unrealHdrMode = com.winlator.star.core.UnrealHdr.OFF;
+    private com.winlator.star.core.DxvkNvapi.Result nvapiSync;
+
+    /** One line for this session's log under {@code area}: the Wayland session log (Download/Wayland-logs)
+     *  on Wayland, the Wine debug log on X11 when the Log Manager has it open; logcat always. */
+    private void logSessionLine(String area, String line) {
+        Log.i("XServerDisplayActivity", area + ": " + line);
+        if (waylandMode) {
+            try { com.winlator.star.wayland.WaylandCompositor.nativeLog(area, line); } catch (Throwable ignored) {}
+        } else if (wineDebugWriter != null) {
+            wineDebugWriter.println("Bannerlator " + area + ": " + line);
+        }
+    }
+
+    /** {@code key=value} into the launch env unless the user's own env vars set {@code key} (theirs wins);
+     *  either way one "key=value" note for the log. */
+    private static void putUnlessUsers(EnvVars envVars, String key, String value, java.util.List<String> said) {
+        if (envVars.has(key)) {
+            said.add(key + "=" + envVars.get(key) + " (yours, kept)");
+        } else {
+            envVars.put(key, value);
+            said.add(key + "=" + value);
+        }
+    }
+
+    /** The session's Unreal Engine HDR environment (core.UnrealHdr; launch worker thread, after the
+     *  user's env vars are merged, both backends). The DirectX 12 fix and DirectX 11 both export
+     *  DXVK_ENABLE_NVAPI=1, once; DirectX 11 adds dxvk-nvapi's WINEDLLOVERRIDES entry and
+     *  DXVK_NVAPI_ALLOW_OTHER_DRIVERS=1 when setupWineSystemFiles put it in the prefix. One "nvapi" line
+     *  in the session log: the mode, the files, the env, and anything that will still stop it working.
+     *  Off exports nothing and logs only when this launch put the prefix's own files back. */
+    private void applyUnrealHdrEnv(EnvVars envVars) {
+        try {
+            String mode = unrealHdrMode;
+            com.winlator.star.core.DxvkNvapi.Result sync = nvapiSync;
+            if (!com.winlator.star.core.UnrealHdr.exportsEnableNvapi(mode)) {
+                if (sync != null && sync.detail != null)
+                    logSessionLine("nvapi", "Unreal Engine HDR off: " + sync.detail);
+                return;
+            }
+            boolean dx11 = com.winlator.star.core.UnrealHdr.usesDxvkNvapi(mode);
+            java.util.List<String> env = new ArrayList<>();
+            putUnlessUsers(envVars, com.winlator.star.core.DxvkNvapi.ENV_DXVK_ENABLE_NVAPI, "1", env);
+            if (dx11 && sync != null && sync.installed) {
+                putUnlessUsers(envVars, com.winlator.star.core.DxvkNvapi.ENV_ALLOW_OTHER_DRIVERS, "1", env);
+                java.util.List<String> kept = new ArrayList<>();
+                String before = envVars.has("WINEDLLOVERRIDES") ? envVars.get("WINEDLLOVERRIDES") : "";
+                String after = com.winlator.star.core.DxvkNvapi.withDllOverrides(before, kept);
+                if (!after.equals(before)) envVars.put("WINEDLLOVERRIDES", after);
+                env.add(kept.isEmpty() ? "WINEDLLOVERRIDES+=nvapi,nvapi64=n"
+                        : "WINEDLLOVERRIDES: yours kept for " + String.join(",", kept));
+            }
+            StringBuilder line = new StringBuilder("Unreal Engine HDR ")
+                    .append(com.winlator.star.core.UnrealHdr.label(mode)).append(": ");
+            if (dx11) line.append(sync != null && sync.detail != null ? sync.detail : "dxvk-nvapi not installed").append("; ");
+            else if (sync != null && sync.detail != null) line.append(sync.detail).append("; "); // back from DirectX 11
+            line.append("env ").append(String.join(" ", env));
+            // What will still stop it, so the log answers "why no HDR" on its own.
+            String dxvkVersion = dxwrapperConfig != null ? dxwrapperConfig.get("version") : "";
+            boolean dxvk = dxwrapper != null && (dxwrapper.contains("dxvk") || dxwrapper.contains("vegas"));
+            if (!dxvk) line.append("; the DX wrapper isn't DXVK, so this does nothing");
+            else if (dx11 && dxvkVersion != null && !dxvkVersion.isEmpty() && compareVersion(dxvkVersion, "2.6") < 0)
+                line.append("; DXVK ").append(dxvkVersion).append(" is older than 2.6 (HDR through NVAPI needs 2.3, in practice 2.6)");
+            if (!waylandMode) line.append("; X11 has no HDR output");
+            else if (!"1".equals(envVars.get("DXVK_HDR"))) line.append("; HDR output is off for this session (no DXVK_HDR)");
+            if (dx11 && !com.winlator.star.core.GpuSpoof.isNvidia(this, graphicsDriverConfig != null ? graphicsDriverConfig.get("gpuName") : null))
+                line.append("; no NVIDIA GPU name spoof, so Unreal Engine won't take its NVAPI path");
+            logSessionLine("nvapi", line.toString());
+        } catch (Throwable t) {
+            Log.w("XServerDisplayActivity", "Unreal Engine HDR environment failed", t);
+        }
+    }
+
+    /** Wayland: the driver config's GPU name spoof and memory cap, handed to DXVK through DXVK_CONFIG
+     *  (core.GpuSpoof) — the X11 wrapper that reads WRAPPER_* isn't on this path. Launch worker thread,
+     *  after the user's env vars are merged, so a key they set in DXVK_CONFIG or DXVK_CONFIG_FILE wins.
+     *  WRAPPER_DEVICE_NAME / _ID / WRAPPER_VENDOR_ID stay exported (from the exact list entry) for the
+     *  Wayland Turnip to read later. One "gpu" line in the session log; none when neither is set. */
+    private void applyWaylandGpuSpoofEnv(EnvVars envVars) {
+        try {
+            String gpuName = graphicsDriverConfig != null ? graphicsDriverConfig.get("gpuName") : null;
+            int memMb = 0;
+            try { memMb = Integer.parseInt(graphicsDriverConfig.get("maxDeviceMemory")); } catch (Exception ignored) {}
+            boolean spoofing = com.winlator.star.core.GpuSpoof.isSpoofing(gpuName);
+            if (!spoofing && memMb <= 0) return;
+            com.winlator.star.core.GpuSpoof.Card card = spoofing ? com.winlator.star.core.GpuSpoof.find(this, gpuName) : null;
+            StringBuilder said = new StringBuilder();
+            if (spoofing) {
+                said.append("spoof: \"").append(gpuName).append('"');
+                EnvVars user = effectiveUserEnv();
+                if (user == null || !user.has("WRAPPER_DEVICE_NAME")) envVars.put("WRAPPER_DEVICE_NAME", gpuName);
+                if (card == null) {
+                    said.append(" is not in the GPU list, so there are no ids to spoof");
+                } else {
+                    said.append(" (vendor ").append(card.vendorId >= 0 ? com.winlator.star.core.GpuSpoof.pciHex(card.vendorId) : "?")
+                        .append(" device ").append(card.deviceId >= 0 ? com.winlator.star.core.GpuSpoof.pciHex(card.deviceId) : "?").append(')');
+                    if (card.deviceId >= 0 && (user == null || !user.has("WRAPPER_DEVICE_ID")))
+                        envVars.put("WRAPPER_DEVICE_ID", String.valueOf(card.deviceId));
+                    if (card.vendorId >= 0 && (user == null || !user.has("WRAPPER_VENDOR_ID")))
+                        envVars.put("WRAPPER_VENDOR_ID", String.valueOf(card.vendorId));
+                }
+            }
+            boolean dxvk = dxwrapper != null && (dxwrapper.contains("dxvk") || dxwrapper.contains("vegas"));
+            if (!dxvk) {
+                if (said.length() > 0) said.append(' ');
+                said.append("not applied: the DX wrapper isn't DXVK (WineD3D has its own GPU name setting)");
+                logSessionLine("gpu", said.toString());
+                return;
+            }
+            java.util.LinkedHashMap<String, String> ours = com.winlator.star.core.GpuSpoof.dxvkOptions(card, memMb);
+            if (!ours.isEmpty()) {
+                String existing = envVars.has("DXVK_CONFIG") ? envVars.get("DXVK_CONFIG") : "";
+                String file = com.winlator.star.core.GpuSpoof.readConfigFile(
+                        envVars.has("DXVK_CONFIG_FILE") ? envVars.get("DXVK_CONFIG_FILE") : null);
+                com.winlator.star.core.GpuSpoof.Merge m = com.winlator.star.core.GpuSpoof.mergeDxvkConfig(existing, file, ours);
+                if (!m.value.isEmpty()) envVars.put("DXVK_CONFIG", m.value);
+                if (card != null) said.append(" via DXVK_CONFIG (dxgi + d3d9)");
+                if (memMb > 0) said.append(said.length() > 0 ? ", " : "").append("memory cap ").append(memMb)
+                        .append(" MB").append(card != null ? "" : " via DXVK_CONFIG").append(" (dxgi.maxDeviceMemory)");
+                if (!m.kept.isEmpty()) said.append("; yours kept: ").append(String.join(", ", m.kept));
+            }
+            logSessionLine("gpu", said.toString());
+        } catch (Throwable t) {
+            Log.w("XServerDisplayActivity", "wayland: GPU name spoof failed", t);
         }
     }
 
@@ -8197,6 +8335,11 @@ public class XServerDisplayActivity extends AppCompatActivity {
             // The HDR opt-in (startWaylandCompositor, which runs first) can turn zero-copy on too.
             if (waylandMode && (isWaylandZeroCopyRequested() || waylandHdrZeroCopyForced)) envVars.put("BANNER_WSI_AHB", "1");
             if (waylandMode) applyWaylandHdrEnv(envVars);
+            // Unreal Engine HDR (both backends) and, on Wayland, the GPU name spoof: after both user env
+            // merges and the HDR env above, so a DXVK_ENABLE_NVAPI / WINEDLLOVERRIDES / DXVK_CONFIG entry
+            // of the user's wins and the log line can say whether DXVK_HDR is on.
+            applyUnrealHdrEnv(envVars);
+            if (waylandMode) applyWaylandGpuSpoofEnv(envVars);
 
             // OpenGL safe mode (Wayland only, default ON): GALLIUM_THREAD=0 removes Mesa's
             // u_threaded_context helper thread. That thread is a plain pthread with no Wine TEB, so a

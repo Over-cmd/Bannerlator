@@ -361,6 +361,12 @@ private fun generalRows(xmb: XmbScope, p: XmbPrefs, host: XmbGameHost): List<Xmb
             subtitle = com.winlator.star.core.WaylandGameDriver.HELP_TEXT) { v ->
             xmb.set(p, "waylandGameDriver", wgdValues[wgdLabels.indexOf(v)].ifEmpty { null })
         }
+        // The pop-up editors' gear next to the Wayland game driver: GPU name spoof, memory cap, present
+        // mode, UBWC hint, in the same graphicsDriverConfig keys as X11's driver configuration.
+        val spoof = com.winlator.star.core.GpuSpoof.gpuNameOf(gdc)
+        rows += XmbRow.Link("waylandDriverCfg", "Wayland driver settings", Icons.Filled.Tune,
+            value = spoof.takeIf { com.winlator.star.core.GpuSpoof.isSpoofing(it) },
+            subtitle = "GPU name spoof, memory cap, present mode…") { xmbWaylandDriverConfigMenu(xmb, s) }
         // HDR output (per-game override of the container's waylandHdr; "" = container default, "1" on,
         // "0" off) — same options as the pop-up editor (WaylandHdr). Greyed with the reason on a screen
         // that doesn't report HDR10, still showing what is stored.
@@ -382,6 +388,29 @@ private fun generalRows(xmb: XmbScope, p: XmbPrefs, host: XmbGameHost): List<Xmb
         subtitle = "Vulkan version, BCn, present modes…") { xmbDriverConfigMenu(xmb, s) }
     // Wrappers are X11 game-driver shims; nothing on the Wayland path uses them.
     if (!waylandGame) rows += XmbRow.External("wrappers", "Manage wrappers", Icons.Filled.Cloud, subtitle = "Import or remove wrapper drivers") { host.openWrapperManager() }
+    // Unreal Engine HDR (per-game override of the container's unrealHdr; "" = container default), both
+    // backends — same options as the pop-up editors (core.UnrealHdr). DirectX 11 while no NVIDIA GPU
+    // name spoof is set gets the optional hint row.
+    run {
+        val cMode = com.winlator.star.core.UnrealHdr.containerMode(c)
+        val uValues = listOf("") + com.winlator.star.core.UnrealHdr.MODES
+        val uLabels = uValues.map {
+            if (it.isEmpty()) "Container default (" + com.winlator.star.core.UnrealHdr.label(cMode) + ")"
+            else com.winlator.star.core.UnrealHdr.label(it)
+        }
+        val uOverride = com.winlator.star.core.UnrealHdr.shortcutChoice(s)
+        rows += XmbRow.Choice(com.winlator.star.core.UnrealHdr.EXTRA, com.winlator.star.core.UnrealHdr.TITLE, Icons.Filled.HdrOn,
+            uLabels, uLabels[uValues.indexOf(uOverride).coerceAtLeast(0)],
+            subtitle = com.winlator.star.core.UnrealHdr.HELP_SHORT) { v ->
+            xmb.set(p, com.winlator.star.core.UnrealHdr.EXTRA, uValues[uLabels.indexOf(v)].ifEmpty { null })
+        }
+        val spoof = com.winlator.star.core.GpuSpoof.gpuNameOf(p.ex("graphicsDriverConfig", c.getGraphicsDriverConfig()))
+        if (uOverride.ifEmpty { cMode } == com.winlator.star.core.UnrealHdr.DX11 &&
+            !com.winlator.star.core.GpuSpoof.isNvidia(p.context, spoof)) {
+            rows += XmbRow.Info("unrealHdrNvidia", "No NVIDIA GPU is reported", Icons.Filled.Info,
+                subtitle = com.winlator.star.core.UnrealHdr.nvidiaHint(waylandGame))
+        }
+    }
     val dxEntries = p.arr(R.array.dxwrapper_entries)
     val dxId = p.ex("dxwrapper", c.getDXWrapper())
     rows += XmbRow.Choice("dxWrapper", "DX wrapper", Icons.Filled.Layers, dxEntries, p.labelFor(dxEntries, dxId)) { v ->

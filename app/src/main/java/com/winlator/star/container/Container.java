@@ -517,6 +517,21 @@ public class Container {
         putExtra(com.winlator.star.display.WaylandHdr.EXTRA, enabled ? "1" : null);
     }
 
+    // --- Unreal Engine HDR (per-container), stored in extraData. X11 and Wayland. ---
+    // "dx12" = DXVK_ENABLE_NVAPI=1 (DXVK stops switching HDR off for UE4 games run with -dx12);
+    // "dx11" = that plus the bundled dxvk-nvapi in the prefix (core.UnrealHdr, core.DxvkNvapi).
+    // Default OFF (absent). A shortcut overrides with the same-named extra ("off" / "dx12" / "dx11";
+    // absent or "" = this).
+    public String getUnrealHdr() {
+        return com.winlator.star.core.UnrealHdr.containerMode(this);
+    }
+
+    public void setUnrealHdr(String mode) {
+        String m = com.winlator.star.core.UnrealHdr.normalize(mode);
+        putExtra(com.winlator.star.core.UnrealHdr.EXTRA,
+                m.isEmpty() || m.equals(com.winlator.star.core.UnrealHdr.OFF) ? null : m);
+    }
+
     // --- Wayland game driver (per-container), stored in extraData ---
     // On Wayland the GAME renders on a Vulkan driver the Proton layer picks (winewayland sets
     // VK_ICD_FILENAMES), not on the compositor's Turnip. The layer bundles three Wayland Turnip
