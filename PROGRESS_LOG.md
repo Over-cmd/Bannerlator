@@ -1,5 +1,43 @@
 # Star-Compose — Progress Log
 
+## 2026-09-15 07:20 — 🏁 **Wayland pre-release 8 live: real HDR10, layer v11, HDR test card; the code is merged to main**
+
+> **Release `3.1.2-wayland-pre8`** (pre-release, not Latest; 3.1.1 stays Latest)
+> - Tag → `35b496a2` on `release/3.1.2-wayland-pre8`; release.yml run 34960984503.
+> - Assets:
+>   - `Bannerlator-3.1.2-wayland-pre8-{standard,pubg,ludashi}.apk` (versionName `3.1.2-wayland-pre8`, versionCode 85);
+>   - `proton-11.0-2.1-arm64ec-wayland-v11.wcp` (sha256 `7f58c98d…`, installs as `Proton-11.0-2.1-arm64ec-11`);
+>   - `AIO-Graphics-Test-HDR-64bit.exe` (AIO-Graphics-Test `feat/hdr-test-scene` `5174cc11`, sha256 `19ed2433…`);
+>   - `README-Wayland-test-kit.txt`.
+> - The layer and the test card were fetched from their CI runs and hash-checked server-side.
+> - The pre-release 7 release was deleted; its tag stays.
+>
+> **What shipped**
+> - HDR10 on Wayland (opt-in, HDR screens only):
+>   - the HDR output setting and the live drawer switch;
+>   - HDR kept through composition, effects, windowed games and frame generation (FP16 engine into a 10-bit HDR10 swapchain);
+>   - the HUD HDR line;
+>   - heat and brightness evidence beside the headroom lines;
+>   - an explicit HDR headroom request (Android 15+).
+> - v11: games see the real screen description.
+> - The Fusion HUD defaults and the frame generation picker on Wayland.
+> - The public build has **no** DETECT_SCREEN_* permissions and no screenshot/recording detection; `feat/wayland-hdr` keeps them for test builds.
+>
+> **Proven:**
+> - On the Galaxy Z Fold 8 Ultra (Adreno 840):
+>   - zero-copy 10-bit PQ;
+>   - the composed path;
+>   - frame generation at 120 fps in HDR10 with 0 tone-mapped frames;
+>   - 3.0–3.6x headroom on the light test card.
+> - The screen description reached DXGI on three phones (1345 / 1207 / 892 nits).
+>
+> **Not proven:**
+> - that the headroom request helps a ROG Phone 9 Pro, which got no HDR boost;
+> - scRGB;
+> - the SDR handheld was not re-run on this exact build.
+>
+> **main** fast-forwarded `55566dbd` → `d1a002be`: the public HDR merge `4938f357` + pre-release 8 docs + the updated Wayland deck (live on Pages). versionName stays 3.1.1. Post-merge CI: run 34962219312. The Wayland layer line in proton-wine is at v11 (`825a546ca3a`); the next layer build stamps versionCode 12.
+
 ## 2026-09-15 00:05 — 🔖 **CHECKPOINT: HDR round 2d + Wayland layer v11 + HDR test card published for the Fold; untested overnight** (nothing merged to main, no Bannerlator release)
 
 > **Where things are.**
