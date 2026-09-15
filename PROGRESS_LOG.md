@@ -1,5 +1,26 @@
 # Star-Compose — Progress Log
 
+## 2026-09-15 — 🎛️ **Wayland driver settings (GPU name spoof) + "Unreal Engine HDR" (DirectX 12 fix / DirectX 11 with bundled dxvk-nvapi): branch `feat/wayland-gpu-spoof`** (on top of `feat/wayland-perf-p1` `b612a869`; CI only, not device-tested, not merged)
+
+> **Wayland driver settings: the gear next to "Wayland game driver"** (container editor, game editor, XMB). Same `graphicsDriverConfig` keys as X11's driver configuration, so choices follow a game across backends; OK writes only these keys.
+> - **GPU name (spoof):** the X11 list, off by default ("Device"), with the NVIDIA (NVAPI/DLSS/Reflex) and AMD (AGS) warning. On Wayland it reaches DirectX games through `DXVK_CONFIG`:
+>   - `dxgi.customVendorId/DeviceId/DeviceDesc` covers D3D10/11, and D3D12, whose adapter vkd3d-proton takes from DXVK's DXGI; `d3d9.custom*` covers D3D9/D3D8, which ignore the dxgi keys.
+>   - Our keys go first (in DXVK a later value wins, and an `[exe]` piece scopes what follows). A key the user sets in DXVK_CONFIG or DXVK_CONFIG_FILE is left out. The name is quoted (an unquoted value stops at a space); ids are 4 hex digits (DXVK's parsePciId).
+>   - WRAPPER_* stay exported for the future Turnip patch. Exact-name lookup (X11's contains() lands on the wrong card for GTX 560/770/1060).
+> - **Max device memory** → `dxgi.maxDeviceMemory`. **Present mode:** mailbox / fifo only (the compositor has no tearing-control); a stored immediate/relaxed stays, labelled X11-only. **OneUI / HyperOS fix** → `FD_DEV_FEATURES=enable_tp_ubwc_flag_hint=1` (it already reached Wayland; now shown there).
+> - **Not on Wayland:** Vulkan version (the Wayland Turnips hard-code apiVersion and never call `vk_get_version_override`, so `MESA_VK_VERSION_OVERRIDE` does nothing), BCn, resourceType, syncFrame, disablePresentWait, and the extension blacklist (needs the Turnip patch, layer v13).
+> - Session log: `gpu       spoof: "NVIDIA GeForce GTX 1080" (vendor 10de device 1b80) via DXVK_CONFIG (dxgi + d3d9)`.
+>
+> **Unreal Engine HDR** (container default, per-game override, XMB; both backends; under HDR output): Off · DirectX 12 fix · DirectX 11 (experimental, NVAPI).
+> - **DirectX 12 fix** = `DXVK_ENABLE_NVAPI=1`: skips DXVK's isHDRDisallowed(), which turns HDR off for "-Win64-Shipping" exes before d3d12.dll loads (UE4 creates DXGI first, so `-dx12` games lose HDR too).
+> - **DirectX 11** = that, plus dxvk-nvapi v0.9.2 (jp7677, MIT) swapped into system32/syswow64 at every launch, `WINEDLLOVERRIDES += nvapi,nvapi64=n` and `DXVK_NVAPI_ALLOW_OTHER_DRIVERS=1`, plus a hint to spoof an NVIDIA GPU (GTX 1080: Pascal, what dxvk-nvapi reports on other drivers).
+>   - The prefix's own files are backed up once to `.wine/bannerlator-nvapi/backup/`, with the marker `installed.properties`. Every copy goes through a temp file + rename; a slot is "ours" only by sha256.
+>   - Off or DX12 puts the prefix's files back.
+> - **Bundling:** `_build.yml` downloads the tarball pinned in `assets/dxvk-nvapi/manifest.json` (sha256 `60c28422…70d6`) and checks both dlls (`nvapi64.dll` `1bcf9b68…e12e`, `nvapi.dll` `afb3bfad…6d19`). The dlls are never committed.
+> - Session log: one `nvapi` line with the mode, files, env, and anything that still blocks it (HDR output off, DXVK older than 2.6, no NVIDIA spoof, DX wrapper not DXVK).
+>
+> **Status:** CI dispatched on this branch (all three flavours). Not device-tested. **Roll back:** `feat/wayland-perf-p1` `b612a869`.
+
 ## 2026-09-15 — ⚙️ **Wayland performance Phase 1, app/compositor half: branch `feat/wayland-perf-p1`** (off `8fd31faa`; CI only, not device-tested, not merged)
 
 > **What changed (code `0255dfea` compositor, `3c4b8983` app):**
