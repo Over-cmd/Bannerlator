@@ -108,6 +108,7 @@ class FusionHudView(
 
     private var engineLabel = ""
     private var displayServer = ""     // "X11" / "Wayland": which display server the game runs on
+    private var hdrState = FusionHdr.NONE  // Wayland HDR, on its own line under latency · display server
     private var gpuModel = ""
     // Stack-layer version strings (Mega bottom band + DX version on the engine row); fed by the host.
     private var wineVersion = ""       // "Proton 10.0-4"
@@ -134,6 +135,7 @@ class FusionHudView(
     private val colDim = 0xFF9AA4B2.toInt()
     private val colLo = 0xFFE4E8EE.toInt()
     private val colDisp = 0xFF4DD0E1.toInt()   // display server (X11 / Wayland)
+    private val colHdr = 0xFFFFD54F.toInt()    // HDR on screen
 
     // ---- Paints -----------------------------------------------------------
     private val measurePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -184,6 +186,11 @@ class FusionHudView(
     fun setEngineLabel(s: String?) { engineLabel = s ?: ""; post { rebuildAndInvalidate() } }
     fun setGpuModel(s: String?) { gpuModel = s ?: ""; post { rebuildAndInvalidate() } }
     fun setDisplayServer(s: String?) { displayServer = s ?: ""; post { rebuildAndInvalidate() } }
+    /** [FusionHdr] code; [FusionHdr.NONE] (the default) draws no HDR line anywhere. Any thread. */
+    fun setHdrState(state: Int) {
+        val v = if (state in FusionHdr.ON..FusionHdr.TONEMAPPED) state else FusionHdr.NONE
+        post { if (v != hdrState) { hdrState = v; rebuildAndInvalidate() } }
+    }
     fun setWineVersion(s: String?) { wineVersion = s ?: ""; post { rebuildAndInvalidate() } }
     fun setGraphicsWrapper(s: String?) { graphicsWrapper = s ?: ""; post { rebuildAndInvalidate() } }
     fun setDxWrapper(dxvk: String?, vkd3d: String?) {
@@ -362,6 +369,68 @@ class FusionHudView(
 
     private fun gap(unitPx: Float) = Span("  ", colDim, unitPx)
 
+    // ---- Wayland HDR state (one line of its own; nothing at all for FusionHdr.NONE) ----
+    /** The state as a full line: "HDR", "HDR (no headroom)", "HDR off", "HDR ready", "HDR tone-mapped". */
+    private fun hdrLine(px: Float): List<Span> = when (hdrState) {
+        FusionHdr.ON -> listOf(Span("HDR", colHdr, px))
+        FusionHdr.NO_HEADROOM -> listOf(Span("HDR", colHdr, px), Span(" (no headroom)", colBat, px))
+        FusionHdr.OFF -> listOf(Span("HDR off", colDim, px))
+        FusionHdr.READY -> listOf(Span("HDR ready", colDim, px))
+        FusionHdr.TONEMAPPED -> listOf(Span("HDR", colDim, px), Span(" tone-mapped", colBat, px))
+        else -> emptyList()
+    }
+    /** The value after an "HDR" label (Full / Mega): "on", "no headroom", "off", "ready", "tone-mapped". */
+    private fun hdrValue(px: Float): List<Span> = when (hdrState) {
+        FusionHdr.ON -> listOf(Span("on", colHdr, px))
+        FusionHdr.NO_HEADROOM -> listOf(Span("no headroom", colBat, px))
+        FusionHdr.OFF -> listOf(Span("off", colDim, px))
+        FusionHdr.READY -> listOf(Span("ready", colDim, px))
+        FusionHdr.TONEMAPPED -> listOf(Span("tone-mapped", colBat, px))
+        else -> emptyList()
+    }
+    private fun hdrText(): String = hdrLine(1f).joinToString("") { it.text }
+
+    /**
+     * The pill is drawn as a capsule (radius = height / 2), so a line near the top or bottom of the stack
+     * sits where the rounded ends curve in: it can fit the bounding box and still run across the outline
+     * (the HDR line under the latency line did, on the Fold). Shift the content right and widen the pill
+     * until every glyph's ink clears both rounded ends, the outline and a small margin. The height is
+     * final by now, and with it the radius.
+     */
+    private val inkRect = android.graphics.Rect()
+    private fun fitCapsule() {
+        if (contentW <= 0f || contentH <= 0f || glyphs.isEmpty()) return
+        val r = contentH / 2f
+        val margin = (if (outlineIntensity > 0f) outlineIntensity * sp(3.5f) else 0f) + sp(2f)
+        fun curveIn(top: Float, bottom: Float): Float {   // how far the rounded end curves in over [top, bottom]
+            val dy = max(r - top, bottom - r)
+            if (dy <= 0f) return 0f
+            if (dy >= r) return r
+            return r - kotlin.math.sqrt(r * r - dy * dy)
+        }
+        var shift = 0f
+        for (g in glyphs) {
+            measurePaint.textSize = g.sizePx
+            measurePaint.getTextBounds(g.text, 0, g.text.length, inkRect)
+            if (inkRect.isEmpty) continue
+            val need = curveIn(g.baseline + inkRect.top, g.baseline + inkRect.bottom) + margin
+            shift = max(shift, need - (g.x + inkRect.left))
+        }
+        var w = contentW + shift
+        for (g in glyphs) {
+            measurePaint.textSize = g.sizePx
+            measurePaint.getTextBounds(g.text, 0, g.text.length, inkRect)
+            if (inkRect.isEmpty) continue
+            val need = curveIn(g.baseline + inkRect.top, g.baseline + inkRect.bottom) + margin
+            w = max(w, g.x + shift + inkRect.right + need)
+        }
+        if (shift > 0f) {
+            val moved = glyphs.map { Glyph(it.x + shift, it.baseline, it.text, it.color, it.sizePx) }
+            glyphs.clear(); glyphs.addAll(moved)
+        }
+        contentW = w
+    }
+
     // ---- Layout builders --------------------------------------------------
     private fun rebuild() {
         glyphs.clear(); tileRects.clear(); pillBorder = null; graphRect = null
@@ -444,6 +513,8 @@ class FusionHudView(
             rows.add(HudRow(Span("GPU", colGpu, rowPx), listOf(Span(gpuModel, colValue, rowPx))))
         if (displayServer.isNotBlank())
             rows.add(HudRow(Span("DISP", colDisp, rowPx), listOf(Span(displayServer, colValue, rowPx))))
+        if (hdrState != FusionHdr.NONE)
+            rows.add(HudRow(Span("HDR", colHdr, rowPx), hdrValue(rowPx)))
         if (showGPU) {
             val v = ArrayList<Span>()
             v += numUnit(s.gpuPercent?.toString(), "%", rowPx, unitPx)
@@ -553,7 +624,8 @@ class FusionHudView(
             tiles.add(Tile("API", colFps, listOf(Span(engineLabel, colValue, valPx)),
                 dxVersion().ifBlank { null }, false))
         if (displayServer.isNotBlank())
-            tiles.add(Tile("DISPLAY", colDisp, listOf(Span(displayServer, colValue, valPx)), null, false))
+            tiles.add(Tile("DISPLAY", colDisp, listOf(Span(displayServer, colValue, valPx)),
+                if (hdrState != FusionHdr.NONE) hdrText() else null, false))
         if (showGpuModel && gpuModel.isNotBlank())
             tiles.add(Tile("GPU", colGpu, listOf(Span(gpuModel, colValue, valPx)), null, true))
         if (showBattery || showPower || showBatteryTemp) {
@@ -657,6 +729,9 @@ class FusionHudView(
             if (showVram && s.vramText() != null) { l += Span(" · ", colDim, stkPx); l += Span("${s.vramText()} vram", colDim, stkPx) }
             stack.add(l)
         }
+        // Wayland HDR state on its OWN line directly under the latency · display-server line (it ran off
+        // the capsule's right edge as "40.3ms · Wayland · HDR (no headroom)"). Only in HDR sessions.
+        if (hdrState != FusionHdr.NONE) stack.add(hdrLine(stkPx))
 
         // Left column: a small API/engine caption (DXVK/VKD3D/Zink) centred ABOVE the big FPS — mirroring
         // the clock centred BELOW it, so the left reads API · FPS · clock top-to-bottom.
@@ -691,6 +766,9 @@ class FusionHudView(
             sy += stkH + stkLineGap
         }
         addSubtleClock(pad, pad + leftBlockW / 2f)   // clock centred under the FPS (left of the pill centre)
+        // HDR sessions: the extra line makes the capsule taller and its ends rounder - make sure nothing
+        // crosses the outline. (Without the HDR line the pill is exactly what it always was.)
+        if (hdrState != FusionHdr.NONE) fitCapsule()
         // Capsule border captured AFTER the footer clock so the pill encloses it too.
         pillBorder = RectF(0f, 0f, contentW, contentH)
     }
@@ -744,6 +822,15 @@ class FusionHudView(
             if (!showClockTime) contentH = footerTop + lineH(apiPx) + pad * 0.5f
         }
         addSubtleClock(pad)
+        // Wayland HDR state on its own line under the footer (engine · display server), HDR sessions only.
+        if (hdrState != FusionHdr.NONE) {
+            val px = sp(9.5f)
+            val line = hdrLine(px)
+            val top = contentH - pad * 0.5f + sp(1f)
+            val end = placeRun(pad, top - ascent(px), line)
+            contentH = top + lineH(px) + pad * 0.5f
+            contentW = max(contentW, end + pad)
+        }
     }
 
     /** Places a column of "label + value" rows; returns (bottomY, rightX). Appends glyphs. Rows flagged
@@ -880,6 +967,7 @@ class FusionHudView(
         val band = ArrayList<List<Span>>()
         if (showResolution) band.add(listOf(Span("RES ", colDim, bandPx), Span(resolutionString(), colValue, bandPx)))
         if (displayServer.isNotBlank()) band.add(listOf(Span("DISP ", colDim, bandPx), Span(displayServer, colDisp, bandPx)))
+        if (hdrState != FusionHdr.NONE) band.add(listOf(Span("HDR ", colDim, bandPx)) + hdrValue(bandPx))
         if (showProton && wineVersion.isNotBlank()) band.add(listOf(Span(wineVersion, colVram, bandPx)))
         if (showSession) band.add(listOf(Span("elapsed ", colDim, bandPx), Span(elapsedString(), colValue, bandPx)))
         if (band.isNotEmpty()) {

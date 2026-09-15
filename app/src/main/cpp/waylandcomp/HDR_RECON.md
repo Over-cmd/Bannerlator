@@ -839,7 +839,21 @@ not the brightness: the user's recording (210.8 s, BT.709 SDR H.264, finalised 2
 Android (at least Samsung's) turns HDR headroom off while the screen is recorded. Every hint now names
 both causes; whether maximum brightness does it too is still unmeasured (tester note step H).
 
-### 11.5 What is still NOT done / not proven
+### 11.5 The HUD's HDR line (round 2b, the user's layout request)
+
+`40.3ms · Wayland · HDR (no headroom)` ran off the pill's right edge (the capsule's ends curve in, and the
+latency line is the bottom of the stack). The display-server label is plain `Wayland` again, and the HDR
+state is a line of its own directly under it, fed as a `FusionHdr` code (`FusionHudView.setHdrState`):
+`HDR` / `HDR (no headroom)` / `HDR off` / `HDR tone-mapped` (switch on, frame generation without an HDR10
+swapchain) / `HDR ready` (gate open, no HDR frames right now). `NONE` - every session whose gate is
+closed - draws nothing, so those HUDs are unchanged to the pixel. Pill: the extra line makes the capsule
+taller and its ends rounder, so in HDR sessions `fitCapsule()` measures every glyph's ink against the
+two rounded ends (plus the outline and 2 sp) and shifts/widens the pill until nothing crosses. Full: an
+`HDR` row under `DISP`; Tiles: the *Display* tile's sub-line; Minimal: a line under the footer; Mega: a
+fragment after `DISP` in the bottom band. Only the Fusion HUD shows the display server at all; the
+classic, GameHub and GameNative HUDs never received it and are untouched.
+
+### 11.6 What is still NOT done / not proven
 
 - Nothing of round 2 has run on a device yet (CI only). The Fold test note is `docs/HDR-test-r2.md`.
 - Frame generation runs on 8-bit PQ (the engines' format); a 10-bit engine path would need the

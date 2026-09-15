@@ -6986,20 +6986,32 @@ public class XServerDisplayActivity extends AppCompatActivity {
         }
     }
 
-    /** The HUD's display-server label: "Wayland · HDR" while HDR frames are really on screen with HDR
-     *  headroom, "Wayland · HDR (no headroom)" while they are on screen but the display has given them
-     *  none for 5 s+ (brightness at maximum, or a screen recording: Android turns HDR headroom off while
-     *  the screen is recorded), "Wayland · HDR off" while the drawer's
-     *  HDR output switch is off (the picture is tone-mapped to SDR), else "Wayland". What is on screen
-     *  wins: frames that stay HDR with the switch off still read "HDR". */
-    private volatile int hudHdrState = 0;   // WaylandCompositor.nativeHdrState()
+    /** The HUD's display-server label: "X11" / "Wayland" (the HDR state has a line of its own). */
+    private String hudDisplayServerLabel() {
+        return waylandMode ? "Wayland" : "X11";
+    }
+
+    /** The Fusion HUD's HDR line, directly under latency · display server - only in sessions whose HDR
+     *  gate is open (everywhere else FusionHdr.NONE: no line, the HUD exactly as before):
+     *  "HDR" while HDR frames are really on screen with HDR headroom; "HDR (no headroom)" while they are
+     *  on screen but the display has given them none for 5 s+ (brightness at maximum, or a screen
+     *  recording: Android turns HDR headroom off while the screen is recorded); "HDR off" while the
+     *  drawer's HDR output switch is off (tone-mapped to SDR); "HDR tone-mapped" while the switch is on
+     *  but the frames are tone-mapped anyway (frame generation on a screen with no HDR10 swapchain);
+     *  "HDR ready" otherwise (no HDR frames on screen right now). What is on screen wins: frames that
+     *  stay HDR with the switch off read "HDR". */
+    private volatile int hudHdrState = 0;          // WaylandCompositor.nativeHdrState()
+    private volatile boolean hudHdrToneMapped = false; // WaylandCompositor.nativeHdrToneMappedOnScreen()
+    private volatile boolean hudHdrGateOpen = false; // the compositor opened HDR for this session
     /** The drawer's HDR output switch (per session, starts on; only offered while the HDR gate is open). */
     private volatile boolean waylandHdrOutputOn = true;
-    private String hudDisplayServerLabel() {
-        if (!waylandMode) return "X11";
-        if (hudHdrState == 1) return "Wayland · HDR";
-        if (hudHdrState == 2) return "Wayland · HDR (no headroom)";
-        return waylandHdrOutputOn ? "Wayland" : "Wayland · HDR off";
+    private int hudHdrCode() {
+        if (!waylandMode || !hudHdrGateOpen) return com.winlator.star.widget.fusionhud.FusionHdr.NONE;
+        if (hudHdrState == 1) return com.winlator.star.widget.fusionhud.FusionHdr.ON;
+        if (hudHdrState == 2) return com.winlator.star.widget.fusionhud.FusionHdr.NO_HEADROOM;
+        if (!waylandHdrOutputOn) return com.winlator.star.widget.fusionhud.FusionHdr.OFF;
+        return hudHdrToneMapped ? com.winlator.star.widget.fusionhud.FusionHdr.TONEMAPPED
+                                : com.winlator.star.widget.fusionhud.FusionHdr.READY;
     }
 
     /** Tell the compositor what the game's display reports (the HDR gate's input; logged on change). */
@@ -7096,7 +7108,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
             }
             Log.i("XServerDisplayActivity", "wayland: HDR output " + (on ? "on" : "off (tone-mapped to SDR)")
                     + " for this session");
-            if (fusionHud != null) fusionHud.setDisplayServer(hudDisplayServerLabel());
+            if (fusionHud != null) fusionHud.setHdrState(hudHdrCode());
         };
 
         // Last-10-s zero-copy frame count, straight from the compositor's stats window, plus whether
@@ -7173,22 +7185,29 @@ public class XServerDisplayActivity extends AppCompatActivity {
                 int gate;
                 try { gate = com.winlator.star.wayland.WaylandCompositor.nativeHdrGateState(); }
                 catch (Throwable t) { gate = 0; }
-                if (gate == 0) {  // closed: nothing to prove this session, and no drawer switch
+                if (gate == 0) {  // closed: nothing to prove this session, and no drawer switch / HUD line
                     XServerDrawerState.INSTANCE.setWaylandHdrAvailable(false);
+                    if (hudHdrGateOpen) {
+                        hudHdrGateOpen = false;
+                        if (fusionHud != null) fusionHud.setHdrState(hudHdrCode());
+                    }
                     stopHdrRatioSampler();
                     return;
                 }
                 if (gate == 1) {
                     XServerDrawerState drawer = XServerDrawerState.INSTANCE;
                     drawer.setWaylandHdrAvailable(true);
+                    boolean hudChanged = !hudHdrGateOpen;
+                    hudHdrGateOpen = true;
                     android.view.Display d = hdrTargetDisplay();
                     armHdrRatioListener(d);
                     float ratio = com.winlator.star.display.DisplayHdrInfo.liveHdrSdrRatio(d);
                     try { com.winlator.star.wayland.WaylandCompositor.nativeHdrSdrRatioSample(ratio, false); }
                     catch (Throwable ignored) {}
-                    // HUD badge: "Wayland · HDR" while HDR frames are really on screen (the compositor's
-                    // verdict: frames tagged BT2020_PQ in the last 1.5 s and, where Android reports it,
-                    // an HDR/SDR ratio above 1).
+                    // The HUD's HDR line (hudHdrCode) and the drawer row: "HDR" while HDR frames are
+                    // really on screen (the compositor's verdict: frames tagged BT2020_PQ in the last
+                    // 1.5 s and, where Android reports it, an HDR/SDR ratio above 1), "HDR (no headroom)"
+                    // after 5 s of ratio 1.00 with HDR frames on screen.
                     int state;
                     boolean toneMapped;
                     try { state = com.winlator.star.wayland.WaylandCompositor.nativeHdrState(); }
@@ -7198,10 +7217,9 @@ public class XServerDisplayActivity extends AppCompatActivity {
                     drawer.setWaylandHdrOnScreen(state == 1);
                     drawer.setWaylandHdrNoHeadroom(state == 2);
                     drawer.setWaylandHdrToneMapped(toneMapped);
-                    if (state != hudHdrState) {
-                        hudHdrState = state;
-                        if (fusionHud != null) fusionHud.setDisplayServer(hudDisplayServerLabel());
-                    }
+                    if (state != hudHdrState) { hudHdrState = state; hudChanged = true; }
+                    if (toneMapped != hudHdrToneMapped) { hudHdrToneMapped = toneMapped; hudChanged = true; }
+                    if (hudChanged && fusionHud != null) fusionHud.setHdrState(hudHdrCode());
                 }
                 hdrRatioHandler.postDelayed(this, 1000);
             }
@@ -12925,6 +12943,7 @@ return true;
         if (hudEngineShort != null) fusionHud.setEngineLabel(hudEngineShort);
         if (hudGpuName != null) fusionHud.setGpuModel(hudGpuName);
         fusionHud.setDisplayServer(hudDisplayServerLabel());
+        fusionHud.setHdrState(hudHdrCode());
         // Mega stack-layer versions: Proton/Wine, the graphics-driver wrapper package, and DX wrapper.
         if (wineInfo != null) fusionHud.setWineVersion(wineInfo.toString());
         fusionHud.setGraphicsWrapper(friendlyGraphicsWrapper());
