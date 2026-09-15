@@ -13,6 +13,8 @@
 >
 > **Commits:** `b1e9510d` core, `a361e2c3`, `68103fd0` editors merge, `8f1fefc5` composition, `23a447ee` link fix (`duplicate symbol: upscale_vert_code` → hdr_compose.c's own copy), `68fcd348` live switch + effects-format flip-flop fix (the plain base frame set the chain back to 8-bit every frame → 13 pipelines rebuilt per frame under the HDR picture), then log-text/doc commit. Quick compositor builds 34909269426 (`23a447ee`) ✅, 34910376790 (`68fcd348`) ✅.
 >
+> **Later the same night (lead):** the DXVK < 3 warning dropped (premise wrong, see (c)); brightness vars on HDR10 displays only; live headroom (see (b)); `0e746b0e` the HDR pass forgets its cached views when an image is destroyed (a reused handle could have drawn through a stale view). **Build under test: run 34911468350 ✅ on `009f69ab` (headSha verified; standard/pubg/ludashi `Bannerlator-hdr-r2-*`), quick compositor build 34911466487 ✅.** Full runs 34910378252 / 34911026074 / 34911182630 were cancelled as stale.
+>
 > **Tester note:** `docs/HDR-test-r2.md` (setup with the setting, tests A–H incl. flipping the switch on a bright scene, effects, zero-copy off, frame generation, window above, windowed, DXVK 2.4.1 on v10; expected lines per route; failure lines). Hand-over through the lead (Gamehub-Components release, with the v10 layer). **No Pocket FIT work** (user: no handheld testing right now).
 
 ## 2026-09-14 17:00 — 🌈 **HDR10 on the Wayland backend, round 1: opt-in gate + wp_color_manager_v1 + BT2020_PQ on the game's display layer** (`feat/wayland-hdr`, off `main` `4c3fb73b`; testing build for the user's Galaxy Fold, NOT for main)
