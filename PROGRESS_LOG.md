@@ -1,5 +1,35 @@
 # Star-Compose — Progress Log
 
+## 2026-09-16 — 🔀 **Merged to main: launch a game on the TV (TV tab + companion screen) + Wayland GPU spoof through a generated dxvk.conf**
+
+> **main** fast-forwarded `a1651e45` → `29c8c5f0` (= `feat/tv-launch-tab` r4, built green in CI run 35051011112), then this log entry. versionName stays 3.1.1 (vc85).
+>
+> **What's in it:**
+> - **TV tab** in a game's settings (classic shortcut dialog and the XMB mirror). It appears while an external screen is connected, or when the game is already set to use one. It reads the screen's modes and HDR support; HDR is automatic, never a question.
+> - **Launch on the TV:** `ActivityOptions.setLaunchDisplayId`, with a normal-launch fallback and toast when the system declines. Session identity comes from the display the window really landed on. Optional match-resolution and output-mode settings.
+> - **Unplug:** the game pauses and is handed back to the handheld, where it resumes. `colorMode|touchscreen|uiMode` were added to `configChanges`, so a display move no longer recreates the session.
+> - **No freeze on a TV session:** `onPause` from the handheld taking focus no longer SIGSTOPs the guest while the game is still visible on the TV.
+> - **Companion screen** on the handheld (`TvCompanionActivity`, non-focusable, own taskAffinity): game name, "Playing on <screen>", Send input back to the TV, End the game. Reopening the app during a TV game returns to it and sends input back.
+> - **HDR readouts follow the screen the game is on:** Fusion HUD and drawer. "HDR ready" is no longer shown on a panel without HDR10.
+> - **Wayland GPU spoof** delivered as a generated `dxvk.conf` (`dxgi.custom*`, `d3d9.custom*`): works on DXVK versions that ignore `DXVK_CONFIG`, and card names keep their spaces. The HUD shows "<card> spoof".
+> - The old X11 "Play on TV" is untouched (`TV_OUTPUT_ENABLED` stays false).
+>
+> **Device-proven on the Pocket FIT (Adreno 750):**
+> - launch on the TV from the Games tab with the HDR gate open for the TV;
+> - no freeze when touching the handheld (54 fps, guest stayed running, controller stayed on the TV);
+> - End the game;
+> - cable pull → pause → resumes on the handheld with sound;
+> - GPU spoof reaching DXVK 2.4.1 and the HUD label.
+>
+> **Not device-tested yet:**
+> - Home → reopen → companion + automatic input send-back;
+> - match resolution and the output-mode picker;
+> - the HUD "not on this screen" wording on r4.
+>
+> **Still open (not in this merge):**
+> - app: add `amd_ags_x64.dll` to the builtin DLLs copied into `system32` on a layer switch (the RE Engine HDR work, layer v16);
+> - new containers default to an FEXCore nightly that isn't installed.
+
 ## 2026-09-15 16:10 — 🔀 **Merged to main: Wayland performance Phase 1 + Wayland driver settings (GPU spoof) + Unreal Engine HDR with bundled dxvk-nvapi** (user: "merge it to main branch")
 
 > **main** fast-forwarded `8fd31faa` → `2541e7fb` (= `feat/wayland-gpu-spoof`, built green in CI run 35017580310; the checkpoint before it is `8fd31faa`). versionName stays 3.1.1, vc85; no DETECT_SCREEN_* permissions. Test build for the Fold: Gamehub-Components `bannerlator-wl-test-r1`.
