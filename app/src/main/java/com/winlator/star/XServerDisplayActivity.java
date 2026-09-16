@@ -1562,6 +1562,10 @@ public class XServerDisplayActivity extends AppCompatActivity {
     private void onTvDisconnected() {
         if (tvDisconnectHandled) return;
         tvDisconnectHandled = true;
+        // Straight away, not on the delay below: the game is on its way back to the handheld and the
+        // companion is a task on that same screen — left up, it would sit in front of the game it is
+        // still telling the user to watch on the TV.
+        com.winlator.star.display.TvCompanionActivity.dismiss("the session left the external display");
         // Own handler: the field one is only built partway through onCreate, and a display can go away
         // before that.
         new Handler(Looper.getMainLooper()).postDelayed(() -> {
@@ -2284,6 +2288,11 @@ public class XServerDisplayActivity extends AppCompatActivity {
         if (tvLaunchDisplayId >= 0) {
             if (onTvLaunchDisplay()) {
                 Log.i("XServerDisplayActivity", "TV: session is on display " + sessionDisplayId + ", as asked");
+                // The launcher put the handheld's companion screen up before starting us; tell it the
+                // session really did land on the TV, so it stops waiting and knows where to send input
+                // back to. This is the earliest honest answer — the window's display is known before
+                // onCreate runs — and it is the session, not the launcher, that owns the screen's life.
+                com.winlator.star.display.TvCompanionActivity.onSessionOnTv(sessionDisplayId);
             } else {
                 // Declined. This is NOT a TV session: no screen-size override, no output-mode request,
                 // and the unplug/pause watch never arms — there is no TV to lose. The user is told once
@@ -2292,6 +2301,9 @@ public class XServerDisplayActivity extends AppCompatActivity {
                 Log.w("XServerDisplayActivity", "TV: the system declined the launch on display "
                         + tvLaunchDisplayId + " — the game is on the handheld (display " + sessionDisplayId
                         + "), so this session is not a TV session");
+                // The launcher put the handheld's companion screen up before starting us, and it is now
+                // describing a TV this game is not on — with the game itself about to open behind it.
+                com.winlator.star.display.TvCompanionActivity.dismiss("the launch display was declined");
             }
         }
         // Watch the display set from here on, not from the end of setupUI: everything between the two is
@@ -5087,6 +5099,10 @@ public class XServerDisplayActivity extends AppCompatActivity {
         eaRefusalHandler.removeCallbacks(eaRefusalWatchRunnable);
         if (exiting) return;
         exiting = true;
+        // Take the handheld's companion screen down at the START of the shutdown, not at onDestroy:
+        // the save/upload phase below can run for many seconds, and the user should not be looking at
+        // "playing on the TV" while the game is being shut down.
+        com.winlator.star.display.TvCompanionActivity.dismiss("the session is ending");
         // Wayland HDR output: the session's "HDR on screen: ..." line, written while the game is still
         // connected (the compositor writes it once; onDestroy's call is the fallback).
         if (waylandMode) {
@@ -6650,6 +6666,11 @@ public class XServerDisplayActivity extends AppCompatActivity {
 
     @Override
     protected void onDestroy() {
+        // The last word on the handheld's companion screen, whatever took this session down (Exit, the
+        // game's own watcher, a recents swipe, the system). Every other dismissal is about telling the
+        // user something sooner; this one is the guarantee that nothing is left on the handheld
+        // describing a session that no longer exists. No-op when it is already gone.
+        com.winlator.star.display.TvCompanionActivity.dismiss("the session is gone");
         if (inGameControlsEditor != null) {
             inGameControlsEditor.dispose();
             inGameControlsEditor = null;

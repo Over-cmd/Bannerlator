@@ -119,6 +119,21 @@
             android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|smallestScreenSize|density|navigation"
             android:exported="false" />
 
+        <!-- The handheld's "your game is on the TV" screen, shown for as long as a session runs on an
+             external display. Its own taskAffinity so it can never be merged into the session's task
+             (both are singleTask, and a shared affinity is how a NEW_TASK launch picks the wrong one) —
+             this window has to stay on the handheld while the game's task lives on the TV. The same
+             display-move configChanges as the session: it is the screen the user is holding when a
+             cable moves, and recreating it there would only make it blink. -->
+        <activity
+            android:name="com.winlator.star.display.TvCompanionActivity"
+            android:theme="@style/AppThemeFullscreen.Dark"
+            android:launchMode="singleTask"
+            android:taskAffinity=".display.TvCompanion"
+            android:screenOrientation="sensor"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|smallestScreenSize|density|navigation|colorMode|touchscreen|uiMode"
+            android:exported="false" />
+
         <activity
             android:name="com.winlator.star.XrActivity"
             android:theme="@style/AppThemeFullscreen"

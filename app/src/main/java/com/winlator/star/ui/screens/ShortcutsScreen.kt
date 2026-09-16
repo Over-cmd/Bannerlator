@@ -9200,6 +9200,13 @@ internal fun launchOnExternalDisplay(activity: Activity, shortcut: Shortcut, int
         // was aimed at, so it can tell "the TV was unplugged" from any other configuration change.
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         intent.putExtra(com.winlator.star.display.ExternalDisplay.EXTRA_DISPLAY_ID, display.displayId)
+        // The handheld's companion screen goes up BEFORE the session, never after: Android focuses the
+        // display whose activity was started LAST, and the physical controller follows that focus - so
+        // starting it the other way round would take the pad off the TV at launch, the very problem the
+        // screen is there to explain. It carries a copy of the finished intent, which is what its "Send
+        // input back to the TV" button replays. The session takes the screen down again itself if the
+        // system declines the TV (a refusal nothing here can see) or when the game ends.
+        com.winlator.star.display.TvCompanionActivity.show(activity, shortcut.name, display, Intent(intent))
         activity.startActivity(intent, options)
         true
     } catch (_: Exception) {
@@ -9207,6 +9214,8 @@ internal fun launchOnExternalDisplay(activity: Activity, shortcut: Shortcut, int
         // start it the ordinary way, but say why the game is not on the TV. BOTH bits — the extra and
         // NEW_TASK — or the ordinary startActivity below runs a singleTask activity with a flag no
         // normal launch sets, which is its own source of odd task/back-stack behaviour.
+        // The companion went up first, so take it down: this game is about to open on the handheld.
+        com.winlator.star.display.TvCompanionActivity.dismiss("the TV launch was refused")
         intent.removeExtra(com.winlator.star.display.ExternalDisplay.EXTRA_DISPLAY_ID)
         if (!callerHadNewTask) intent.removeFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         Toast.makeText(
