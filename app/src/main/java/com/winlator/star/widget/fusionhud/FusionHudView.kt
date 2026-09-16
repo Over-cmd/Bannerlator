@@ -188,7 +188,7 @@ class FusionHudView(
     fun setDisplayServer(s: String?) { displayServer = s ?: ""; post { rebuildAndInvalidate() } }
     /** [FusionHdr] code; [FusionHdr.NONE] (the default) draws no HDR line anywhere. Any thread. */
     fun setHdrState(state: Int) {
-        val v = if (state in FusionHdr.ON..FusionHdr.TONEMAPPED) state else FusionHdr.NONE
+        val v = if (state in FusionHdr.ON..FusionHdr.NOT_ON_THIS_SCREEN) state else FusionHdr.NONE
         post { if (v != hdrState) { hdrState = v; rebuildAndInvalidate() } }
     }
     fun setWineVersion(s: String?) { wineVersion = s ?: ""; post { rebuildAndInvalidate() } }
@@ -370,22 +370,26 @@ class FusionHudView(
     private fun gap(unitPx: Float) = Span("  ", colDim, unitPx)
 
     // ---- Wayland HDR state (one line of its own; nothing at all for FusionHdr.NONE) ----
-    /** The state as a full line: "HDR", "HDR (no headroom)", "HDR off", "HDR ready", "HDR tone-mapped". */
+    /** The state as a full line: "HDR", "HDR (no headroom)", "HDR off", "HDR ready", "HDR tone-mapped",
+     *  "HDR not on this screen". */
     private fun hdrLine(px: Float): List<Span> = when (hdrState) {
         FusionHdr.ON -> listOf(Span("HDR", colHdr, px))
         FusionHdr.NO_HEADROOM -> listOf(Span("HDR", colHdr, px), Span(" (no headroom)", colBat, px))
         FusionHdr.OFF -> listOf(Span("HDR off", colDim, px))
         FusionHdr.READY -> listOf(Span("HDR ready", colDim, px))
         FusionHdr.TONEMAPPED -> listOf(Span("HDR", colDim, px), Span(" tone-mapped", colBat, px))
+        FusionHdr.NOT_ON_THIS_SCREEN -> listOf(Span("HDR", colDim, px), Span(" not on this screen", colBat, px))
         else -> emptyList()
     }
-    /** The value after an "HDR" label (Full / Mega): "on", "no headroom", "off", "ready", "tone-mapped". */
+    /** The value after an "HDR" label (Full / Mega): "on", "no headroom", "off", "ready", "tone-mapped",
+     *  "not on this screen". */
     private fun hdrValue(px: Float): List<Span> = when (hdrState) {
         FusionHdr.ON -> listOf(Span("on", colHdr, px))
         FusionHdr.NO_HEADROOM -> listOf(Span("no headroom", colBat, px))
         FusionHdr.OFF -> listOf(Span("off", colDim, px))
         FusionHdr.READY -> listOf(Span("ready", colDim, px))
         FusionHdr.TONEMAPPED -> listOf(Span("tone-mapped", colBat, px))
+        FusionHdr.NOT_ON_THIS_SCREEN -> listOf(Span("not on this screen", colBat, px))
         else -> emptyList()
     }
     private fun hdrText(): String = hdrLine(1f).joinToString("") { it.text }

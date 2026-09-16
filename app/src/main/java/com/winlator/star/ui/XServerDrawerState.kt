@@ -93,6 +93,13 @@ object XServerDrawerState {
     val waylandHdrNoHeadroom: StateFlow<Boolean> = _waylandHdrNoHeadroom
     private val _waylandHdrToneMapped     = MutableStateFlow(false)
     val waylandHdrToneMapped: StateFlow<Boolean> = _waylandHdrToneMapped
+    // Does the screen the game is on RIGHT NOW report HDR10? The gate above is decided once, at launch,
+    // and cannot be withdrawn from a running game - but the screen can change under it (the TV is
+    // unplugged and the session comes back to a panel with no HDR10, where Android tone-maps whatever we
+    // tag). Kept live by the activity's display watch so the row stops presenting the session as
+    // HDR-capable on a screen that isn't. True until something says otherwise.
+    private val _waylandHdrScreenCapable  = MutableStateFlow(true)
+    val waylandHdrScreenCapable: StateFlow<Boolean> = _waylandHdrScreenCapable
 
     private val _isMouseDisabled         = MutableStateFlow(false)
     val isMouseDisabled: StateFlow<Boolean> = _isMouseDisabled
@@ -535,6 +542,7 @@ object XServerDrawerState {
     fun setWaylandHdrOnScreen(v: Boolean)       { _waylandHdrOnScreen.value = v }
     fun setWaylandHdrNoHeadroom(v: Boolean)     { _waylandHdrNoHeadroom.value = v }
     fun setWaylandHdrToneMapped(v: Boolean)     { _waylandHdrToneMapped.value = v }
+    fun setWaylandHdrScreenCapable(v: Boolean)  { _waylandHdrScreenCapable.value = v }
     fun setIsMouseDisabled(v: Boolean)         { _isMouseDisabled.value = v }
     fun setMoveCursorToTouchpoint(v: Boolean)  { _moveCursorToTouchpoint.value = v }
     fun setGestureDragSelect(v: Boolean)          { _gestureDragSelect.value = v }
@@ -691,6 +699,7 @@ object XServerDrawerState {
         _waylandHdrOnScreen.value = false
         _waylandHdrNoHeadroom.value = false
         _waylandHdrToneMapped.value = false
+        _waylandHdrScreenCapable.value = true
         _isMouseDisabled.value = false
         _moveCursorToTouchpoint.value = false
         _gestureDragSelect.value = true

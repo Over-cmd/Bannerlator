@@ -1382,6 +1382,10 @@ private fun WaylandHdrOutputRow(state: XServerDrawerState) {
     val onScreen by state.waylandHdrOnScreen.collectAsState()
     val noHeadroom by state.waylandHdrNoHeadroom.collectAsState()
     val toneMapped by state.waylandHdrToneMapped.collectAsState()
+    // The gate is decided once at launch and cannot be withdrawn from a running game, so the row stays;
+    // this is whether the screen the game is on NOW can actually show HDR10 (the TV can be unplugged
+    // mid-session). Without it the status line below goes on claiming HDR on a panel that has none.
+    val screenCapable by state.waylandHdrScreenCapable.collectAsState()
     var checked by remember(output) { mutableStateOf(output) }
 
     Spacer(Modifier.height(6.dp))
@@ -1398,6 +1402,8 @@ private fun WaylandHdrOutputRow(state: XServerDrawerState) {
             checked && noHeadroom  -> "On, but the screen gives HDR no headroom right now: brightness at maximum, " +
                                       "or the screen is being recorded (Android turns HDR headroom off while recording)."
             checked && toneMapped  -> "On, but shown tone-mapped: frame generation on a screen with no HDR swapchain."
+            checked && !screenCapable -> "On, but this screen has no HDR10: Android tone-maps the picture for it. " +
+                                      "The game keeps the HDR it was offered until it closes."
             checked                -> "On: no HDR frames right now (is HDR on in the game's settings?)."
             onScreen || noHeadroom -> "Off, but these frames cannot be tone-mapped here: they stay HDR."
             toneMapped             -> "Off: HDR frames shown tone-mapped to SDR."

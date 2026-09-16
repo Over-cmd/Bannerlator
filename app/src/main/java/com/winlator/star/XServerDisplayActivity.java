@@ -7373,8 +7373,9 @@ public class XServerDisplayActivity extends AppCompatActivity {
      *  recording: Android turns HDR headroom off while the screen is recorded); "HDR off" while the
      *  drawer's HDR output switch is off (tone-mapped to SDR); "HDR tone-mapped" while the switch is on
      *  but the frames are tone-mapped anyway (frame generation on a screen with no HDR10 swapchain);
-     *  "HDR ready" otherwise (no HDR frames on screen right now). What is on screen wins: frames that
-     *  stay HDR with the switch off read "HDR". */
+     *  "HDR not on this screen" when the screen the game is on NOW has no HDR10 (the TV was unplugged
+     *  mid-game); "HDR ready" otherwise (no HDR frames on screen right now). What is on screen wins:
+     *  frames that stay HDR with the switch off read "HDR". */
     private volatile int hudHdrState = 0;          // WaylandCompositor.nativeHdrState()
     private volatile boolean hudHdrToneMapped = false; // WaylandCompositor.nativeHdrToneMappedOnScreen()
     private volatile boolean hudHdrGateOpen = false; // the compositor opened HDR for this session
@@ -7385,8 +7386,23 @@ public class XServerDisplayActivity extends AppCompatActivity {
         if (hudHdrState == 1) return com.winlator.star.widget.fusionhud.FusionHdr.ON;
         if (hudHdrState == 2) return com.winlator.star.widget.fusionhud.FusionHdr.NO_HEADROOM;
         if (!waylandHdrOutputOn) return com.winlator.star.widget.fusionhud.FusionHdr.OFF;
-        return hudHdrToneMapped ? com.winlator.star.widget.fusionhud.FusionHdr.TONEMAPPED
-                                : com.winlator.star.widget.fusionhud.FusionHdr.READY;
+        if (hudHdrToneMapped) return com.winlator.star.widget.fusionhud.FusionHdr.TONEMAPPED;
+        // No HDR frames on screen right now — and "ready" is only honest on a screen that could show
+        // them. The colour-manager offer to the game is fixed for the life of the session (it cannot be
+        // withdrawn from a running client), so the gate deliberately stays open after the TV is pulled;
+        // the SCREEN underneath is what changed, and on a panel with no HDR10 SurfaceFlinger tone-maps
+        // whatever we tag. The session log already says exactly that — this stops the HUD contradicting it.
+        return sessionDisplaySupportsHdr10() ? com.winlator.star.widget.fusionhud.FusionHdr.READY
+                                             : com.winlator.star.widget.fusionhud.FusionHdr.NOT_ON_THIS_SCREEN;
+    }
+
+    /** Does the display this session is on NOW report HDR10? Reads the capability
+     *  {@link #reportHdrCapability} keeps for the current display (re-read on every display move, so it
+     *  cannot go stale), and answers optimistically before the first read: an unknown display must not
+     *  contradict a gate the compositor really did open. */
+    private boolean sessionDisplaySupportsHdr10() {
+        com.winlator.star.display.DisplayHdrInfo info = hdrInfo;
+        return info == null || info.supportsHdr10;
     }
 
     /** Tell the compositor what the game's display reports (the HDR gate's input; logged on change). */
@@ -7860,6 +7876,13 @@ public class XServerDisplayActivity extends AppCompatActivity {
                 try { com.winlator.star.wayland.WaylandCompositor.nativeLogDisplay(line); }
                 catch (Throwable t) { Log.w("XServerDisplayActivity", "HDR: session-log write failed", t); }
                 if (!first) pushWaylandHdrDisplay(now); // the HDR output hears about a new display too
+                // The readouts follow the SCREEN, not the gate: once the game moves to a display with no
+                // HDR10 (the cable came out) the HUD must stop saying "HDR ready" and the drawer must
+                // stop presenting the session as HDR-capable. Nothing else refreshes them — the
+                // once-a-second sampler only pushes when the compositor's own verdict changes, and a
+                // display move changes neither of its values.
+                XServerDrawerState.INSTANCE.setWaylandHdrScreenCapable(now.supportsHdr10);
+                if (fusionHud != null) fusionHud.setHdrState(hudHdrCode());
             }
             // The Task Manager header is built once at launch; refresh it so a screen plugged in
             // mid-game updates the row instead of showing the handheld's answer for ever.

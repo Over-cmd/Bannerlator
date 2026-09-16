@@ -66,4 +66,8 @@ object FusionHdr {
     const val READY = 4        // HDR open for the session, no HDR frames on screen right now
     const val TONEMAPPED = 5   // HDR output on, but the frames are shown tone-mapped (frame generation
                                // on a screen that offers no HDR10 swapchain)
+    const val NOT_ON_THIS_SCREEN = 6 // HDR open for the session, but the screen the game is on NOW
+                               // reports no HDR10 (the TV was unplugged mid-game). The offer to the
+                               // game cannot be withdrawn once made, so the gate stays open for the
+                               // session — but "ready" would be a lie on a panel that cannot show it.
 }
