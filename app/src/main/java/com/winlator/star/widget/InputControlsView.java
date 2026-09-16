@@ -779,12 +779,21 @@ public class InputControlsView extends View {
         return (int)Mathf.roundTo(getHeight(), snappingSize);
     }
 
+    /** The profile the mouse-move timer runs for: the on-screen controls profile when one is active,
+     *  else the physical pad's lane (Players > Bind), which is used with the on-screen controls hidden.
+     *  Requiring the on-screen profile alone meant a physical stick bound to mouse movement never moved
+     *  the cursor while the OSC was off. null = neither lane active, nothing to move. */
+    static ControlsProfile mouseMoveProfile(ControlsProfile osc, ControlsProfile physical) {
+        return osc != null ? osc : physical;
+    }
+
     private void createMouseMoveTimer() {
-        if (xServer == null || profile == null) return;
+        ControlsProfile speedProfile = mouseMoveProfile(profile, physicalProfile);
+        if (xServer == null || speedProfile == null) return;
         WinHandler winHandler = xServer.getWinHandler();
         if (winHandler == null) return;
         if (mouseMoveTimer == null) {
-            final float cursorSpeed = profile.getCursorSpeed();
+            final float cursorSpeed = speedProfile.getCursorSpeed();
             mouseMoveTimer = new Timer();
             mouseMoveTimer.schedule(new TimerTask() {
                 @Override

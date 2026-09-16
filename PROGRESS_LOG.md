@@ -1,5 +1,17 @@
 # Star-Compose — Progress Log
 
+## 2026-09-16 — Fix: a physical stick bound to mouse movement now moves the cursor (branch `fix/physical-lane-mouse-move`)
+
+> **Bug (user):** in the drawer's *Physical Controller Test / Bind*, binding the right stick to mouse up/down/left/right did not move the Windows mouse or the on-screen cursor.
+>
+> **Cause:** `InputControlsView.createMouseMoveTimer()` returned early when the on-screen controls profile (`profile`) was null, and took the cursor speed from it. The physical pad's bindings live in a separate lane (`physicalProfile`, Players > Bind) that is used with the on-screen controls hidden. So the stick's mouse offsets were computed (`processControllerMappings`) but the timer that applies them never started.
+>
+> **Fix:** `mouseMoveProfile(profile, physicalProfile)` picks the on-screen profile if active, else the physical lane. The timer runs for either and uses that profile's cursor speed. Unit test added (`InputControlsViewTest`).
+>
+> **Backends:** X11 moves the X pointer (or sends relative moves through WinHandler when the game uses relative mouse). On Wayland the same X pointer moves reach the compositor through `XServer.InputSink` (`XServerDisplayActivity`), so both backends get the fix.
+>
+> **Status:** built in CI; not device-tested yet.
+
 ## 2026-09-16 — 🏁 **Wayland pre-release 9 released** (`3.1.2-wayland-pre9`) + HUD pill top line merged
 
 > **main** fast-forwarded `6e7d174b` → `be893205` (= `feat/fusion-pill-gpu-name-top`, CI run 35093274094 green): in the Fusion pill, a GPU name wider than the stats (a Wayland spoof) gets its own top line instead of stretching the capsule. Not device-tested.
