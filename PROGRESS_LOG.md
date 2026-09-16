@@ -10,7 +10,7 @@
 >
 > **Backends:** X11 moves the X pointer (or sends relative moves through WinHandler when the game uses relative mouse). On Wayland the same X pointer moves reach the compositor through `XServer.InputSink` (`XServerDisplayActivity`), so both backends get the fix.
 >
-> **Status:** built in CI; not device-tested yet.
+> **Status:** CI run 35102525936 green. ✅ **Device-proven by the user** (pre-release 9 code + this fix, pubg): a physical right stick bound to mouse movement moves the cursor with the on-screen controls hidden. Merged to main 2026-09-16.
 
 ## 2026-09-16 — 🏁 **Wayland pre-release 9 released** (`3.1.2-wayland-pre9`) + HUD pill top line merged
 
