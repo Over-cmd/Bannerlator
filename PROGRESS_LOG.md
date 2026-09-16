@@ -1,5 +1,17 @@
 # Star-Compose — Progress Log
 
+## 2026-09-16 — Fusion HUD pill: a long GPU name gets its own top line (branch `feat/fusion-pill-gpu-name-top`)
+
+> **Why (user):** in Pill size a Wayland GPU spoof name such as "Radeon RX 6800/6800 XT / 6900 XT spoof" headed the right-hand stack, so the stack's width, and with it the whole capsule, stretched to fit that one line over empty space. Asked to move it over the API label so it fills the pill.
+>
+> **Change (`FusionHudView.buildPill`):**
+> - The GPU-name line is held back while the stack is built.
+> - If it is wider than every stat line, it is placed on its own line across the top of the pill. It is left-aligned over the API caption and pulled in just far enough to clear the capsule's rounded end at that height. The body (API · FPS · clock | stats) moves down one line, and the stats set the width again.
+> - A name that fits (e.g. "Adreno 750") stays at the top of the stack exactly as before. The name is fixed per session, so the layout never jumps.
+> - `fitCapsule`'s curve maths is factored into `capsuleCurveIn` / `capsuleMargin` so the top line uses the same outline rule. Full / Tiles / Minimal are unchanged.
+>
+> **Status:** built in CI, not device-tested yet (needs a Wayland session with a GPU spoof set).
+
 ## 2026-09-16 — 🔀 **Merged to main: launch a game on the TV (TV tab + companion screen) + Wayland GPU spoof through a generated dxvk.conf**
 
 > **main** fast-forwarded `a1651e45` → `29c8c5f0` (= `feat/tv-launch-tab` r4, built green in CI run 35051011112), then this log entry. versionName stays 3.1.1 (vc85).

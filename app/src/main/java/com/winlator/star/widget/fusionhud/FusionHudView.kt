@@ -22,6 +22,7 @@ import java.util.Locale
 import java.util.function.BiConsumer
 import java.util.function.Consumer
 import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -422,16 +423,20 @@ class FusionHudView(
      * final by now, and with it the radius.
      */
     private val inkRect = android.graphics.Rect()
+    /** Clearance kept between glyph ink and the capsule outline. */
+    private fun capsuleMargin(): Float = (if (outlineIntensity > 0f) outlineIntensity * sp(3.5f) else 0f) + sp(2f)
+    /** How far the capsule's rounded end curves in over the band [top, bottom] (radius = contentH / 2). */
+    private fun capsuleCurveIn(top: Float, bottom: Float): Float {
+        val r = contentH / 2f
+        val dy = max(r - top, bottom - r)
+        if (dy <= 0f) return 0f
+        if (dy >= r) return r
+        return r - kotlin.math.sqrt(r * r - dy * dy)
+    }
     private fun fitCapsule() {
         if (contentW <= 0f || contentH <= 0f || glyphs.isEmpty()) return
-        val r = contentH / 2f
-        val margin = (if (outlineIntensity > 0f) outlineIntensity * sp(3.5f) else 0f) + sp(2f)
-        fun curveIn(top: Float, bottom: Float): Float {   // how far the rounded end curves in over [top, bottom]
-            val dy = max(r - top, bottom - r)
-            if (dy <= 0f) return 0f
-            if (dy >= r) return r
-            return r - kotlin.math.sqrt(r * r - dy * dy)
-        }
+        val margin = capsuleMargin()
+        fun curveIn(top: Float, bottom: Float): Float = capsuleCurveIn(top, bottom)
         var shift = 0f
         for (g in glyphs) {
             measurePaint.textSize = g.sizePx
@@ -714,7 +719,11 @@ class FusionHudView(
         left += Span("fps", colDim, if (generating) bigUnitPx * 0.8f else bigUnitPx)
 
         val stack = ArrayList<List<Span>>()
-        if (showGpuModel && gpuNameText().isNotBlank()) stack.add(gpuModelSpans(stkPx, colDim, compact = true))
+        // The GPU name normally heads the stack. A name wider than every stat under it (a Wayland spoof
+        // such as "Radeon RX 6800/6800 XT / 6900 XT spoof") would set the stack's width and stretch the
+        // whole capsule around empty space, so that name gets its own line across the top of the pill
+        // instead, starting over the API caption (see nameOnTop below).
+        val gpuName = if (showGpuModel && gpuNameText().isNotBlank()) gpuModelSpans(stkPx, colDim, compact = true) else null
         run {
             val l = ArrayList<Span>()
             if (showGPU) { l += Span("GPU ${s.gpuPercent ?: "—"}%", colGpu, stkPx) }
@@ -757,6 +766,11 @@ class FusionHudView(
         // the capsule's right edge as "40.3ms · Wayland · HDR (no headroom)"). Only in HDR sessions.
         if (hdrState != FusionHdr.NONE) stack.add(hdrLine(stkPx))
 
+        var statsW = 0f
+        for (l in stack) statsW = max(statsW, runWidth(l))
+        val nameOnTop = gpuName != null && runWidth(gpuName) > statsW
+        if (gpuName != null && !nameOnTop) stack.add(0, gpuName)
+
         // Left column: a small API/engine caption (DXVK/VKD3D/Zink) centred ABOVE the big FPS — mirroring
         // the clock centred BELOW it, so the left reads API · FPS · clock top-to-bottom.
         val apiStr = apiLabel()
@@ -773,23 +787,40 @@ class FusionHudView(
         for (l in stack) stackW = max(stackW, runWidth(l))
         val stackTotalH = stack.size * stkH + (stack.size - 1).coerceAtLeast(0) * stkLineGap
         val innerH = max(leftColH, stackTotalH)
+        val topLineH = if (nameOnTop) stkH + stkLineGap else 0f
         contentW = pad + leftBlockW + midGap + stackW + pad
-        contentH = pad + innerH + pad
+        contentH = pad + topLineH + innerH + pad
 
         // left column (API caption + big FPS), vertically centered as a block
-        var ly = pad + (innerH - leftColH) / 2f
+        var ly = pad + topLineH + (innerH - leftColH) / 2f
         if (hasApi) {
             placeRun(pad + (leftBlockW - apiW) / 2f, ly - ascent(stkPx), listOf(Span(apiStr, colFps, stkPx)))
             ly += apiH + apiGap
         }
         placeRun(pad + (leftBlockW - leftW) / 2f, ly - ascent(bigPx), left)
         // stack, vertically centered
-        var sy = pad + (innerH - stackTotalH) / 2f
+        var sy = pad + topLineH + (innerH - stackTotalH) / 2f
         for (l in stack) {
             placeRun(pad + leftBlockW + midGap, sy - ascent(stkPx), l)
             sy += stkH + stkLineGap
         }
         addSubtleClock(pad, pad + leftBlockW / 2f)   // clock centred under the FPS (left of the pill centre)
+        if (nameOnTop && gpuName != null) {
+            // Left-aligned over the API caption, pulled in just far enough to clear the rounded end at
+            // this height; the pill only widens if the name is wider than the API/FPS column + stats.
+            val baseline = pad - ascent(stkPx)
+            var inkTop = 0f; var inkBottom = 0f
+            for (span in gpuName) {
+                measurePaint.textSize = span.sizePx
+                measurePaint.getTextBounds(span.text, 0, span.text.length, inkRect)
+                if (inkRect.isEmpty) continue
+                inkTop = min(inkTop, inkRect.top.toFloat()); inkBottom = max(inkBottom, inkRect.bottom.toFloat())
+            }
+            val clear = capsuleCurveIn(baseline + inkTop, baseline + inkBottom) + capsuleMargin()
+            val x = max(pad, clear)
+            placeRun(x, baseline, gpuName)
+            contentW = max(contentW, x + runWidth(gpuName) + max(pad, clear))
+        }
         // HDR sessions: the extra line makes the capsule taller and its ends rounder - make sure nothing
         // crosses the outline. (Without the HDR line the pill is exactly what it always was.)
         if (hdrState != FusionHdr.NONE) fitCapsule()
