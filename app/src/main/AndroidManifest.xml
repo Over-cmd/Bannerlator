@@ -94,13 +94,21 @@
             </intent-filter>
         </activity>
 
+        <!-- colorMode|touchscreen|uiMode on top of the usual set so MOVING BETWEEN DISPLAYS does not
+             recreate the session. A game launched on a TV ("TV" tab) and then unplugged is handed back
+             to the handheld by the system; the two screens differ in HDR / wide-colour support (that is
+             the whole point of launching on the TV), which is a colorMode change, and an external
+             screen has no touchscreen and reports a TV uiMode. Any one of those not listed here tears
+             the activity down and restarts the whole guest — device-observed as "a fresh Wayland
+             session log, then program disconnected" when the cable came out. Handled instead by
+             onConfigurationChanged + the display listener, which pause the game and keep it alive. -->
         <activity
             android:name="com.winlator.star.XServerDisplayActivity"
             android:theme="@style/AppThemeFullscreen"
             android:launchMode="singleTask"
             android:supportsPictureInPicture="true"
             android:screenOrientation="sensorLandscape"
-            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|smallestScreenSize|density|navigation"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|smallestScreenSize|density|navigation|colorMode|touchscreen|uiMode"
             android:exported="true" />
 
         <activity
