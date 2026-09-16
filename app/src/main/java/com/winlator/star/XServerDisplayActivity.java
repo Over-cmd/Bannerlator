@@ -3057,6 +3057,13 @@ public class XServerDisplayActivity extends AppCompatActivity {
     public void onResume() {
         super.onResume();
 
+        // A TV session that was paused but never stopped is in front again, so the teardown onPause
+        // handed to onStop is moot — and there is nothing for the restore below to undo, because
+        // nothing was ever suspended. It still runs, unchanged: every call in it is idempotent (SIGCONT
+        // to a process that was never stopped, a GL thread told to resume when it never paused, a perf
+        // profile re-applied), which is what keeps the two sides symmetric without a second flag.
+        tvSuspendDeferred = false;
+
         if (environment != null) {
             xServerView.onResume();
             environment.onResume();
@@ -3066,6 +3073,10 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // Android hides clipboard changes from background apps: re-read it now we're in front.
         if (waylandClipboard != null) waylandClipboard.refresh();
         startTime = System.currentTimeMillis();
+        // Exactly one playtime ticker however we got here: the runnable re-posts itself, and a TV
+        // session that was paused without ever being stopped never ran onPause's removeCallbacks, so
+        // posting blind would leave a second chain running for the rest of the session.
+        handler.removeCallbacks(savePlaytimeRunnable);
         handler.postDelayed(savePlaytimeRunnable, SAVE_INTERVAL_MS);
         ProcessHelper.resumeAllWineProcesses();
         // Returning to the foreground unconditionally resumes the guest (above) — keep the paused
@@ -3114,6 +3125,47 @@ public class XServerDisplayActivity extends AppCompatActivity {
         if (inGameControlsEditor != null) inGameControlsEditor.save();
         super.onPause();
 
+        // A session playing on the TV is PAUSED the moment ANOTHER activity of this app comes to the
+        // front on the handheld — the games list the user was left looking at, and now the companion
+        // screen — while the game is still fully on screen over there. Device-proven on the Pocket FIT:
+        // a touch alone leaves the guest running (S<s), but MainActivity on display 0 SIGSTOPs it (T<s)
+        // at once, which is the user's "the game freezes but the audio keeps playing".
+        //
+        // So a pause on its own is NOT the signal to tear a session down: hand the whole teardown to
+        // onStop, the callback that really does mean this session has left the screen. Nothing at all
+        // happens here — not even releasing held inputs, because the pad is still playing the game over
+        // on the TV. If a build genuinely stops us, everything below still runs, one callback later.
+        // PiP is untouched (it has always frozen the guest) and a session on its way out tears down
+        // here as before — there is no onStop worth waiting for.
+        if (!isInPictureInPictureMode() && onTvLaunchDisplay() && !isFinishing() && !isDestroyed()) {
+            tvSuspendDeferred = true;
+            Log.i("XServerDisplayActivity", "TV: paused but still on display " + sessionDisplayId
+                    + " — leaving the game running");
+            return;
+        }
+
+        suspendSessionForBackground();
+    }
+
+    /**
+     * Set when {@link #onPause} handed a TV session's teardown to {@link #onStop}. Cleared by whichever
+     * callback arrives next — onStop does the work, onResume means the session never left the screen.
+     */
+    private boolean tvSuspendDeferred = false;
+
+    /**
+     * Freeze the guest and drop everything that must not keep running while this session is off screen:
+     * exactly what {@link #onPause} used to do inline, unchanged, so the two callers cannot drift.
+     *
+     * <p>The restore side stays where it has always been, in {@link #onResume} (which always follows
+     * onStart), and stays unconditional: every call in it is idempotent — SIGCONT to a process that was
+     * never stopped, {@code GLSurfaceView.onResume} on a thread that never paused, a perf profile
+     * re-applied — and PiP relies on it running after a pause this method never saw.
+     */
+    private void suspendSessionForBackground() {
+        // Nothing may stay held while the guest is frozen: a button still down when the game stops
+        // answering comes back pressed. (Deliberately NOT done for a TV session that is only paused —
+        // the game is still on screen and the controller is still playing it.)
         if (inputControlsView != null) inputControlsView.releaseAllInputs();
         if (touchpadView != null) touchpadView.releaseAllInputs();
         if (winHandler != null && inputControlsView != null) winHandler.releaseAllControllerInputs();
@@ -3136,7 +3188,8 @@ public class XServerDisplayActivity extends AppCompatActivity {
             // so the external display reads as paused (not a frozen frame) while the user is away.
             if (externalDisplayController != null) externalDisplayController.setPaused(true);
             // Mark a real background so onResume rebuilds the audio sink (the AAudio route dies while
-            // backgrounded, on TV or handheld). Distinct from PiP/dialog pauses, which don't set this.
+            // backgrounded, on TV or handheld). Distinct from PiP/dialog pauses, which don't set this —
+            // and, since the TV path only gets here from onStop, from a focus flicker on the handheld.
             wasBackgrounded = true;
         }
 
@@ -6694,6 +6747,18 @@ public class XServerDisplayActivity extends AppCompatActivity {
     @Override
     protected void onStop() {
         super.onStop();
+        // The teardown onPause handed over for a session playing on the TV. onStop is the callback that
+        // means "no longer visible to the user", so reaching it says the session really did leave the
+        // screen — a home press, another app taking the TV, the system stopping us — and the guest must
+        // freeze after all. The log line is deliberate: if a game on the TV still freezes when the
+        // handheld is touched, this line in logcat is the proof that this build stops the session
+        // instead of only pausing it, which no code in here can tell apart any earlier.
+        if (tvSuspendDeferred) {
+            tvSuspendDeferred = false;
+            Log.i("XServerDisplayActivity", "TV: stopped while on display " + sessionDisplayId
+                    + " — freezing the game after all");
+            suspendSessionForBackground();
+        }
         // Belt-and-suspenders: also drop controller-test isolation on stop (see onPause).
         controllerTestActive = false;
         savePlaytimeData();
