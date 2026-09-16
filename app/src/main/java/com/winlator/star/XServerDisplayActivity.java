@@ -192,13 +192,22 @@ public class XServerDisplayActivity extends AppCompatActivity {
     private com.winlator.star.display.ExternalDisplayController externalDisplayController;
     // "Launch this game on the TV" (com.winlator.star.display.ExternalDisplay — the per-game TV tab, NOT
     // the frozen controller above). The launcher started this activity with setLaunchDisplayId(id) and
-    // passed the same id as EXTRA_DISPLAY_ID, so the session knows which screen it was aimed at; -1 for
-    // every ordinary handheld launch. sessionDisplayId is where the window actually IS, re-read whenever
-    // the configuration or the display set changes — losing the launch display is what "the cable came
-    // out" looks like from in here, and it pauses the game instead of letting it die.
+    // passed the same id as EXTRA_DISPLAY_ID, so the session knows which screen it was ASKED for; -1 for
+    // every ordinary handheld launch.
+    //
+    // The extra is the REQUEST, never the answer: Android can decline a launch display silently — no
+    // exception for the launcher to catch, the activity is simply created on the handheld instead. So
+    // nothing keys off tvLaunchDisplayId on its own. sessionDisplayId is where the window actually IS
+    // (read from the activity's own display, re-read whenever the configuration or the display set
+    // changes) and onTvLaunchDisplay() is the single question every TV decision asks. A declined launch
+    // is an ordinary handheld session that happens to know which screen it was refused: no TV settings,
+    // and no unplug watch, because it has no TV to lose.
     private int tvLaunchDisplayId = -1;
     private int sessionDisplayId = android.view.Display.DEFAULT_DISPLAY;
     private boolean tvDisconnectHandled = false;
+    // Set in onCreate when the launch display was refused; the user is told once, from setupUI.
+    private boolean tvLaunchDeclined = false;
+    private boolean tvLaunchDeclinedNotified = false;
     // Set on a real background (onPause outside PiP) so onResume rebuilds the guest audio sink.
     private boolean wasBackgrounded = false;
     // Mid-game output-route watcher: plugging/unplugging wired (or USB/BT/HDMI) headphones during play
@@ -1501,12 +1510,26 @@ public class XServerDisplayActivity extends AppCompatActivity {
     }
 
     /**
+     * Is this session's window really on the external display it was launched on?
+     *
+     * <p>The one question every TV decision asks — the screen-size override, the output mode, the
+     * unplug watch. Deliberately NOT "was a TV asked for": {@code ActivityOptions.setLaunchDisplayId}
+     * is a request the system may decline without throwing, and a declined session runs on the handheld
+     * while the intent extra still names the TV. Derived from {@link #sessionDisplayId} rather than
+     * cached, so it cannot go stale when the window moves.
+     */
+    private boolean onTvLaunchDisplay() {
+        return tvLaunchDisplayId >= 0 && sessionDisplayId == tvLaunchDisplayId;
+    }
+
+    /**
      * Re-read the display this session's window is on and, when it has left the screen it was launched
      * on, pause the game rather than let it run on (or die on) a screen that is gone.
      *
      * <p>Android moves the task back to the default display by itself when an external display is
-     * unplugged — we deliberately do NOT move it, we only notice and pause. Only a session that was
-     * actually AIMED at a TV can "lose" one, so an ordinary handheld launch never trips this.
+     * unplugged — we deliberately do NOT move it, we only notice and pause. Only a session whose window
+     * really WAS on the TV can lose one, so neither an ordinary handheld launch nor a declined TV launch
+     * ever trips this.
      */
     private void checkSessionDisplay(String why) {
         int now;
@@ -1517,12 +1540,14 @@ public class XServerDisplayActivity extends AppCompatActivity {
         }
         if (now == sessionDisplayId) return;
         int from = sessionDisplayId;
+        // Asked BEFORE sessionDisplayId moves on: this is "the window was on the TV until a moment ago".
+        boolean wasOnTvLaunchDisplay = onTvLaunchDisplay();
         sessionDisplayId = now;
         Log.i("XServerDisplayActivity", "TV: session moved from display " + from + " to " + now + " [" + why + "]");
         // The compositor's HDR gate is decided from the display the window is on, so the new screen's
         // capability has to be re-read (and pushed to the compositor) before anything else looks at it.
         reportHdrCapability("session moved to display " + now);
-        if (tvLaunchDisplayId >= 0 && from == tvLaunchDisplayId) onTvDisconnected();
+        if (wasOnTvLaunchDisplay) onTvDisconnected();
     }
 
     /**
@@ -2248,13 +2273,32 @@ public class XServerDisplayActivity extends AppCompatActivity {
         componentInstallerExe = getIntent().getStringExtra("component_installer_exe");
         waylandMode = getIntent().getBooleanExtra("wayland_mode", false);
         // "Launch this game on the TV": the launcher aimed this session at an external display and told
-        // us which one. Read before anything reads the display, so the screen-size and HDR decisions
-        // below are made about the TV and not about the handheld panel.
+        // us which one. That extra is only what was ASKED for — the system can decline a launch display
+        // without anything throwing — so read where the window really ended up and decide from that.
+        // It is knowable here: an activity is attached to its display before onCreate runs, so
+        // getDisplay() (API 30+, else the activity's WindowManager default display) already answers the
+        // real screen, early enough for the screen-size decision further down.
         tvLaunchDisplayId = getIntent().getIntExtra(
                 com.winlator.star.display.ExternalDisplay.EXTRA_DISPLAY_ID, -1);
-        // Baseline for the "did we move?" check, so a configuration change arriving before setupUI
-        // cannot read the default display as a move away from the TV.
         sessionDisplayId = com.winlator.star.display.ExternalDisplay.currentDisplayId(this);
+        if (tvLaunchDisplayId >= 0) {
+            if (onTvLaunchDisplay()) {
+                Log.i("XServerDisplayActivity", "TV: session is on display " + sessionDisplayId + ", as asked");
+            } else {
+                // Declined. This is NOT a TV session: no screen-size override, no output-mode request,
+                // and the unplug/pause watch never arms — there is no TV to lose. The user is told once
+                // from setupUI, where the toast host is up.
+                tvLaunchDeclined = true;
+                Log.w("XServerDisplayActivity", "TV: the system declined the launch on display "
+                        + tvLaunchDisplayId + " — the game is on the handheld (display " + sessionDisplayId
+                        + "), so this session is not a TV session");
+            }
+        }
+        // Watch the display set from here on, not from the end of setupUI: everything between the two is
+        // the whole container setup (and on a portrait container setupUI waits for the orientation flip
+        // as well), so a cable pulled in that window used to go unnoticed until the next resume or
+        // configuration change. Idempotent — startHdrCapabilityReport() calls it again and it no-ops.
+        registerDisplayWatch();
 
         // Log shortcut_path
         String shortcutPath = getIntent().getStringExtra("shortcut_path");
@@ -2647,15 +2691,17 @@ public class XServerDisplayActivity extends AppCompatActivity {
         } catch (Exception ignored) {}
 
         // "Match the TV's resolution" (per game, TV tab): render at the display's own resolution instead
-        // of this game's screen size. Only for a session actually aimed at a TV, and only for THIS
-        // session — the shortcut's screenSize extra is never rewritten, so unplugging the TV and
-        // launching again gives the game its own resolution back. The output mode the user picked wins
-        // over the display's current one: that is the resolution the TV is being asked to run at.
-        if (tvLaunchDisplayId >= 0 && shortcut != null
+        // of this game's screen size. Only when the window really IS on the TV — a declined launch is an
+        // ordinary handheld session and must keep the game's own size, or it would render at the TV's
+        // resolution on the phone. The display is read by the session's actual id for the same reason.
+        // Only for THIS session, too: the shortcut's screenSize extra is never rewritten, so unplugging
+        // the TV and launching again gives the game its own resolution back. The output mode the user
+        // picked wins over the display's current one: that is the resolution the TV is being asked for.
+        if (onTvLaunchDisplay() && shortcut != null
                 && com.winlator.star.display.ExternalDisplay.matchResolution(shortcut)) {
             try {
                 android.view.Display tvDisplay =
-                        com.winlator.star.display.ExternalDisplay.byId(this, tvLaunchDisplayId);
+                        com.winlator.star.display.ExternalDisplay.byId(this, sessionDisplayId);
                 String tvSize = com.winlator.star.display.ExternalDisplay.resolutionOf(
                         com.winlator.star.display.ExternalDisplay.effectiveMode(tvDisplay,
                                 com.winlator.star.display.ExternalDisplay.modeId(shortcut)));
@@ -7383,9 +7429,11 @@ public class XServerDisplayActivity extends AppCompatActivity {
         @Override public void onDisplayRemoved(int displayId) {
             // The removal is the FIRST notice that a TV went away — the window's own display id still
             // reads as the dead one until the system finishes handing the task back, so this cannot
-            // wait for onConfigurationChanged. A session launched on that display pauses now; the
-            // capability re-read below then runs against whatever we ended up on.
-            if (tvLaunchDisplayId >= 0 && displayId == tvLaunchDisplayId) {
+            // wait for onConfigurationChanged. A session whose window is ON that display pauses now; the
+            // capability re-read below then runs against whatever we ended up on. onTvLaunchDisplay()
+            // and not the requested id: a session the system refused to put on the TV is already running
+            // on the handheld, and pulling that TV's cable must not pause it.
+            if (displayId == tvLaunchDisplayId && onTvLaunchDisplay()) {
                 Log.i("XServerDisplayActivity", "TV: launch display " + displayId + " removed");
                 onTvDisconnected();
             }
@@ -7395,7 +7443,19 @@ public class XServerDisplayActivity extends AppCompatActivity {
         @Override public void onDisplayChanged(int displayId) { reportHdrCapability("display changed"); }
     };
 
-    private void startHdrCapabilityReport() {
+    /**
+     * Register the one display watch this session has (HDR capability + the TV unplug path above).
+     * Split out of {@link #startHdrCapabilityReport()} so onCreate can arm it before the container
+     * setup begins: setupUI, where the report itself starts, can be a long way off — and on a portrait
+     * container it does not run until the orientation flips — which used to leave a cable pulled during
+     * setup unnoticed until the next resume or configuration change.
+     *
+     * <p>Idempotent: the manager field doubles as the "already registered" flag, so the onCreate call
+     * and {@link #startHdrCapabilityReport()}'s cannot register twice. Unregistered where it always
+     * was, in {@link #stopHdrCapabilityReport()} (onDestroy runs it even for a launch that bails early).
+     */
+    private void registerDisplayWatch() {
+        if (hdrDisplayManager != null) return;
         try {
             hdrDisplayManager = (android.hardware.display.DisplayManager)
                     getSystemService(android.content.Context.DISPLAY_SERVICE);
@@ -7405,6 +7465,10 @@ public class XServerDisplayActivity extends AppCompatActivity {
         } catch (Throwable t) {
             Log.w("XServerDisplayActivity", "HDR: display listener unavailable", t);
         }
+    }
+
+    private void startHdrCapabilityReport() {
+        registerDisplayWatch();
         reportHdrCapability("session start");
         if (waylandMode && waylandHdrMode != com.winlator.star.wayland.WaylandCompositor.HDR_MODE_OFF)
             startHdrRatioSampler();
@@ -9016,14 +9080,13 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // Wayland mode: overlay the embedded compositor's SurfaceView on top of the (idle) X view,
         // and start the compositor rendering into it. winewayland.drv connects to its socket.
         if (waylandMode) startWaylandCompositor(rootView);
-        // "Launch this game on the TV": remember the screen this session is really on and ask the TV for
-        // the output mode the user picked. Seeded HERE, in setupUI, and not in onCreate — the container
-        // and the shortcut only exist by now, and the window is attached, so currentDisplayId() is the
-        // session's real display rather than a default read too early.
-        sessionDisplayId = com.winlator.star.display.ExternalDisplay.currentDisplayId(this);
-        if (tvLaunchDisplayId >= 0) {
-            Log.i("XServerDisplayActivity", "TV: session launched on display " + tvLaunchDisplayId
-                    + " (window is on " + sessionDisplayId + ")");
+        // "Launch this game on the TV": re-read the display the window is on now that it is attached,
+        // then ask the TV for the output mode the user picked — but only when the window really is on
+        // the TV. The re-read goes through checkSessionDisplay so a cable pulled between onCreate and
+        // here (the whole container setup) takes the normal unplug path instead of being mistaken for a
+        // refusal; it is a no-op when nothing moved.
+        checkSessionDisplay("UI ready");
+        if (onTvLaunchDisplay()) {
             int tvModeId = com.winlator.star.display.ExternalDisplay.modeId(shortcut);
             if (tvModeId > 0) {
                 // The window's preferred mode is what asks the display to switch; 0 leaves the TV on
@@ -9036,6 +9099,16 @@ public class XServerDisplayActivity extends AppCompatActivity {
                     Log.w("XServerDisplayActivity", "TV: output mode " + tvModeId + " refused", t);
                 }
             }
+        } else if (tvLaunchDeclined && !tvLaunchDeclinedNotified) {
+            // The game was aimed at the TV and came up on the handheld. Silent refusal otherwise: the
+            // launcher's catch never fires for it, so this is the only place the user hears about it.
+            // Once per session, and safe this early — the toast is state the host shows when it composes.
+            tvLaunchDeclinedNotified = true;
+            try {
+                XServerDialogState.INSTANCE.showInfoToast(
+                        "TV LAUNCH REFUSED", "handheld",
+                        "The system wouldn't open this game on the TV. It's running on the handheld screen.");
+            } catch (Throwable ignored) {}
         }
         startHdrCapabilityReport();
 

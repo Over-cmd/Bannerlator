@@ -9192,6 +9192,9 @@ internal fun launchOnExternalDisplay(activity: Activity, shortcut: Shortcut, int
     if (!com.winlator.star.display.ExternalDisplay.launchOnTv(shortcut)) return false
     val display = com.winlator.star.display.ExternalDisplay.find(activity) ?: return false
     val options = com.winlator.star.display.ExternalDisplay.launchOptions(display.displayId) ?: return false
+    // The caller's intent is handed back to it untouched if this fails, so remember what it built:
+    // NEW_TASK is ours to add for the TV launch, and ours to take away again.
+    val callerHadNewTask = (intent.flags and Intent.FLAG_ACTIVITY_NEW_TASK) != 0
     return try {
         // A task on another display needs its own task; the session also has to be told WHICH display it
         // was aimed at, so it can tell "the TV was unplugged" from any other configuration change.
@@ -9201,8 +9204,11 @@ internal fun launchOnExternalDisplay(activity: Activity, shortcut: Shortcut, int
         true
     } catch (_: Exception) {
         // Refused (an untrusted/private display, a vendor policy): drop the TV bits and let the caller
-        // start it the ordinary way, but say why the game is not on the TV.
+        // start it the ordinary way, but say why the game is not on the TV. BOTH bits — the extra and
+        // NEW_TASK — or the ordinary startActivity below runs a singleTask activity with a flag no
+        // normal launch sets, which is its own source of odd task/back-stack behaviour.
         intent.removeExtra(com.winlator.star.display.ExternalDisplay.EXTRA_DISPLAY_ID)
+        if (!callerHadNewTask) intent.removeFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         Toast.makeText(
             activity,
             "Couldn't start this game on ${com.winlator.star.display.ExternalDisplay.title(display)} — opening on the handheld instead.",
