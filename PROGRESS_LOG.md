@@ -1,5 +1,20 @@
 # Star-Compose — Progress Log
 
+## 2026-09-16 — 🏁 **Wayland pre-release 9 released** (`3.1.2-wayland-pre9`) + HUD pill top line merged
+
+> **main** fast-forwarded `6e7d174b` → `be893205` (= `feat/fusion-pill-gpu-name-top`, CI run 35093274094 green): in the Fusion pill, a GPU name wider than the stats (a Wayland spoof) gets its own top line instead of stretching the capsule. Not device-tested.
+>
+> **Pre-release 9:** branch `release/3.1.2-wayland-pre9` off `be893205` → `70709a95` (versionName `3.1.2-wayland-pre9`, `docs/releases/3.1.2-wayland-pre9.md` with pre9 open and pre8 and older collapsed, kit README) → `497b3f88` (release.yml branch-only step attaching the **v16** layer from proton-wine run 35051048569, sha `28d8c360…ba87`, plus the AIO HDR card and README, server-side). Annotated tag `3.1.2-wayland-pre9` → `497b3f88`; release.yml run 35094728985 with `make_prerelease=true`. Not offered in-app; 3.1.1 stays Latest.
+>
+> **Headline:**
+> - TV launch;
+> - Wayland performance phase 1: Vulkan +9%, D3D12 +12%, DirectDraw +20% on the Pocket FIT copy path;
+> - Wayland GPU name spoof through a generated dxvk.conf;
+> - Unreal Engine HDR helper;
+> - RE Engine HDR via an AMD spoof + v16's builtin AGS. Resident Evil 3 asks "Enable HDR?" and AGS reports Stage 7 / HDR10 1, proven on the handheld today; not yet seen on an HDR screen.
+>
+> **This commit on main:** the pre9 notes file and kit README only; versionName stays 3.1.1.
+
 ## 2026-09-16 — Fusion HUD pill: a long GPU name gets its own top line (branch `feat/fusion-pill-gpu-name-top`)
 
 > **Why (user):** in Pill size a Wayland GPU spoof name such as "Radeon RX 6800/6800 XT / 6900 XT spoof" headed the right-hand stack, so the stack's width, and with it the whole capsule, stretched to fit that one line over empty space. Asked to move it over the API label so it fills the pill.
