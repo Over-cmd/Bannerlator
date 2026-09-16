@@ -7307,17 +7307,24 @@ public class XServerDisplayActivity extends AppCompatActivity {
         }
     }
 
-    /** Wayland: the driver config's GPU name spoof and memory cap, handed to DXVK through DXVK_CONFIG
-     *  (core.GpuSpoof) — the X11 wrapper that reads WRAPPER_* isn't on this path. Launch worker thread,
-     *  after the user's env vars are merged, so a key they set in DXVK_CONFIG or DXVK_CONFIG_FILE wins.
-     *  WRAPPER_DEVICE_NAME / _ID / WRAPPER_VENDOR_ID stay exported (from the exact list entry) for the
-     *  Wayland Turnip to read later. One "gpu" line in the session log; none when neither is set. */
+    /** The dxvk.conf this session generates, in the container's own directory. Rewritten every launch,
+     *  and pointed at with DXVK_CONFIG_FILE — an absolute Android path, which is what DXVK opens (the
+     *  same kind of path WINEPREFIX and DXVK_STATE_CACHE_PATH already carry). */
+    private static final String DXVK_GENERATED_CONF = "dxvk-generated.conf";
+
+    /** Wayland: the driver config's GPU name spoof and memory cap, delivered to DXVK as a generated
+     *  dxvk.conf (DXVK_CONFIG_FILE) plus the ids in DXVK_CONFIG — core.GpuSpoof says why it takes both
+     *  routes and why the name can only ride the file. The X11 wrapper that reads WRAPPER_* isn't on
+     *  this path. Launch worker thread, after the user's env vars are merged, so a key they set in
+     *  DXVK_CONFIG or a config file of their own wins. WRAPPER_DEVICE_NAME / _ID / WRAPPER_VENDOR_ID
+     *  stay exported (from the exact list entry) for the Wayland Turnip to read later. One "gpu" line
+     *  in the session log, saying what each route actually carried; none when neither is set. */
     private void applyWaylandGpuSpoofEnv(EnvVars envVars) {
         try {
-            String gpuName = graphicsDriverConfig != null ? graphicsDriverConfig.get("gpuName") : null;
+            String gpuName = requestedWaylandGpuSpoof();   // null unless this session asks for a spoof
             int memMb = 0;
             try { memMb = Integer.parseInt(graphicsDriverConfig.get("maxDeviceMemory")); } catch (Exception ignored) {}
-            boolean spoofing = com.winlator.star.core.GpuSpoof.isSpoofing(gpuName);
+            boolean spoofing = gpuName != null;
             if (!spoofing && memMb <= 0) return;
             com.winlator.star.core.GpuSpoof.Card card = spoofing ? com.winlator.star.core.GpuSpoof.find(this, gpuName) : null;
             StringBuilder said = new StringBuilder();
@@ -7346,20 +7353,87 @@ public class XServerDisplayActivity extends AppCompatActivity {
             java.util.LinkedHashMap<String, String> ours = com.winlator.star.core.GpuSpoof.dxvkOptions(card, memMb);
             if (!ours.isEmpty()) {
                 String existing = envVars.has("DXVK_CONFIG") ? envVars.get("DXVK_CONFIG") : "";
-                String file = com.winlator.star.core.GpuSpoof.readConfigFile(
-                        envVars.has("DXVK_CONFIG_FILE") ? envVars.get("DXVK_CONFIG_FILE") : null);
-                com.winlator.star.core.GpuSpoof.Merge m = com.winlator.star.core.GpuSpoof.mergeDxvkConfig(existing, file, ours);
+                String userPath = envVars.has("DXVK_CONFIG_FILE") ? envVars.get("DXVK_CONFIG_FILE") : null;
+                String userFile = com.winlator.star.core.GpuSpoof.readConfigFile(userPath);
+                com.winlator.star.core.GpuSpoof.Merge m =
+                        com.winlator.star.core.GpuSpoof.mergeDxvkConfig(existing, userFile, ours);
+
+                // Route 1 — the generated config file. The only route that can carry a GPU name: a
+                // quoted value is what DXVK's file parser is written for, while the same name sent
+                // through the environment never reached the game (core.GpuSpoof). A config file of
+                // the user's own is folded in underneath ours, not replaced; when it can't be read from
+                // the Android side we leave DXVK_CONFIG_FILE pointing at it and go with the environment
+                // alone, since hijacking it would take their whole config away. This also takes over
+                // from a dxvk.conf sitting in the game's folder, which DXVK reads only while
+                // DXVK_CONFIG_FILE is unset — the trade for a spoof that actually arrives.
+                String wrote = null, noFile = null;
+                if (com.winlator.star.core.GpuSpoof.isConfigFilePath(userPath) && userFile == null) {
+                    noFile = "your config file " + userPath + " can't be read from here, so it stays in charge";
+                } else if (container == null) {
+                    noFile = "no container directory to write one in";
+                } else {
+                    File conf = new File(container.getRootDir(), DXVK_GENERATED_CONF);
+                    String path = conf.getPath();
+                    if (!com.winlator.star.core.GpuSpoof.envSafe(path))
+                        noFile = path + " can't go through the environment";
+                    else if (!FileUtils.writeString(conf,
+                            com.winlator.star.core.GpuSpoof.configFileText(m.options, userPath, userFile)))
+                        noFile = "couldn't write " + path;
+                    else { envVars.put("DXVK_CONFIG_FILE", path); wrote = path; }
+                }
+
+                // Route 2 — the ids and the memory cap, whitespace-free so they survive the trip.
                 if (!m.value.isEmpty()) envVars.put("DXVK_CONFIG", m.value);
-                if (card != null) said.append(" via DXVK_CONFIG (dxgi + d3d9)");
-                if (memMb > 0) said.append(said.length() > 0 ? ", " : "").append("memory cap ").append(memMb)
-                        .append(" MB").append(card != null ? "" : " via DXVK_CONFIG").append(" (dxgi.maxDeviceMemory)");
+
+                // Only a name that really went out may reach the app's own readouts: the HUD and the
+                // Task Manager must never name a GPU the game was not told about. A name of the user's
+                // own is in m.kept instead of m.options, and theirs is the one the game will report.
+                if (wrote != null && m.options.containsKey(com.winlator.star.core.GpuSpoof.KEY_DXGI_DEVICE_DESC)) {
+                    deliveredGpuSpoofName = gpuName;
+                    // The Task Manager's CONTAINER block was built in setupUI, long before this ran —
+                    // rebuild it so the GPU-name row appears (the HDR row refreshes the same way).
+                    runOnUiThread(() -> XServerDialogState.INSTANCE.setTmContainerInfo(buildTmContainerInfo()));
+                }
+
+                // What each route actually carried. The line used to claim a DXVK_CONFIG delivery for
+                // the name that the game never saw, which is how the spoof stayed broken so long.
+                StringBuilder how = new StringBuilder();
+                if (wrote != null) how.append(wrote).append(" (")
+                        .append(String.join(", ", m.options.keySet())).append(')');
+                if (!m.added.isEmpty()) how.append(how.length() > 0 ? " + " : "")
+                        .append("DXVK_CONFIG (").append(String.join(", ", m.added)).append(')');
+                said.append(how.length() > 0 ? " via " : " NOT delivered: nothing could be written").append(how);
+                if (noFile != null) said.append("; no generated config file: ").append(noFile);
+                if (memMb > 0) said.append(", memory cap ").append(memMb).append(" MB (dxgi.maxDeviceMemory)");
                 if (!m.kept.isEmpty()) said.append("; yours kept: ").append(String.join(", ", m.kept));
+                // DXVK only started reading DXVK_CONFIG in 2.5 (2.4.1 ignores it outright, device-proven),
+                // so on an older one the file is the whole delivery and the environment is dead weight.
+                String dxvkVersion = dxwrapperConfig != null ? dxwrapperConfig.get("version") : null;
+                if (dxvkVersion != null && !dxvkVersion.isEmpty() && compareVersion(dxvkVersion, "2.5") < 0)
+                    said.append("; DXVK ").append(dxvkVersion).append(" ignores DXVK_CONFIG (2.5 and up read it)");
             }
             logSessionLine("gpu", said.toString());
         } catch (Throwable t) {
             Log.w("XServerDisplayActivity", "wayland: GPU name spoof failed", t);
         }
     }
+
+    /** The GPU name the Wayland driver settings ask this session to report, or null when it asks for
+     *  none — what the launch path above tries to deliver, read the same way it reads every other
+     *  graphicsDriverConfig key (the shortcut's override is already folded into that field). */
+    private String requestedWaylandGpuSpoof() {
+        if (!waylandMode) return null;
+        String gpuName = graphicsDriverConfig != null ? graphicsDriverConfig.get("gpuName") : null;
+        return com.winlator.star.core.GpuSpoof.isSpoofing(gpuName) ? gpuName : null;
+    }
+
+    /** The GPU name this session actually got out to the game, or null when the game sees the real
+     *  adapter — set by applyWaylandGpuSpoofEnv only once the name is written where DXVK will read it,
+     *  so the app's readouts follow the delivery instead of the setting. This exists at all because
+     *  Wayland hands the spoof to DXVK and nothing renames the Vulkan device: every query the app makes
+     *  still answers with the real chip. On X11 the wrapper's ICD does the renaming, so the readouts
+     *  are handed the spoofed name already and this stays null. Launch worker writes, UI thread reads. */
+    private volatile String deliveredGpuSpoofName = null;
 
     /** The HUD's display-server label: "X11" / "Wayland" (the HDR state has a line of its own). */
     private String hudDisplayServerLabel() {
@@ -7989,6 +8063,10 @@ public class XServerDisplayActivity extends AppCompatActivity {
                         if (gameNativeHud != null) gameNativeHud.setGpuModel(hudGpuName);
                         if (fusionHud != null) fusionHud.setGpuModel(hudGpuName);
                     }
+                    // The name above is the adapter the COMPOSITOR is really on. When the session got a
+                    // spoof out to the game, the Fusion HUD names that instead — the X11 HUD shows the
+                    // spoof already, because there the wrapper renames the Vulkan device itself.
+                    if (fusionHud != null) fusionHud.setGpuSpoofName(deliveredGpuSpoofName);
                     // Respect the master toggle, like the _MESA_DRV binding does.
                     if (!hudCounterEnabled) return;
                     if (perfHud != null) perfHud.setVisibility(View.VISIBLE);
@@ -13625,6 +13703,10 @@ return true;
         fusionHud.applyConfig(fpsConfigString);
         if (hudEngineShort != null) fusionHud.setEngineLabel(hudEngineShort);
         if (hudGpuName != null) fusionHud.setGpuModel(hudGpuName);
+        // A HUD built (or rebuilt, on a style switch) mid-session picks up the GPU-name spoof this
+        // session delivered, the same way it picks up the display server; null on X11, on an unspoofed
+        // session and on one whose spoof never got out, so the GPU row is what it always was.
+        fusionHud.setGpuSpoofName(deliveredGpuSpoofName);
         fusionHud.setDisplayServer(hudDisplayServerLabel());
         fusionHud.setHdrState(hudHdrCode());
         // Mega stack-layer versions: Proton/Wine, the graphics-driver wrapper package, and DX wrapper.
@@ -14344,7 +14426,7 @@ return true;
             return new XServerDialogState.TmContainerInfo(
                 wine, dxwrapper, resolvedRenderer(),
                 waylandMode ? waylandDriverSummary() : graphicsDriver, res, device,
-                waylandMode ? "Wayland" : "X11", hdrRowValue());
+                waylandMode ? "Wayland" : "X11", hdrRowValue(), deliveredGpuSpoofName);
         } catch (Exception e) {
             return null;
         }

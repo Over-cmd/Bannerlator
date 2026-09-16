@@ -110,6 +110,11 @@ class FusionHudView(
     private var displayServer = ""     // "X11" / "Wayland": which display server the game runs on
     private var hdrState = FusionHdr.NONE  // Wayland HDR, on its own line under latency · display server
     private var gpuModel = ""
+    // The GPU name a Wayland session reports to games instead of the real adapter ("" = none). It has
+    // to travel separately from gpuModel: Wayland hands the spoof to DXVK and leaves the Vulkan device
+    // alone, so everything the host reads back is still the real chip. On X11 the driver wrapper renames
+    // the device itself, so there gpuModel already IS the spoofed name and this stays empty.
+    private var gpuSpoofName = ""
     // Stack-layer version strings (Mega bottom band + DX version on the engine row); fed by the host.
     private var wineVersion = ""       // "Proton 10.0-4"
     private var graphicsWrapper = ""   // graphics-driver wrapper package, e.g. "GameNative", "bcn_layer 20260719"
@@ -185,6 +190,9 @@ class FusionHudView(
     // ---- Public surface (symmetric with the other overlays) ---------------
     fun setEngineLabel(s: String?) { engineLabel = s ?: ""; post { rebuildAndInvalidate() } }
     fun setGpuModel(s: String?) { gpuModel = s ?: ""; post { rebuildAndInvalidate() } }
+    /** This session's Wayland GPU-name spoof (null / empty = none, the default): the GPU row names it
+     *  in place of the real model, marked so it can't be read as the chip that is really rendering. */
+    fun setGpuSpoofName(s: String?) { gpuSpoofName = s ?: ""; post { rebuildAndInvalidate() } }
     fun setDisplayServer(s: String?) { displayServer = s ?: ""; post { rebuildAndInvalidate() } }
     /** [FusionHdr] code; [FusionHdr.NONE] (the default) draws no HDR line anywhere. Any thread. */
     fun setHdrState(state: Int) {
@@ -394,6 +402,18 @@ class FusionHudView(
     }
     private fun hdrText(): String = hdrLine(1f).joinToString("") { it.text }
 
+    // ---- GPU model (with the Wayland GPU-name spoof) ----
+    /** What the GPU row names: the spoofed GPU when this session reports one, else the real model. */
+    private fun gpuNameText(): String = gpuSpoofName.ifBlank { gpuModel }
+    /** The GPU row's value run. A spoofed name carries a marker in the same warning colour the HDR line
+     *  qualifies its state with, so the row can't be read as the chip that is really rendering:
+     *  "GeForce GTX 1080 (spoof)", and where the line is tightest (the pill) "GeForce GTX 1080 spoof". */
+    private fun gpuModelSpans(px: Float, color: Int, compact: Boolean = false): List<Span> {
+        val name = Span(gpuNameText(), color, px)
+        if (gpuSpoofName.isBlank()) return listOf(name)
+        return listOf(name, Span(if (compact) " spoof" else " (spoof)", colBat, px))
+    }
+
     /**
      * The pill is drawn as a capsule (radius = height / 2), so a line near the top or bottom of the stack
      * sits where the rounded ends curve in: it can fit the bounding box and still run across the outline
@@ -513,8 +533,8 @@ class FusionHudView(
         val pad = sp(10f); val lineGap = sp(4f); val lvGap = sp(8f)
         val rows = ArrayList<HudRow>()
 
-        if (showGpuModel && gpuModel.isNotBlank())
-            rows.add(HudRow(Span("GPU", colGpu, rowPx), listOf(Span(gpuModel, colValue, rowPx))))
+        if (showGpuModel && gpuNameText().isNotBlank())
+            rows.add(HudRow(Span("GPU", colGpu, rowPx), gpuModelSpans(rowPx, colValue)))
         if (displayServer.isNotBlank())
             rows.add(HudRow(Span("DISP", colDisp, rowPx), listOf(Span(displayServer, colValue, rowPx))))
         if (hdrState != FusionHdr.NONE)
@@ -630,8 +650,8 @@ class FusionHudView(
         if (displayServer.isNotBlank())
             tiles.add(Tile("DISPLAY", colDisp, listOf(Span(displayServer, colValue, valPx)),
                 if (hdrState != FusionHdr.NONE) hdrText() else null, false))
-        if (showGpuModel && gpuModel.isNotBlank())
-            tiles.add(Tile("GPU", colGpu, listOf(Span(gpuModel, colValue, valPx)), null, true))
+        if (showGpuModel && gpuNameText().isNotBlank())
+            tiles.add(Tile("GPU", colGpu, gpuModelSpans(valPx, colValue), null, true))
         if (showBattery || showPower || showBatteryTemp) {
             val parts = ArrayList<Span>(); var any = false
             if (showBattery && s.battery.percent != null) { parts += numUnit(s.battery.percent.toString(), "%", valPx, unitPx); any = true }
@@ -694,7 +714,7 @@ class FusionHudView(
         left += Span("fps", colDim, if (generating) bigUnitPx * 0.8f else bigUnitPx)
 
         val stack = ArrayList<List<Span>>()
-        if (showGpuModel && gpuModel.isNotBlank()) stack.add(listOf(Span(gpuModel, colDim, stkPx)))
+        if (showGpuModel && gpuNameText().isNotBlank()) stack.add(gpuModelSpans(stkPx, colDim, compact = true))
         run {
             val l = ArrayList<Span>()
             if (showGPU) { l += Span("GPU ${s.gpuPercent ?: "—"}%", colGpu, stkPx) }
@@ -881,8 +901,8 @@ class FusionHudView(
 
         // ---- LEFT column: GPU, aggregate CPU, then per-core rows ----
         val left = ArrayList<HudRow>()
-        if (showGpuModel && gpuModel.isNotBlank())
-            left.add(HudRow(Span("GPU", colGpu, rowPx), listOf(Span(gpuModel, colValue, rowPx))))
+        if (showGpuModel && gpuNameText().isNotBlank())
+            left.add(HudRow(Span("GPU", colGpu, rowPx), gpuModelSpans(rowPx, colValue)))
         if (showGPU) {
             val v = ArrayList<Span>()
             v += numUnit(s.gpuPercent?.toString(), "%", rowPx, unitPx)

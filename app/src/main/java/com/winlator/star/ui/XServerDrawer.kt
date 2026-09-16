@@ -5163,6 +5163,10 @@ private fun TmContainerPanel(info: XServerDialogState.TmContainerInfo?) {
                 // driver value is the "compositor: … · game: …" pair the activity resolved (wraps).
                 ContainerInfoRow("Renderer", if (wayland) "Vulkan (Wayland compositor)" else prettyRenderer(info.renderer), accent)
                 ContainerInfoRow("Graphics driver", info.graphicsDriver)
+                // Wayland hands the GPU-name spoof to DXVK and leaves the Vulkan device alone, so this
+                // is the only place that can say the game is being told about a GPU that isn't here.
+                // Null (X11, or no spoof) = no row, the block exactly as it was.
+                info.gpuSpoof?.let { ContainerInfoRow("GPU name", "$it (spoofed, not the real GPU)") }
                 ContainerInfoRow("Resolution", info.resolution)
                 // What the panel the game is on reports, read live. Reporting only - there is no HDR
                 // output path, so there is deliberately no toggle beside it.

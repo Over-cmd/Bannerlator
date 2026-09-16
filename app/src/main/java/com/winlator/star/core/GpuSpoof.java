@@ -18,22 +18,39 @@ import java.util.Map;
  *
  * <p>On X11 the driver config's {@code gpuName} becomes WRAPPER_DEVICE_NAME / _ID / WRAPPER_VENDOR_ID,
  * which the X11 wrapper Vulkan ICD reports to everything above it. Wayland games render on the Proton's
- * bundled Wayland Turnip with no wrapper, so the same choice is handed to DXVK instead, through
- * DXVK_CONFIG: {@code dxgi.custom*} for D3D10/11 and for D3D12 (vkd3d-proton takes the adapter from
- * DXVK's DXGI), {@code d3d9.custom*} for D3D9 and D3D8 (DXVK's D3D9 has its own adapter options).
- * The same {@code gpuName} key is used on both backends, so the choice survives switching.
+ * bundled Wayland Turnip with no wrapper, so the same choice is handed to DXVK instead:
+ * {@code dxgi.custom*} for D3D10/11 and for D3D12 (vkd3d-proton takes the adapter from DXVK's DXGI),
+ * {@code d3d9.custom*} for D3D9 and D3D8 (DXVK's D3D9 has its own adapter options). The same
+ * {@code gpuName} key is used on both backends, so the choice survives switching.
  *
- * <p>DXVK_CONFIG is parsed by DXVK's {@code Config::getUserConfig()}: split on ';', each piece
- * {@code key = value}; an unquoted value ends at the first space (so the name is quoted), a
- * {@code [exe]} piece scopes the keys after it to one exe, and a later value for a key replaces an
- * earlier one. The spoof's keys therefore go FIRST, in the global scope, and a key the user already
- * set (in DXVK_CONFIG or in DXVK_CONFIG_FILE's global scope) is left out so theirs applies.
+ * <p>It reaches DXVK by TWO routes, because neither one is enough on its own:
+ * <ul>
+ * <li>A generated dxvk.conf named by DXVK_CONFIG_FILE ({@link #configFileText}) — the only route that
+ *     can carry the GPU NAME. DXVK's {@code parseUserConfigLine} ends an unquoted value at the first
+ *     whitespace but keeps everything between quotes, so {@code dxgi.customDeviceDesc = "NVIDIA GeForce
+ *     GTX 1080"} arrives whole. Every DXVK ever shipped reads DXVK_CONFIG_FILE; DXVK_CONFIG is only
+ *     read from 2.5 on (on 2.4.1 it is ignored outright, so the file is the whole delivery there).
+ * <li>DXVK_CONFIG, for the ids and the memory cap ({@link #mergeDxvkConfig}). Only a bare token is safe
+ *     in it: every env string that passes back through {@link EnvVars}'s string form is re-split on
+ *     spaces, and on device the quoted name never arrived — DXVK logged a DXVK_CONFIG that began
+ *     mid-string and applied none of the ids — while the same options with no spaces and no quotes
+ *     applied in full and the game showed them. So this value is written with no whitespace at all:
+ *     {@code dxgi.customVendorId=10de;dxgi.customDeviceId=1b80}, and the name is left to the file.
+ * </ul>
+ *
+ * <p>DXVK parses the file first and DXVK_CONFIG after it, keeping the LAST value it sees for a key, and
+ * a {@code [exe]} piece scopes the keys after it to one exe. Our keys therefore go FIRST and in the
+ * global scope, and a key the user already sets globally (in their own DXVK_CONFIG or config file) is
+ * left out of BOTH routes so theirs is what applies.
  */
 public final class GpuSpoof {
     private GpuSpoof() {}
 
     /** The "no spoof" entry of the GPU name list: report the real GPU. */
     public static final String DEVICE = "Device";
+
+    /** The option that carries the GPU NAME — the one value the environment cannot deliver. */
+    public static final String KEY_DXGI_DEVICE_DESC = "dxgi.customDeviceDesc";
 
     public static final int VENDOR_NVIDIA = 0x10de;
     public static final int VENDOR_AMD = 0x1002;
@@ -146,10 +163,15 @@ public final class GpuSpoof {
     }
 
     /**
-     * The DXVK_CONFIG options for this spoof and memory cap, in the order they are written. {@code card}
+     * The options for this spoof and memory cap, in the order they are written — the generated config
+     * file takes all of them, DXVK_CONFIG only the ones the environment can carry. {@code card}
      * null = no spoof; {@code maxDeviceMemoryMb} <= 0 = no cap. The cap is DXGI's reported adapter
      * memory ({@code dxgi.maxDeviceMemory}); D3D9's {@code d3d9.maxAvailableMemory} is left alone
      * because D3D9 also enforces it as an allocation limit.
+     *
+     * <p>The name is quoted for DXVK's file parser, which would otherwise stop at the space after the
+     * first word. A quote or a ';' inside the name is dropped rather than escaped: a '"' would end the
+     * quoted run early, and a ';' would split the value in half on the DXVK_CONFIG route.
      */
     public static LinkedHashMap<String, String> dxvkOptions(Card card, int maxDeviceMemoryMb) {
         LinkedHashMap<String, String> o = new LinkedHashMap<>();
@@ -169,7 +191,9 @@ public final class GpuSpoof {
     public static final class Merge {
         /** The new DXVK_CONFIG value ("" when there is nothing to set). */
         public final String value;
-        /** Our keys that went in. */
+        /** Our options that survived, in write order: what the generated config file is built from. */
+        public final LinkedHashMap<String, String> options = new LinkedHashMap<>();
+        /** Our keys that also fitted in DXVK_CONFIG (a subset of {@link #options}: see {@link #envSafe}). */
         public final List<String> added = new ArrayList<>();
         /** Our keys left out because the user already sets them, with the user's value ("key=value"). */
         public final List<String> kept = new ArrayList<>();
@@ -178,11 +202,17 @@ public final class GpuSpoof {
     }
 
     /**
-     * {@code ours} put in front of {@code existing} (a DXVK_CONFIG value, may be null or empty) in
-     * DXVK's own "key = value; key = value" form, minus every key the user already sets in the global
-     * scope of {@code existing} or of {@code configFile} (DXVK_CONFIG_FILE's contents, may be null).
-     * Keys they set only inside an [exe] section still get ours in front: their scoped value comes
-     * later and wins for that exe.
+     * Works out what each route delivers: {@code ours} minus every key the user already sets in the
+     * global scope of {@code existing} (their DXVK_CONFIG, may be null or empty) or of
+     * {@code configFile} (their own config file's contents, may be null) — DXVK keeps the last value it
+     * parses, so a key of theirs would win anyway; leaving ours out keeps the session log honest about
+     * what actually went. Keys they set only inside an [exe] section still get ours: their scoped value
+     * comes later and wins for that exe.
+     *
+     * <p>{@link Merge#value} is the new DXVK_CONFIG — our survivors that {@link #envSafe} accepts, in
+     * DXVK's "key=value;key=value" form with NO whitespace anywhere (the transport splits on spaces),
+     * followed by {@code existing} unchanged. Ours go first so they still arrive when something the
+     * user put in DXVK_CONFIG has a space in it and cuts the value short.
      */
     public static Merge mergeDxvkConfig(String existing, String configFile, Map<String, String> ours) {
         Map<String, String> theirs = globalKeys(existing, ";");
@@ -191,6 +221,7 @@ public final class GpuSpoof {
                 theirs.putIfAbsent(e.getKey(), e.getValue());
         }
         StringBuilder sb = new StringBuilder();
+        LinkedHashMap<String, String> options = new LinkedHashMap<>();
         List<String> added = new ArrayList<>();
         List<String> kept = new ArrayList<>();
         for (Map.Entry<String, String> e : ours.entrySet()) {
@@ -198,19 +229,60 @@ public final class GpuSpoof {
                 kept.add(e.getKey() + "=" + theirs.get(e.getKey()));
                 continue;
             }
-            if (sb.length() > 0) sb.append("; ");
-            sb.append(e.getKey()).append(" = ").append(e.getValue());
+            options.put(e.getKey(), e.getValue());
+            if (!envSafe(e.getValue())) continue;   // the quoted GPU name: file route only
+            if (sb.length() > 0) sb.append(';');
+            sb.append(e.getKey()).append('=').append(e.getValue());
             added.add(e.getKey());
         }
         String rest = existing == null ? "" : existing.trim();
         if (!rest.isEmpty()) {
-            if (sb.length() > 0) sb.append("; ");
+            if (sb.length() > 0) sb.append(';');
             sb.append(rest);
         }
         Merge m = new Merge(sb.toString());
+        m.options.putAll(options);
         m.added.addAll(added);
         m.kept.addAll(kept);
         return m;
+    }
+
+    /**
+     * True when {@code value} is safe to send in an environment variable: one token, no whitespace, no
+     * quote and no ';'. {@link EnvVars} re-splits a NAME=VALUE string on spaces wherever an environment
+     * round-trips through its string form, ';' is the DXVK_CONFIG separator, and a quoted spaced value
+     * demonstrably did not reach DXVK intact — so anything else is cut short somewhere between here and
+     * the game. A GPU name has spaces by nature, which is why it travels in the config file instead.
+     */
+    public static boolean envSafe(String value) {
+        if (value == null || value.isEmpty()) return false;
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (c == '"' || c == '\'' || c == ';' || Character.isWhitespace(c)) return false;
+        }
+        return true;
+    }
+
+    /**
+     * The generated dxvk.conf: one {@code key = value} line per surviving option, then the user's own
+     * config file ({@code userText}, null when they have none) appended verbatim so selecting one keeps
+     * working — it is merged, never replaced. Ours go first and theirs follows: none of their global
+     * keys are in {@code options} (see {@link #mergeDxvkConfig}), so where the two ever name the same
+     * option THEIRS is what applies, whether they set it globally or for one exe.
+     */
+    public static String configFileText(Map<String, String> options, String userPath, String userText) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("# Generated for this session by the graphics driver settings.\n");
+        sb.append("# Rewritten on every launch - edit the settings, not this file.\n");
+        for (Map.Entry<String, String> e : options.entrySet())
+            sb.append(e.getKey()).append(" = ").append(e.getValue()).append('\n');
+        if (userText != null) {
+            sb.append("\n# --- your own config file, applied on top of the lines above")
+              .append(isConfigFilePath(userPath) ? ": " + userPath : "").append(" ---\n");
+            sb.append(userText);
+            if (!userText.endsWith("\n")) sb.append('\n');
+        }
+        return sb.toString();
     }
 
     /** key -> value of every "key = value" piece before the first [section] piece. */
@@ -229,9 +301,17 @@ public final class GpuSpoof {
         return keys;
     }
 
-    /** The text of DXVK_CONFIG_FILE when it names a readable file on the Android side, else null. */
+    /** True when {@code path} names a config file the user actually chose — the DX wrapper config's
+     *  "None" / "0" placeholders and an empty value are not one. */
+    public static boolean isConfigFilePath(String path) {
+        return path != null && !path.isEmpty() && !path.equals("0") && !path.equals("None");
+    }
+
+    /** The text of DXVK_CONFIG_FILE when it names a readable file on the Android side, else null —
+     *  including for a file that can only be read from inside the guest. A caller that cannot read
+     *  their file must leave their DXVK_CONFIG_FILE pointing at it, or their whole config disappears. */
     public static String readConfigFile(String path) {
-        if (path == null || path.isEmpty() || path.equals("0") || path.equals("None")) return null;
+        if (!isConfigFilePath(path)) return null;
         try {
             File f = new File(path);
             if (!f.isFile() || f.length() > 1 << 20) return null;
