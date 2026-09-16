@@ -38,6 +38,7 @@ import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material.icons.filled.TouchApp
 import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.Tv
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material.icons.filled.Widgets
 import androidx.compose.runtime.getValue
@@ -297,6 +298,63 @@ private fun generalRows(xmb: XmbScope, p: XmbPrefs, host: XmbGameHost): List<Xmb
                 else -> { s.putExtra("unlockGameRefreshRate", "1"); xmb.set(p, "maxGameRefreshRate", nv) }
             }
         }
+    }
+
+    // TV — the same rows as the pop-up editor's TV tab (display.ExternalDisplay), on the same
+    // condition: an external display is plugged in, or this game is already set to launch on one so a
+    // leftover setting is never hidden. Per game only, no container default. HDR is reported, not
+    // asked: starting the session on the TV is what opens the compositor's HDR gate there.
+    // XMB has no display listener of its own — its rows rebuild on refresh(), so a cable plugged in
+    // while this column is open shows up on the next change rather than instantly.
+    val tvDisplay = com.winlator.star.display.ExternalDisplay.find(p.context)
+    if (tvDisplay != null || com.winlator.star.display.ExternalDisplay.launchOnTv(s)) {
+        rows += XmbRow.Header("hTv", "TV")
+        rows += XmbRow.Info("tvDisplay",
+            if (tvDisplay != null) com.winlator.star.display.ExternalDisplay.title(tvDisplay) else "No external display",
+            Icons.Filled.Tv,
+            value = if (tvDisplay != null) com.winlator.star.display.ExternalDisplay.modeLabel(
+                com.winlator.star.display.ExternalDisplay.activeMode(tvDisplay)) else "",
+            subtitle = if (tvDisplay != null) com.winlator.star.display.ExternalDisplay.summary(tvDisplay)
+                       else "Nothing is plugged in. This game is still set to launch on a TV.")
+        rows += XmbRow.Toggle("tvLaunch", "Launch this game on the TV", Icons.Filled.Tv,
+            com.winlator.star.display.ExternalDisplay.launchOnTv(s),
+            subtitle = com.winlator.star.display.ExternalDisplay.HELP_LAUNCH) {
+            xmb.set(p, com.winlator.star.display.ExternalDisplay.EXTRA_LAUNCH, if (it) "1" else "0")
+        }
+        val tvModes = com.winlator.star.display.ExternalDisplay.selectableModes(tvDisplay)
+        val tvModeId = com.winlator.star.display.ExternalDisplay.modeId(s)
+        if (tvModes.size > 1) {
+            val tvValues = listOf(0) + tvModes.map { it.modeId }
+            val tvLabels = listOf("Default (leave the TV as it is)") +
+                tvModes.map { com.winlator.star.display.ExternalDisplay.modeLabel(it) }
+            rows += XmbRow.Choice("tvModeId", "Output mode", Icons.Filled.DesktopWindows, tvLabels,
+                tvLabels[tvValues.indexOf(tvModeId).coerceAtLeast(0)],
+                subtitle = "What the TV is told to run at") { v ->
+                xmb.set(p, com.winlator.star.display.ExternalDisplay.EXTRA_MODE_ID,
+                    tvValues[tvLabels.indexOf(v)].toString())
+            }
+        } else {
+            rows += XmbRow.Info("tvModeId", "Output mode", Icons.Filled.DesktopWindows,
+                value = com.winlator.star.display.ExternalDisplay.modeLabel(tvModes.firstOrNull()).ifEmpty { "—" },
+                subtitle = if (tvDisplay != null) "This screen advertises one output mode"
+                           else "Plug a screen in to choose an output mode")
+        }
+        rows += XmbRow.Toggle("tvMatchRes", "Match the TV's resolution", Icons.Filled.AspectRatio,
+            com.winlator.star.display.ExternalDisplay.matchResolution(s),
+            subtitle = com.winlator.star.display.ExternalDisplay.HELP_MATCH_RES) {
+            xmb.set(p, com.winlator.star.display.ExternalDisplay.EXTRA_MATCH_RES, if (it) "1" else "0")
+        }
+        val tvHdrReason = if (tvDisplay == null) null
+                          else com.winlator.star.display.ExternalDisplay.hdrUnavailableReason(tvDisplay)
+        rows += XmbRow.Info("tvHdr", "Use HDR on the TV", Icons.Filled.HdrOn,
+            value = if (tvDisplay != null && tvHdrReason == null) "On" else "Off",
+            subtitle = tvHdrReason ?: (
+                if (tvDisplay != null) "Automatic. This screen accepts HDR10, so HDR output switches on for this game."
+                else "Plug the screen in to see what it can do."))
+        rows += XmbRow.Info("tvNoteUnplug", "If the cable comes out", Icons.Filled.Info,
+            subtitle = com.winlator.star.display.ExternalDisplay.NOTE_UNPLUG)
+        rows += XmbRow.Info("tvNoteTouch", "Touch on the TV", Icons.Filled.TouchApp,
+            subtitle = com.winlator.star.display.ExternalDisplay.NOTE_TOUCH)
     }
 
     // Graphics

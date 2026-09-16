@@ -1861,7 +1861,9 @@ internal fun launchShortcut(activity: Activity, shortcut: Shortcut, preflightDon
             putExtra("disableXinput", shortcut.getExtra("disableXinput", "0"))
             if (preflightDone) putExtra(SteamSessionManager.EXTRA_PREFLIGHT_DONE, true)
         }
-        activity.startActivity(intent)
+        // Same "Launch this game on the TV" as the shortcut list (shared helper, so the two launch
+        // paths can't drift); false = no TV wanted, none connected, or the system refused it.
+        if (!launchOnExternalDisplay(activity, shortcut, intent)) activity.startActivity(intent)
     } else {
         XrActivity.openIntent(activity, shortcut.container.id, shortcut.file.path)
     }

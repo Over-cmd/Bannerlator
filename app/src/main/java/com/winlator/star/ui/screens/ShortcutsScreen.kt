@@ -92,6 +92,7 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.filled.SportsEsports
 import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.Tv
 import androidx.compose.material.icons.filled.Widgets
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
@@ -6261,6 +6262,34 @@ internal fun ShortcutSettingsDialogScreen(
     // else off / dx12 / dx11. Both backends; see core.UnrealHdr.
     var unrealHdrOverride by remember { mutableStateOf(com.winlator.star.core.UnrealHdr.shortcutChoice(shortcut)) }
 
+    // ── TV tab (display.ExternalDisplay) — per game only, deliberately with NO container default: which
+    // screen a game belongs on is a property of the game. Launching the session ON the TV is what opens
+    // the compositor's HDR gate there (the gate reads the activity's own display), so HDR is not a
+    // setting in this tab at all — it is reported from whatever the display says.
+    var tvLaunch by remember { mutableStateOf(com.winlator.star.display.ExternalDisplay.launchOnTv(shortcut)) }
+    // What was STORED when the dialog opened — only this decides whether the tab is shown for a game
+    // whose TV is currently unplugged (see tvTabVisible below).
+    val tvLaunchStored = remember { com.winlator.star.display.ExternalDisplay.launchOnTv(shortcut) }
+    var tvModeId by remember { mutableStateOf(com.winlator.star.display.ExternalDisplay.modeId(shortcut)) }
+    var tvMatchRes by remember { mutableStateOf(com.winlator.star.display.ExternalDisplay.matchResolution(shortcut)) }
+    // The tab has to appear and disappear with the cable WITHOUT reopening the dialog, and every value
+    // on it (name, mode list, HDR) is read live — so a DisplayListener bumps a tick that re-reads the
+    // display on the next composition. Unregistered with the dialog.
+    var tvDisplayTick by remember { mutableIntStateOf(0) }
+    DisposableEffect(Unit) {
+        val dm = context.getSystemService(Context.DISPLAY_SERVICE) as? android.hardware.display.DisplayManager
+        val listener = object : android.hardware.display.DisplayManager.DisplayListener {
+            override fun onDisplayAdded(displayId: Int) { tvDisplayTick++ }
+            override fun onDisplayRemoved(displayId: Int) { tvDisplayTick++ }
+            override fun onDisplayChanged(displayId: Int) { tvDisplayTick++ }
+        }
+        runCatching {
+            dm?.registerDisplayListener(listener, android.os.Handler(android.os.Looper.getMainLooper()))
+        }
+        onDispose { runCatching { dm?.unregisterDisplayListener(listener) } }
+    }
+    val tvDisplay = remember(tvDisplayTick) { com.winlator.star.display.ExternalDisplay.find(context) }
+
     // Gyro (motion aim) per-game overrides — seeded from the shortcut extra, falling back to the
     // container's value. Only the game-facing half lives here (deadzone/smoothing stay container-wide,
     // they're hand-tremor/latency settings, not game settings). These are ALWAYS written on save —
@@ -6587,9 +6616,21 @@ internal fun ShortcutSettingsDialogScreen(
 
     // Tab
     var selectedTab by remember { mutableIntStateOf(0) }
-    // Tab positions: General(0), Win Components(1), Env Vars(2), Advanced(3), Controller(4). The old
-    // top "general" scrolling block became the General tab; its controller half became Controller.
-    val tabTitles = listOf("General", "Win Components", "Env Vars", "Advanced", "Controller")
+    // Tab positions: General(0), Win Components(1), Env Vars(2), Advanced(3), Controller(4), TV(5). The
+    // old top "general" scrolling block became the General tab; its controller half became Controller.
+    // TV is appended only while an external display is plugged in OR this game is already set to launch
+    // on one — so a setting left behind by a since-unplugged TV is never hidden where it can't be turned
+    // off. It comes and goes live with the cable (tvDisplayTick above).
+    // tvLaunchStored, not the live switch: turning the switch off with no TV plugged in must not yank
+    // the tab out from under the finger that just moved it. It goes when the dialog is next opened.
+    val tvTabVisible = tvDisplay != null || tvLaunchStored || tvLaunch
+    val tabTitles = remember(tvTabVisible) {
+        listOf("General", "Win Components", "Env Vars", "Advanced", "Controller") +
+            (if (tvTabVisible) listOf("TV") else emptyList())
+    }
+    // Unplugging a TV on a game that never wanted one takes the tab away under the user's finger; land
+    // them back on General rather than on an index that no longer has content.
+    LaunchedEffect(tabTitles.size) { if (selectedTab > tabTitles.lastIndex) selectedTab = 0 }
 
     // Icon picker
     fun applyIconFromUri(uri: Uri) {
@@ -6730,6 +6771,12 @@ internal fun ShortcutSettingsDialogScreen(
             putExtra(com.winlator.star.display.WaylandHdr.EXTRA, waylandHdrOverride.ifEmpty { null })
             // Unreal Engine HDR override: "" clears the extra (container default).
             putExtra(com.winlator.star.core.UnrealHdr.EXTRA, unrealHdrOverride.ifEmpty { null })
+            // TV tab (display.ExternalDisplay) — per game, no container fallback, so these are always
+            // written as a plain "1"/"0" (there is no inherit sentinel to preserve). tvModeId 0 = leave
+            // the TV on whatever output mode it is already running.
+            putExtra(com.winlator.star.display.ExternalDisplay.EXTRA_LAUNCH, if (tvLaunch) "1" else "0")
+            putExtra(com.winlator.star.display.ExternalDisplay.EXTRA_MODE_ID, tvModeId.toString())
+            putExtra(com.winlator.star.display.ExternalDisplay.EXTRA_MATCH_RES, if (tvMatchRes) "1" else "0")
             putExtra("renderer", StringUtils.parseIdentifier(selectedRenderer))
             putExtra("sfCompatMode", if (sfCompatMode) "1" else "0")
             // Gyro per-game overrides (read by the launch resolver in XServerDisplayActivity).
@@ -6850,6 +6897,12 @@ internal fun ShortcutSettingsDialogScreen(
                     if (gyroActivator != Container.GYRO_ACTIVATOR_ALWAYS) add("gyroActivationMode")
                     add("gyroSensitivity"); add("gyroInvertX"); add("gyroInvertY")
                 }
+            }
+            5 -> { // TV — only reachable while the tab exists (see tvTabVisible)
+                add("tvLaunch")
+                // A display advertising a single mode renders as a read-only row, so it takes no focus.
+                if (com.winlator.star.display.ExternalDisplay.selectableModes(tvDisplay).size > 1) add("tvModeId")
+                add("tvMatchRes")
             }
         }
         add("tabs"); add("cancel"); add("ok")
@@ -8272,6 +8325,21 @@ internal fun ShortcutSettingsDialogScreen(
             onShowBox64DownloadSheet = { showBox64DownloadSheet = true },
             onShowFexCoreDownloadSheet = { showFexCoreDownloadSheet = true }
         )
+                            5 -> ScTvTab(
+                                dp = dp,
+                                display = tvDisplay,
+                                // This game's own render resolution, for the "instead of…" subtitle —
+                                // taken from the LIVE General-tab state, not the saved extra, so the
+                                // two tabs can't disagree while the dialog is open.
+                                gameScreenSize = if (selectedScreenSize == "Custom") "${customWidth}x${customHeight}"
+                                                 else StringUtils.parseIdentifier(selectedScreenSize),
+                                tvLaunch = tvLaunch,
+                                onTvLaunchChange = { tvLaunch = it },
+                                tvModeId = tvModeId,
+                                onTvModeIdChange = { tvModeId = it },
+                                tvMatchRes = tvMatchRes,
+                                onTvMatchResChange = { tvMatchRes = it },
+                            )
                         }
                     }
                 }
@@ -8450,7 +8518,217 @@ private fun shortcutTabIcon(title: String): ImageVector = when (title) {
     "Env Vars" -> Icons.Filled.Extension
     "Advanced" -> Icons.Filled.Tune
     "Controller" -> Icons.Filled.SportsEsports
+    "TV" -> Icons.Filled.Tv
     else -> Icons.Filled.Settings
+}
+
+/**
+ * The "TV" tab — start this game's session ON a connected external display. See
+ * com.winlator.star.display.ExternalDisplay.
+ *
+ * Everything about the display (its name, its output modes, its HDR) is READ LIVE here and never
+ * stored: the caller re-reads it on every DisplayManager event, so unplugging the cable updates this
+ * tab (and takes it away) without the dialog being reopened.
+ *
+ * HDR is shown rather than asked. The compositor's HDR gate is decided from the display the session
+ * lands on (XServerDisplayActivity.hdrTargetDisplay), so a game started on an HDR10 TV simply gets HDR
+ * and one started on a panel without it does not — there is nothing here for the user to switch, only
+ * a reason to read when the answer is no.
+ *
+ * [display] null = the tab is only here because this game still has the setting stored.
+ * [gameScreenSize] this game's own render resolution ("1280x720"), for the "Match the TV's" subtitle.
+ */
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+@Composable
+private fun ScTvTab(
+    dp: SettingsDpad,
+    display: android.view.Display?,
+    gameScreenSize: String,
+    tvLaunch: Boolean,
+    onTvLaunchChange: (Boolean) -> Unit,
+    tvModeId: Int,
+    onTvModeIdChange: (Int) -> Unit,
+    tvMatchRes: Boolean,
+    onTvMatchResChange: (Boolean) -> Unit,
+) {
+    val modes = com.winlator.star.display.ExternalDisplay.selectableModes(display)
+    val hdrReason = if (display == null) null else com.winlator.star.display.ExternalDisplay.hdrUnavailableReason(display)
+    val hdrOk = display != null && hdrReason == null
+
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        // ── The display, as Android describes it right now ──────────────────────────────────────
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+        ) {
+            Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        Icons.Filled.Tv, contentDescription = null,
+                        modifier = Modifier.size(28.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            if (display != null) com.winlator.star.display.ExternalDisplay.title(display)
+                            else "No external display",
+                            fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
+                        )
+                        Text(
+                            if (display != null) com.winlator.star.display.ExternalDisplay.summary(display)
+                            else "Nothing is plugged in. This game is still set to launch on a TV, so the tab stays here.",
+                            fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+                if (display != null) {
+                    Spacer(Modifier.height(8.dp))
+                    androidx.compose.foundation.layout.FlowRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        com.winlator.star.display.ExternalDisplay.hdrChips(display).forEach { chip ->
+                            val on = com.winlator.star.display.ExternalDisplay.isHdrFormatChip(chip) && hdrOk
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(
+                                        if (on) MaterialTheme.colorScheme.primaryContainer
+                                        else MaterialTheme.colorScheme.secondaryContainer
+                                    )
+                                    .padding(horizontal = 8.dp, vertical = 3.dp)
+                            ) {
+                                Text(
+                                    chip,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (on) MaterialTheme.colorScheme.onPrimaryContainer
+                                            else MaterialTheme.colorScheme.onSecondaryContainer,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── The one switch that matters ─────────────────────────────────────────────────────────
+        TvSettingRow(
+            title = "Launch this game on the TV",
+            subtitle = com.winlator.star.display.ExternalDisplay.HELP_LAUNCH,
+        ) {
+            DpSwitch(dp, "tvLaunch", checked = tvLaunch, onCheckedChange = onTvLaunchChange)
+        }
+
+        // ── Output mode: what the TV is asked to run at ─────────────────────────────────────────
+        // A display that advertises exactly one mode has nothing to choose, so it reads back as a
+        // plain row (and stays out of the D-pad order — see dpadIds).
+        if (modes.size > 1) {
+            val values = listOf(0) + modes.map { it.modeId }
+            val labels = listOf("Default (leave the TV as it is)") +
+                modes.map { com.winlator.star.display.ExternalDisplay.modeLabel(it) }
+            DpDrop(
+                dp, "tvModeId",
+                label = "Output mode",
+                options = labels,
+                selected = labels[values.indexOf(tvModeId).coerceAtLeast(0)],
+                onSelect = { onTvModeIdChange(values[labels.indexOf(it)]) },
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Text(
+                "What the TV is told to run at.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        } else {
+            TvSettingRow(
+                title = "Output mode",
+                subtitle = if (display != null) "This screen advertises one output mode."
+                           else "Plug a screen in to choose an output mode.",
+            ) {
+                Text(
+                    com.winlator.star.display.ExternalDisplay.modeLabel(modes.firstOrNull()).ifEmpty { "—" },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+
+        // ── Render resolution ───────────────────────────────────────────────────────────────────
+        TvSettingRow(
+            title = "Match the TV's resolution",
+            subtitle = run {
+                val tvRes = com.winlator.star.display.ExternalDisplay.resolutionOf(
+                    com.winlator.star.display.ExternalDisplay.effectiveMode(display, tvModeId))
+                if (tvRes.isEmpty()) com.winlator.star.display.ExternalDisplay.HELP_MATCH_RES
+                else "Render at ${tvRes.replace("x", "×")} instead of this game's " +
+                     "${gameScreenSize.replace("x", "×")}. More pixels costs frame rate."
+            },
+        ) {
+            DpSwitch(dp, "tvMatchRes", checked = tvMatchRes, onCheckedChange = onTvMatchResChange)
+        }
+
+        // ── HDR: reported, never asked ──────────────────────────────────────────────────────────
+        TvSettingRow(
+            title = "Use HDR on the TV",
+            subtitle = hdrReason
+                ?: "Automatic. This screen accepts HDR10, so HDR output switches on for this game.",
+            dimSubtitle = !hdrOk,
+        ) {
+            // Deliberately a bare Switch, not a DpSwitch: it is a readout, so it must not be
+            // reachable with the D-pad or invite a tap.
+            Switch(checked = hdrOk, onCheckedChange = {}, enabled = false)
+        }
+
+        // ── The two things to know before the first try ─────────────────────────────────────────
+        TvNote(com.winlator.star.display.ExternalDisplay.NOTE_UNPLUG)
+        TvNote(com.winlator.star.display.ExternalDisplay.NOTE_TOUCH)
+    }
+}
+
+/** One TV-tab row: title + explanation on the left, its control on the right (the approved design). */
+@Composable
+private fun TvSettingRow(
+    title: String,
+    subtitle: String,
+    dimSubtitle: Boolean = false,
+    control: @Composable () -> Unit,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(title, fontSize = 14.sp)
+            Text(
+                subtitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = if (dimSubtitle) MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.65f)
+                        else MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Spacer(Modifier.width(10.dp))
+        control()
+    }
+}
+
+/** A quiet boxed note under the TV rows (the mockup's "info" blocks). */
+@Composable
+private fun TvNote(text: String) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+    ) {
+        Text(
+            text,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+        )
+    }
 }
 
 @Composable
@@ -8892,9 +9170,45 @@ private fun launchShortcutNow(activity: Activity, shortcut: Shortcut, preflightD
             if (preflightDone) putExtra(SteamSessionManager.EXTRA_PREFLIGHT_DONE, true)
             if (wayland) putExtra("wayland_mode", true)
         }
-        activity.startActivity(intent)
+        if (!launchOnExternalDisplay(activity, shortcut, intent)) activity.startActivity(intent)
     } else {
         XrActivity.openIntent(activity, shortcut.container.id, shortcut.file.path)
+    }
+}
+
+/**
+ * "Launch this game on the TV" (the shortcut's TV tab — see display.ExternalDisplay): start the session
+ * ON the external display instead of the handheld. Returns true when it did, false when the caller
+ * should launch normally.
+ *
+ * This is what makes HDR work on a TV: the compositor's HDR gate is decided from the display the
+ * activity's window is on, so a session started here asks the TV about HDR10 rather than the handheld
+ * panel. setLaunchDisplayId is allowed for any app on a public display (a plugged-in HDMI/DP screen),
+ * so there is no root and no permission behind it — but the system may still decline, and a display can
+ * vanish between the check and the call. Anything going wrong falls back to an ordinary launch with a
+ * toast rather than leaving the user with no game.
+ */
+internal fun launchOnExternalDisplay(activity: Activity, shortcut: Shortcut, intent: Intent): Boolean {
+    if (!com.winlator.star.display.ExternalDisplay.launchOnTv(shortcut)) return false
+    val display = com.winlator.star.display.ExternalDisplay.find(activity) ?: return false
+    val options = com.winlator.star.display.ExternalDisplay.launchOptions(display.displayId) ?: return false
+    return try {
+        // A task on another display needs its own task; the session also has to be told WHICH display it
+        // was aimed at, so it can tell "the TV was unplugged" from any other configuration change.
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        intent.putExtra(com.winlator.star.display.ExternalDisplay.EXTRA_DISPLAY_ID, display.displayId)
+        activity.startActivity(intent, options)
+        true
+    } catch (_: Exception) {
+        // Refused (an untrusted/private display, a vendor policy): drop the TV bits and let the caller
+        // start it the ordinary way, but say why the game is not on the TV.
+        intent.removeExtra(com.winlator.star.display.ExternalDisplay.EXTRA_DISPLAY_ID)
+        Toast.makeText(
+            activity,
+            "Couldn't start this game on ${com.winlator.star.display.ExternalDisplay.title(display)} — opening on the handheld instead.",
+            Toast.LENGTH_LONG,
+        ).show()
+        false
     }
 }
 
