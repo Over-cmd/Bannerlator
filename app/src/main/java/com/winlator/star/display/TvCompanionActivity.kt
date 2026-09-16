@@ -123,7 +123,29 @@ class TvCompanionActivity : ComponentActivity() {
             && ExternalDisplay.byId(this, sessionDisplayId) == null) {
             Log.i(TAG, "display " + sessionDisplayId + " is gone — closing the companion")
             finishSafely()
+            return
         }
+        // Arriving HERE means the user has just come back from somewhere else — the launcher, another
+        // app — and the focused display came back with them, so the pad is on the handheld and the game
+        // on the TV has stopped answering it. Put it back once, the same move the button makes.
+        //
+        // Once, and only on a real return: this runs on nothing but a resume, so the launch path (no
+        // session has confirmed yet) is silent, and a tap on this screen mid-game — which changes focus
+        // without touching the lifecycle — is left alone, as the user meant it. The button is the retry.
+        if (sessionConfirmed) sendInputBackToTv()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        // On the way out for good while the game is still playing: this is the USER leaving — back, or
+        // swiped out of recents — and not the session taking its own screen down, because every one of
+        // those paths goes through dismiss(), which clears sessionConfirmed before it finishes anything.
+        // So whatever they land on next is the screen they asked for: the handheld hands this one back
+        // over on their NEXT return instead of the instant they leave.
+        //
+        // Here and not in onDestroy: the screen they land on is resumed BEFORE a finishing activity is
+        // destroyed, so a flag set there would arrive after it was needed and hand them straight back.
+        if (isFinishing && sessionConfirmed) userClosedWhileLive = true
     }
 
     override fun onDestroy() {
@@ -209,8 +231,15 @@ class TvCompanionActivity : ComponentActivity() {
 
         /** The instance on screen, or null. Written on the main thread; every reader posts there too. */
         @Volatile private var live: TvCompanionActivity? = null
-        /** Set once a session has reported that its window really is on the external display. */
+        /** Set once a session has reported that its window really is on the external display. Cleared by
+         *  every path the session tears down through, so it also answers "is a game still playing over
+         *  there" for anyone outside this screen — see [resumeForLiveSession]. */
         @Volatile private var sessionConfirmed = false
+        /** The exact intent [show] put this screen up with, kept so it can be brought back for the same
+         *  session without the launch path's arguments (which nothing else has). Cleared by [dismiss]. */
+        @Volatile private var shownIntent: Intent? = null
+        /** One-shot: the user closed the companion themselves while the game was still playing. */
+        @Volatile private var userClosedWhileLive = false
 
         private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -227,12 +256,14 @@ class TvCompanionActivity : ComponentActivity() {
         fun show(activity: Activity, gameName: String?, display: Display, sessionIntent: Intent) {
             try {
                 sessionConfirmed = false
+                userClosedWhileLive = false
                 val intent = Intent(activity, TvCompanionActivity::class.java)
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                     .putExtra(EXTRA_GAME_NAME, gameName.orEmpty())
                     .putExtra(EXTRA_DISPLAY_NAME, ExternalDisplay.title(display))
                     .putExtra(EXTRA_DISPLAY_ID, display.displayId)
                     .putExtra(EXTRA_SESSION_INTENT, Intent(sessionIntent))
+                shownIntent = Intent(intent)
                 // Explicitly the display the LAUNCHER is on, not DEFAULT_DISPLAY: on a DeX-style setup
                 // the app itself runs on a second screen, and the companion belongs on whichever screen
                 // the user just tapped from. ExternalDisplay.find() never returns that display, so this
@@ -252,12 +283,48 @@ class TvCompanionActivity : ComponentActivity() {
         }
 
         /**
+         * Put this screen back in front of the user for a session that is STILL playing on the external
+         * display, and answer whether it took the screen. The handheld's launcher hands over here, so
+         * re-opening the app during a TV game lands on the one screen that can do something about it
+         * instead of the games list — which is also what gets the controller back to the TV, since this
+         * screen sends input back on the way in.
+         *
+         * Nothing here goes near the session: it re-starts THIS screen, on the display the caller is on,
+         * from the intent [show] built. False means there is nothing to come back to — no session ever
+         * confirmed the TV, it has since ended or lost the screen, the display is gone, or the user
+         * closed this screen a moment ago — and the caller carries on to wherever it was going.
+         */
+        @JvmStatic
+        fun resumeForLiveSession(activity: Activity): Boolean {
+            try {
+                if (!sessionConfirmed) return false
+                val intent = shownIntent ?: return false
+                if (userClosedWhileLive) {
+                    // They chose the app over this screen; the return after this one is a fresh ask.
+                    userClosedWhileLive = false
+                    return false
+                }
+                val displayId = intent.getIntExtra(EXTRA_DISPLAY_ID, -1)
+                if (displayId < 0 || ExternalDisplay.byId(activity, displayId) == null) return false
+                activity.startActivity(Intent(intent),
+                    ExternalDisplay.launchOptions(ExternalDisplay.currentDisplayId(activity)))
+                Log.i(TAG, "a game is still playing on display " + displayId + " — showing the companion")
+                return true
+            } catch (t: Throwable) {
+                Log.w(TAG, "could not bring the companion back", t)
+                return false
+            }
+        }
+
+        /**
          * Take the companion down: the session was refused the TV, lost it, ended, or is gone. Safe to
          * call at any time, from any thread, with or without a companion on screen.
          */
         @JvmStatic
         fun dismiss(reason: String) {
             sessionConfirmed = false
+            shownIntent = null
+            userClosedWhileLive = false
             mainHandler.post {
                 val activity = live ?: return@post
                 Log.i(TAG, "closing the companion: " + reason)
