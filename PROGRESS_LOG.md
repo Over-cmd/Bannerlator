@@ -93,6 +93,17 @@
 >
 > Max's `main`-branch CI artifacts predate the gamescope branch (no proot in them), so no shortcut from his APK.
 
+### ✅ 2026-09-17 ~18:35 — gamescope session RUNS on device; Steam client self-updating
+
+> **pcmanfm rendered under gamescope**, HUD reading Adreno 750 / Vulkan / Wayland, and then the native arm64 Steam client launched and pulled its own 665 MB update (Steam dir 933 MB → 3.9 GB). proot → gamescope → Xwayland (glamor on Zink) → GTK app → Valve's client, all on the device.
+>
+> **Two real blockers, both now understood:**
+>
+> 1. **Our proot binary was broken, not our proot source.** Bisected by cross-pairing: Termux's proot + *our* loader runs; *our* proot + Termux's loader does not. Same for the NDK-27 rebuild, so it was never the toolchain either — the tree in `cpp/proot` is an old snapshot of the Termux fork, thousands of lines behind in the ptrace/exec core (`syscall/enter.c` alone differs by ~2,500 lines). Termux's binary of the fork at v5.1.107.92 runs the rootfs; that is what `build-proot.yml` now builds.
+> 2. **`-i uid:gid` is required.** Xwayland's `Popen()` does `setgid(getgid()); setuid(getuid())` in the child and `_exit(127)`s if either fails; Android's app seccomp policy traps both, so xkbcomp never exec'd and Xwayland died with "XKB: Failed to compile keymap". Proved by instrumenting `/usr/bin/xkbcomp` — the log stayed empty (never invoked), then with `-i` it was invoked and returned warnings only. **Note the earlier `setpriv` A/B that seemed to clear `-i` was invalid: it ran in a root shell, which carries no app seccomp filter.** Also needed: `xkeyboard-config` (the closure never pulled it; `/usr/share/X11/xkb` was empty) — seeded for rootfs r2, hand-installed on r1.
+>
+> **Confirmed we are not missing any Wayland work of Max's:** across his whole gamescope branch the only compositor file touched is `compositor.c` (166 lines), and all ten markers of it are present in ours — fullscreen configure, seat fan-out, `wl_output` 4 + name/description, `wl_seat` 9, `axis_value120`.
+
 ### Phase 1 — proot in the build (`ba0a5786`)
 
 > The tree had been sitting in `cpp/proot` unused since the old Xvfb Steam attempt, absent from `CMakeLists.txt`. Our copy is an older base than his and is CRLF/tab-formatted, so his diffs do not apply; the changes were ported by hand.
