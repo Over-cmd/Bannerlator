@@ -8,6 +8,14 @@ name: Build linuxfs (Linux runtime rootfs)
 # Artifact only. Publishing it to the contents catalog is a separate, explicit step.
 
 on:
+  # workflow_dispatch only works once this file is on the default branch, so while the runtime
+  # lives on its own branch the job is driven by pushes that touch it.
+  push:
+    branches:
+      - 'feat/linux-gamescope-runtime'
+    paths:
+      - 'tools/linuxfs/**'
+      - '.github/workflows/build-linuxfs.yml'
   workflow_dispatch:
     inputs:
       label:
@@ -56,7 +64,7 @@ jobs:
             echo "  ok  $f"
           done
           {
-            echo "### linuxfs ${{ inputs.label }}"
+            echo "### linuxfs ${{ inputs.label || github.run_number }}"
             echo ""
             echo "| | |"
             echo "|---|---|"
@@ -66,7 +74,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: linuxfs-${{ inputs.label }}
+          name: linuxfs-${{ inputs.label || github.run_number }}
           path: out/linuxfs.tar.zst
           compression-level: 0
           retention-days: 30
