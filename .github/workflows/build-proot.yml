@@ -1,0 +1,53 @@
+name: Build proot (NDK 27)
+
+# proot for the Linux runtime, built on its own with NDK 27 rather than by the app's CMake with
+# whatever NDK the app pins. On device, the same source built with NDK 29 mangles the traced
+# syscall (execve returns ENOSYS, then PEEKDATA EIO / EFAULT reading tracee memory) while
+# WinNative's NDK 27 build of it works, so proot is pinned to the toolchain it is known to work
+# with and shipped as prebuilt jniLibs.
+
+on:
+  push:
+    branches:
+      - 'feat/linux-gamescope-runtime'
+    paths:
+      - 'app/src/main/cpp/proot/**'
+      - '.github/workflows/build-proot.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  proot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install NDK 27
+        id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27c
+          add-to-path: false
+
+      - name: Configure and build
+        run: |
+          cmake -S app/src/main/cpp/proot -B build-proot \
+            -DCMAKE_TOOLCHAIN_FILE="${{ steps.ndk.outputs.ndk-path }}/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-26 \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-proot -j"$(nproc)"
+          mkdir -p out/arm64-v8a
+          cp build-proot/libproot.so build-proot/libproot-loader.so out/arm64-v8a/
+          ls -la out/arm64-v8a
+          "${{ steps.ndk.outputs.ndk-path }}"/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf -h out/arm64-v8a/libproot-loader.so | grep -E "Type|Entry"
+          for f in out/arm64-v8a/*.so; do echo "$(sha256sum "$f" | cut -d' ' -f1)  $(basename "$f")"; done | tee out/SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: proot-ndk27-${{ github.run_number }}
+          path: out/
+          compression-level: 0
+          retention-days: 30
