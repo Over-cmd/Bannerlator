@@ -55,6 +55,18 @@
 
 > Run `35268263770` at `8072b875` green → `pubg` artifact staged as **`/sdcard/Download/Bannerlator-gamescope-final-pubg.apk`** (534,905,742 bytes, sha256 `21e23a011702b5a5a64af0b577bbd88184d19ba2df5336f931f08f8e245ed036`; both proot libs confirmed inside). **Test order:** a normal Wayland game launch first (the seat fan-out and the `wl_seat` 9 / `wl_output` 4 bumps changed the live Wayland path), then Contents → Linux Runtime → Install (needs `linuxfs.json` published), then the Steam (Linux) entry.
 
+### First device run (2026-09-17 evening) — the app-side chain works; our old proot did not
+
+> Rootfs r1 published as a **local copy** (`/sdcard/Download/linuxfs-r1.tar.zst`, 789,000,670 B, sha256 `7002a594…a38b`; the 752 MB GitHub upload 500'd and is deferred to better internet — **`linuxfs.json` is already live and points at an asset that is not there yet**), unpacked with GNU tar (hard links kept, 76,069 entries, 3.2 GB) and swapped into `files/linuxfs` as the app uid with `.version` r1. Valve's arm64 client (933 MB) fetched from here and copied in, `.steam` links recreated with in-rootfs targets. `Steam (Linux)` and a `Linux Desktop` shortcut written into container 8.
+>
+> **Launch by intent (`container_id 8`, `shortcut_path`) → the whole app-side chain fired:** runtime resolved to gamescope, `linuxSessionArgs` = `[desktop]`, `LinuxLauncher` exec'd `libproot.so --kill-on-exit -r …/files/linuxfs …` with `PROOT_LOADER`/`PROOT_TMP_DIR`. Then proot died in 56 ms: `execve("/usr/bin/env"): Function not implemented`, `ptrace(PEEKDATA): I/O error`, `can't chmod …: Bad address`.
+>
+> **Diagnosis, not a guess:** as root it fails identically with seccomp on *and* off (`PROOT_NO_SECCOMP=1`) → not the sandbox. Under Termux's known-good proot the *same* rootfs runs `/usr/bin/env` → not the rootfs. Our proot was an older base whose `loader.c`/`assembly-arm64.h` differ from WinNative's (which never touched them) — the loader does not work on this kernel. **Fix `d4b538ab`: our proot tree replaced wholesale with WinNative's proven one** (carries everything hand-ported plus `#!` interpreters and `execveat`, and handles `setresuid`). Cloud build `35274984079`; the hand-ported `45fe2a8a` is superseded.
+>
+> Also shipped: per-launch debug logs under `Downloads/Bannerlator-LinuxSteam/` (`e3cc9695`) — the script half is in `tools/linuxfs`, so it lands in rootfs **r2**, not the installed r1; patch on device for now.
+>
+> Max's five new commits reviewed: the two proot fixes (now in via the swap); a fake evdev input layer for controllers, `steam-library`/`steam-compat` scripts and a Proton compat tool for running Windows games through Proton+FEX inside the session — all follow-ups, none needed for the client to come up.
+
 ### Phase 1 — proot in the build (`ba0a5786`)
 
 > The tree had been sitting in `cpp/proot` unused since the old Xvfb Steam attempt, absent from `CMakeLists.txt`. Our copy is an older base than his and is CRLF/tab-formatted, so his diffs do not apply; the changes were ported by hand.
