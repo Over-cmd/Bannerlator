@@ -162,11 +162,16 @@ fun LinuxRuntimeTab() {
     }
 }
 
-/** Puts the Steam entry in the first container, so the Games tab has something to launch. */
+/**
+ * Puts the Steam entry in a container so the Games tab has something to launch: one the user has
+ * marked as a gamescope container if there is one, else the first. The entry carries the runtime
+ * itself, so it launches into the Linux runtime from either.
+ */
 private fun addSteamEntry(context: android.content.Context) {
     runCatching {
         val manager = ContainerManager(context)
-        val container = manager.containers.firstOrNull() ?: return
+        val container = manager.containers.firstOrNull { it.isGamescopeRuntime }
+            ?: manager.containers.firstOrNull() ?: return
         if (!LinuxShortcuts.hasSteamShortcut(container)) LinuxShortcuts.createSteamShortcut(container)
     }
 }
