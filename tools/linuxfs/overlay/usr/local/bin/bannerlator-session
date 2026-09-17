@@ -78,6 +78,8 @@ case $mode in
   steam)
     bannerlator-steam-install || exit $?
     steam_root=$XDG_DATA_HOME/Steam
+    # Register the games the app downloaded (bound at /mnt/bannerlator) with the client.
+    bannerlator-steam-library "$steam_root" || true
     export STEAM_RUNTIME=1
     export LD_LIBRARY_PATH=$steam_root/steamrtarm64:$steam_root/steamrtarm64/panorama${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
     export SDL_VIDEO_X11_DGAMOUSE=0

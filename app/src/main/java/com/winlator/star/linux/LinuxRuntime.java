@@ -84,6 +84,13 @@ public final class LinuxRuntime {
      */
     public static List<String> command(Context context, ImageFs imageFs, File runtimeDir,
                                        File externalStorage, List<String> guestCommand) {
+        return command(context, imageFs, runtimeDir, externalStorage, null, guestCommand);
+    }
+
+    /** As above, plus {@code host:guest} bind specs — the installed games handed to Steam. */
+    public static List<String> command(Context context, ImageFs imageFs, File runtimeDir,
+                                       File externalStorage, List<String> extraBinds,
+                                       List<String> guestCommand) {
         File root = rootDir(context);
         List<String> cmd = new ArrayList<>();
         cmd.add(prootBinary(context).getPath());
@@ -138,6 +145,9 @@ public final class LinuxRuntime {
             }
         }
         bindGpuNode(context, cmd);
+        if (extraBinds != null) {
+            for (String spec : extraBinds) bind(cmd, spec);
+        }
         cmd.addAll(guestCommand);
         return cmd;
     }

@@ -8499,8 +8499,12 @@ public class XServerDisplayActivity extends AppCompatActivity {
         hostEnv.put("PROOT_LOADER", com.winlator.star.linux.LinuxRuntime.prootLoader(this).getPath());
         hostEnv.put("PROOT_TMP_DIR", getCacheDir().getPath());
 
+        // The games this app already downloaded, handed to the Steam client as a library folder so
+        // the same install serves both launchers and nothing is fetched twice.
+        List<String> gameBinds = com.winlator.star.linux.LinuxSteamLibrary.prepare(
+                container, com.winlator.star.linux.LinuxRuntime.rootDir(this));
         List<String> command = com.winlator.star.linux.LinuxRuntime.command(this, imageFs, runtimeDir,
-                android.os.Environment.getExternalStorageDirectory(), guest);
+                android.os.Environment.getExternalStorageDirectory(), gameBinds, guest);
         environment.addComponent(new com.winlator.star.linux.LinuxProgramLauncherComponent(
                 command, hostEnv, com.winlator.star.linux.LinuxRuntime.rootDir(this), (status) -> {
                     Log.i("XServerDisplayActivity", "Linux session " + session + " ended: " + status);
