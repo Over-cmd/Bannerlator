@@ -3,6 +3,7 @@
 #include <unistd.h>    /* getpgid, */
 #include <utime.h>     /* utimbuf, */
 #include <sys/vfs.h>   /* statfs64 */
+#include <stdbool.h>   /* bool, */
 #include <string.h>    /* memset   */
 #include <linux/net.h> /* SYS_SENDMMSG */
 #include <assert.h>    /* assert(3), */
@@ -478,6 +479,51 @@ static int handle_seccomp_event_common(Tracee *tracee)
 		set_result_after_seccomp(tracee, ret);
 		break;
 	}
+
+	case PR_setuid:
+	case PR_setuid32:
+	case PR_setgid:
+	case PR_setgid32:
+	case PR_setreuid:
+	case PR_setreuid32:
+	case PR_setregid:
+	case PR_setregid32:
+	{
+		gid_t rxid_, exid_, sxid_;
+		bool is_uid = (sysnum == PR_setuid || sysnum == PR_setuid32
+			|| sysnum == PR_setreuid || sysnum == PR_setreuid32);
+		bool is_re = (sysnum == PR_setreuid || sysnum == PR_setreuid32
+			|| sysnum == PR_setregid || sysnum == PR_setregid32);
+		word_t first = peek_reg(tracee, CURRENT, SYSARG_1);
+		word_t second = is_re ? peek_reg(tracee, CURRENT, SYSARG_2) : (word_t) -1;
+		if (is_uid)
+			ret = getresuid(&rxid_, &exid_, &sxid_);
+		else
+			ret = getresgid(&rxid_, &exid_, &sxid_);
+		if (ret) {
+			set_result_after_seccomp(tracee, -EPERM);
+			break;
+		}
+		ret = 0;
+		if ((gid_t) first != (gid_t) -1 && (gid_t) first != rxid_
+			&& (gid_t) first != exid_ && (gid_t) first != sxid_)
+			ret = -EPERM;
+		if ((gid_t) second != (gid_t) -1 && (gid_t) second != rxid_
+			&& (gid_t) second != exid_ && (gid_t) second != sxid_)
+			ret = -EPERM;
+		set_result_after_seccomp(tracee, ret);
+		break;
+	}
+
+	case PR_setfsuid:
+	case PR_setfsuid32:
+		set_result_after_seccomp(tracee, geteuid());
+		break;
+
+	case PR_setfsgid:
+	case PR_setfsgid32:
+		set_result_after_seccomp(tracee, getegid());
+		break;
 
 	case PR_set_robust_list:
 	default:
