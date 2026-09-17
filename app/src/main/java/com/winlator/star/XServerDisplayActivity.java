@@ -1452,6 +1452,8 @@ public class XServerDisplayActivity extends AppCompatActivity {
     // our embedded compositor instead of the X11 server. All branches are guarded by this flag,
     // so the X11 path is unchanged when it's false. See WAYLAND_RUNTIME.md.
     private boolean waylandMode = false;
+    // The session runs gamescope in the Linux runtime instead of Wine; the compositor is its display.
+    private boolean gamescopeMode = false;
     // HUD metric sampling for wayland mode (see startWaylandCompositor): its own thread, never the
     // compositor's. update() self-throttles to 500 ms and posts the view refresh to the UI thread.
     private android.os.HandlerThread waylandHudThread;
@@ -2386,6 +2388,16 @@ public class XServerDisplayActivity extends AppCompatActivity {
             waylandMode = Container.DISPLAY_BACKEND_WAYLAND.equals(backend);
         }
 
+        // Runtime: the game's override, else the container's. gamescope is a Wayland client of our
+        // compositor and has nothing to draw on otherwise, so it pins the backend to Wayland.
+        String runtime = shortcut != null ? shortcut.getExtra(Container.EXTRA_RUNTIME, "") : "";
+        if (runtime.isEmpty()) runtime = container.getRuntime();
+        gamescopeMode = Container.RUNTIME_GAMESCOPE.equals(runtime);
+        if (gamescopeMode) {
+            waylandMode = true;
+            Log.i("XServerDisplayActivity", "runtime: gamescope (Linux), display server: Wayland");
+        }
+
         // In-game Friends tab (drawer): read the friends/chat opt-in once for this launch and start
         // watching for a live source. The RealSteam hint keeps the app-session source from flashing up
         // before maybeStageRealSteam() arms the plan (which confirms or withdraws it); disarmed in onDestroy.
@@ -2532,7 +2544,8 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // selected layer must ship winewayland.so AND its bundled Wayland Turnip, else the compositor
         // start, the registry driver write and the winex11.drv hide below would all run against a
         // layer that can't drive them. Fall back to X11 and say so.
-        if (waylandMode && !com.winlator.star.core.WineWaylandSupport.isWaylandCapable(wineInfo)) {
+        if (waylandMode && !gamescopeMode
+                && !com.winlator.star.core.WineWaylandSupport.isWaylandCapable(wineInfo)) {
             Log.w("XServerDisplayActivity", "wayland: layer " + wineVersion + " (" + wineInfo.path
                     + ") lacks winewayland.so and/or lib/libvulkan_freedreno_wayland.so; launching on X11");
             waylandMode = false;
@@ -8414,6 +8427,114 @@ public class XServerDisplayActivity extends AppCompatActivity {
         return bmp;
     }
 
+    /**
+     * A gamescope session. proot runs the Linux runtime's session script, which starts gamescope as
+     * a Wayland client of the compositor this activity already brought up; gamescope then execs the
+     * script again inside itself for the program. Nothing of Wine is involved — no prefix, no
+     * wineserver, no dxwrapper — and the PulseAudio socket is the only imagefs service the guest
+     * reaches.
+     *
+     * <p>Ported from WinNative's gamescope runtime (GPL-3.0).
+     */
+    private void setupLinuxSession(String rootPath) {
+        if (!com.winlator.star.linux.LinuxRuntime.isInstalled(this)) {
+            throw new IllegalStateException("The Linux runtime is not installed."
+                    + " Install it from Components before launching a gamescope session.");
+        }
+        try {
+            com.winlator.star.linux.LinuxRuntime.writeAccounts(this);
+        } catch (java.io.IOException e) {
+            throw new IllegalStateException(e);
+        }
+
+        List<String> session = linuxSessionArgs();
+        File runtimeDir = new File(getFilesDir(), ".wayland-rt");
+        runtimeDir.mkdirs();
+
+        environment = new XEnvironment(this, imageFs);
+
+        List<String> guest = new ArrayList<>();
+        guest.add("/usr/bin/env");
+        guest.add("-i");
+        guest.add("HOME=/root");
+        guest.add("USER=root");
+        guest.add("PATH=/usr/local/bin:/usr/bin:/bin");
+        guest.add("TERM=xterm-256color");
+        guest.add("LANG=C.UTF-8");
+        guest.add("XDG_RUNTIME_DIR=" + runtimeDir.getPath());
+        guest.add("XDG_SESSION_TYPE=wayland");
+        guest.add("WAYLAND_DISPLAY=wayland-0");
+        guest.add("GAMESCOPE_FORCE_GENERAL_QUEUE=1");
+        guest.add("LD_PRELOAD=/usr/local/lib/libblsession.so");
+        // Steam's CEF needs GL and the rootfs ships no native GL driver: route it through Zink.
+        guest.add("MESA_LOADER_DRIVER_OVERRIDE=zink");
+        guest.add("GALLIUM_DRIVER=zink");
+        guest.add("LIBGL_KOPPER_DRI2=true");
+        File icd = com.winlator.star.linux.LinuxRuntime.vulkanIcd(this);
+        if (icd != null) guest.add("VK_ICD_FILENAMES=" + icd.getPath());
+        if ("pulseaudio".equals(audioDriver)) {
+            guest.add("PULSE_SERVER=unix:" + rootPath + UnixSocketConfig.PULSE_SERVER_PATH);
+            environment.addComponent(new PulseAudioComponent(
+                    UnixSocketConfig.createSocket(rootPath, UnixSocketConfig.PULSE_SERVER_PATH)));
+        }
+        guest.add("BL_WIDTH=" + xServer.screenInfo.width);
+        guest.add("BL_HEIGHT=" + xServer.screenInfo.height);
+        guest.add("BL_FPS=" + (resolvedFpsLimiterEnabled() ? Math.max(0, resolvedFpsLimiterValue()) : 0));
+        File logDir = new File(getExternalFilesDir(null), "wayland-logs");
+        logDir.mkdirs();
+        guest.add("BL_LOG=" + new File(logDir, "linux-session.log").getPath());
+        guest.add(com.winlator.star.linux.LinuxRuntime.SESSION_SCRIPT);
+        guest.addAll(session);
+
+        EnvVars hostEnv = new EnvVars();
+        hostEnv.put("PROOT_LOADER", com.winlator.star.linux.LinuxRuntime.prootLoader(this).getPath());
+        hostEnv.put("PROOT_TMP_DIR", getCacheDir().getPath());
+
+        List<String> command = com.winlator.star.linux.LinuxRuntime.command(this, imageFs, runtimeDir,
+                android.os.Environment.getExternalStorageDirectory(), guest);
+        environment.addComponent(new com.winlator.star.linux.LinuxProgramLauncherComponent(
+                command, hostEnv, com.winlator.star.linux.LinuxRuntime.rootDir(this), (status) -> {
+                    Log.i("XServerDisplayActivity", "Linux session " + session + " ended: " + status);
+                    exit();
+                }));
+
+        preloaderDialog.step(4, "Launching Linux session…");
+        environment.startEnvironmentComponents();
+        preloaderDialog.enterGuest("Waiting for gamescope to render…");
+        runOnUiThread(this::startLaunchTimers);
+        // The same unconditional overlay clear the Wayland path uses: the first-frame hook may never
+        // fire for this client, and the guest must not stay hidden behind a stuck spinner.
+        new android.os.Handler(getMainLooper()).postDelayed(() -> {
+            if (!winStarted) { winStarted = true; cancelLaunchTimers(); }
+            preloaderDialog.closeOnUiThread();
+        }, 2000L);
+        winHandler.start();
+    }
+
+    /** What the session script runs: the desktop, a Linux program, or the native Steam client. */
+    private List<String> linuxSessionArgs() {
+        List<String> args = new ArrayList<>();
+        if (shortcut == null) {
+            args.add(com.winlator.star.linux.LinuxRuntime.MODE_DESKTOP);
+            return args;
+        }
+        String mode = shortcut.getExtra(com.winlator.star.linux.LinuxRuntime.EXTRA_LINUX_MODE, "");
+        if (com.winlator.star.linux.LinuxRuntime.MODE_STEAM.equals(mode)) {
+            args.add(com.winlator.star.linux.LinuxRuntime.MODE_STEAM);
+            String appId = shortcut.getExtra("app_id", "");
+            if (!appId.isEmpty()) args.add("steam://rungameid/" + appId);
+            return args;
+        }
+        String exe = shortcut.getExtra("custom_exe", "");
+        if (com.winlator.star.linux.LinuxRuntime.MODE_RUN.equals(mode) && !exe.isEmpty()) {
+            args.add(com.winlator.star.linux.LinuxRuntime.MODE_RUN);
+            args.add(exe);
+            return args;
+        }
+        args.add(com.winlator.star.linux.LinuxRuntime.MODE_DESKTOP);
+        return args;
+    }
+
     private void setupXEnvironment() throws PackageManager.NameNotFoundException {
 
         // Set environment variables
@@ -8545,6 +8666,12 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // (wrapperLogDir then points at the user's log dir, outside tmp) or on a WineD3D container (null).
         if (wrapperLogDir != null) wrapperLogDir.mkdirs();
 
+        // A gamescope session shares nothing below this point: no prefix, no wineserver, no
+        // dxwrapper, no guest launcher. proot and the session script are the whole of it.
+        if (gamescopeMode) {
+            setupLinuxSession(rootPath);
+            return;
+        }
 
         guestProgramLauncherComponent = new GuestProgramLauncherComponent(
                 contentsManager,

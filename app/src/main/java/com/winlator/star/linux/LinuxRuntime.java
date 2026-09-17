@@ -30,6 +30,8 @@ public final class LinuxRuntime {
     public static final String MODE_DESKTOP = "desktop";
     public static final String MODE_STEAM = "steam";
     public static final String MODE_RUN = "run";
+    /** Shortcut extra naming which of the modes above a Linux entry launches. */
+    public static final String EXTRA_LINUX_MODE = "linux_mode";
     private static final String KGSL_DEVICE = "/dev/kgsl-3d0";
 
     private LinuxRuntime() {}
