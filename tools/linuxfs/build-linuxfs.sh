@@ -11,6 +11,9 @@ set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 work=${1:?work dir}
 out=${2:?output tarball}
+# The script cds into the work dir below; a relative output path must be pinned before that.
+case $out in /*) ;; *) out=$PWD/$out ;; esac
+mkdir -p "$(dirname "$out")"
 mirror=http://mirror.archlinuxarm.org/aarch64
 base_url=http://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz
 seeds=(gamescope mesa vulkan-freedreno xorg-xwayland xorg-xhost xorg-xrandr vulkan-tools wayland-utils

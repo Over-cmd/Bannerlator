@@ -50,7 +50,7 @@ jobs:
       - name: Build the rootfs
         run: |
           mkdir -p out
-          tools/linuxfs/build-linuxfs.sh "${RUNNER_TEMP}/linuxfs-work" "out/linuxfs.tar.zst"
+          tools/linuxfs/build-linuxfs.sh "${RUNNER_TEMP}/linuxfs-work" "${GITHUB_WORKSPACE}/out/linuxfs.tar.zst"
 
       - name: Report what came out
         run: |
