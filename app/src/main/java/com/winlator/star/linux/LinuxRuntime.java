@@ -88,13 +88,6 @@ public final class LinuxRuntime {
         List<String> cmd = new ArrayList<>();
         cmd.add(prootBinary(context).getPath());
         cmd.add("--kill-on-exit");
-        // Android's app seccomp policy traps the whole set*id family. Xwayland's Popen() calls
-        // setgid()/setuid() before it execs xkbcomp and _exit(127)s when they fail, so without
-        // this the keymap never compiles and Xwayland dies. -i makes proot answer those calls
-        // itself while still reporting our real ids, so nothing inside sees a different user.
-        int uid = Process.myUid();
-        cmd.add("-i");
-        cmd.add(uid + ":" + uid);
         cmd.add("-r");
         cmd.add(root.getPath());
         cmd.add("-w");
