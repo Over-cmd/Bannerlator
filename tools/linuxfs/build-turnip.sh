@@ -49,16 +49,37 @@ cpu = 'aarch64'
 endian = 'little'
 EOF
 
+# Mesa's Wayland module wants a wayland-scanner >= 1.26 on the BUILD machine, and distributions
+# lag it (Ubuntu 24.04 ships 1.22). Build the scanner alone — no libraries, no docs — from the
+# pinned release; it takes seconds.
+wl_version=1.26.0
+wl_sha256=64176eaa46e4969903e286f8e5ef8331affc17fdf03ac9b58381d2b23162b7a3
+host=$work/wayland-host
+if [ ! -x "$host/bin/wayland-scanner" ]; then
+  [ -s "wayland-$wl_version.tar.xz" ] || curl -fsSL --retry 6 --retry-delay 5 --retry-all-errors \
+    -o "wayland-$wl_version.tar.xz" \
+    "https://gitlab.freedesktop.org/wayland/wayland/-/releases/$wl_version/downloads/wayland-$wl_version.tar.xz"
+  echo "$wl_sha256  wayland-$wl_version.tar.xz" | sha256sum -c --quiet
+  rm -rf "wayland-$wl_version" && tar -xJf "wayland-$wl_version.tar.xz"
+  meson setup wayland-build "wayland-$wl_version" --prefix "$host" --libdir lib --buildtype release \
+    -Dlibraries=false -Dscanner=true -Dtests=false -Ddocumentation=false -Ddtd_validation=false
+  ninja -C wayland-build install
+fi
+
 # Programs Mesa runs on the BUILD machine. Without this it asks the sysroot's pkg-config for
-# wayland-scanner and gets the aarch64 binary, which the build host cannot execute.
+# wayland-scanner and gets the aarch64 binary, which the build host cannot execute; and the
+# build-machine pkg-config path is where it finds the scanner built above.
 cat > native.ini <<EOF
 [binaries]
 c = 'gcc'
 cpp = 'g++'
 pkg-config = '/usr/bin/pkg-config'
 cmake = '/usr/bin/cmake'
-wayland-scanner = '$(command -v wayland-scanner)'
+wayland-scanner = '$host/bin/wayland-scanner'
 glslangValidator = '$(command -v glslangValidator)'
+
+[built-in options]
+pkg_config_path = '$host/lib/pkgconfig'
 EOF
 
 [ -f build/build.ninja ] || meson setup build "$src" --cross-file cross.ini --native-file native.ini --buildtype release \
