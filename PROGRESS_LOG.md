@@ -51,6 +51,10 @@
 > - Hand-off APK dispatched at head `8072b875` → run `35268263770`.
 > - One warning to keep an eye on from the qemu hook pass: `gdk-pixbuf-query-loaders` could not create `loaders.cache` — the loaders dir is missing in the aarch64 package layout. Cosmetic for Steam (pcmanfm icons at worst); not blocking.
 
+### Hand-off APK staged
+
+> Run `35268263770` at `8072b875` green → `pubg` artifact staged as **`/sdcard/Download/Bannerlator-gamescope-final-pubg.apk`** (534,905,742 bytes, sha256 `21e23a011702b5a5a64af0b577bbd88184d19ba2df5336f931f08f8e245ed036`; both proot libs confirmed inside). **Test order:** a normal Wayland game launch first (the seat fan-out and the `wl_seat` 9 / `wl_output` 4 bumps changed the live Wayland path), then Contents → Linux Runtime → Install (needs `linuxfs.json` published), then the Steam (Linux) entry.
+
 ### Phase 1 — proot in the build (`ba0a5786`)
 
 > The tree had been sitting in `cpp/proot` unused since the old Xvfb Steam attempt, absent from `CMakeLists.txt`. Our copy is an older base than his and is CRLF/tab-formatted, so his diffs do not apply; the changes were ported by hand.
