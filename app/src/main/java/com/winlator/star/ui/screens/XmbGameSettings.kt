@@ -19,6 +19,7 @@ import androidx.compose.material.icons.filled.Event
 import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Gamepad
+import androidx.compose.material.icons.filled.HdrOn
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Label
@@ -37,6 +38,7 @@ import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material.icons.filled.TouchApp
 import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.Tv
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material.icons.filled.Widgets
 import androidx.compose.runtime.getValue
@@ -53,6 +55,7 @@ import com.winlator.star.core.DirectAudioSupport
 import com.winlator.star.core.StringUtils
 import com.winlator.star.core.WineInfo
 import com.winlator.star.core.WinePath
+import com.winlator.star.display.WaylandHdr
 import com.winlator.star.midi.MidiManager
 import com.winlator.star.store.SteamStoreSearch
 import com.winlator.star.ui.components.AUDIO_PRESETS
@@ -97,6 +100,9 @@ internal class XmbPrefs(val context: Context, val shortcut: Shortcut) {
     // async facts the editor loads in the background
     var arm64ec by mutableStateOf<Boolean?>(null)
     var midiList by mutableStateOf<List<String>>(emptyList())
+
+    /** Why the device's screen can't show HDR10 (the HDR row is greyed with it), null when it can. Read once. */
+    val hdrUnavailableReason: String? by lazy { WaylandHdr.unavailableReason(context) }
 }
 
 private fun XmbPrefs.loadAsync(xmb: XmbScope) {
@@ -294,6 +300,63 @@ private fun generalRows(xmb: XmbScope, p: XmbPrefs, host: XmbGameHost): List<Xmb
         }
     }
 
+    // TV — the same rows as the pop-up editor's TV tab (display.ExternalDisplay), on the same
+    // condition: an external display is plugged in, or this game is already set to launch on one so a
+    // leftover setting is never hidden. Per game only, no container default. HDR is reported, not
+    // asked: starting the session on the TV is what opens the compositor's HDR gate there.
+    // XMB has no display listener of its own — its rows rebuild on refresh(), so a cable plugged in
+    // while this column is open shows up on the next change rather than instantly.
+    val tvDisplay = com.winlator.star.display.ExternalDisplay.find(p.context)
+    if (tvDisplay != null || com.winlator.star.display.ExternalDisplay.launchOnTv(s)) {
+        rows += XmbRow.Header("hTv", "TV")
+        rows += XmbRow.Info("tvDisplay",
+            if (tvDisplay != null) com.winlator.star.display.ExternalDisplay.title(tvDisplay) else "No external display",
+            Icons.Filled.Tv,
+            value = if (tvDisplay != null) com.winlator.star.display.ExternalDisplay.modeLabel(
+                com.winlator.star.display.ExternalDisplay.activeMode(tvDisplay)) else "",
+            subtitle = if (tvDisplay != null) com.winlator.star.display.ExternalDisplay.summary(tvDisplay)
+                       else "Nothing is plugged in. This game is still set to launch on a TV.")
+        rows += XmbRow.Toggle("tvLaunch", "Launch this game on the TV", Icons.Filled.Tv,
+            com.winlator.star.display.ExternalDisplay.launchOnTv(s),
+            subtitle = com.winlator.star.display.ExternalDisplay.HELP_LAUNCH) {
+            xmb.set(p, com.winlator.star.display.ExternalDisplay.EXTRA_LAUNCH, if (it) "1" else "0")
+        }
+        val tvModes = com.winlator.star.display.ExternalDisplay.selectableModes(tvDisplay)
+        val tvModeId = com.winlator.star.display.ExternalDisplay.modeId(s)
+        if (tvModes.size > 1) {
+            val tvValues = listOf(0) + tvModes.map { it.modeId }
+            val tvLabels = listOf("Default (leave the TV as it is)") +
+                tvModes.map { com.winlator.star.display.ExternalDisplay.modeLabel(it) }
+            rows += XmbRow.Choice("tvModeId", "Output mode", Icons.Filled.DesktopWindows, tvLabels,
+                tvLabels[tvValues.indexOf(tvModeId).coerceAtLeast(0)],
+                subtitle = "What the TV is told to run at") { v ->
+                xmb.set(p, com.winlator.star.display.ExternalDisplay.EXTRA_MODE_ID,
+                    tvValues[tvLabels.indexOf(v)].toString())
+            }
+        } else {
+            rows += XmbRow.Info("tvModeId", "Output mode", Icons.Filled.DesktopWindows,
+                value = com.winlator.star.display.ExternalDisplay.modeLabel(tvModes.firstOrNull()).ifEmpty { "—" },
+                subtitle = if (tvDisplay != null) "This screen advertises one output mode"
+                           else "Plug a screen in to choose an output mode")
+        }
+        rows += XmbRow.Toggle("tvMatchRes", "Match the TV's resolution", Icons.Filled.AspectRatio,
+            com.winlator.star.display.ExternalDisplay.matchResolution(s),
+            subtitle = com.winlator.star.display.ExternalDisplay.HELP_MATCH_RES) {
+            xmb.set(p, com.winlator.star.display.ExternalDisplay.EXTRA_MATCH_RES, if (it) "1" else "0")
+        }
+        val tvHdrReason = if (tvDisplay == null) null
+                          else com.winlator.star.display.ExternalDisplay.hdrUnavailableReason(tvDisplay)
+        rows += XmbRow.Info("tvHdr", "Use HDR on the TV", Icons.Filled.HdrOn,
+            value = if (tvDisplay != null && tvHdrReason == null) "On" else "Off",
+            subtitle = tvHdrReason ?: (
+                if (tvDisplay != null) "Automatic. This screen accepts HDR10, so HDR output switches on for this game."
+                else "Plug the screen in to see what it can do."))
+        rows += XmbRow.Info("tvNoteUnplug", "If the cable comes out", Icons.Filled.Info,
+            subtitle = com.winlator.star.display.ExternalDisplay.NOTE_UNPLUG)
+        rows += XmbRow.Info("tvNoteTouch", "Touch on the TV", Icons.Filled.TouchApp,
+            subtitle = com.winlator.star.display.ExternalDisplay.NOTE_TOUCH)
+    }
+
     // Graphics
     rows += XmbRow.Header("hGfx", "Graphics")
     val gfxEntries = WrapperManager.driverEntries(p.context, p.res.getStringArray(R.array.graphics_driver_entries))
@@ -316,15 +379,20 @@ private fun generalRows(xmb: XmbScope, p: XmbPrefs, host: XmbGameHost): List<Xmb
             }
         }
         val turnips = ((xmbBundledDriverVersions ?: emptyList()) + importedDriverVersions(p.context)).distinct()
-        rows += XmbRow.Choice("gfxDriver", "Compositor driver", Icons.Filled.Memory, turnips, if (compositorVersion in turnips) compositorVersion else "",
+        val turnipsLoaded = xmbBundledDriverVersions != null
+        rows += XmbRow.Choice("gfxDriver", "Compositor driver", Icons.Filled.Memory, turnips,
+            compositorDriverLabel(compositorVersion, turnips, turnipsLoaded),
             subtitle = "Used by the Wayland compositor to put frames on screen; the game renders on the Wayland game driver below.") { v ->
             xmb.set(p, "graphicsDriverConfig", withGraphicsDriverVersion(gdc, v))
         }
         // "System"/empty falls back to the system libvulkan, which can't import the game's dmabufs
-        // (black screen) — mirrors XServerDisplayActivity's Wayland driver resolve. Warn only.
-        if (compositorVersion.isEmpty() || compositorVersion == "System") {
-            rows += XmbRow.Info("gfxSystemWarn", "Compositor driver is \"System\"", Icons.Filled.Info,
-                subtitle = """Wayland needs a Turnip driver here. "System" cannot import the game's frames and shows a black screen.""")
+        // (black screen) — mirrors XServerDisplayActivity's Wayland driver resolve; so does an id
+        // that is no longer installed. Warn only.
+        if (compositorDriverUnusable(compositorVersion, turnips, turnipsLoaded)) {
+            val isSystem = compositorVersion.isEmpty() || compositorVersion == "System"
+            rows += XmbRow.Info("gfxSystemWarn",
+                if (isSystem) "Compositor driver is \"System\"" else "Compositor driver is not available", Icons.Filled.Info,
+                subtitle = """Wayland needs a Turnip driver here. "System" or a missing driver cannot import the game's frames and shows a black screen.""")
         }
         // Wayland game driver (per-game override of the container's waylandGameDriver; "" = container
         // default): Auto / the bundled Turnip variants / imported Linux ICDs — same options and labels
@@ -351,6 +419,22 @@ private fun generalRows(xmb: XmbScope, p: XmbPrefs, host: XmbGameHost): List<Xmb
             subtitle = com.winlator.star.core.WaylandGameDriver.HELP_TEXT) { v ->
             xmb.set(p, "waylandGameDriver", wgdValues[wgdLabels.indexOf(v)].ifEmpty { null })
         }
+        // The pop-up editors' gear next to the Wayland game driver: GPU name spoof, memory cap, present
+        // mode, UBWC hint, in the same graphicsDriverConfig keys as X11's driver configuration.
+        val spoof = com.winlator.star.core.GpuSpoof.gpuNameOf(gdc)
+        rows += XmbRow.Link("waylandDriverCfg", "Wayland driver settings", Icons.Filled.Tune,
+            value = spoof.takeIf { com.winlator.star.core.GpuSpoof.isSpoofing(it) },
+            subtitle = "GPU name spoof, memory cap, present mode…") { xmbWaylandDriverConfigMenu(xmb, s) }
+        // HDR output (per-game override of the container's waylandHdr; "" = container default, "1" on,
+        // "0" off) — same options as the pop-up editor (WaylandHdr). Greyed with the reason on a screen
+        // that doesn't report HDR10, still showing what is stored.
+        val hdrValues = listOf("", "1", "0")
+        val hdrLabels = listOf("Container default (" + (if (c.isWaylandHdr()) "On" else "Off") + ")", "On", "Off")
+        rows += XmbRow.Choice(WaylandHdr.EXTRA, WaylandHdr.TITLE, Icons.Filled.HdrOn, hdrLabels,
+            hdrLabels[hdrValues.indexOf(WaylandHdr.shortcutChoice(s)).coerceAtLeast(0)],
+            subtitle = WaylandHdr.HELP_SHORT, disabledReason = p.hdrUnavailableReason) { v ->
+            xmb.set(p, WaylandHdr.EXTRA, hdrValues[hdrLabels.indexOf(v)].ifEmpty { null })
+        }
     } else {
         rows += XmbRow.Choice("gfxDriver", p.str(R.string.graphics_driver), Icons.Filled.Memory, gfxEntries, p.labelFor(gfxEntries, gfxId)) { v ->
             xmb.set(p, "graphicsDriver", StringUtils.parseIdentifier(v))
@@ -362,6 +446,29 @@ private fun generalRows(xmb: XmbScope, p: XmbPrefs, host: XmbGameHost): List<Xmb
         subtitle = "Vulkan version, BCn, present modes…") { xmbDriverConfigMenu(xmb, s) }
     // Wrappers are X11 game-driver shims; nothing on the Wayland path uses them.
     if (!waylandGame) rows += XmbRow.External("wrappers", "Manage wrappers", Icons.Filled.Cloud, subtitle = "Import or remove wrapper drivers") { host.openWrapperManager() }
+    // Unreal Engine HDR (per-game override of the container's unrealHdr; "" = container default), both
+    // backends — same options as the pop-up editors (core.UnrealHdr). DirectX 11 while no NVIDIA GPU
+    // name spoof is set gets the optional hint row.
+    run {
+        val cMode = com.winlator.star.core.UnrealHdr.containerMode(c)
+        val uValues = listOf("") + com.winlator.star.core.UnrealHdr.MODES
+        val uLabels = uValues.map {
+            if (it.isEmpty()) "Container default (" + com.winlator.star.core.UnrealHdr.label(cMode) + ")"
+            else com.winlator.star.core.UnrealHdr.label(it)
+        }
+        val uOverride = com.winlator.star.core.UnrealHdr.shortcutChoice(s)
+        rows += XmbRow.Choice(com.winlator.star.core.UnrealHdr.EXTRA, com.winlator.star.core.UnrealHdr.TITLE, Icons.Filled.HdrOn,
+            uLabels, uLabels[uValues.indexOf(uOverride).coerceAtLeast(0)],
+            subtitle = com.winlator.star.core.UnrealHdr.HELP_SHORT) { v ->
+            xmb.set(p, com.winlator.star.core.UnrealHdr.EXTRA, uValues[uLabels.indexOf(v)].ifEmpty { null })
+        }
+        val spoof = com.winlator.star.core.GpuSpoof.gpuNameOf(p.ex("graphicsDriverConfig", c.getGraphicsDriverConfig()))
+        if (uOverride.ifEmpty { cMode } == com.winlator.star.core.UnrealHdr.DX11 &&
+            !com.winlator.star.core.GpuSpoof.isNvidia(p.context, spoof)) {
+            rows += XmbRow.Info("unrealHdrNvidia", "No NVIDIA GPU is reported", Icons.Filled.Info,
+                subtitle = com.winlator.star.core.UnrealHdr.nvidiaHint(waylandGame))
+        }
+    }
     val dxEntries = p.arr(R.array.dxwrapper_entries)
     val dxId = p.ex("dxwrapper", c.getDXWrapper())
     rows += XmbRow.Choice("dxWrapper", "DX wrapper", Icons.Filled.Layers, dxEntries, p.labelFor(dxEntries, dxId)) { v ->
@@ -422,14 +529,13 @@ private fun generalRows(xmb: XmbScope, p: XmbPrefs, host: XmbGameHost): List<Xmb
     val fgLabels = listOf(p.str(R.string.frame_generation_off), p.str(R.string.frame_generation_bionic), p.str(R.string.frame_generation_lsfg_native))
     val fg = p.ex("frameGenEngine", c.frameGenEngine).let { if (it == "lsfg") "lsfg-native" else it }
     val lsfgDll = File(p.context.filesDir, "lsfg-vk/Lossless.dll").isFile
-    // On Wayland FG is simply not wired to the compositor yet (the X11 renderer gate doesn't apply);
-    // disabled with that reason and displaying it, stored engine untouched.
-    val fgShown = if (waylandGame) "Not available on Wayland yet" else fgLabels[fgEngines.indexOf(fg).coerceAtLeast(0)]
-    rows += XmbRow.Choice("frameGen", "Frame generation", Icons.Filled.Speed, if (waylandGame) listOf(fgShown) else fgLabels, fgShown,
+    // On Wayland the X11 renderer gate does not apply: FG runs inside the compositor (always Vulkan)
+    // and the in-game drawer arms the engine picked here.
+    val fgShown = fgLabels[fgEngines.indexOf(fg).coerceAtLeast(0)]
+    rows += XmbRow.Choice("frameGen", "Frame generation", Icons.Filled.Speed, fgLabels, fgShown,
         subtitle = if (!lsfgDll) "Import a Lossless.dll in Settings to enable LSFG" else null,
         disabledReason = when {
-            waylandGame -> "Not available on Wayland yet (frame generation has not been wired to the Wayland compositor)"
-            rend != "Vulkan" -> "Frame generation requires the Vulkan renderer"
+            !waylandGame && rend != "Vulkan" -> "Frame generation requires the Vulkan renderer"
             else -> null
         },
         disabledOptions = if (lsfgDll) emptySet() else setOf(fgLabels[2])) { v -> xmb.set(p, "frameGenEngine", fgEngines[fgLabels.indexOf(v)]) }

@@ -94,10 +94,58 @@ int vkp_device_lost(void);
 // Clear to black, blit the draws in order (first = bottom) and present.
 // Returns 0 on success, -1 if nothing could be presented (no window yet, etc.).
 int vkp_render(int scene_w, int scene_h, const struct vkp_draw *draws, int n);
+/* A black frame with no compositor pass (no effects, no frame generation), whatever is armed: the
+ * base surface under an HDR game that keeps its display layer (compositor.c). */
+int vkp_render_plain(int scene_w, int scene_h);
+/* Layer mode's base surface: make sure it shows a plain black frame under the display layers. A frame
+ * is presented only when the base is not already black on the current swapchain (entering layer mode,
+ * after a copy-path / frame-generation frame, after a swapchain rebuild); otherwise nothing is drawn
+ * or presented at all. 0 = the base is black, -1 = no output. Compositor thread. */
+int vkp_base_black(int scene_w, int scene_h);
+
+/* ---- perf counters (the 10 s `perf` line, compositor.c) ----
+ * Everything the compositor thread spends in the driver, since the last vkp_perf_take(). Times in ns. */
+struct vkp_perf {
+    unsigned acquires, presents, waits;
+    int64_t acquire_ns, acquire_max_ns;   /* vkAcquireNextImageKHR */
+    int64_t present_ns, present_max_ns;   /* vkQueuePresentKHR */
+    int64_t wait_ns, wait_max_ns;         /* vkWaitForFences on the compositor's own work */
+    unsigned base_presents;               /* black frames presented under the display layers */
+    unsigned base_kept;                   /* layer frames that kept the black frame already there */
+    unsigned gpu_release_waits;           /* layer-buffer release fences waited for on the GPU */
+};
+void vkp_perf_take(struct vkp_perf *out);
+/* 1 when a release fence (sync_file) can be handed to the GPU as a wait (VK_KHR_external_semaphore_fd):
+ * the layer pool then reuses a buffer the display is still reading without blocking on the CPU. */
+int vkp_can_wait_sync_fd(void);
+
+/* ---- HDR composition (hdr_compose.h) ----
+ * An HDR game that cannot be alone on its display layer: the scene is composed into ONE encoding. */
+struct banner_color;
+struct vkp_hdr_frame {
+    const unsigned char *is_hdr; /* per draw: 1 = its image holds PQ BT.2020 (the surface's description) */
+    float peak_nits;             /* the HDR content's peak, for a tone-map (max CLL / mastering max; 0 = 1000) */
+    int tonemap;                 /* 1 = the drawer's HDR output switch is off: tone-map to SDR, never PQ */
+    const struct banner_color *color; /* the topmost HDR draw's description: an HDR10 swapchain's metadata */
+};
+/* vkp_render for a scene with HDR draws (frame generation): composed into PQ and presented through an
+ * HDR10 swapchain where the surface offers one (and hf->tonemap is 0), else tone-mapped into the ordinary
+ * one. *how = 1 HDR10, 2 tone-mapped, 0 the HDR pass was unavailable (shown the old way). Same return as
+ * vkp_render. */
+int vkp_render_hdr(int scene_w, int scene_h, const struct vkp_draw *draws, int n,
+                   const struct vkp_hdr_frame *hf, int *how);
+/* vkp_pass_begin for a scene with HDR draws: composed into a 10-bit picture - PQ BT.2020, or sRGB
+ * tone-mapped when hf->tonemap - the effects run on it in 10-bit, the result (rw x rh, A2B10G10R10) is
+ * left for vkp_pass_copy_to() into a layer buffer (a blit: 10-bit or 8-bit). -1 = not possible (nothing
+ * recorded). */
+int vkp_pass_begin_hdr(int scene_w, int scene_h, const struct vkp_draw *draws, int n,
+                       const struct vkp_hdr_frame *hf, int *rw, int *rh);
 
 /* ---- layer mode helpers (sc_layer.c; compositor thread) ---- */
-/* Whole-image copy of src into dst (a blit-destination dmabuf image), waited for on the CPU. */
-int vkp_blit_image(struct vkp_image *src, struct vkp_image *dst);
+/* Whole-image copy of src into dst (a blit-destination dmabuf image), waited for on the CPU.
+ * wait_fd: a sync_file the copy must wait for before writing dst (the display's release fence of that
+ * buffer), -1 = none. Always consumed (handed to the GPU, or waited for and closed). */
+int vkp_blit_image(struct vkp_image *src, struct vkp_image *dst, int wait_fd);
 /* Refresh the scene -> output mapping for this scene size without presenting (creates the
  * swapchain if needed, since the mapping is in output pixels). 0 = mapping valid. */
 int vkp_update_map(int scene_w, int scene_h);
@@ -107,6 +155,12 @@ int vkp_map_draw(const struct vkp_draw *d, int out[8]);
 /* The same for a bare w x h buffer shown over the whole scene (no vkp_image: zero-copy layers). */
 int vkp_map_rect(int img_w, int img_h, int scene_w, int scene_h, int out[8]);
 /* The output window frames go to (NULL = none); compositor thread. */
+/* Degrees the display rotates every layer we present by (0/90/180/270), -1 before the swapchain
+ * exists. From VkSurfaceCapabilitiesKHR::currentTransform, i.e. what the presentation engine says
+ * it does — never a device allowlist. The layer path uses it to decide whether a SECOND display
+ * layer is affordable on this display (sc_layer_present_overlay). */
+int vkp_surface_rotation_degrees(void);
+
 ANativeWindow *vkp_window(void);
 /* Fire the one-shot first-frame notification (layer mode presents outside vkp_render). */
 void vkp_signal_first_frame(void);
@@ -121,7 +175,8 @@ void vkp_signal_first_frame(void);
  * must follow a successful begin. The chain deliberately runs with NO swapchain image acquired -
  * see the comment in vk_present.c. Frame generation is not run here (see WAYLAND_RUNTIME.md). */
 int vkp_pass_begin(int scene_w, int scene_h, const struct vkp_draw *draws, int n, int *rw, int *rh);
-int vkp_pass_copy_to(struct vkp_image *dst);
+/* wait_fd: as for vkp_blit_image (consumed in every case). */
+int vkp_pass_copy_to(struct vkp_image *dst, int wait_fd);
 void vkp_pass_abort(void);
 
 // Session log (compositor.c): one line to Download/Wayland-logs and logcat.

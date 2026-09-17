@@ -656,7 +656,7 @@ fun BigPictureScreen(navController: NavController) {
                 // Per-game spec = the SAME resolved settings the game cards and the pre-launch screen
                 // show (buildLaunchSpec: renderer / driver / DXVK / VKD3D / frame-gen / x86 backend),
                 // so Big Picture matches the rest of the app instead of the old wrapper/box64 chips.
-                val spec = selected?.let { buildLaunchSpec(it, context.resources) }
+                val spec = selected?.let { buildLaunchSpec(it, context) }
                 val chips = spec?.let {
                     listOf(
                         "Renderer" to it.rendererLabel,
@@ -1861,7 +1861,9 @@ internal fun launchShortcut(activity: Activity, shortcut: Shortcut, preflightDon
             putExtra("disableXinput", shortcut.getExtra("disableXinput", "0"))
             if (preflightDone) putExtra(SteamSessionManager.EXTRA_PREFLIGHT_DONE, true)
         }
-        activity.startActivity(intent)
+        // Same "Launch this game on the TV" as the shortcut list (shared helper, so the two launch
+        // paths can't drift); false = no TV wanted, none connected, or the system refused it.
+        if (!launchOnExternalDisplay(activity, shortcut, intent)) activity.startActivity(intent)
     } else {
         XrActivity.openIntent(activity, shortcut.container.id, shortcut.file.path)
     }

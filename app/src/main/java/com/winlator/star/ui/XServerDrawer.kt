@@ -1362,7 +1362,85 @@ private fun GraphicsContent(state: XServerDrawerState) {
         }
     }
 
+    if (isWaylandSession) WaylandHdrOutputRow(state)
     if (isWaylandSession) WaylandZeroCopyRow(state, waylandEffectsOk)
+    if (isWaylandSession) WaylandGlSafeModeRow(state)
+}
+
+// ───── Wayland: HDR output (live, HDR sessions only) ─────
+// Shown only while the compositor has HDR open for this session (the game's or container's "HDR output"
+// setting was on at launch AND this screen reports HDR10) - never on X11, never on an SDR screen. A live
+// switch: on = the game's HDR frames go to the display as real HDR; off = the SAME frames are shown as a
+// tone-mapped SDR picture. Nothing is relaunched and the game is not told (DXVK_HDR and the offer to the
+// game were decided at launch, so its own HDR setting is untouched). Per session: the next launch starts
+// on again, and whether HDR is offered at all stays the editors' setting.
+@Composable
+private fun WaylandHdrOutputRow(state: XServerDrawerState) {
+    val available by state.waylandHdrAvailable.collectAsState()
+    if (!available) return
+    val output by state.waylandHdrOutput.collectAsState()
+    val onScreen by state.waylandHdrOnScreen.collectAsState()
+    val noHeadroom by state.waylandHdrNoHeadroom.collectAsState()
+    val toneMapped by state.waylandHdrToneMapped.collectAsState()
+    // The gate is decided once at launch and cannot be withdrawn from a running game, so the row stays;
+    // this is whether the screen the game is on NOW can actually show HDR10 (the TV can be unplugged
+    // mid-session). Without it the status line below goes on claiming HDR on a panel that has none.
+    val screenCapable by state.waylandHdrScreenCapable.collectAsState()
+    var checked by remember(output) { mutableStateOf(output) }
+
+    Spacer(Modifier.height(6.dp))
+    ToggleRow("HDR output", checked) {
+        checked = it
+        state.setWaylandHdrOutput(it)
+        state.onWaylandHdrOutputToggle?.accept(it)
+    }
+    HelperText("On: HDR games show real HDR on this screen. Off: the same picture tone-mapped to SDR. " +
+        "Applies immediately, for this session only; the game's own HDR setting is left alone.")
+    HelperText(
+        when {
+            checked && onScreen    -> "On: HDR frames on screen now."
+            checked && noHeadroom  -> "On, but the screen gives HDR no headroom right now: brightness at maximum, " +
+                                      "or the screen is being recorded (Android turns HDR headroom off while recording)."
+            checked && toneMapped  -> "On, but shown tone-mapped: frame generation on a screen with no HDR swapchain."
+            checked && !screenCapable -> "On, but this screen has no HDR10: Android tone-maps the picture for it. " +
+                                      "The game keeps the HDR it was offered until it closes."
+            checked                -> "On: no HDR frames right now (is HDR on in the game's settings?)."
+            onScreen || noHeadroom -> "Off, but these frames cannot be tone-mapped here: they stay HDR."
+            toneMapped             -> "Off: HDR frames shown tone-mapped to SDR."
+            else                   -> "Off: no HDR frames right now."
+        }
+    )
+}
+
+// ───── Wayland: OpenGL safe mode ─────
+// Native OpenGL games render through Mesa here (Zink on Turnip). Mesa runs OpenGL draw submission on
+// a helper thread of its own, and a fault on that thread takes the whole game down WITHOUT a crash
+// report: it is not a Wine thread, so Wine's crash handler faults again on it and the kernel kills
+// the process outright - the game simply vanishes. Safe mode removes the helper thread. The cost is
+// a little CPU-side throughput in OpenGL games; DXVK/VKD3D games never load that driver at all.
+//
+// GALLIUM_THREAD is read once, when the guest's GL driver starts, so this row is a saved preference
+// for the next launch and NOT a live switch - the helper text says exactly that rather than
+// pretending the flip did something to the running game.
+@Composable
+private fun WaylandGlSafeModeRow(state: XServerDrawerState) {
+    val safeMode by state.waylandGlSafeMode.collectAsState()
+    var checked by remember(safeMode) { mutableStateOf(safeMode) }
+
+    Spacer(Modifier.height(6.dp))
+    ToggleRow("OpenGL safe mode", checked) {
+        checked = it
+        state.setWaylandGlSafeMode(it)
+        state.onWaylandGlSafeModeToggle?.accept(it)
+    }
+    HelperText(
+        if (checked)
+            "On: stops native OpenGL games disappearing with no error. Costs a little OpenGL speed; " +
+            "DirectX games are unaffected. Saved for this game - takes effect the next time it starts."
+        else
+            "Off: OpenGL games keep Mesa's extra draw thread (slightly faster), but a fault on it can " +
+            "close the game with no error message. Saved for this game - takes effect the next time it starts."
+    )
 }
 
 // ───── Wayland: Zero-copy presentation ─────
@@ -5085,7 +5163,14 @@ private fun TmContainerPanel(info: XServerDialogState.TmContainerInfo?) {
                 // driver value is the "compositor: … · game: …" pair the activity resolved (wraps).
                 ContainerInfoRow("Renderer", if (wayland) "Vulkan (Wayland compositor)" else prettyRenderer(info.renderer), accent)
                 ContainerInfoRow("Graphics driver", info.graphicsDriver)
+                // Wayland hands the GPU-name spoof to DXVK and leaves the Vulkan device alone, so this
+                // is the only place that can say the game is being told about a GPU that isn't here.
+                // Null (X11, or no spoof) = no row, the block exactly as it was.
+                info.gpuSpoof?.let { ContainerInfoRow("GPU name", "$it (spoofed, not the real GPU)") }
                 ContainerInfoRow("Resolution", info.resolution)
+                // What the panel the game is on reports, read live. Reporting only - there is no HDR
+                // output path, so there is deliberately no toggle beside it.
+                ContainerInfoRow("HDR", info.hdr)
                 ContainerInfoRow("Device", tidyDevice(info.device))
             }
         }

@@ -190,6 +190,24 @@ public class XServerDisplayActivity extends AppCompatActivity {
     private XServerView xServerView;
     // Version-A spike: auto-swaps the game onto a connected external display (TV), handheld = controller.
     private com.winlator.star.display.ExternalDisplayController externalDisplayController;
+    // "Launch this game on the TV" (com.winlator.star.display.ExternalDisplay — the per-game TV tab, NOT
+    // the frozen controller above). The launcher started this activity with setLaunchDisplayId(id) and
+    // passed the same id as EXTRA_DISPLAY_ID, so the session knows which screen it was ASKED for; -1 for
+    // every ordinary handheld launch.
+    //
+    // The extra is the REQUEST, never the answer: Android can decline a launch display silently — no
+    // exception for the launcher to catch, the activity is simply created on the handheld instead. So
+    // nothing keys off tvLaunchDisplayId on its own. sessionDisplayId is where the window actually IS
+    // (read from the activity's own display, re-read whenever the configuration or the display set
+    // changes) and onTvLaunchDisplay() is the single question every TV decision asks. A declined launch
+    // is an ordinary handheld session that happens to know which screen it was refused: no TV settings,
+    // and no unplug watch, because it has no TV to lose.
+    private int tvLaunchDisplayId = -1;
+    private int sessionDisplayId = android.view.Display.DEFAULT_DISPLAY;
+    private boolean tvDisconnectHandled = false;
+    // Set in onCreate when the launch display was refused; the user is told once, from setupUI.
+    private boolean tvLaunchDeclined = false;
+    private boolean tvLaunchDeclinedNotified = false;
     // Set on a real background (onPause outside PiP) so onResume rebuilds the guest audio sink.
     private boolean wasBackgrounded = false;
     // Mid-game output-route watcher: plugging/unplugging wired (or USB/BT/HDMI) headphones during play
@@ -711,6 +729,61 @@ public class XServerDisplayActivity extends AppCompatActivity {
         if (vulkan) return "Vulkan";
         if (opengl) return guestGlIsZink() ? "Zink" : "OpenGL";
         // 3. Nothing graphics-related mapped yet — keep polling (unchanged behaviour).
+        return null;
+    }
+
+    /**
+     * P4 on WAYLAND: is the game rendering with native Vulkan or native OpenGL? Asked of the one
+     * process that can answer — the game's own — and answered from what it has actually mapped.
+     *
+     * <p>{@link #detectActiveDxApi} deliberately refuses to separate the two on X11, where guest-side
+     * Zink makes a GL title map vulkan-1.dll as well; it also ORs its flags over EVERY wine process,
+     * so explorer.exe's modules count as the game's. Neither works here. On Wayland the GL stack sits
+     * on the HOST side of winewayland.drv (wine's unix libEGL -> Zink -> Turnip), and — device-measured
+     * on this layer — it is mapped into a process only when that process really takes the GL path:
+     * <ul>
+     *   <li><b>OpenGL</b>: the layer's own {@code lib/libEGL.so.1} / {@code libgallium-*.so} /
+     *       {@code libwayland-egl.so} appear in the game's maps. Measured against the counter-example:
+     *       a D3D11-on-DXVK title (Titanfall 2, live Wayland session) maps NONE of them.</li>
+     *   <li><b>Vulkan</b> (native, or DXVK/VKD3D on top): {@code winevulkan.so}, the unix half of
+     *       winevulkan.dll, which only loads when the guest itself uses Vulkan.</li>
+     * </ul>
+     * Those are real ELF libraries out of the layer, so they are file-backed in
+     * {@code /proc/<pid>/maps} even on arm64ec, where the PE-only DLLs are invisible to a module scan.
+     * Costs one maps read per 2s poll (detectActiveDxApi reads every process's).
+     *
+     * <p>GL evidence is weighed FIRST because it is the specific signal: loading the GL stack means a
+     * GL context was created, while winevulkan says nothing about what is layered on top of it.
+     * {@code opengl32.so} is deliberately NOT evidence — the same Titanfall 2 session maps it while
+     * rendering D3D11, so wine's GL DLL being resident proves nothing (the X11 resolver's note about
+     * opengl32 being loaded proactively holds here too).
+     *
+     * <p>Returns null — not a guess — when the game pid isn't up yet or nothing is mapped; the caller
+     * then leaves the neutral "Vulkan" (the compositor, true of every Wayland session) on the HUD. The
+     * HUD must never name an API, or a wrapper, that nothing proves.
+     */
+    private String resolveWaylandNativeApi() {
+        try {
+            String pid = findRunningGamePid();
+            if (pid == null) return null;
+            boolean gl = false, vulkan = false;
+            try (java.io.BufferedReader r = new java.io.BufferedReader(
+                    new java.io.FileReader(new java.io.File("/proc/" + pid + "/maps")))) {
+                String line;
+                while ((line = r.readLine()) != null) {
+                    if (line.indexOf('/') < 0) continue;          // anonymous mapping — no module name
+                    line = line.toLowerCase();
+                    // The layer's Mesa EGL/Zink. "libegl.so.1" is Mesa's soname — Android's platform
+                    // EGL is /system/lib64/libEGL.so (no ".1"), so this can't match the host's.
+                    if (line.indexOf("libegl.so.1") >= 0 || line.indexOf("libgallium") >= 0
+                            || line.indexOf("libwayland-egl.so") >= 0) { gl = true; break; }
+                    if (line.indexOf("winevulkan.so") >= 0 || line.indexOf("winevulkan.dll") >= 0
+                            || line.indexOf("vulkan-1.dll") >= 0) vulkan = true;
+                }
+            }
+            if (gl) return "OpenGL";
+            if (vulkan) return "Vulkan";
+        } catch (Exception ignore) {}
         return null;
     }
 
@@ -1243,12 +1316,23 @@ public class XServerDisplayActivity extends AppCompatActivity {
         hudCounterEnabled = fpsConfig.get("hudEnabled", "1").equals("1");
         String hudStyle = fpsConfig.get("hudStyle", "fusion");
 
+        // Host renderer side. On Wayland the container's renderer setting picks an X11 present path
+        // that this session never runs: the game's frames land in the embedded compositor, which is
+        // always Vulkan (the drawer and Task Manager say "Vulkan (Wayland compositor)"; the HUD line
+        // has room for one word). X11 keeps reading its configured renderer, as before.
         String resolvedR = resolvedRenderer();
-        String rendererMode = "vulkan".equals(resolvedR) ? "Vulkan"
+        String rendererMode = waylandMode ? "Vulkan"
+            : "vulkan".equals(resolvedR) ? "Vulkan"
             : "surfaceflinger".equals(resolvedR) ? "SurfaceFlinger" : "OpenGL";
+        // The configured wrapper NAMES what a D3D game would load here — it is not evidence that THIS
+        // game loads one: a native OpenGL or Vulkan title never touches DXVK. It stays the tag for a
+        // D3D API the resolvers actually prove (startDxApiDetection's fallback arg) and, on X11, the
+        // launch-time seed it has always been. On Wayland the label instead starts at the one thing
+        // true of every session — the compositor's Vulkan — and upgrades to "D3D9 · DXVK" / "OpenGL"
+        // when an evidence resolver sees the real API (see startDxApiDetection).
         String dxName = dxwrapper.contains("dxvk") ? "DXVK" : dxwrapper.contains("vegas") ? "VEGAS" : "WineD3D";
-        hudRendererLabel = rendererMode + " | " + dxName;
-        hudEngineShort = dxName;
+        hudRendererLabel = waylandMode ? rendererMode : rendererMode + " | " + dxName;
+        hudEngineShort = waylandMode ? rendererMode : dxName;
 
         // Build whichever HUD the config selected. The other styles are created on demand if the user
         // swaps hudStyle in the in-game drawer (see buildPerfHud/buildClassicHud/buildGameNativeHud).
@@ -1319,7 +1403,18 @@ public class XServerDisplayActivity extends AppCompatActivity {
                 String api = readAppDeclaredApi();                                  // P1
                 if (api == null) api = resolveApiFromEngineLogTopLevel(fallback);   // P2
                 if (api == null) api = resolveApiFromWrapperLogs(fallback);         // P3
-                if (api == null) api = detectActiveDxApi(fallback);                 // P4
+                if (api == null && waylandMode) {
+                    // P4 on Wayland: the game's OWN process says whether it is native Vulkan or
+                    // native OpenGL. detectActiveDxApi's native branch can't answer it here — it ORs
+                    // its flags over every wine process and reasons about the X11 topology — so only
+                    // its D3D verdict (file-backed DX DLLs, i.e. a non-arm64ec layer) is still worth
+                    // taking. No evidence => no api => the neutral compositor label stands.
+                    api = resolveWaylandNativeApi();
+                    if (api == null) {
+                        String dx = detectActiveDxApi(fallback);
+                        if (dx != null && dx.startsWith("D3D")) api = dx;
+                    }
+                } else if (api == null) api = detectActiveDxApi(fallback);          // P4
                 if (api != null && !api.equals(lastApi)) {
                     lastApi = api;
                     // Classic FrameRating renderer line = "<host renderer> | <api>". Skip the prefix
@@ -1394,12 +1489,94 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // The activity is sensorLandscape and a portrait-resolution container forces portrait, so the
         // rotation really does flip under us at runtime — re-read it for the orientation remap.
         refreshCachedDisplayRotation();
+        // A move between displays arrives here now that colorMode|touchscreen|uiMode are in the
+        // manifest's configChanges (before that it recreated the activity and killed the guest).
+        checkSessionDisplay("configuration changed");
         if (configChangedCallback != null) {
             configChangedCallback.run();
             configChangedCallback = null;
         }
     }
-    
+
+    /**
+     * The framework's own "this activity moved to another display" callback. It is a hidden Activity
+     * method, so there is no {@code @Override} to hang here and no compile-time guarantee it is
+     * called — the real work is in {@link #checkSessionDisplay(String)}, which
+     * {@link #onConfigurationChanged} and the display listener also drive. This is only the earliest,
+     * most direct notice of the move when the platform does dispatch it.
+     */
+    public void onMovedToDisplay(int displayId, Configuration config) {
+        checkSessionDisplay("moved to display " + displayId);
+    }
+
+    /**
+     * Is this session's window really on the external display it was launched on?
+     *
+     * <p>The one question every TV decision asks — the screen-size override, the output mode, the
+     * unplug watch. Deliberately NOT "was a TV asked for": {@code ActivityOptions.setLaunchDisplayId}
+     * is a request the system may decline without throwing, and a declined session runs on the handheld
+     * while the intent extra still names the TV. Derived from {@link #sessionDisplayId} rather than
+     * cached, so it cannot go stale when the window moves.
+     */
+    private boolean onTvLaunchDisplay() {
+        return tvLaunchDisplayId >= 0 && sessionDisplayId == tvLaunchDisplayId;
+    }
+
+    /**
+     * Re-read the display this session's window is on and, when it has left the screen it was launched
+     * on, pause the game rather than let it run on (or die on) a screen that is gone.
+     *
+     * <p>Android moves the task back to the default display by itself when an external display is
+     * unplugged — we deliberately do NOT move it, we only notice and pause. Only a session whose window
+     * really WAS on the TV can lose one, so neither an ordinary handheld launch nor a declined TV launch
+     * ever trips this.
+     */
+    private void checkSessionDisplay(String why) {
+        int now;
+        try {
+            now = com.winlator.star.display.ExternalDisplay.currentDisplayId(this);
+        } catch (Throwable t) {
+            return;
+        }
+        if (now == sessionDisplayId) return;
+        int from = sessionDisplayId;
+        // Asked BEFORE sessionDisplayId moves on: this is "the window was on the TV until a moment ago".
+        boolean wasOnTvLaunchDisplay = onTvLaunchDisplay();
+        sessionDisplayId = now;
+        Log.i("XServerDisplayActivity", "TV: session moved from display " + from + " to " + now + " [" + why + "]");
+        // The compositor's HDR gate is decided from the display the window is on, so the new screen's
+        // capability has to be re-read (and pushed to the compositor) before anything else looks at it.
+        reportHdrCapability("session moved to display " + now);
+        if (wasOnTvLaunchDisplay) onTvDisconnected();
+    }
+
+    /**
+     * The TV this session was launched on is gone (unplugged, or the system moved us off it). Pause the
+     * game and say so; the user resumes from the drawer once they are looking at the handheld.
+     *
+     * <p>Deliberately posted rather than run inline: the move can be bracketed by a transient
+     * pause/resume of the activity, and {@link #onResume} unconditionally clears a pause
+     * ("if (isPaused) setPausedState(false)"), which would undo this the moment it landed. Settling
+     * first, then pausing, makes the pause the last word. Runs once per session.
+     */
+    private void onTvDisconnected() {
+        if (tvDisconnectHandled) return;
+        tvDisconnectHandled = true;
+        // Straight away, not on the delay below: the game is on its way back to the handheld and the
+        // companion is a task on that same screen — left up, it would sit in front of the game it is
+        // still telling the user to watch on the TV.
+        com.winlator.star.display.TvCompanionActivity.dismiss("the session left the external display");
+        // Own handler: the field one is only built partway through onCreate, and a display can go away
+        // before that.
+        new Handler(Looper.getMainLooper()).postDelayed(() -> {
+            if (isFinishing() || isDestroyed()) return;
+            setPausedState(true);
+            XServerDialogState.INSTANCE.showInfoToast(
+                    "TV DISCONNECTED", "paused",
+                    "The game is paused. Resume from the drawer.");
+        }, 500);
+    }
+
     /**
      * Publish the panel's real refresh rates through RandR so Wine can offer them to games.
      *
@@ -2099,6 +2276,41 @@ public class XServerDisplayActivity extends AppCompatActivity {
 
         componentInstallerExe = getIntent().getStringExtra("component_installer_exe");
         waylandMode = getIntent().getBooleanExtra("wayland_mode", false);
+        // "Launch this game on the TV": the launcher aimed this session at an external display and told
+        // us which one. That extra is only what was ASKED for — the system can decline a launch display
+        // without anything throwing — so read where the window really ended up and decide from that.
+        // It is knowable here: an activity is attached to its display before onCreate runs, so
+        // getDisplay() (API 30+, else the activity's WindowManager default display) already answers the
+        // real screen, early enough for the screen-size decision further down.
+        tvLaunchDisplayId = getIntent().getIntExtra(
+                com.winlator.star.display.ExternalDisplay.EXTRA_DISPLAY_ID, -1);
+        sessionDisplayId = com.winlator.star.display.ExternalDisplay.currentDisplayId(this);
+        if (tvLaunchDisplayId >= 0) {
+            if (onTvLaunchDisplay()) {
+                Log.i("XServerDisplayActivity", "TV: session is on display " + sessionDisplayId + ", as asked");
+                // The launcher put the handheld's companion screen up before starting us; tell it the
+                // session really did land on the TV, so it stops waiting and knows where to send input
+                // back to. This is the earliest honest answer — the window's display is known before
+                // onCreate runs — and it is the session, not the launcher, that owns the screen's life.
+                com.winlator.star.display.TvCompanionActivity.onSessionOnTv(sessionDisplayId);
+            } else {
+                // Declined. This is NOT a TV session: no screen-size override, no output-mode request,
+                // and the unplug/pause watch never arms — there is no TV to lose. The user is told once
+                // from setupUI, where the toast host is up.
+                tvLaunchDeclined = true;
+                Log.w("XServerDisplayActivity", "TV: the system declined the launch on display "
+                        + tvLaunchDisplayId + " — the game is on the handheld (display " + sessionDisplayId
+                        + "), so this session is not a TV session");
+                // The launcher put the handheld's companion screen up before starting us, and it is now
+                // describing a TV this game is not on — with the game itself about to open behind it.
+                com.winlator.star.display.TvCompanionActivity.dismiss("the launch display was declined");
+            }
+        }
+        // Watch the display set from here on, not from the end of setupUI: everything between the two is
+        // the whole container setup (and on a portrait container setupUI waits for the orientation flip
+        // as well), so a cable pulled in that window used to go unnoticed until the next resume or
+        // configuration change. Idempotent — startHdrCapabilityReport() calls it again and it no-ops.
+        registerDisplayWatch();
 
         // Log shortcut_path
         String shortcutPath = getIntent().getStringExtra("shortcut_path");
@@ -2298,7 +2510,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // Non-root: this only feeds the existing taskAffinityMask path. Empty result (undetectable
         // topology) leaves the computed affinity untouched.
         if (preferBig) {
-            String bigList = com.winlator.star.perf.CpuTopology.INSTANCE.detectBigCoreCpuList();
+            String bigList = detectBigCoreCpuListLogged();
             if (bigList != null && !bigList.isEmpty()) {
                 taskAffinityMask = (short) ProcessHelper.getAffinityMask(bigList);
                 taskAffinityMaskWoW64 = taskAffinityMask;
@@ -2470,7 +2682,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
             preloaderDialog.show(container.getName(), null, null);
         else {
             preloaderDialog.show(shortcut.name, shortcut.icon, shortcut.getCoverArt(),
-                com.winlator.star.ui.screens.LaunchSpecBuilderKt.buildLaunchSpec(shortcut, getResources()),
+                com.winlator.star.ui.screens.LaunchSpecBuilderKt.buildLaunchSpec(shortcut, this),
                 com.winlator.star.ui.screens.LaunchSpecBuilderKt.buildLaunchDetails(shortcut));
         }
         preloaderDialog.step(1, "Preparing container…");
@@ -2489,6 +2701,31 @@ public class XServerDisplayActivity extends AppCompatActivity {
                 if (tvPresent) screenSize = (tvRes == 2) ? "1920x1080" : "2560x1440";
             }
         } catch (Exception ignored) {}
+
+        // "Match the TV's resolution" (per game, TV tab): render at the display's own resolution instead
+        // of this game's screen size. Only when the window really IS on the TV — a declined launch is an
+        // ordinary handheld session and must keep the game's own size, or it would render at the TV's
+        // resolution on the phone. The display is read by the session's actual id for the same reason.
+        // Only for THIS session, too: the shortcut's screenSize extra is never rewritten, so unplugging
+        // the TV and launching again gives the game its own resolution back. The output mode the user
+        // picked wins over the display's current one: that is the resolution the TV is being asked for.
+        if (onTvLaunchDisplay() && shortcut != null
+                && com.winlator.star.display.ExternalDisplay.matchResolution(shortcut)) {
+            try {
+                android.view.Display tvDisplay =
+                        com.winlator.star.display.ExternalDisplay.byId(this, sessionDisplayId);
+                String tvSize = com.winlator.star.display.ExternalDisplay.resolutionOf(
+                        com.winlator.star.display.ExternalDisplay.effectiveMode(tvDisplay,
+                                com.winlator.star.display.ExternalDisplay.modeId(shortcut)));
+                if (!tvSize.isEmpty()) {
+                    Log.i("XServerDisplayActivity", "TV: matching the display's resolution — screen size "
+                            + screenSize + " -> " + tvSize);
+                    screenSize = tvSize;
+                }
+            } catch (Exception e) {
+                Log.w("XServerDisplayActivity", "TV: could not read the display's resolution", e);
+            }
+        }
 
         // Supersampling ("Render scale"): multiply the game's render resolution so it renders above
         // display res, then let the Vulkan compositor Lanczos-downscale it (see setHqDownscale below).
@@ -2832,6 +3069,13 @@ public class XServerDisplayActivity extends AppCompatActivity {
     public void onResume() {
         super.onResume();
 
+        // A TV session that was paused but never stopped is in front again, so the teardown onPause
+        // handed to onStop is moot — and there is nothing for the restore below to undo, because
+        // nothing was ever suspended. It still runs, unchanged: every call in it is idempotent (SIGCONT
+        // to a process that was never stopped, a GL thread told to resume when it never paused, a perf
+        // profile re-applied), which is what keeps the two sides symmetric without a second flag.
+        tvSuspendDeferred = false;
+
         if (environment != null) {
             xServerView.onResume();
             environment.onResume();
@@ -2841,6 +3085,10 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // Android hides clipboard changes from background apps: re-read it now we're in front.
         if (waylandClipboard != null) waylandClipboard.refresh();
         startTime = System.currentTimeMillis();
+        // Exactly one playtime ticker however we got here: the runnable re-posts itself, and a TV
+        // session that was paused without ever being stopped never ran onPause's removeCallbacks, so
+        // posting blind would leave a second chain running for the rest of the session.
+        handler.removeCallbacks(savePlaytimeRunnable);
         handler.postDelayed(savePlaytimeRunnable, SAVE_INTERVAL_MS);
         ProcessHelper.resumeAllWineProcesses();
         // Returning to the foreground unconditionally resumes the guest (above) — keep the paused
@@ -2864,6 +3112,9 @@ public class XServerDisplayActivity extends AppCompatActivity {
         updateCurrentRefreshRate();
         // Re-check the external display in case a TV was (un)plugged while we were backgrounded.
         if (externalDisplayController != null) externalDisplayController.onResume();
+        // Same for a session launched ON a TV: the cable can come out while the app is in the
+        // background, and the display listener's notice arrives with nothing on screen to read it.
+        checkSessionDisplay("resume");
         // Returning from the background can leave the guest's AAudio output route dead (the stream is
         // torn down while backgrounded) — on the TV OR the handheld. Rebuild the audio sink shortly
         // after resume so sound comes back. Only after a real background (not a PiP/dialog pause).
@@ -2886,6 +3137,47 @@ public class XServerDisplayActivity extends AppCompatActivity {
         if (inGameControlsEditor != null) inGameControlsEditor.save();
         super.onPause();
 
+        // A session playing on the TV is PAUSED the moment ANOTHER activity of this app comes to the
+        // front on the handheld — the games list the user was left looking at, and now the companion
+        // screen — while the game is still fully on screen over there. Device-proven on the Pocket FIT:
+        // a touch alone leaves the guest running (S<s), but MainActivity on display 0 SIGSTOPs it (T<s)
+        // at once, which is the user's "the game freezes but the audio keeps playing".
+        //
+        // So a pause on its own is NOT the signal to tear a session down: hand the whole teardown to
+        // onStop, the callback that really does mean this session has left the screen. Nothing at all
+        // happens here — not even releasing held inputs, because the pad is still playing the game over
+        // on the TV. If a build genuinely stops us, everything below still runs, one callback later.
+        // PiP is untouched (it has always frozen the guest) and a session on its way out tears down
+        // here as before — there is no onStop worth waiting for.
+        if (!isInPictureInPictureMode() && onTvLaunchDisplay() && !isFinishing() && !isDestroyed()) {
+            tvSuspendDeferred = true;
+            Log.i("XServerDisplayActivity", "TV: paused but still on display " + sessionDisplayId
+                    + " — leaving the game running");
+            return;
+        }
+
+        suspendSessionForBackground();
+    }
+
+    /**
+     * Set when {@link #onPause} handed a TV session's teardown to {@link #onStop}. Cleared by whichever
+     * callback arrives next — onStop does the work, onResume means the session never left the screen.
+     */
+    private boolean tvSuspendDeferred = false;
+
+    /**
+     * Freeze the guest and drop everything that must not keep running while this session is off screen:
+     * exactly what {@link #onPause} used to do inline, unchanged, so the two callers cannot drift.
+     *
+     * <p>The restore side stays where it has always been, in {@link #onResume} (which always follows
+     * onStart), and stays unconditional: every call in it is idempotent — SIGCONT to a process that was
+     * never stopped, {@code GLSurfaceView.onResume} on a thread that never paused, a perf profile
+     * re-applied — and PiP relies on it running after a pause this method never saw.
+     */
+    private void suspendSessionForBackground() {
+        // Nothing may stay held while the guest is frozen: a button still down when the game stops
+        // answering comes back pressed. (Deliberately NOT done for a TV session that is only paused —
+        // the game is still on screen and the controller is still playing it.)
         if (inputControlsView != null) inputControlsView.releaseAllInputs();
         if (touchpadView != null) touchpadView.releaseAllInputs();
         if (winHandler != null && inputControlsView != null) winHandler.releaseAllControllerInputs();
@@ -2908,7 +3200,8 @@ public class XServerDisplayActivity extends AppCompatActivity {
             // so the external display reads as paused (not a frozen frame) while the user is away.
             if (externalDisplayController != null) externalDisplayController.setPaused(true);
             // Mark a real background so onResume rebuilds the audio sink (the AAudio route dies while
-            // backgrounded, on TV or handheld). Distinct from PiP/dialog pauses, which don't set this.
+            // backgrounded, on TV or handheld). Distinct from PiP/dialog pauses, which don't set this —
+            // and, since the TV path only gets here from onStop, from a focus flicker on the handheld.
             wasBackgrounded = true;
         }
 
@@ -4806,6 +5099,15 @@ public class XServerDisplayActivity extends AppCompatActivity {
         eaRefusalHandler.removeCallbacks(eaRefusalWatchRunnable);
         if (exiting) return;
         exiting = true;
+        // Take the handheld's companion screen down at the START of the shutdown, not at onDestroy:
+        // the save/upload phase below can run for many seconds, and the user should not be looking at
+        // "playing on the TV" while the game is being shut down.
+        com.winlator.star.display.TvCompanionActivity.dismiss("the session is ending");
+        // Wayland HDR output: the session's "HDR on screen: ..." line, written while the game is still
+        // connected (the compositor writes it once; onDestroy's call is the fallback).
+        if (waylandMode) {
+            try { com.winlator.star.wayland.WaylandCompositor.nativeHdrSessionEnd(); } catch (Throwable ignored) {}
+        }
         // A frozen (SIGSTOP'd) guest can't act on the SIGTERM below — resume before tearing down so
         // graceful termination isn't stuck waiting on a suspended process (any pending pulse aside).
         reshadePulseInProgress = false;
@@ -6364,6 +6666,11 @@ public class XServerDisplayActivity extends AppCompatActivity {
 
     @Override
     protected void onDestroy() {
+        // The last word on the handheld's companion screen, whatever took this session down (Exit, the
+        // game's own watcher, a recents swipe, the system). Every other dismissal is about telling the
+        // user something sooner; this one is the guarantee that nothing is left on the handheld
+        // describing a session that no longer exists. No-op when it is already gone.
+        com.winlator.star.display.TvCompanionActivity.dismiss("the session is gone");
         if (inGameControlsEditor != null) {
             inGameControlsEditor.dispose();
             inGameControlsEditor = null;
@@ -6393,6 +6700,8 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // Hide the drawer's Friends tab source + leave any in-game chat thread (the full Friends
         // screen's own open/close is untouched).
         try { com.winlator.star.store.InGameFriendsSource.INSTANCE.disarm(); } catch (Throwable ignored) {}
+        // The HDR capability report watches the same DisplayManager; drop its listener too.
+        stopHdrCapabilityReport();
         // Version-A spike: unregister the display listener, dismiss the Presentation, and pull the
         // game back to the phone so nothing leaks a window on the external display.
         if (externalDisplayController != null) {
@@ -6459,6 +6768,18 @@ public class XServerDisplayActivity extends AppCompatActivity {
     @Override
     protected void onStop() {
         super.onStop();
+        // The teardown onPause handed over for a session playing on the TV. onStop is the callback that
+        // means "no longer visible to the user", so reaching it says the session really did leave the
+        // screen — a home press, another app taking the TV, the system stopping us — and the guest must
+        // freeze after all. The log line is deliberate: if a game on the TV still freezes when the
+        // handheld is touched, this line in logcat is the proof that this build stops the session
+        // instead of only pausing it, which no code in here can tell apart any earlier.
+        if (tvSuspendDeferred) {
+            tvSuspendDeferred = false;
+            Log.i("XServerDisplayActivity", "TV: stopped while on display " + sessionDisplayId
+                    + " — freezing the game after all");
+            suspendSessionForBackground();
+        }
         // Belt-and-suspenders: also drop controller-test isolation on stop (see onPause).
         controllerTestActive = false;
         savePlaytimeData();
@@ -6619,6 +6940,15 @@ public class XServerDisplayActivity extends AppCompatActivity {
                 containerDataChanged = true;
             }
         }
+
+        // Unreal Engine HDR, DirectX 11 mode: the bundled dxvk-nvapi into this prefix, or the prefix's
+        // own nvapi files back when the game isn't in that mode (core.DxvkNvapi). Every launch, after
+        // the DX wrapper step above so a DXVK package carrying its own nvapi can't undo it; idempotent,
+        // and it finishes or undoes whatever an interrupted launch left half-done. setupXEnvironment
+        // sets the matching env and writes the session log line.
+        unrealHdrMode = com.winlator.star.core.UnrealHdr.effective(shortcut, container);
+        nvapiSync = com.winlator.star.core.DxvkNvapi.sync(this, new File(imageFs.getRootDir(), ImageFs.WINEPREFIX),
+                com.winlator.star.core.UnrealHdr.usesDxvkNvapi(unrealHdrMode));
 
         String wincomponents = shortcut != null ? shortcut.getExtra("wincomponents", container.getWinComponents()) : container.getWinComponents();
         if (!wincomponents.equals(container.getExtra("wincomponents"))) {
@@ -6788,6 +7118,380 @@ public class XServerDisplayActivity extends AppCompatActivity {
         return zc != null && (zc.equals("1") || zc.equalsIgnoreCase("true"));
     }
 
+    /** The effective env (container first, shortcut second, so the shortcut wins), or null. */
+    private EnvVars effectiveUserEnv() {
+        if (container == null) return null;
+        String raw = container.getEnvVars();
+        if (shortcut != null) {
+            String sv = shortcut.getExtra("envVars", "");
+            if (sv != null && !sv.isEmpty()) raw = (raw == null ? "" : raw + " ") + sv;
+        }
+        return raw != null && !raw.isEmpty() ? new EnvVars(raw) : null;
+    }
+
+    /** The Wayland compositor's HDR10 output for this launch (waylandcomp/src/banner_color.h,
+     *  display.WaylandHdr). The "HDR output" setting decides — the game shortcut's own choice, else the
+     *  container's, the same owner the editors write — and BANNER_WAYLAND_HDR in the container's or
+     *  shortcut's environment variables overrides it: 1/true/on = on, 0/false/off = off, force = on
+     *  whatever the display says (testing the negotiation on an SDR panel). "On" still only turns
+     *  anything on where the game's display lists HDR10 (startWaylandCompositor). */
+    private int resolvedWaylandHdrMode() {
+        EnvVars env = effectiveUserEnv();
+        if (env != null && env.has("BANNER_WAYLAND_HDR")) {
+            String v = env.get("BANNER_WAYLAND_HDR").trim();
+            if (v.equalsIgnoreCase("force")) return com.winlator.star.wayland.WaylandCompositor.HDR_MODE_FORCE;
+            if (v.equals("1") || v.equalsIgnoreCase("true") || v.equalsIgnoreCase("on"))
+                return com.winlator.star.wayland.WaylandCompositor.HDR_MODE_ON;
+            return com.winlator.star.wayland.WaylandCompositor.HDR_MODE_OFF;
+        }
+        return com.winlator.star.display.WaylandHdr.effective(shortcut, container)
+                ? com.winlator.star.wayland.WaylandCompositor.HDR_MODE_ON
+                : com.winlator.star.wayland.WaylandCompositor.HDR_MODE_OFF;
+    }
+
+    /** What decided resolvedWaylandHdrMode(), for the session log. */
+    private String waylandHdrSource() {
+        EnvVars env = effectiveUserEnv();
+        if (env != null && env.has("BANNER_WAYLAND_HDR")) {
+            if (shortcut != null) {
+                String sv = shortcut.getExtra("envVars", "");
+                if (sv != null && !sv.isEmpty() && new EnvVars(sv).has("BANNER_WAYLAND_HDR")) return "shortcut env var";
+            }
+            return "container env var";
+        }
+        return !com.winlator.star.display.WaylandHdr.shortcutChoice(shortcut).isEmpty()
+                ? "the game's HDR output setting" : "the container's HDR output setting";
+    }
+
+    /** Set in startWaylandCompositor: HDR output is really on for this session (the switch resolved on,
+     *  AND the game's display lists HDR10, or =force). Read by setupXEnvironment (worker thread, later). */
+    private volatile boolean waylandHdrActive = false;
+    /** The display reading startWaylandCompositor made (the brightness hand-off exports it). */
+    private volatile com.winlator.star.display.DisplayHdrInfo waylandHdrDisplay;
+
+    /** DXVK_HDR=1 in the effective env: DXVK then reports an HDR display through DXGI. */
+    private boolean isDxvkHdrEnvOn() {
+        EnvVars env = effectiveUserEnv();
+        String v = env != null ? env.get("DXVK_HDR") : null;
+        return v != null && (v.equals("1") || v.equalsIgnoreCase("true"));
+    }
+
+    /** Set in startWaylandCompositor: the HDR opt-in turned zero-copy presentation on for this session
+     *  (the guest half, BANNER_WSI_AHB=1, is exported in setupXEnvironment, which runs after it). */
+    private volatile boolean waylandHdrZeroCopyForced = false;
+    /** The HDR opt-in mode this session started with (the ratio sampler runs only when it is on). */
+    private int waylandHdrMode = com.winlator.star.wayland.WaylandCompositor.HDR_MODE_OFF;
+
+    /** The Wayland session's HDR environment (launch worker thread, after the user's env vars are
+     *  merged, so an explicit value of theirs always wins):
+     *  - HDR output on for this session -> DXVK_HDR=1, so DXVK tells the game its display is HDR;
+     *  - every Wayland session whose display lists HDR10 -> BANNER_WAYLAND_HDR_MAX_NITS /
+     *    _MAX_AVG_NITS / _MIN_NITS (decimal nits from Display.getHdrCapabilities(); a value that is
+     *    unknown is left out, and so is a max or max-average of 0). The Wayland layer from versionCode
+     *    10 describes the monitor to Windows with them (EDID HDR metadata), so DXGI reports this
+     *    screen's real peak instead of DXVK's 1499-nit stand-in. Never on a display without HDR10: its
+     *    EDID would then claim PQ support the screen does not have. Android reports no LIVE brightness
+     *    in nits; the live HDR/SDR ratio is what the compositor logs instead. */
+    private void applyWaylandHdrEnv(EnvVars envVars) {
+        try {
+            StringBuilder said = new StringBuilder();
+            if (waylandHdrActive) {
+                if (envVars.has("DXVK_HDR")) {
+                    said.append("DXVK_HDR=").append(envVars.get("DXVK_HDR")).append(" (yours, kept)");
+                } else {
+                    envVars.put("DXVK_HDR", "1");
+                    said.append("DXVK_HDR=1");
+                }
+            }
+            com.winlator.star.display.DisplayHdrInfo d = waylandHdrDisplay;
+            if (d == null) d = com.winlator.star.display.DisplayHdrInfo.read(hdrTargetDisplay());
+            String[][] nits = {
+                    {"BANNER_WAYLAND_HDR_MAX_NITS", d.maxLuminance > 0f ? com.winlator.star.display.WaylandHdr.nits(d.maxLuminance) : null},
+                    {"BANNER_WAYLAND_HDR_MAX_AVG_NITS", d.maxAverageLuminance > 0f ? com.winlator.star.display.WaylandHdr.nits(d.maxAverageLuminance) : null},
+                    {"BANNER_WAYLAND_HDR_MIN_NITS", d.minLuminance >= 0f ? com.winlator.star.display.WaylandHdr.nits(d.minLuminance) : null}};
+            if (d.supportsHdr10 && d.maxLuminance > 0f) { // HDR10 displays only; no peak = nothing worth describing
+                for (String[] kv : nits) {
+                    if (kv[1] == null) continue;
+                    if (said.length() > 0) said.append(' ');
+                    if (envVars.has(kv[0])) {
+                        said.append(kv[0]).append('=').append(envVars.get(kv[0])).append(" (yours, kept)");
+                    } else {
+                        envVars.put(kv[0], kv[1]);
+                        said.append(kv[0]).append('=').append(kv[1]);
+                    }
+                }
+            }
+            if (said.length() > 0) {
+                String line = "session environment: " + said + " - from \"" + d.displayName + "\" (Android reports no live "
+                        + "brightness in nits; the HDR/SDR ratio lines are the live reading)";
+                Log.i("XServerDisplayActivity", "wayland HDR " + line);
+                com.winlator.star.wayland.WaylandCompositor.nativeLogColor(line);
+            }
+        } catch (Throwable t) {
+            Log.w("XServerDisplayActivity", "wayland: HDR environment failed", t);
+        }
+    }
+
+    /** This launch's Unreal Engine HDR mode (core.UnrealHdr) and what setupWineSystemFiles did to the
+     *  prefix for it (core.DxvkNvapi); both are read by setupXEnvironment on the same launch thread. */
+    private String unrealHdrMode = com.winlator.star.core.UnrealHdr.OFF;
+    private com.winlator.star.core.DxvkNvapi.Result nvapiSync;
+
+    /** One line for this session's log under {@code area}: the Wayland session log (Download/Wayland-logs)
+     *  on Wayland, the Wine debug log on X11 when the Log Manager has it open; logcat always. */
+    private void logSessionLine(String area, String line) {
+        Log.i("XServerDisplayActivity", area + ": " + line);
+        if (waylandMode) {
+            try { com.winlator.star.wayland.WaylandCompositor.nativeLog(area, line); } catch (Throwable ignored) {}
+        } else if (wineDebugWriter != null) {
+            wineDebugWriter.println("Bannerlator " + area + ": " + line);
+        }
+    }
+
+    /** {@code key=value} into the launch env unless the user's own env vars set {@code key} (theirs wins);
+     *  either way one "key=value" note for the log. */
+    private static void putUnlessUsers(EnvVars envVars, String key, String value, java.util.List<String> said) {
+        if (envVars.has(key)) {
+            said.add(key + "=" + envVars.get(key) + " (yours, kept)");
+        } else {
+            envVars.put(key, value);
+            said.add(key + "=" + value);
+        }
+    }
+
+    /** The session's Unreal Engine HDR environment (core.UnrealHdr; launch worker thread, after the
+     *  user's env vars are merged, both backends). The DirectX 12 fix and DirectX 11 both export
+     *  DXVK_ENABLE_NVAPI=1, once; DirectX 11 adds dxvk-nvapi's WINEDLLOVERRIDES entry and
+     *  DXVK_NVAPI_ALLOW_OTHER_DRIVERS=1 when setupWineSystemFiles put it in the prefix. One "nvapi" line
+     *  in the session log: the mode, the files, the env, and anything that will still stop it working.
+     *  Off exports nothing and logs only when this launch put the prefix's own files back. */
+    private void applyUnrealHdrEnv(EnvVars envVars) {
+        try {
+            String mode = unrealHdrMode;
+            com.winlator.star.core.DxvkNvapi.Result sync = nvapiSync;
+            if (!com.winlator.star.core.UnrealHdr.exportsEnableNvapi(mode)) {
+                if (sync != null && sync.detail != null)
+                    logSessionLine("nvapi", "Unreal Engine HDR off: " + sync.detail);
+                return;
+            }
+            boolean dx11 = com.winlator.star.core.UnrealHdr.usesDxvkNvapi(mode);
+            java.util.List<String> env = new ArrayList<>();
+            putUnlessUsers(envVars, com.winlator.star.core.DxvkNvapi.ENV_DXVK_ENABLE_NVAPI, "1", env);
+            if (dx11 && sync != null && sync.installed) {
+                putUnlessUsers(envVars, com.winlator.star.core.DxvkNvapi.ENV_ALLOW_OTHER_DRIVERS, "1", env);
+                java.util.List<String> kept = new ArrayList<>();
+                String before = envVars.has("WINEDLLOVERRIDES") ? envVars.get("WINEDLLOVERRIDES") : "";
+                String after = com.winlator.star.core.DxvkNvapi.withDllOverrides(before, kept);
+                if (!after.equals(before)) envVars.put("WINEDLLOVERRIDES", after);
+                env.add(kept.isEmpty() ? "WINEDLLOVERRIDES+=nvapi,nvapi64=n"
+                        : "WINEDLLOVERRIDES: yours kept for " + String.join(",", kept));
+            }
+            StringBuilder line = new StringBuilder("Unreal Engine HDR ")
+                    .append(com.winlator.star.core.UnrealHdr.label(mode)).append(": ");
+            if (dx11) line.append(sync != null && sync.detail != null ? sync.detail : "dxvk-nvapi not installed").append("; ");
+            else if (sync != null && sync.detail != null) line.append(sync.detail).append("; "); // back from DirectX 11
+            line.append("env ").append(String.join(" ", env));
+            // What will still stop it, so the log answers "why no HDR" on its own.
+            String dxvkVersion = dxwrapperConfig != null ? dxwrapperConfig.get("version") : "";
+            boolean dxvk = dxwrapper != null && (dxwrapper.contains("dxvk") || dxwrapper.contains("vegas"));
+            if (!dxvk) line.append("; the DX wrapper isn't DXVK, so this does nothing");
+            else if (dx11 && dxvkVersion != null && !dxvkVersion.isEmpty() && compareVersion(dxvkVersion, "2.6") < 0)
+                line.append("; DXVK ").append(dxvkVersion).append(" is older than 2.6 (HDR through NVAPI needs 2.3, in practice 2.6)");
+            if (!waylandMode) line.append("; X11 has no HDR output");
+            else if (!"1".equals(envVars.get("DXVK_HDR"))) line.append("; HDR output is off for this session (no DXVK_HDR)");
+            if (dx11 && !com.winlator.star.core.GpuSpoof.isNvidia(this, graphicsDriverConfig != null ? graphicsDriverConfig.get("gpuName") : null))
+                line.append("; no NVIDIA GPU name spoof, so Unreal Engine won't take its NVAPI path");
+            logSessionLine("nvapi", line.toString());
+        } catch (Throwable t) {
+            Log.w("XServerDisplayActivity", "Unreal Engine HDR environment failed", t);
+        }
+    }
+
+    /** The dxvk.conf this session generates, in the container's own directory. Rewritten every launch,
+     *  and pointed at with DXVK_CONFIG_FILE — an absolute Android path, which is what DXVK opens (the
+     *  same kind of path WINEPREFIX and DXVK_STATE_CACHE_PATH already carry). */
+    private static final String DXVK_GENERATED_CONF = "dxvk-generated.conf";
+
+    /** Wayland: the driver config's GPU name spoof and memory cap, delivered to DXVK as a generated
+     *  dxvk.conf (DXVK_CONFIG_FILE) plus the ids in DXVK_CONFIG — core.GpuSpoof says why it takes both
+     *  routes and why the name can only ride the file. The X11 wrapper that reads WRAPPER_* isn't on
+     *  this path. Launch worker thread, after the user's env vars are merged, so a key they set in
+     *  DXVK_CONFIG or a config file of their own wins. WRAPPER_DEVICE_NAME / _ID / WRAPPER_VENDOR_ID
+     *  stay exported (from the exact list entry) for the Wayland Turnip to read later. One "gpu" line
+     *  in the session log, saying what each route actually carried; none when neither is set. */
+    private void applyWaylandGpuSpoofEnv(EnvVars envVars) {
+        try {
+            String gpuName = requestedWaylandGpuSpoof();   // null unless this session asks for a spoof
+            int memMb = 0;
+            try { memMb = Integer.parseInt(graphicsDriverConfig.get("maxDeviceMemory")); } catch (Exception ignored) {}
+            boolean spoofing = gpuName != null;
+            if (!spoofing && memMb <= 0) return;
+            com.winlator.star.core.GpuSpoof.Card card = spoofing ? com.winlator.star.core.GpuSpoof.find(this, gpuName) : null;
+            StringBuilder said = new StringBuilder();
+            if (spoofing) {
+                said.append("spoof: \"").append(gpuName).append('"');
+                EnvVars user = effectiveUserEnv();
+                if (user == null || !user.has("WRAPPER_DEVICE_NAME")) envVars.put("WRAPPER_DEVICE_NAME", gpuName);
+                if (card == null) {
+                    said.append(" is not in the GPU list, so there are no ids to spoof");
+                } else {
+                    said.append(" (vendor ").append(card.vendorId >= 0 ? com.winlator.star.core.GpuSpoof.pciHex(card.vendorId) : "?")
+                        .append(" device ").append(card.deviceId >= 0 ? com.winlator.star.core.GpuSpoof.pciHex(card.deviceId) : "?").append(')');
+                    if (card.deviceId >= 0 && (user == null || !user.has("WRAPPER_DEVICE_ID")))
+                        envVars.put("WRAPPER_DEVICE_ID", String.valueOf(card.deviceId));
+                    if (card.vendorId >= 0 && (user == null || !user.has("WRAPPER_VENDOR_ID")))
+                        envVars.put("WRAPPER_VENDOR_ID", String.valueOf(card.vendorId));
+                }
+            }
+            boolean dxvk = dxwrapper != null && (dxwrapper.contains("dxvk") || dxwrapper.contains("vegas"));
+            if (!dxvk) {
+                if (said.length() > 0) said.append(' ');
+                said.append("not applied: the DX wrapper isn't DXVK (WineD3D has its own GPU name setting)");
+                logSessionLine("gpu", said.toString());
+                return;
+            }
+            java.util.LinkedHashMap<String, String> ours = com.winlator.star.core.GpuSpoof.dxvkOptions(card, memMb);
+            if (!ours.isEmpty()) {
+                String existing = envVars.has("DXVK_CONFIG") ? envVars.get("DXVK_CONFIG") : "";
+                String userPath = envVars.has("DXVK_CONFIG_FILE") ? envVars.get("DXVK_CONFIG_FILE") : null;
+                String userFile = com.winlator.star.core.GpuSpoof.readConfigFile(userPath);
+                com.winlator.star.core.GpuSpoof.Merge m =
+                        com.winlator.star.core.GpuSpoof.mergeDxvkConfig(existing, userFile, ours);
+
+                // Route 1 — the generated config file. The only route that can carry a GPU name: a
+                // quoted value is what DXVK's file parser is written for, while the same name sent
+                // through the environment never reached the game (core.GpuSpoof). A config file of
+                // the user's own is folded in underneath ours, not replaced; when it can't be read from
+                // the Android side we leave DXVK_CONFIG_FILE pointing at it and go with the environment
+                // alone, since hijacking it would take their whole config away. This also takes over
+                // from a dxvk.conf sitting in the game's folder, which DXVK reads only while
+                // DXVK_CONFIG_FILE is unset — the trade for a spoof that actually arrives.
+                String wrote = null, noFile = null;
+                if (com.winlator.star.core.GpuSpoof.isConfigFilePath(userPath) && userFile == null) {
+                    noFile = "your config file " + userPath + " can't be read from here, so it stays in charge";
+                } else if (container == null) {
+                    noFile = "no container directory to write one in";
+                } else {
+                    File conf = new File(container.getRootDir(), DXVK_GENERATED_CONF);
+                    String path = conf.getPath();
+                    if (!com.winlator.star.core.GpuSpoof.envSafe(path))
+                        noFile = path + " can't go through the environment";
+                    else if (!FileUtils.writeString(conf,
+                            com.winlator.star.core.GpuSpoof.configFileText(m.options, userPath, userFile)))
+                        noFile = "couldn't write " + path;
+                    else { envVars.put("DXVK_CONFIG_FILE", path); wrote = path; }
+                }
+
+                // Route 2 — the ids and the memory cap, whitespace-free so they survive the trip.
+                if (!m.value.isEmpty()) envVars.put("DXVK_CONFIG", m.value);
+
+                // Only a name that really went out may reach the app's own readouts: the HUD and the
+                // Task Manager must never name a GPU the game was not told about. A name of the user's
+                // own is in m.kept instead of m.options, and theirs is the one the game will report.
+                if (wrote != null && m.options.containsKey(com.winlator.star.core.GpuSpoof.KEY_DXGI_DEVICE_DESC)) {
+                    deliveredGpuSpoofName = gpuName;
+                    // The Task Manager's CONTAINER block was built in setupUI, long before this ran —
+                    // rebuild it so the GPU-name row appears (the HDR row refreshes the same way).
+                    runOnUiThread(() -> XServerDialogState.INSTANCE.setTmContainerInfo(buildTmContainerInfo()));
+                }
+
+                // What each route actually carried. The line used to claim a DXVK_CONFIG delivery for
+                // the name that the game never saw, which is how the spoof stayed broken so long.
+                StringBuilder how = new StringBuilder();
+                if (wrote != null) how.append(wrote).append(" (")
+                        .append(String.join(", ", m.options.keySet())).append(')');
+                if (!m.added.isEmpty()) how.append(how.length() > 0 ? " + " : "")
+                        .append("DXVK_CONFIG (").append(String.join(", ", m.added)).append(')');
+                said.append(how.length() > 0 ? " via " : " NOT delivered: nothing could be written").append(how);
+                if (noFile != null) said.append("; no generated config file: ").append(noFile);
+                if (memMb > 0) said.append(", memory cap ").append(memMb).append(" MB (dxgi.maxDeviceMemory)");
+                if (!m.kept.isEmpty()) said.append("; yours kept: ").append(String.join(", ", m.kept));
+                // DXVK only started reading DXVK_CONFIG in 2.5 (2.4.1 ignores it outright, device-proven),
+                // so on an older one the file is the whole delivery and the environment is dead weight.
+                String dxvkVersion = dxwrapperConfig != null ? dxwrapperConfig.get("version") : null;
+                if (dxvkVersion != null && !dxvkVersion.isEmpty() && compareVersion(dxvkVersion, "2.5") < 0)
+                    said.append("; DXVK ").append(dxvkVersion).append(" ignores DXVK_CONFIG (2.5 and up read it)");
+            }
+            logSessionLine("gpu", said.toString());
+        } catch (Throwable t) {
+            Log.w("XServerDisplayActivity", "wayland: GPU name spoof failed", t);
+        }
+    }
+
+    /** The GPU name the Wayland driver settings ask this session to report, or null when it asks for
+     *  none — what the launch path above tries to deliver, read the same way it reads every other
+     *  graphicsDriverConfig key (the shortcut's override is already folded into that field). */
+    private String requestedWaylandGpuSpoof() {
+        if (!waylandMode) return null;
+        String gpuName = graphicsDriverConfig != null ? graphicsDriverConfig.get("gpuName") : null;
+        return com.winlator.star.core.GpuSpoof.isSpoofing(gpuName) ? gpuName : null;
+    }
+
+    /** The GPU name this session actually got out to the game, or null when the game sees the real
+     *  adapter — set by applyWaylandGpuSpoofEnv only once the name is written where DXVK will read it,
+     *  so the app's readouts follow the delivery instead of the setting. This exists at all because
+     *  Wayland hands the spoof to DXVK and nothing renames the Vulkan device: every query the app makes
+     *  still answers with the real chip. On X11 the wrapper's ICD does the renaming, so the readouts
+     *  are handed the spoofed name already and this stays null. Launch worker writes, UI thread reads. */
+    private volatile String deliveredGpuSpoofName = null;
+
+    /** The HUD's display-server label: "X11" / "Wayland" (the HDR state has a line of its own). */
+    private String hudDisplayServerLabel() {
+        return waylandMode ? "Wayland" : "X11";
+    }
+
+    /** The Fusion HUD's HDR line, directly under latency · display server - only in sessions whose HDR
+     *  gate is open (everywhere else FusionHdr.NONE: no line, the HUD exactly as before):
+     *  "HDR" while HDR frames are really on screen with HDR headroom; "HDR (no headroom)" while they are
+     *  on screen but the display has given them none for 5 s+ (brightness at maximum, or a screen
+     *  recording: Android turns HDR headroom off while the screen is recorded); "HDR off" while the
+     *  drawer's HDR output switch is off (tone-mapped to SDR); "HDR tone-mapped" while the switch is on
+     *  but the frames are tone-mapped anyway (frame generation on a screen with no HDR10 swapchain);
+     *  "HDR not on this screen" when the screen the game is on NOW has no HDR10 (the TV was unplugged
+     *  mid-game); "HDR ready" otherwise (no HDR frames on screen right now). What is on screen wins:
+     *  frames that stay HDR with the switch off read "HDR". */
+    private volatile int hudHdrState = 0;          // WaylandCompositor.nativeHdrState()
+    private volatile boolean hudHdrToneMapped = false; // WaylandCompositor.nativeHdrToneMappedOnScreen()
+    private volatile boolean hudHdrGateOpen = false; // the compositor opened HDR for this session
+    /** The drawer's HDR output switch (per session, starts on; only offered while the HDR gate is open). */
+    private volatile boolean waylandHdrOutputOn = true;
+    private int hudHdrCode() {
+        if (!waylandMode || !hudHdrGateOpen) return com.winlator.star.widget.fusionhud.FusionHdr.NONE;
+        if (hudHdrState == 1) return com.winlator.star.widget.fusionhud.FusionHdr.ON;
+        if (hudHdrState == 2) return com.winlator.star.widget.fusionhud.FusionHdr.NO_HEADROOM;
+        if (!waylandHdrOutputOn) return com.winlator.star.widget.fusionhud.FusionHdr.OFF;
+        if (hudHdrToneMapped) return com.winlator.star.widget.fusionhud.FusionHdr.TONEMAPPED;
+        // No HDR frames on screen right now — and "ready" is only honest on a screen that could show
+        // them. The colour-manager offer to the game is fixed for the life of the session (it cannot be
+        // withdrawn from a running client), so the gate deliberately stays open after the TV is pulled;
+        // the SCREEN underneath is what changed, and on a panel with no HDR10 SurfaceFlinger tone-maps
+        // whatever we tag. The session log already says exactly that — this stops the HUD contradicting it.
+        return sessionDisplaySupportsHdr10() ? com.winlator.star.widget.fusionhud.FusionHdr.READY
+                                             : com.winlator.star.widget.fusionhud.FusionHdr.NOT_ON_THIS_SCREEN;
+    }
+
+    /** Does the display this session is on NOW report HDR10? Reads the capability
+     *  {@link #reportHdrCapability} keeps for the current display (re-read on every display move, so it
+     *  cannot go stale), and answers optimistically before the first read: an unknown display must not
+     *  contradict a gate the compositor really did open. */
+    private boolean sessionDisplaySupportsHdr10() {
+        com.winlator.star.display.DisplayHdrInfo info = hdrInfo;
+        return info == null || info.supportsHdr10;
+    }
+
+    /** Tell the compositor what the game's display reports (the HDR gate's input; logged on change). */
+    private void pushWaylandHdrDisplay(com.winlator.star.display.DisplayHdrInfo d) {
+        if (!waylandMode || d == null) return;
+        try {
+            com.winlator.star.wayland.WaylandCompositor.nativeSetHdrDisplay(d.displayId, d.displayName, d.formats,
+                    d.supportsHdr10, d.maxLuminance, d.maxAverageLuminance, d.minLuminance,
+                    d.hdrSdrRatioAvailable, d.hdrSdrRatio, android.os.Build.VERSION.SDK_INT);
+            com.winlator.star.wayland.WaylandCompositor.nativeSetHdrHighestRatio(d.highestHdrSdrRatio);
+        } catch (Throwable t) {
+            Log.w("XServerDisplayActivity", "wayland: HDR display push failed", t);
+        }
+    }
+
     /** The in-game drawer's Wayland rows (Graphics tab): seed the Zero-copy toggle from the effective
      *  env and wire its live switch + writer + the frame-count poll. Runs from setupUI, after the
      *  container and shortcut are resolved and after the drawer's reset() in onCreate. */
@@ -6833,6 +7537,46 @@ public class XServerDisplayActivity extends AppCompatActivity {
                 Log.e("XServerDisplayActivity", "wayland: zero-copy env write failed", e);
             }
         };
+        // OpenGL safe mode. GALLIUM_THREAD is read by Mesa when the GL driver comes up inside the
+        // guest, so unlike zero-copy there is nothing to flip live: the switch is the DEFAULT for the
+        // next launch of this game, and the row says so. Written to the SAME owner
+        // resolvedWaylandGlSafeMode() reads from (shortcut on a shortcut launch, else the container),
+        // so the toggle can never be inert.
+        state.setWaylandGlSafeMode(resolvedWaylandGlSafeMode());
+        state.onWaylandGlSafeModeToggle = on -> {
+            try {
+                if (shortcut != null) {
+                    shortcut.putExtra("waylandGlSafeMode", on ? "1" : "0");
+                    shortcut.saveData();
+                } else {
+                    container.setWaylandGlSafeMode(on);
+                    container.saveData();
+                }
+                Log.i("XServerDisplayActivity", "wayland: OpenGL safe mode " + (on ? "on" : "off")
+                        + " saved to " + (shortcut != null ? "shortcut" : "container")
+                        + " - applies at the next launch (GALLIUM_THREAD is read when Mesa starts)");
+            } catch (Exception e) {
+                Log.e("XServerDisplayActivity", "wayland: OpenGL safe mode write failed", e);
+            }
+        };
+
+        // HDR output (HDR sessions only: the row is shown once the sampler below sees the gate open).
+        // A live, per-session switch - nothing is saved: the editors' "HDR output" setting stays the
+        // next launch's choice (DXVK_HDR and the colour-manager offer are decided at launch).
+        waylandHdrOutputOn = true;
+        state.setWaylandHdrOutput(true);
+        state.onWaylandHdrOutputToggle = on -> {
+            waylandHdrOutputOn = on;
+            try {
+                com.winlator.star.wayland.WaylandCompositor.nativeSetHdrOutput(on);
+            } catch (Throwable t) {
+                Log.e("XServerDisplayActivity", "wayland: live HDR output switch failed", t);
+            }
+            Log.i("XServerDisplayActivity", "wayland: HDR output " + (on ? "on" : "off (tone-mapped to SDR)")
+                    + " for this session");
+            if (fusionHud != null) fusionHud.setHdrState(hudHdrCode());
+        };
+
         // Last-10-s zero-copy frame count, straight from the compositor's stats window, plus whether
         // a zero-copy frame reached the display layer just now. The 10 s counter cannot show a switch
         // that happened two seconds ago; the age can, so the row says "switching..." only for as long
@@ -6842,6 +7586,392 @@ public class XServerDisplayActivity extends AppCompatActivity {
             int age = com.winlator.star.wayland.WaylandCompositor.nativeZeroCopyLastFrameAgeMs();
             state.setWaylandZeroCopyLive(age >= 0 && age < 1500);
         };
+    }
+
+    // ───── HDR capability reporting (both backends; reporting only, nothing turns HDR on) ─────
+    // We have exactly one data point on HDR hardware (this device: none) and no idea what testers'
+    // phones report, so every session records the real platform answer. It is deliberately NOT a
+    // toggle: the compositor emits no colour metadata at all, so a switch would promise output we do
+    // not produce.
+    //
+    // Capability belongs to the DISPLAY, not the device - it comes from that connector's EDID - and
+    // the game can move onto an external screen at runtime (ExternalDisplayController + Presentation).
+    // So it is read live for the display the game is on, and re-read whenever the display set changes.
+    private com.winlator.star.display.DisplayHdrInfo hdrInfo;
+    private android.hardware.display.DisplayManager hdrDisplayManager;
+    private final android.hardware.display.DisplayManager.DisplayListener hdrDisplayListener =
+            new android.hardware.display.DisplayManager.DisplayListener() {
+        @Override public void onDisplayAdded(int displayId)   { reportHdrCapability("display added"); }
+        @Override public void onDisplayRemoved(int displayId) {
+            // The removal is the FIRST notice that a TV went away — the window's own display id still
+            // reads as the dead one until the system finishes handing the task back, so this cannot
+            // wait for onConfigurationChanged. A session whose window is ON that display pauses now; the
+            // capability re-read below then runs against whatever we ended up on. onTvLaunchDisplay()
+            // and not the requested id: a session the system refused to put on the TV is already running
+            // on the handheld, and pulling that TV's cable must not pause it.
+            if (displayId == tvLaunchDisplayId && onTvLaunchDisplay()) {
+                Log.i("XServerDisplayActivity", "TV: launch display " + displayId + " removed");
+                onTvDisconnected();
+            }
+            reportHdrCapability("display removed");
+            checkSessionDisplay("display removed");
+        }
+        @Override public void onDisplayChanged(int displayId) { reportHdrCapability("display changed"); }
+    };
+
+    /**
+     * Register the one display watch this session has (HDR capability + the TV unplug path above).
+     * Split out of {@link #startHdrCapabilityReport()} so onCreate can arm it before the container
+     * setup begins: setupUI, where the report itself starts, can be a long way off — and on a portrait
+     * container it does not run until the orientation flips — which used to leave a cable pulled during
+     * setup unnoticed until the next resume or configuration change.
+     *
+     * <p>Idempotent: the manager field doubles as the "already registered" flag, so the onCreate call
+     * and {@link #startHdrCapabilityReport()}'s cannot register twice. Unregistered where it always
+     * was, in {@link #stopHdrCapabilityReport()} (onDestroy runs it even for a launch that bails early).
+     */
+    private void registerDisplayWatch() {
+        if (hdrDisplayManager != null) return;
+        try {
+            hdrDisplayManager = (android.hardware.display.DisplayManager)
+                    getSystemService(android.content.Context.DISPLAY_SERVICE);
+            if (hdrDisplayManager != null)
+                hdrDisplayManager.registerDisplayListener(hdrDisplayListener,
+                        new android.os.Handler(getMainLooper()));
+        } catch (Throwable t) {
+            Log.w("XServerDisplayActivity", "HDR: display listener unavailable", t);
+        }
+    }
+
+    private void startHdrCapabilityReport() {
+        registerDisplayWatch();
+        reportHdrCapability("session start");
+        if (waylandMode && waylandHdrMode != com.winlator.star.wayland.WaylandCompositor.HDR_MODE_OFF)
+            startHdrRatioSampler();
+    }
+
+    private void stopHdrCapabilityReport() {
+        stopHdrRatioSampler();
+        if (waylandMode) {
+            // The compositor's "HDR on screen: ..." summary (once; a no-op when HDR was never asked for).
+            try { com.winlator.star.wayland.WaylandCompositor.nativeHdrSessionEnd(); } catch (Throwable ignored) {}
+        }
+        if (hdrDisplayManager == null) return;
+        try { hdrDisplayManager.unregisterDisplayListener(hdrDisplayListener); } catch (Throwable ignored) {}
+        hdrDisplayManager = null;
+    }
+
+    // ───── HDR evidence on Wayland: the display's live HDR/SDR ratio (API 34+) ─────
+    // The one platform reading that says an HDR layer is really being SHOWN as HDR: 1.0 while only SDR
+    // is on screen, above 1.0 once the display grants the picture HDR headroom. The compositor tags the
+    // game's frames and counts them; this feeds it what the display did with them, so the session log
+    // (and its "HDR on screen: ..." line) can tell "tagged" from "shown". Runs only while the HDR switch
+    // is on, stops by itself when the compositor reports the gate closed, and never throws.
+    private final android.os.Handler hdrRatioHandler = new android.os.Handler(android.os.Looper.getMainLooper());
+    private Runnable hdrRatioSampler;
+    private java.util.function.Consumer<android.view.Display> hdrRatioListener;
+    private android.view.Display hdrRatioDisplay;
+
+    private void startHdrRatioSampler() {
+        if (hdrRatioSampler != null) return;
+        hdrRatioSampler = new Runnable() {
+            @Override public void run() {
+                if (hdrRatioSampler != this) return;
+                int gate;
+                try { gate = com.winlator.star.wayland.WaylandCompositor.nativeHdrGateState(); }
+                catch (Throwable t) { gate = 0; }
+                if (gate == 0) {  // closed: nothing to prove this session, and no drawer switch / HUD line
+                    XServerDrawerState.INSTANCE.setWaylandHdrAvailable(false);
+                    if (hudHdrGateOpen) {
+                        hudHdrGateOpen = false;
+                        if (fusionHud != null) fusionHud.setHdrState(hudHdrCode());
+                    }
+                    stopHdrRatioSampler();
+                    return;
+                }
+                if (gate == 1) {
+                    XServerDrawerState drawer = XServerDrawerState.INSTANCE;
+                    drawer.setWaylandHdrAvailable(true);
+                    boolean hudChanged = !hudHdrGateOpen;
+                    hudHdrGateOpen = true;
+                    android.view.Display d = hdrTargetDisplay();
+                    armHdrRatioListener(d);
+                    armHdrEvidence();
+                    // Thermal headroom: at most every 10 s (Android returns NaN when asked more often than
+                    // once a second), then the whole evidence set to the compositor (it logs changes only).
+                    if (hdrEvidenceTick++ % 10 == 0) readHdrThermalHeadroom();
+                    pushHdrEvidence();
+                    applyScreenHdrHeadroom();
+                    float ratio = com.winlator.star.display.DisplayHdrInfo.liveHdrSdrRatio(d);
+                    try { com.winlator.star.wayland.WaylandCompositor.nativeHdrSdrRatioSample(ratio, false); }
+                    catch (Throwable ignored) {}
+                    // The HUD's HDR line (hudHdrCode) and the drawer row: "HDR" while HDR frames are
+                    // really on screen (the compositor's verdict: frames tagged BT2020_PQ in the last
+                    // 1.5 s and, where Android reports it, an HDR/SDR ratio above 1), "HDR (no headroom)"
+                    // after 5 s of ratio 1.00 with HDR frames on screen.
+                    int state;
+                    boolean toneMapped;
+                    try { state = com.winlator.star.wayland.WaylandCompositor.nativeHdrState(); }
+                    catch (Throwable t) { state = 0; }
+                    try { toneMapped = com.winlator.star.wayland.WaylandCompositor.nativeHdrToneMappedOnScreen(); }
+                    catch (Throwable t) { toneMapped = false; }
+                    drawer.setWaylandHdrOnScreen(state == 1);
+                    drawer.setWaylandHdrNoHeadroom(state == 2);
+                    drawer.setWaylandHdrToneMapped(toneMapped);
+                    if (state != hudHdrState) { hudHdrState = state; hudChanged = true; }
+                    if (toneMapped != hudHdrToneMapped) { hudHdrToneMapped = toneMapped; hudChanged = true; }
+                    if (hudChanged && fusionHud != null) fusionHud.setHdrState(hudHdrCode());
+                }
+                hdrRatioHandler.postDelayed(this, 1000);
+            }
+        };
+        hdrRatioHandler.postDelayed(hdrRatioSampler, 1000);
+    }
+
+    /** Register the display's own ratio listener (changes arrive at once, not a second later); moves with
+     *  the game to another display. Silently nothing where the display has no ratio (API < 34 / SDR).
+     *  Reached by reflection: Display.registerHdrSdrRatioListener is not in the compile SDK's stubs,
+     *  and where it is missing the one-second sampler above is all there is (nothing is lost but speed). */
+    private void armHdrRatioListener(android.view.Display d) {
+        if (android.os.Build.VERSION.SDK_INT < 34 || d == null || d == hdrRatioDisplay) return;
+        disarmHdrRatioListener();
+        hdrRatioDisplay = d; // whatever happens below, do not retry every second
+        try {
+            if (!d.isHdrSdrRatioAvailable()) return;
+            java.util.function.Consumer<android.view.Display> l = disp -> {
+                float r = com.winlator.star.display.DisplayHdrInfo.liveHdrSdrRatio(disp);
+                try { com.winlator.star.wayland.WaylandCompositor.nativeHdrSdrRatioSample(r, true); }
+                catch (Throwable ignored) {}
+            };
+            java.util.concurrent.Executor ex = hdrRatioHandler::post;
+            android.view.Display.class.getMethod("registerHdrSdrRatioListener",
+                    java.util.concurrent.Executor.class, java.util.function.Consumer.class).invoke(d, ex, l);
+            hdrRatioListener = l;
+        } catch (Throwable t) {
+            hdrRatioListener = null;
+            Log.w("XServerDisplayActivity", "HDR: ratio listener unavailable (sampling once a second instead)", t);
+        }
+    }
+
+    private void disarmHdrRatioListener() {
+        if (hdrRatioDisplay != null && hdrRatioListener != null) {
+            try {
+                android.view.Display.class.getMethod("unregisterHdrSdrRatioListener", java.util.function.Consumer.class)
+                        .invoke(hdrRatioDisplay, hdrRatioListener);
+            } catch (Throwable ignored) {}
+        }
+        hdrRatioListener = null;
+        hdrRatioDisplay = null;
+    }
+
+    private void stopHdrRatioSampler() {
+        if (hdrRatioSampler != null) hdrRatioHandler.removeCallbacks(hdrRatioSampler);
+        hdrRatioSampler = null;
+        disarmHdrRatioListener();
+        disarmHdrEvidence();
+    }
+
+    // ───── HDR evidence beside the headroom (HDR sessions only; non-root APIs, no permission) ─────
+    // The Fold lost HDR headroom with HDR frames on screen in three ways: a screen recording (Android turns
+    // headroom off for it), heat under load, and possibly the brightness slider at maximum. So the session
+    // log carries what the device says about heat and brightness - PowerManager thermal status (+ a
+    // listener) and thermal headroom, the brightness setting and its mode (+ an observer). A screenshot or
+    // a screen recording is not detected in this build (that needs extra permissions); the log names it as
+    // a possible cause instead. Nothing here prompts.
+    private boolean hdrEvidenceArmed;
+    private Object hdrThermalListener;          // PowerManager.OnThermalStatusChangedListener (API 29)
+    private android.database.ContentObserver hdrBrightnessObserver;
+    private float hdrThermalHeadroom = Float.NaN;
+    private int hdrEvidenceTick;
+
+    private void armHdrEvidence() {
+        if (hdrEvidenceArmed) return;
+        hdrEvidenceArmed = true;
+        java.util.concurrent.Executor ex = hdrRatioHandler::post;
+        if (android.os.Build.VERSION.SDK_INT >= 29) {
+            try {
+                android.os.PowerManager pm = (android.os.PowerManager) getSystemService(android.content.Context.POWER_SERVICE);
+                if (pm != null) {
+                    android.os.PowerManager.OnThermalStatusChangedListener l = status -> pushHdrEvidence();
+                    pm.addThermalStatusListener(ex, l);
+                    hdrThermalListener = l;
+                }
+            } catch (Throwable t) {
+                Log.w("XServerDisplayActivity", "HDR evidence: no thermal status listener", t);
+            }
+        }
+        try {
+            hdrBrightnessObserver = new android.database.ContentObserver(hdrRatioHandler) {
+                @Override public void onChange(boolean selfChange) { pushHdrEvidence(); }
+            };
+            android.content.ContentResolver cr = getContentResolver();
+            cr.registerContentObserver(android.provider.Settings.System.getUriFor(
+                    android.provider.Settings.System.SCREEN_BRIGHTNESS), false, hdrBrightnessObserver);
+            cr.registerContentObserver(android.provider.Settings.System.getUriFor(
+                    android.provider.Settings.System.SCREEN_BRIGHTNESS_MODE), false, hdrBrightnessObserver);
+        } catch (Throwable t) {
+            hdrBrightnessObserver = null;
+            Log.w("XServerDisplayActivity", "HDR evidence: no brightness observer", t);
+        }
+        readHdrThermalHeadroom();
+        pushHdrEvidence();
+    }
+
+    // ───── The screen surface's HDR headroom request (frames through the HDR10 swapchain) ─────
+    // The game's display layer asks for headroom itself (sc_layer.c, ASurfaceTransaction_setDesiredHdrHeadroom).
+    // Frame generation presents HDR through the compositor's own swapchain on this SurfaceView instead, so the
+    // request goes on the SurfaceView (API 35): content peak / SDR white, cleared when those frames stop. Some
+    // phones only boost HDR when a surface asks.
+    private float hdrScreenHeadroomApplied = -1f; // -1 = never set
+    private boolean hdrScreenHeadroomMissingSaid;
+
+    private void applyScreenHdrHeadroom() {
+        float want;
+        try { want = com.winlator.star.wayland.WaylandCompositor.nativeHdrScreenHeadroom(); }
+        catch (Throwable t) { return; }
+        if (hdrScreenHeadroomApplied < 0f && want <= 0f) return;            // never asked: leave it be
+        if (Math.abs(want - hdrScreenHeadroomApplied) < 0.005f) return;
+        android.view.SurfaceView sv = waylandSurfaceView;
+        if (sv == null) return;
+        String how = null;
+        if (android.os.Build.VERSION.SDK_INT >= 35) {
+            try {
+                android.view.SurfaceView.class.getMethod("setDesiredHdrHeadroom", float.class).invoke(sv, want);
+                how = "SurfaceView.setDesiredHdrHeadroom";
+            } catch (Throwable t) {
+                try {
+                    android.view.SurfaceControl sc = sv.getSurfaceControl();
+                    android.view.SurfaceControl.Transaction tx = new android.view.SurfaceControl.Transaction();
+                    android.view.SurfaceControl.Transaction.class.getMethod("setDesiredHdrHeadroom",
+                            android.view.SurfaceControl.class, float.class).invoke(tx, sc, want);
+                    tx.apply();
+                    how = "SurfaceControl.Transaction.setDesiredHdrHeadroom";
+                } catch (Throwable t2) {
+                    how = null;
+                }
+            }
+        }
+        hdrScreenHeadroomApplied = want;
+        try {
+            if (how == null) {
+                if (!hdrScreenHeadroomMissingSaid && want > 0f) {
+                    hdrScreenHeadroomMissingSaid = true;
+                    com.winlator.star.wayland.WaylandCompositor.nativeHdrNoteHeadroomRequest(-1f);
+                    com.winlator.star.wayland.WaylandCompositor.nativeLogColor("HDR headroom request on the screen surface "
+                            + "not available (Android < 15): frames through the HDR10 swapchain rely on Android's default");
+                }
+                return;
+            }
+            com.winlator.star.wayland.WaylandCompositor.nativeHdrNoteHeadroomRequest(want);
+            if (want > 0f) {
+                String why = com.winlator.star.wayland.WaylandCompositor.nativeHdrScreenHeadroomWhy();
+                com.winlator.star.wayland.WaylandCompositor.nativeLogColor(String.format(java.util.Locale.US,
+                        "requested HDR headroom %.1fx on the screen surface (HDR10 swapchain for frame generation; %s) via %s",
+                        want, why, how));
+            } else {
+                com.winlator.star.wayland.WaylandCompositor.nativeLogColor("HDR headroom request on the screen surface "
+                        + "cleared (no preference): no HDR frames go through the swapchain any more");
+            }
+        } catch (Throwable ignored) {}
+    }
+
+    private void readHdrThermalHeadroom() {
+        if (android.os.Build.VERSION.SDK_INT < 30) return;
+        try {
+            android.os.PowerManager pm = (android.os.PowerManager) getSystemService(android.content.Context.POWER_SERVICE);
+            if (pm != null) hdrThermalHeadroom = pm.getThermalHeadroom(10);
+        } catch (Throwable t) {
+            hdrThermalHeadroom = Float.NaN;
+        }
+    }
+
+    /** Thermal status + headroom and the brightness setting to the compositor (it logs changes only). */
+    private void pushHdrEvidence() {
+        int thermal = -1, brightness = -1, mode = -1;
+        if (android.os.Build.VERSION.SDK_INT >= 29) {
+            try {
+                android.os.PowerManager pm = (android.os.PowerManager) getSystemService(android.content.Context.POWER_SERVICE);
+                if (pm != null) thermal = pm.getCurrentThermalStatus();
+            } catch (Throwable ignored) {}
+        }
+        try {
+            brightness = android.provider.Settings.System.getInt(getContentResolver(),
+                    android.provider.Settings.System.SCREEN_BRIGHTNESS, -1);
+            mode = android.provider.Settings.System.getInt(getContentResolver(),
+                    android.provider.Settings.System.SCREEN_BRIGHTNESS_MODE, -1);
+        } catch (Throwable ignored) {}
+        float headroom = hdrThermalHeadroom;
+        if (Float.isNaN(headroom) || Float.isInfinite(headroom)) headroom = -1f;
+        try { com.winlator.star.wayland.WaylandCompositor.nativeHdrEnvSample(thermal, headroom, brightness, mode); }
+        catch (Throwable ignored) {}
+    }
+
+    private void disarmHdrEvidence() {
+        if (!hdrEvidenceArmed) return;
+        hdrEvidenceArmed = false;
+        if (android.os.Build.VERSION.SDK_INT >= 29 && hdrThermalListener != null) {
+            try {
+                android.os.PowerManager pm = (android.os.PowerManager) getSystemService(android.content.Context.POWER_SERVICE);
+                if (pm != null) pm.removeThermalStatusListener(
+                        (android.os.PowerManager.OnThermalStatusChangedListener) hdrThermalListener);
+            } catch (Throwable ignored) {}
+        }
+        hdrThermalListener = null;
+        if (hdrBrightnessObserver != null) {
+            try { getContentResolver().unregisterContentObserver(hdrBrightnessObserver); } catch (Throwable ignored) {}
+            hdrBrightnessObserver = null;
+        }
+    }
+
+    /** The display the game is on: the TV when it has been moved there, else this activity's. */
+    private android.view.Display hdrTargetDisplay() {
+        try {
+            if (externalDisplayController != null) {
+                android.view.Display d = externalDisplayController.getExternalGameDisplay();
+                if (d != null) return d;
+            }
+        } catch (Throwable ignored) {}
+        try { return getWindowManager().getDefaultDisplay(); } catch (Throwable ignored) { return null; }
+    }
+
+    /** Read the capability now and record it: one "display" line in the Wayland session log (only
+     *  when the answer actually changed, so a chatty DisplayManager cannot flood it) and the value
+     *  the Task Manager's CONTAINER block shows. Never throws. */
+    private void reportHdrCapability(String why) {
+        try {
+            com.winlator.star.display.DisplayHdrInfo now =
+                    com.winlator.star.display.DisplayHdrInfo.read(hdrTargetDisplay());
+            boolean first = hdrInfo == null;
+            if (!first && now.sameAs(hdrInfo)) return;
+            hdrInfo = now;
+            String line = now.logLine() + " [" + why + "]";
+            Log.i("XServerDisplayActivity", "HDR: " + line);
+            if (waylandMode) {
+                try { com.winlator.star.wayland.WaylandCompositor.nativeLogDisplay(line); }
+                catch (Throwable t) { Log.w("XServerDisplayActivity", "HDR: session-log write failed", t); }
+                if (!first) pushWaylandHdrDisplay(now); // the HDR output hears about a new display too
+                // The readouts follow the SCREEN, not the gate: once the game moves to a display with no
+                // HDR10 (the cable came out) the HUD must stop saying "HDR ready" and the drawer must
+                // stop presenting the session as HDR-capable. Nothing else refreshes them — the
+                // once-a-second sampler only pushes when the compositor's own verdict changes, and a
+                // display move changes neither of its values.
+                XServerDrawerState.INSTANCE.setWaylandHdrScreenCapable(now.supportsHdr10);
+                if (fusionHud != null) fusionHud.setHdrState(hudHdrCode());
+            }
+            // The Task Manager header is built once at launch; refresh it so a screen plugged in
+            // mid-game updates the row instead of showing the handheld's answer for ever.
+            if (!first) runOnUiThread(() ->
+                    XServerDialogState.INSTANCE.setTmContainerInfo(buildTmContainerInfo()));
+        } catch (Throwable t) {
+            Log.w("XServerDisplayActivity", "HDR: capability read failed", t);
+        }
+    }
+
+    /** Short HDR value for the Task Manager's CONTAINER block ("none - panel 500 nits"). */
+    private String hdrRowValue() {
+        com.winlator.star.display.DisplayHdrInfo info = hdrInfo;
+        if (info == null) info = com.winlator.star.display.DisplayHdrInfo.read(hdrTargetDisplay());
+        return info.shortSummary();
     }
 
     private static boolean isZeroCopyEnvOn(String raw) {
@@ -6933,6 +8063,10 @@ public class XServerDisplayActivity extends AppCompatActivity {
                         if (gameNativeHud != null) gameNativeHud.setGpuModel(hudGpuName);
                         if (fusionHud != null) fusionHud.setGpuModel(hudGpuName);
                     }
+                    // The name above is the adapter the COMPOSITOR is really on. When the session got a
+                    // spoof out to the game, the Fusion HUD names that instead — the X11 HUD shows the
+                    // spoof already, because there the wrapper renames the Vulkan device itself.
+                    if (fusionHud != null) fusionHud.setGpuSpoofName(deliveredGpuSpoofName);
                     // Respect the master toggle, like the _MESA_DRV binding does.
                     if (!hudCounterEnabled) return;
                     if (perfHud != null) perfHud.setVisibility(View.VISIBLE);
@@ -6954,6 +8088,11 @@ public class XServerDisplayActivity extends AppCompatActivity {
                 fpsCounter.tick();
                 android.os.Handler h = waylandHudSampler;
                 if (h != null && waylandHudSampleQueued.compareAndSet(false, true)) h.post(waylandHudSample);
+            }
+            @Override public void onGameProgram(int pid, String program) {
+                // X11 arms the launch-time CPU affinity from window events (onMapWindow / _NET_WM_PID);
+                // a Wayland session has none, so the game's first presented frame arms it instead.
+                runOnUiThread(() -> assignWaylandTaskAffinity(pid, program));
             }
         });
         if (waylandHudThread == null) {
@@ -7122,6 +8261,42 @@ public class XServerDisplayActivity extends AppCompatActivity {
             }
             EnvVars env = raw != null && !raw.isEmpty() ? new EnvVars(raw) : null;
             boolean zeroCopy = isWaylandZeroCopyRequested();
+            // HDR10 output (opt-in: the game's / container's HDR output setting, BANNER_WAYLAND_HDR overrides
+            // it): the compositor decides the gate when it starts, from this request plus the display the
+            // game is on. The best path is the game's own 10-bit frames straight on its display layer, so
+            // when HDR can be on, zero-copy presentation is turned on for this session too (whatever needs
+            // the compositor - effects, windows, frame generation - gets the composed HDR picture). Without
+            // the setting, or on a display without HDR10, nothing here changes anything.
+            waylandHdrMode = resolvedWaylandHdrMode();
+            com.winlator.star.display.DisplayHdrInfo hdrDisp =
+                    com.winlator.star.display.DisplayHdrInfo.read(hdrTargetDisplay());
+            boolean hdrPossible = waylandHdrMode == com.winlator.star.wayland.WaylandCompositor.HDR_MODE_FORCE
+                    || (waylandHdrMode == com.winlator.star.wayland.WaylandCompositor.HDR_MODE_ON && hdrDisp.supportsHdr10);
+            waylandHdrActive = hdrPossible;
+            waylandHdrDisplay = hdrDisp;
+            // SDR content composed into an HDR picture (a window over the game, the desktop around a
+            // windowed game) is placed at this many nits; BT.2408's 203 unless the user says otherwise.
+            if (hdrPossible && env != null && env.has("BANNER_WAYLAND_HDR_SDR_NITS")) {
+                try {
+                    com.winlator.star.wayland.WaylandCompositor.nativeSetHdrSdrWhite(
+                            Float.parseFloat(env.get("BANNER_WAYLAND_HDR_SDR_NITS").trim()));
+                } catch (NumberFormatException ignored) {}
+            }
+            waylandHdrZeroCopyForced = hdrPossible && !zeroCopy;
+            if (waylandHdrZeroCopyForced) {
+                zeroCopy = true;
+                XServerDrawerState.INSTANCE.setWaylandZeroCopyRequested(true);
+                Log.i("XServerDisplayActivity", "wayland: HDR output requested on an HDR10 display - zero-copy on for this session");
+            }
+            pushWaylandHdrDisplay(hdrDisp);
+            // DXVK_HDR=1 reaches the game when the user set it, or when HDR is on and the user did not
+            // set it at all (setupXEnvironment exports it then; an explicit DXVK_HDR=0 stays 0).
+            boolean dxvkHdrInSession = isDxvkHdrEnvOn() || (hdrPossible && (env == null || !env.has("DXVK_HDR")));
+            com.winlator.star.wayland.WaylandCompositor.nativeSetHdrRequest(waylandHdrMode, waylandHdrSource(),
+                    dxvkHdrInSession, waylandHdrZeroCopyForced);
+            if (waylandHdrMode != com.winlator.star.wayland.WaylandCompositor.HDR_MODE_OFF)
+                Log.i("XServerDisplayActivity", "wayland: BANNER_WAYLAND_HDR mode " + waylandHdrMode + " on \""
+                        + hdrDisp.displayName + "\" (HDR types " + hdrDisp.formats + ", HDR10 " + hdrDisp.supportsHdr10 + ")");
             com.winlator.star.wayland.WaylandCompositor.nativeSetZeroCopy(zeroCopy);
             XServerDrawerState.INSTANCE.setWaylandZeroCopyActive(zeroCopy);
             if (zeroCopy) Log.i("XServerDisplayActivity", "wayland: zero-copy layer mode requested");
@@ -7131,6 +8306,13 @@ public class XServerDisplayActivity extends AppCompatActivity {
             boolean ubwc = !(ub != null && (ub.equals("0") || ub.equalsIgnoreCase("false") || ub.equalsIgnoreCase("off")));
             com.winlator.star.wayland.WaylandCompositor.nativeSetUbwc(ubwc);
             if (!ubwc) Log.i("XServerDisplayActivity", "wayland: compressed (UBWC) game buffers disabled by BANNER_WAYLAND_UBWC");
+            // Debug: BANNER_WAYLAND_NO_RENDER_NODE=1 makes the compositor name no DRM device in its
+            // dma-buf feedback (main device 0:0), which is what a phone that exposes no /dev/dri
+            // node to apps sends. Reproduces those phones' OpenGL path on a device that has one.
+            String nrn = env != null ? env.get("BANNER_WAYLAND_NO_RENDER_NODE") : null;
+            boolean noRenderNode = nrn != null && (nrn.equals("1") || nrn.equalsIgnoreCase("true") || nrn.equalsIgnoreCase("on"));
+            com.winlator.star.wayland.WaylandCompositor.nativeSetNoRenderNode(noRenderNode);
+            if (noRenderNode) Log.i("XServerDisplayActivity", "wayland: BANNER_WAYLAND_NO_RENDER_NODE - advertising no DRM device");
         } catch (Exception e) {
             Log.e("XServerDisplayActivity", "wayland: zero-copy flag read failed", e);
         }
@@ -7517,7 +8699,37 @@ public class XServerDisplayActivity extends AppCompatActivity {
             // its own Android layer (startWaylandCompositor) also tells our Wayland Turnip's WSI to
             // allocate the game's swapchain images as gralloc buffers and hand them to the compositor
             // (banner_ahb_v1), so the layer shows the game's own buffer without a copy.
-            if (waylandMode && isWaylandZeroCopyRequested()) envVars.put("BANNER_WSI_AHB", "1");
+            // The HDR opt-in (startWaylandCompositor, which runs first) can turn zero-copy on too.
+            if (waylandMode && (isWaylandZeroCopyRequested() || waylandHdrZeroCopyForced)) envVars.put("BANNER_WSI_AHB", "1");
+            if (waylandMode) applyWaylandHdrEnv(envVars);
+            // Unreal Engine HDR (both backends) and, on Wayland, the GPU name spoof: after both user env
+            // merges and the HDR env above, so a DXVK_ENABLE_NVAPI / WINEDLLOVERRIDES / DXVK_CONFIG entry
+            // of the user's wins and the log line can say whether DXVK_HDR is on.
+            applyUnrealHdrEnv(envVars);
+            if (waylandMode) applyWaylandGpuSpoofEnv(envVars);
+
+            // OpenGL safe mode (Wayland only, default ON): GALLIUM_THREAD=0 removes Mesa's
+            // u_threaded_context helper thread. That thread is a plain pthread with no Wine TEB, so a
+            // fault on it makes Wine's SIGSEGV handler fault again and the kernel kills the process
+            // with NO tombstone, NO Wine exception and NO log line - the game just disappears
+            // (proved on Wizardry: 2 swaps and gone, vs 2862 swaps with the thread off).
+            // It only reaches Mesa's gallium drivers, i.e. the OpenGL/Zink path; a DXVK/VKD3D game
+            // goes straight to Turnip's Vulkan driver and never loads one, so this is inert for it.
+            // Both user env strings (container, then shortcut) are already merged above, so an
+            // explicit GALLIUM_THREAD the user typed themselves still wins.
+            if (waylandMode) {
+                if (!resolvedWaylandGlSafeMode()) {
+                    Log.i("XServerDisplayActivity", "wayland: OpenGL safe mode is OFF for this launch"
+                            + " - Mesa's threaded context stays on");
+                } else if (envVars.has("GALLIUM_THREAD")) {
+                    Log.i("XServerDisplayActivity", "wayland: OpenGL safe mode on, but GALLIUM_THREAD="
+                            + envVars.get("GALLIUM_THREAD") + " is already set in the environment variables"
+                            + " - leaving the user's value alone");
+                } else {
+                    envVars.put("GALLIUM_THREAD", "0");
+                    Log.i("XServerDisplayActivity", "wayland: OpenGL safe mode on - exporting GALLIUM_THREAD=0");
+                }
+            }
 
             // Keep the lsfg-vk Vulkan layer INERT unless lsfg-vk is actually the engine.
             // Placed AFTER both user env merges (container above, shortcut just here) so
@@ -8055,6 +9267,37 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // Wayland mode: overlay the embedded compositor's SurfaceView on top of the (idle) X view,
         // and start the compositor rendering into it. winewayland.drv connects to its socket.
         if (waylandMode) startWaylandCompositor(rootView);
+        // "Launch this game on the TV": re-read the display the window is on now that it is attached,
+        // then ask the TV for the output mode the user picked — but only when the window really is on
+        // the TV. The re-read goes through checkSessionDisplay so a cable pulled between onCreate and
+        // here (the whole container setup) takes the normal unplug path instead of being mistaken for a
+        // refusal; it is a no-op when nothing moved.
+        checkSessionDisplay("UI ready");
+        if (onTvLaunchDisplay()) {
+            int tvModeId = com.winlator.star.display.ExternalDisplay.modeId(shortcut);
+            if (tvModeId > 0) {
+                // The window's preferred mode is what asks the display to switch; 0 leaves the TV on
+                // whatever it is already doing, which is why "Default" stores 0.
+                try {
+                    android.view.WindowManager.LayoutParams lp = getWindow().getAttributes();
+                    lp.preferredDisplayModeId = tvModeId;
+                    getWindow().setAttributes(lp);
+                } catch (Throwable t) {
+                    Log.w("XServerDisplayActivity", "TV: output mode " + tvModeId + " refused", t);
+                }
+            }
+        } else if (tvLaunchDeclined && !tvLaunchDeclinedNotified) {
+            // The game was aimed at the TV and came up on the handheld. Silent refusal otherwise: the
+            // launcher's catch never fires for it, so this is the only place the user hears about it.
+            // Once per session, and safe this early — the toast is state the host shows when it composes.
+            tvLaunchDeclinedNotified = true;
+            try {
+                XServerDialogState.INSTANCE.showInfoToast(
+                        "TV LAUNCH REFUSED", "handheld",
+                        "The system wouldn't open this game on the TV. It's running on the handheld screen.");
+            } catch (Throwable ignored) {}
+        }
+        startHdrCapabilityReport();
 
         // Version A: watch for an external (TV) display and reparent the game onto it, using the
         // handheld as the controller. The listener updates the in-game TV tab + raises Compose toasts.
@@ -11147,7 +12390,7 @@ return true;
                 // Recompute the affinity mask the guest launcher reads (processes spawned after the
                 // flip + next launch)...
                 if (on) {
-                    String bigList = com.winlator.star.perf.CpuTopology.INSTANCE.detectBigCoreCpuList();
+                    String bigList = detectBigCoreCpuListLogged();
                     if (bigList != null && !bigList.isEmpty()) {
                         taskAffinityMask = (short) ProcessHelper.getAffinityMask(bigList);
                         taskAffinityMaskWoW64 = taskAffinityMask;
@@ -11575,6 +12818,21 @@ return true;
             return shortcut.getExtra("matchRefreshRate", container.isMatchRefreshRate() ? "1" : "0").equals("1");
         }
         return container.isMatchRefreshRate();
+    }
+
+    // Per-game override for OpenGL safe mode (shortcut wins over the container default), Wayland only.
+    // Default ON (Container.isWaylandGlSafeMode). Read and WRITTEN through the same owner: when a
+    // shortcut is launched the value lives on the shortcut, otherwise on the container -- so the
+    // in-game toggle is never inert. (resolvedMatchRefreshRate() has exactly that bug: it prefers a
+    // shortcut extra while the drawer writes the container, so a shortcut carrying its own value
+    // swallows the toggle. Do not copy that shape.)
+    private boolean resolvedWaylandGlSafeMode() {
+        if (container == null) return true;
+        if (shortcut != null) {
+            return shortcut.getExtra("waylandGlSafeMode",
+                container.isWaylandGlSafeMode() ? "1" : "0").equals("1");
+        }
+        return container.isWaylandGlSafeMode();
     }
 
     // Per-game override for the manual refresh-rate lock (shortcut wins over the container default).
@@ -12200,6 +13458,60 @@ return true;
     }
 
     /**
+     * Wayland counterpart of {@link #assignTaskAffinity(Window)}. A Wayland session has no X window
+     * events, so before this the launch-time mask (container/shortcut CPU list, or Prefer Big Cores)
+     * was never applied there — only the in-game toggle and the Task Manager armed anything. The
+     * compositor reports the program behind the first game window that presents GPU frames: its Linux
+     * pid (the Wayland client's credentials, i.e. the real /proc pid, no exe scan needed) and its
+     * executable name. The mask goes Windows-side by name, as X11's class-name path does, and the
+     * host-side drift checker is armed on the pid. The compositor cannot tell a WoW64 program apart,
+     * so the 64-bit mask applies. UI thread.
+     */
+    private void assignWaylandTaskAffinity(int pid, String program) {
+        if (taskAffinityMask == 0) return;
+        final int processAffinity = taskAffinityMask;
+        String exe = program != null ? program.trim().toLowerCase(java.util.Locale.ROOT) : "";
+        int slash = Math.max(exe.lastIndexOf('/'), exe.lastIndexOf('\\'));
+        if (slash >= 0) exe = exe.substring(slash + 1);
+        if (!exe.isEmpty() && winHandler != null) winHandler.setProcessAffinity(exe, processAffinity);
+        boolean restrict = Integer.bitCount(processAffinity & 0xff) < Runtime.getRuntime().availableProcessors();
+        String msg = "launch CPU affinity for " + (exe.isEmpty() ? "an unnamed program" : exe) + " (pid " + pid
+                + "): mask 0x" + Integer.toHexString(processAffinity & 0xffff)
+                + (restrict ? ", kept on those cores by the drift checker" : " (every core: nothing to enforce)");
+        Log.i("XServerDisplayActivity", "wayland: " + msg);
+        try { com.winlator.star.wayland.WaylandCompositor.nativeLogPerf(msg); } catch (Throwable ignored) {}
+        if (!restrict) return;
+        if (!exe.isEmpty()) {
+            if (!exe.equals(affinityTargetExe)) affinityLinuxPid = -1; // new target -> re-resolve
+            affinityTargetExe = exe;
+            if (pid > 0) affinityLinuxPid = pid;
+            affinityTargetMask = processAffinity & 0xff;
+            startAffinityReapply();
+        } else if (pid > 0) {
+            // No name to re-resolve by if it restarts: pin it once, host-side.
+            ProcessHelper.setLinuxAffinity(pid, processAffinity & 0xff);
+        }
+    }
+
+    /**
+     * Prefer Big Cores' core list ({@link com.winlator.star.perf.CpuTopology}), and — once per session —
+     * which cores it picked and why, to logcat and, on Wayland, the session log.
+     */
+    private boolean bigCoresLogged = false;
+    private String detectBigCoreCpuListLogged() {
+        String list = com.winlator.star.perf.CpuTopology.INSTANCE.detectBigCoreCpuList();
+        if (!bigCoresLogged) {
+            bigCoresLogged = true;
+            String msg = "prefer big cores: " + com.winlator.star.perf.CpuTopology.INSTANCE.describeBigCores();
+            Log.i("XServerDisplayActivity", msg);
+            if (waylandMode) {
+                try { com.winlator.star.wayland.WaylandCompositor.nativeLogPerf(msg); } catch (Throwable ignored) {}
+            }
+        }
+        return list;
+    }
+
+    /**
      * Re-pin the ALREADY-RUNNING guest process tree when Prefer Big Cores is toggled mid-game (the old
      * behavior only changed the mask for newly-spawned processes, leaving the current game on 0-7).
      * Enumerates every guest process via the WinHandler process list and sets each one's affinity —
@@ -12212,7 +13524,7 @@ return true;
         if (!on && bigCoreAffinitySnapshot.isEmpty()) return; // nothing we changed -> nothing to revert
         final int bigMask;
         if (on) {
-            String bigList = com.winlator.star.perf.CpuTopology.INSTANCE.detectBigCoreCpuList();
+            String bigList = detectBigCoreCpuListLogged();
             if (bigList == null || bigList.isEmpty()) return; // topology unknown -> nothing to pin to
             bigMask = ProcessHelper.getAffinityMask(bigList);
         } else {
@@ -12378,18 +13690,25 @@ return true;
         FrameLayout rootView = findViewById(R.id.FLXServerDisplay);
         fusionHud = new com.winlator.star.widget.fusionhud.FusionHudView(this);
         fusionHud.setFpsCounter(fpsCounter);
+        // Fusion sits in the top-right corner until dragged, anchored on its right edge so a tap to a
+        // bigger size grows it leftward into the screen.
         FrameLayout.LayoutParams plp = new FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
-            android.view.Gravity.TOP | android.view.Gravity.START
+            android.view.Gravity.TOP | android.view.Gravity.END
         );
         plp.topMargin = 10;
-        plp.leftMargin = 10;
+        plp.rightMargin = 10;
         fusionHud.setLayoutParams(plp);
         fusionHud.applyConfig(fpsConfigString);
         if (hudEngineShort != null) fusionHud.setEngineLabel(hudEngineShort);
         if (hudGpuName != null) fusionHud.setGpuModel(hudGpuName);
-        fusionHud.setDisplayServer(waylandMode ? "Wayland" : "X11");
+        // A HUD built (or rebuilt, on a style switch) mid-session picks up the GPU-name spoof this
+        // session delivered, the same way it picks up the display server; null on X11, on an unspoofed
+        // session and on one whose spoof never got out, so the GPU row is what it always was.
+        fusionHud.setGpuSpoofName(deliveredGpuSpoofName);
+        fusionHud.setDisplayServer(hudDisplayServerLabel());
+        fusionHud.setHdrState(hudHdrCode());
         // Mega stack-layer versions: Proton/Wine, the graphics-driver wrapper package, and DX wrapper.
         if (wineInfo != null) fusionHud.setWineVersion(wineInfo.toString());
         fusionHud.setGraphicsWrapper(friendlyGraphicsWrapper());
@@ -12399,6 +13718,16 @@ return true;
         fusionHud.setOnLockChangedListener((locked) -> persistHudConfigKey("hudLocked", locked ? "1" : "0"));
         fusionHud.setOnMovedListener((x, y) -> persistHudPosition("hudPosFusion", x, y));
         restoreHudPosition(fusionHud, "hudPosFusion");
+        // A dragged HUD keeps its right edge when it changes size, so a wider size could push it past
+        // the left edge. Pull it back on screen whenever its size changes (setX/setY don't relayout).
+        fusionHud.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
+            View parent = (View) v.getParent();
+            if (parent == null || v.getWidth() == 0 || v.getHeight() == 0) return;
+            float x = Math.max(0, Math.min(v.getX(), Math.max(0, parent.getWidth() - v.getWidth())));
+            float y = Math.max(0, Math.min(v.getY(), Math.max(0, parent.getHeight() - v.getHeight())));
+            if (x != v.getX()) v.setX(x);
+            if (y != v.getY()) v.setY(y);
+        });
         fusionHud.setVisibility(frameRatingWindowId != -1 && hudCounterEnabled ? View.VISIBLE : View.GONE);
         rootView.addView(fusionHud);
     }
@@ -13097,7 +14426,7 @@ return true;
             return new XServerDialogState.TmContainerInfo(
                 wine, dxwrapper, resolvedRenderer(),
                 waylandMode ? waylandDriverSummary() : graphicsDriver, res, device,
-                waylandMode ? "Wayland" : "X11");
+                waylandMode ? "Wayland" : "X11", hdrRowValue(), deliveredGpuSpoofName);
         } catch (Exception e) {
             return null;
         }

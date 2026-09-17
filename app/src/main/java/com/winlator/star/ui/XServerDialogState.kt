@@ -861,10 +861,17 @@ object XServerDialogState {
     )
     // displayBackend: "X11" or "Wayland". On Wayland the activity fills graphicsDriver with the
     // "compositor: … · game: …" pair (the X11 renderer + its driver are idle in that session).
+    // hdr: what the display the game is on reports right now ("none - panel 500 nits",
+    // "HDR10, HLG - 1000 nits"). Reporting only: nothing in the stack emits HDR, and the value is
+    // re-sent when a screen is plugged in, because capability is per-display.
+    // gpuSpoof: the GPU name a Wayland session actually got out to the game in place of the real
+    // adapter, null when the game sees the real one (a spoof that could not be delivered included).
+    // Always null on X11 — there the driver wrapper renames the Vulkan device, so every readout is
+    // handed the spoofed name already and has nothing to substitute. Its row exists only while it is set.
     data class TmContainerInfo(
         val wine: String, val dxWrapper: String, val renderer: String,
         val graphicsDriver: String, val resolution: String, val device: String,
-        val displayBackend: String,
+        val displayBackend: String, val hdr: String, val gpuSpoof: String?,
     )
 
     private val _tmHeader = MutableStateFlow<TmHeaderStats?>(null)

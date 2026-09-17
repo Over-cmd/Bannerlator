@@ -1,6 +1,6 @@
 package com.winlator.star.ui.screens
 
-import android.content.res.Resources
+import android.content.Context
 import com.winlator.star.R
 import com.winlator.star.container.GameDetails
 import com.winlator.star.container.Shortcut
@@ -15,8 +15,12 @@ import com.winlator.star.core.StringUtils
  * override → container default. Single source of truth shared by [ShortcutItemLayoutL] and the launch
  * overlay so the two can never drift. Public (not internal) so the Java XServerDisplayActivity can
  * call it at launch time as `SpecCardComponentsKt`-style static.
+ *
+ * Takes a [context] (not just Resources) because the renderer chip has to ask whether this game
+ * effectively runs on Wayland, which needs the container's layer probed.
  */
-fun buildLaunchSpec(shortcut: Shortcut, res: Resources): PreloaderSpec {
+fun buildLaunchSpec(shortcut: Shortcut, context: Context): PreloaderSpec {
+    val res = context.resources
     val container = shortcut.container
     val resolution = shortcut.getExtra("screenSize", container?.getScreenSize() ?: "")
     val driverCfg = shortcut.getExtra("graphicsDriverConfig", container?.getGraphicsDriverConfig() ?: "")
@@ -24,7 +28,9 @@ fun buildLaunchSpec(shortcut: Shortcut, res: Resources): PreloaderSpec {
     val dxwrapperCfg = shortcut.getExtra("dxwrapperConfig", container?.getDXWrapperConfig() ?: "")
     val (dxvkVersion, vkd3dVersion) = parseDxwrapperConfig(dxwrapperCfg)
 
-    val rendererLabel = rendererLabelOf(shortcut.getExtra("renderer", container?.renderer ?: ""))
+    // Renderer chip: on Wayland the stored id is the (unused) X11 setting — the compositor renders.
+    val wayland = com.winlator.star.core.WineWaylandSupport.runsOnWayland(context, shortcut)
+    val rendererLabel = rendererLabelOf(shortcut.getExtra("renderer", container?.renderer ?: ""), wayland)
     val frameGenLabel = frameGenLabelOf(shortcut.getExtra("frameGenEngine", container?.frameGenEngine ?: "off"))
     val backendLabel = run {
         val id = shortcut.getExtra("emulator", container?.emulator ?: "")

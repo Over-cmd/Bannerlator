@@ -86,31 +86,67 @@ public class AdrenotoolsManager {
         return driverVersion;
     }
 
+    // meta.json "vendor" ("Mesa", "Qualcomm", ...), or "" when the package doesn't declare one
+    // (the bundled turnip-sdk36 meta.json carries only libraryName).
+    public String getDriverVendor(String adrenoToolsDriverId) {
+        String vendor = "";
+        File driverPath = new File(adrenotoolsContentDir, adrenoToolsDriverId);
+        try {
+            File metaProfile = new File(driverPath, "meta.json");
+            if (!metaProfile.exists()) return "";
+            JSONObject jsonObject = new JSONObject(FileUtils.readString(metaProfile));
+            vendor = jsonObject.optString("vendor", "");
+        }
+        catch (Exception e) {
+        }
+        return vendor;
+    }
+
     public String getDriverPath(String adrenotoolsDriverId) {
         return adrenotoolsContentDir.getAbsolutePath() + "/" + adrenotoolsDriverId + "/";
     }
 
+    // Migrate every container/shortcut still pointing at the driver being removed onto the default
+    // wrapper. Matching is by the driver's NAME, read from its meta.json.
+    //
+    // Two guards, because this is the one place that rewrites configuration the user never touched:
+    //  • an absent/unreadable meta.json makes getDriverName() return "", and String.contains("") is
+    //    true for EVERY container and EVERY shortcut — that reset the whole library's graphics
+    //    driver on a single driver delete. Nothing to match against means nothing to migrate.
+    //  • a shortcut with no graphicsDriverConfig of its own INHERITS the container's. Rewriting it
+    //    pinned a per-game override onto a game that never had one; the container was already
+    //    migrated above, so leaving it alone is both correct and lossless.
     private void reloadContainers(String adrenoToolsDriverId) {
+        String driverName = getDriverName(adrenoToolsDriverId);
+        if (driverName.isEmpty()) {
+            Log.w("AdrenotoolsManager", "No driver name for " + adrenoToolsDriverId + " (missing meta.json?) - skipping container migration");
+            return;
+        }
+        String fallback = GPUInformation.isDriverSupported(DefaultVersion.WRAPPER_ADRENO, mContext)
+                ? DefaultVersion.WRAPPER_ADRENO : DefaultVersion.WRAPPER;
+
         ContainerManager containerManager = new ContainerManager(mContext);
         for (Container container : containerManager.getContainers()) {
             HashMap<String, String> config = GraphicsDriverConfigDialog.parseGraphicsDriverConfig(container.getGraphicsDriverConfig());
-            Log.d("AdrenotoolsManager", "Checking if container driver version " + config.get("version") + " matches " + getDriverName(adrenoToolsDriverId));
-            if (config.get("version").contains(getDriverName(adrenoToolsDriverId))) {
-                Log.d("AdrenotoolsManager", "Found a match for container " + container.getName());
-                config.put("version", GPUInformation.isDriverSupported(DefaultVersion.WRAPPER_ADRENO, mContext) ? DefaultVersion.WRAPPER_ADRENO : DefaultVersion.WRAPPER);
-                container.setGraphicsDriverConfig(GraphicsDriverConfigDialog.toGraphicsDriverConfig(config));
-                container.saveData();
-            }     
+            String version = config.get("version");
+            Log.d("AdrenotoolsManager", "Checking if container driver version " + version + " matches " + driverName);
+            if (version == null || !version.contains(driverName)) continue;
+            Log.d("AdrenotoolsManager", "Found a match for container " + container.getName());
+            config.put("version", fallback);
+            container.setGraphicsDriverConfig(GraphicsDriverConfigDialog.toGraphicsDriverConfig(config));
+            container.saveData();
         }
         for (Shortcut shortcut : containerManager.loadShortcuts()) {
-            HashMap<String, String> config = GraphicsDriverConfigDialog.parseGraphicsDriverConfig(shortcut.getExtra("graphicsDriverConfig", shortcut.container.getGraphicsDriverConfig()));
-            Log.d("AdrenotoolsManager", "Checking if shortcut driver version " + config.get("version") + " matches " + getDriverName(adrenoToolsDriverId));
-            if (config.get("version").contains(getDriverName(adrenoToolsDriverId))) {
-                Log.d("AdrenotoolsManager", "Found a match for shortcut " + shortcut.name);
-                config.put("version", GPUInformation.isDriverSupported(DefaultVersion.WRAPPER_ADRENO, mContext) ? DefaultVersion.WRAPPER_ADRENO : DefaultVersion.WRAPPER);
-                shortcut.putExtra("graphicsDriverConfig", GraphicsDriverConfigDialog.toGraphicsDriverConfig(config));
-                shortcut.saveData();
-            }
+            String own = shortcut.getExtra("graphicsDriverConfig", "");
+            if (own.isEmpty()) continue;   // inherits the container, which was just migrated
+            HashMap<String, String> config = GraphicsDriverConfigDialog.parseGraphicsDriverConfig(own);
+            String version = config.get("version");
+            Log.d("AdrenotoolsManager", "Checking if shortcut driver version " + version + " matches " + driverName);
+            if (version == null || !version.contains(driverName)) continue;
+            Log.d("AdrenotoolsManager", "Found a match for shortcut " + shortcut.name);
+            config.put("version", fallback);
+            shortcut.putExtra("graphicsDriverConfig", GraphicsDriverConfigDialog.toGraphicsDriverConfig(config));
+            shortcut.saveData();
         }
     }
     

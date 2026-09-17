@@ -80,7 +80,17 @@ public class Container {
      * overlay jumped size on the first metric toggle).
      */
     public static final int DEFAULT_HUD_SCALE = 100;
-    public static final String DEFAULT_FPS_COUNTER_CONFIG = "hudStyle=fusion,hudEnabled=1,hudMode=horizontal,showFPS=1,showCPULoad=1,showGPULoad=1,showRAM=1,showRenderer=1,showBatteryTemp=1,hudScale=" + DEFAULT_HUD_SCALE + ",hudSize=pill,showVram=1,showLow001=1,fpsDecimal=1,hudLocked=0,showPerCore=1,showSwap=1,showNet=1,showResolution=1,showProton=1,showWrapper=1,showDxVer=1,showSession=1";
+    /** Size a brand-new container's HUD starts at (the Fusion pill at 75%). */
+    public static final int NEW_CONTAINER_HUD_SCALE = 75;
+    /**
+     * The HUD a new container gets: Fusion pill at 75%, unlocked, with every Fusion metric on. Each
+     * key is written explicitly (both spellings where the editors emit two) so the editors show the
+     * same switches the overlay draws, instead of falling back to their own absent-key defaults.
+     */
+    public static final String DEFAULT_FPS_COUNTER_CONFIG = "hudStyle=fusion,hudEnabled=1,hudMode=horizontal,hudSize=pill,hudScale=" + NEW_CONTAINER_HUD_SCALE + ",hudLocked=0"
+            + ",showFPS=1,showFPSGraph=1,showCPUUsage=1,showCPULoad=1,showGPULoad=1,showRAM=1,showVram=1,showPower=1,showBattery=1"
+            + ",showTemp=1,showBatteryTemp=1,showGpuTemp=1,showEngine=1,showRenderer=1,showGpuModel=1,showLow001=1,fpsDecimal=1,showClock=1"
+            + ",showPerCore=1,showSwap=1,showNet=1,showResolution=1,showProton=1,showWrapper=1,showDxVer=1,showSession=1";
     public static final String DEFAULT_WINCOMPONENTS = "direct3d=1,directsound=0,directmusic=0,directshow=0,directplay=0,xaudio=0,vcrun2010=1";
     public static final String FALLBACK_WINCOMPONENTS = "direct3d=1,directsound=1,directmusic=1,directshow=1,directplay=1,xaudio=1,vcrun2010=1";
     public static final String DEFAULT_DRIVES = "F:"+Environment.getExternalStorageDirectory().getAbsolutePath()+"D:"+Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
@@ -475,6 +485,51 @@ public class Container {
 
     public boolean isWaylandBackend() {
         return DISPLAY_BACKEND_WAYLAND.equals(getDisplayBackend());
+    }
+
+    // --- OpenGL safe mode (per-container), stored in extraData. Wayland sessions only. ---
+    // Native OpenGL games on the Wayland backend render through Mesa (Zink on Turnip). Mesa's
+    // u_threaded_context helper thread ("gdrv0") can fault inside libgallium, and because that is a
+    // plain pthread with no Wine TEB, Wine's own SIGSEGV handler faults again on it: the kernel then
+    // kills the process outright. The game VANISHES - no crash dump, no dialog, no log line.
+    // GALLIUM_THREAD=0 removes that thread; the cost is that OpenGL draw submission stops being
+    // pipelined onto a second core, i.e. a little CPU-side throughput on GL titles and nothing at
+    // all on Vulkan ones (DXVK/VKD3D never load a gallium driver). Default ON because a silent
+    // disappearance is far worse than a few percent of CPU throughput.
+    // A shortcut may override per game with the same-named extra.
+    public boolean isWaylandGlSafeMode() {
+        return getExtra("waylandGlSafeMode", "1").equals("1");
+    }
+
+    public void setWaylandGlSafeMode(boolean enabled) {
+        putExtra("waylandGlSafeMode", enabled ? "1" : "0");
+    }
+
+    // --- HDR output (per-container), stored in extraData. Wayland sessions only. ---
+    // Games that support HDR10 get it on a screen that reports HDR10 (display.WaylandHdr, the
+    // compositor's wl_color_mgmt.c). Default OFF (absent). A shortcut overrides with the same-named
+    // extra ("1" / "0"; absent or "" = this). BANNER_WAYLAND_HDR in the env vars still overrides both.
+    public boolean isWaylandHdr() {
+        return getExtra(com.winlator.star.display.WaylandHdr.EXTRA, "0").equals("1");
+    }
+
+    public void setWaylandHdr(boolean enabled) {
+        putExtra(com.winlator.star.display.WaylandHdr.EXTRA, enabled ? "1" : null);
+    }
+
+    // --- Unreal Engine HDR (per-container), stored in extraData. X11 and Wayland. ---
+    // "dx12" = DXVK_ENABLE_NVAPI=1 (DXVK stops switching HDR off for UE4 games run with -dx12);
+    // "dx11" = that plus the bundled dxvk-nvapi in the prefix (core.UnrealHdr, core.DxvkNvapi).
+    // Default OFF (absent). A shortcut overrides with the same-named extra ("off" / "dx12" / "dx11";
+    // absent or "" = this).
+    public String getUnrealHdr() {
+        return com.winlator.star.core.UnrealHdr.containerMode(this);
+    }
+
+    public void setUnrealHdr(String mode) {
+        String m = com.winlator.star.core.UnrealHdr.normalize(mode);
+        putExtra(com.winlator.star.core.UnrealHdr.EXTRA,
+                m.isEmpty() || m.equals(com.winlator.star.core.UnrealHdr.OFF) ? null : m);
     }
 
     // --- Wayland game driver (per-container), stored in extraData ---
@@ -1453,7 +1508,20 @@ public class Container {
 
             if (data.has("envVars") && data.has("extraData")) {
                 JSONObject extraData = data.getJSONObject("extraData");
-                int appVersion = Integer.parseInt(extraData.optString("appVersion", "0"));
+                // Back-fill env vars added since app version 16, but ONLY onto a container that
+                // really carries an old stamp. An ABSENT appVersion means "never booted", not
+                // "written by app version 0": it is what a container the editor just wrote looks
+                // like, and what the New Container Defaults profile always looks like. Treating
+                // that as legacy re-added every DEFAULT_ENV_VARS entry the user had deliberately
+                // deleted, silently undoing their edit. (Parsing defensively also keeps a junk
+                // stamp from throwing NumberFormatException straight out of loadData, which no
+                // caller catches.)
+                String stamp = extraData.optString("appVersion", "");
+                int appVersion = Integer.MAX_VALUE;
+                if (!stamp.isEmpty()) {
+                    try { appVersion = Integer.parseInt(stamp); }
+                    catch (NumberFormatException e) { appVersion = 0; }
+                }
                 if (appVersion < 16) {
                     EnvVars defaultEnvVars = new EnvVars(DEFAULT_ENV_VARS);
                     EnvVars envVars = new EnvVars(data.getString("envVars"));

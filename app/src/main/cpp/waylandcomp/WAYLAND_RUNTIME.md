@@ -169,6 +169,21 @@ small interface in `src/banner_ext.h` (compositor.c only gained hook calls + acc
   yet looks scrambled — `=0` is the workaround, and the `gpu` line names both the GPU and the
   compositor's driver.
 
+## Phones with no DRM node (OpenGL) — `BANNER_WAYLAND_NO_RENDER_NODE=1`
+- The feedback's `main_device` is the first of `/dev/dri/renderD128`, `renderD129`, `card0` the app
+  can `stat`; retail phones (Adreno 830/840 reports, 2026-09-14) expose none, so it is `0:0`.
+  Vulkan games do not care. Mesa's EGL did: its Wayland DRM initialiser failed the display in
+  `dri2_setup_device()` without a render node and fell back to a software path that has no
+  rasteriser in these layers — native OpenGL black, sound playing. Wayland layer versionCode 9
+  (Banners-Turnip `patches/wayland/egl_wayland_no_drm_node.py`) runs zink + kopper on the Vulkan
+  device without a node instead; nothing app-side is needed for that.
+- `BANNER_WAYLAND_NO_RENDER_NODE=1` (container or shortcut env) makes the compositor advertise
+  `main device 0:0` on a device that does have a node, to reproduce those phones here.
+- Log lines: `dmabuf` `… no display (DRM) device …: OpenGL games need Wayland layer versionCode 9
+  or newer …` when the main device is 0:0; `opengl` `<program> asked for GPU buffers but has drawn
+  only software (shared-memory) frames …` once per program that asked for dma-buf feedback (EGL's
+  GPU path always does) and then committed 150 wl_shm frames without making a dma-buf buffer.
+
 ## Zero-copy window layers (spike, `BANNER_WAYLAND_ZERO_COPY=1`)
 Research + host-side prototype in `ZERO_COPY_SPIKE.md`: why a dma-buf can't become an
 `AHardwareBuffer` (the game's buffers are DMA-heap allocations, not gralloc's), why the interop

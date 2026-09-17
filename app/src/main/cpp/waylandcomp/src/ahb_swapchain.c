@@ -2,6 +2,7 @@
  * See ahb_swapchain.h and ZERO_COPY_SPIKE.md. */
 #define _GNU_SOURCE
 #include "ahb_swapchain.h"
+#include "banner_color.h"
 #include "banner_ext.h"
 #include "sc_layer.h"
 #include "vk_present.h"
@@ -36,12 +37,14 @@ struct ahb_buf {
     AHardwareBuffer *ahb;               /* our reference to the game's buffer */
     int w, h;
     uint32_t stride, image_count;
+    uint32_t format;                    /* AHARDWAREBUFFER_FORMAT_* gralloc gave it (10-bit for HDR10) */
     uint64_t modifier;
     struct wl_client *client;
     struct wl_resource *resource;       /* the wl_buffer; NULL once the client destroyed it */
     struct wl_listener resource_destroy;
     int on_layer;                       /* set on the SurfaceControl (or not yet released by SurfaceFlinger) */
     int release_pending;                /* the surface let go of it while on the layer */
+    int64_t deferred_ns;                /* when it did (the perf line: how long the display kept it) */
     struct surface *surface;            /* for the paced release; NULL = release at once */
     struct wl_event_source *fence_src;  /* fallback: waiting the release fence in the event loop */
     int fence_fd;
@@ -67,7 +70,7 @@ static int g_rel_n, g_rel_cap;
 static int g_rel_pipe[2] = {-1, -1};
 
 /* Which swapchains were announced (one log line per swapchain, not per image). */
-struct chain_seen { struct wl_client *client; int w, h; uint32_t image_count; uint64_t modifier; };
+struct chain_seen { struct wl_client *client; int w, h; uint32_t image_count; uint64_t modifier; uint32_t format; };
 static struct chain_seen g_last_chain;
 
 static int64_t now_ns(void) {
@@ -110,7 +113,7 @@ static void on_buffer_resource_destroyed(struct wl_listener *l, void *data) {
 
 static void send_deferred_release(struct ahb_buf *ab) {
     if (ab->release_pending && ab->resource)
-        banner_release_buffer(ab->surface, ab->resource, ab->surface != NULL);
+        banner_release_buffer(ab->surface, ab->resource, ab->surface != NULL, ab->deferred_ns);
     ab->release_pending = 0;
     ab->surface = NULL;
 }
@@ -216,7 +219,8 @@ int ahb_swapchain_present(struct dmabuf_buffer *b, struct surface *s, int scene_
         int r;
         do { r = poll(&p, 1, 100); } while (r < 0 && errno == EINTR);
     }
-    int r = sc_layer_present_ahb(ab->ahb, ab->w, ab->h, acquire, (void *)(uintptr_t)ab->id, scene_w, scene_h);
+    int r = sc_layer_present_ahb(ab->ahb, ab->w, ab->h, acquire, (void *)(uintptr_t)ab->id, scene_w, scene_h,
+                                 s ? banner_surface_color(s) : NULL, ab->format);
     if (r < 0) return -1;
     if (r == 1) return 0; /* nothing of it on screen: not on the layer, nothing to release later */
     if (!ab->on_layer) {
@@ -244,6 +248,7 @@ int ahb_swapchain_defer_release(struct dmabuf_buffer *b, struct wl_resource *buf
     struct ahb_buf *ab = b ? *banner_dmabuf_ahb_slot(b) : NULL;
     if (!ab || !ab->on_layer || !buffer || ab->resource != buffer) return 0;
     ab->release_pending = 1;
+    ab->deferred_ns = now_ns();
     ab->surface = paced ? s : NULL;
     return 1;
 }
@@ -258,6 +263,13 @@ unsigned ahb_swapchain_stats_take(void) {
     unsigned n = g_stat_zero_copy;
     g_stat_zero_copy = 0;
     return n;
+}
+
+int ahb_swapchain_advertised(void) { return g_advertised; }
+
+uint32_t ahb_swapchain_ahb_format(const struct dmabuf_buffer *b) {
+    struct ahb_buf *ab = b ? *banner_dmabuf_ahb_slot((struct dmabuf_buffer *)b) : NULL;
+    return ab ? ab->format : 0;
 }
 
 /* ---- banner_ahb_v1 */
@@ -310,6 +322,7 @@ static void ahb_attach(struct wl_client *c, struct wl_resource *r, struct wl_res
     ab->w = bw; ab->h = bh;
     ab->stride = d.stride ? d.stride : stride;
     ab->image_count = image_count;
+    ab->format = d.format;
     ab->modifier = modifier;
     ab->client = c;
     ab->resource = buffer;
@@ -320,10 +333,10 @@ static void ahb_attach(struct wl_client *c, struct wl_resource *r, struct wl_res
     *slot = ab;
 
     if (g_last_chain.client != c || g_last_chain.w != bw || g_last_chain.h != bh ||
-        g_last_chain.image_count != image_count || g_last_chain.modifier != modifier) {
-        g_last_chain = (struct chain_seen){c, bw, bh, image_count, modifier};
-        banner_log("layer", "zero-copy: AHB swapchain from %s (%u images, %dx%d, %s, stride %u px)", banner_client_name(c),
-                   image_count, bw, bh, modifier == MOD_QCOM_COMPRESSED ? "UBWC (QCOM_COMPRESSED)"
+        g_last_chain.image_count != image_count || g_last_chain.modifier != modifier || g_last_chain.format != d.format) {
+        g_last_chain = (struct chain_seen){c, bw, bh, image_count, modifier, d.format};
+        banner_log("layer", "zero-copy: AHB swapchain from %s (%u images, %dx%d, %s, %s, stride %u px)", banner_client_name(c),
+                   image_count, bw, bh, banner_ahb_format_name(d.format), modifier == MOD_QCOM_COMPRESSED ? "UBWC (QCOM_COMPRESSED)"
                                        : modifier == 0 ? "linear" : "unknown modifier", ab->stride);
     }
 }

@@ -452,7 +452,7 @@ internal fun ShortcutsXmbView(
                     label = "xmbTitle",
                     modifier = Modifier.offset(m.titleX.dp, m.titleY.dp).width(m.titleW.dp),
                 ) { s ->
-                    val meta = remember(s) { buildLaunchSpec(s, context.resources).meta }
+                    val meta = remember(s) { buildLaunchSpec(s, context).meta }
                     Column {
                         Text(
                             s.name, color = Color.White, fontSize = m.titleSize.sp, lineHeight = (m.titleSize * 1.15f).sp,
@@ -673,8 +673,8 @@ private fun XmbActionRow(action: XmbAction, selected: Boolean, accent: Color, ic
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun XmbInfo(s: Shortcut, playtime: String?, descLines: Int, storeBadges: @Composable (Shortcut) -> Unit) {
-    val res = LocalContext.current.resources
-    val spec = remember(s) { buildLaunchSpec(s, res) }
+    val context = LocalContext.current
+    val spec = remember(s) { buildLaunchSpec(s, context) }
     val details = remember(s) { buildLaunchDetails(s) }
     storeBadges(s)
     SpecChipRows(

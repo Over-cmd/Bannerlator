@@ -1,5 +1,665 @@
 # Star-Compose — Progress Log
 
+## 2026-09-16 — Fix: a physical stick bound to mouse movement now moves the cursor (branch `fix/physical-lane-mouse-move`)
+
+> **Bug (user):** in the drawer's *Physical Controller Test / Bind*, binding the right stick to mouse up/down/left/right did not move the Windows mouse or the on-screen cursor.
+>
+> **Cause:** `InputControlsView.createMouseMoveTimer()` returned early when the on-screen controls profile (`profile`) was null, and took the cursor speed from it. The physical pad's bindings live in a separate lane (`physicalProfile`, Players > Bind) that is used with the on-screen controls hidden. So the stick's mouse offsets were computed (`processControllerMappings`) but the timer that applies them never started.
+>
+> **Fix:** `mouseMoveProfile(profile, physicalProfile)` picks the on-screen profile if active, else the physical lane. The timer runs for either and uses that profile's cursor speed. Unit test added (`InputControlsViewTest`).
+>
+> **Backends:** X11 moves the X pointer (or sends relative moves through WinHandler when the game uses relative mouse). On Wayland the same X pointer moves reach the compositor through `XServer.InputSink` (`XServerDisplayActivity`), so both backends get the fix.
+>
+> **Status:** CI run 35102525936 green. ✅ **Device-proven by the user** (pre-release 9 code + this fix, pubg): a physical right stick bound to mouse movement moves the cursor with the on-screen controls hidden. Merged to main 2026-09-16.
+
+## 2026-09-16 — 🏁 **Wayland pre-release 9 released** (`3.1.2-wayland-pre9`) + HUD pill top line merged
+
+> **main** fast-forwarded `6e7d174b` → `be893205` (= `feat/fusion-pill-gpu-name-top`, CI run 35093274094 green): in the Fusion pill, a GPU name wider than the stats (a Wayland spoof) gets its own top line instead of stretching the capsule. Not device-tested.
+>
+> **Pre-release 9:** branch `release/3.1.2-wayland-pre9` off `be893205` → `70709a95` (versionName `3.1.2-wayland-pre9`, `docs/releases/3.1.2-wayland-pre9.md` with pre9 open and pre8 and older collapsed, kit README) → `497b3f88` (release.yml branch-only step attaching the **v16** layer from proton-wine run 35051048569, sha `28d8c360…ba87`, plus the AIO HDR card and README, server-side). Annotated tag `3.1.2-wayland-pre9` → `497b3f88`; release.yml run 35094728985 with `make_prerelease=true`. Not offered in-app; 3.1.1 stays Latest.
+>
+> **Headline:**
+> - TV launch;
+> - Wayland performance phase 1: Vulkan +9%, D3D12 +12%, DirectDraw +20% on the Pocket FIT copy path;
+> - Wayland GPU name spoof through a generated dxvk.conf;
+> - Unreal Engine HDR helper;
+> - RE Engine HDR via an AMD spoof + v16's builtin AGS. Resident Evil 3 asks "Enable HDR?" and AGS reports Stage 7 / HDR10 1, proven on the handheld today; not yet seen on an HDR screen.
+>
+> **This commit on main:** the pre9 notes file and kit README only; versionName stays 3.1.1.
+
+## 2026-09-16 — Fusion HUD pill: a long GPU name gets its own top line (branch `feat/fusion-pill-gpu-name-top`)
+
+> **Why (user):** in Pill size a Wayland GPU spoof name such as "Radeon RX 6800/6800 XT / 6900 XT spoof" headed the right-hand stack, so the stack's width, and with it the whole capsule, stretched to fit that one line over empty space. Asked to move it over the API label so it fills the pill.
+>
+> **Change (`FusionHudView.buildPill`):**
+> - The GPU-name line is held back while the stack is built.
+> - If it is wider than every stat line, it is placed on its own line across the top of the pill. It is left-aligned over the API caption and pulled in just far enough to clear the capsule's rounded end at that height. The body (API · FPS · clock | stats) moves down one line, and the stats set the width again.
+> - A name that fits (e.g. "Adreno 750") stays at the top of the stack exactly as before. The name is fixed per session, so the layout never jumps.
+> - `fitCapsule`'s curve maths is factored into `capsuleCurveIn` / `capsuleMargin` so the top line uses the same outline rule. Full / Tiles / Minimal are unchanged.
+>
+> **Status:** built in CI, not device-tested yet (needs a Wayland session with a GPU spoof set).
+
+## 2026-09-16 — 🔀 **Merged to main: launch a game on the TV (TV tab + companion screen) + Wayland GPU spoof through a generated dxvk.conf**
+
+> **main** fast-forwarded `a1651e45` → `29c8c5f0` (= `feat/tv-launch-tab` r4, built green in CI run 35051011112), then this log entry. versionName stays 3.1.1 (vc85).
+>
+> **What's in it:**
+> - **TV tab** in a game's settings (classic shortcut dialog and the XMB mirror). It appears while an external screen is connected, or when the game is already set to use one. It reads the screen's modes and HDR support; HDR is automatic, never a question.
+> - **Launch on the TV:** `ActivityOptions.setLaunchDisplayId`, with a normal-launch fallback and toast when the system declines. Session identity comes from the display the window really landed on. Optional match-resolution and output-mode settings.
+> - **Unplug:** the game pauses and is handed back to the handheld, where it resumes. `colorMode|touchscreen|uiMode` were added to `configChanges`, so a display move no longer recreates the session.
+> - **No freeze on a TV session:** `onPause` from the handheld taking focus no longer SIGSTOPs the guest while the game is still visible on the TV.
+> - **Companion screen** on the handheld (`TvCompanionActivity`, non-focusable, own taskAffinity): game name, "Playing on <screen>", Send input back to the TV, End the game. Reopening the app during a TV game returns to it and sends input back.
+> - **HDR readouts follow the screen the game is on:** Fusion HUD and drawer. "HDR ready" is no longer shown on a panel without HDR10.
+> - **Wayland GPU spoof** delivered as a generated `dxvk.conf` (`dxgi.custom*`, `d3d9.custom*`): works on DXVK versions that ignore `DXVK_CONFIG`, and card names keep their spaces. The HUD shows "<card> spoof".
+> - The old X11 "Play on TV" is untouched (`TV_OUTPUT_ENABLED` stays false).
+>
+> **Device-proven on the Pocket FIT (Adreno 750):**
+> - launch on the TV from the Games tab with the HDR gate open for the TV;
+> - no freeze when touching the handheld (54 fps, guest stayed running, controller stayed on the TV);
+> - End the game;
+> - cable pull → pause → resumes on the handheld with sound;
+> - GPU spoof reaching DXVK 2.4.1 and the HUD label.
+>
+> **Not device-tested yet:**
+> - Home → reopen → companion + automatic input send-back;
+> - match resolution and the output-mode picker;
+> - the HUD "not on this screen" wording on r4.
+>
+> **Still open (not in this merge):**
+> - app: add `amd_ags_x64.dll` to the builtin DLLs copied into `system32` on a layer switch (the RE Engine HDR work, layer v16);
+> - new containers default to an FEXCore nightly that isn't installed.
+
+## 2026-09-15 16:10 — 🔀 **Merged to main: Wayland performance Phase 1 + Wayland driver settings (GPU spoof) + Unreal Engine HDR with bundled dxvk-nvapi** (user: "merge it to main branch")
+
+> **main** fast-forwarded `8fd31faa` → `2541e7fb` (= `feat/wayland-gpu-spoof`, built green in CI run 35017580310; the checkpoint before it is `8fd31faa`). versionName stays 3.1.1, vc85; no DETECT_SCREEN_* permissions. Test build for the Fold: Gamehub-Components `bannerlator-wl-test-r1`.
+>
+> **What's in it:**
+> - **Phase 1:**
+>   - the compositor `perf` line;
+>   - the black base kept under the zero-copy layer, and letterbox-only clears;
+>   - a 5-buffer layer pool with GPU-side release waits and UBWC requests;
+>   - the named `wl-compositor` thread;
+>   - CPU affinity armed on Wayland;
+>   - "Prefer big cores" = every core ≥70% of peak.
+>
+>   Pocket FIT AIO copy path vs pre-release 8: Vulkan +9%, D3D12 +12%, DirectDraw +20%, higher 1% lows on every API.
+> - **Wayland driver settings gear:**
+>   - GPU spoof through DXVK `dxgi.*` + `d3d9.custom*`;
+>   - max device memory;
+>   - present mode (mailbox/FIFO);
+>   - the UBWC flag hint.
+> - **Unreal Engine HDR:** Off / DirectX 12 fix (`DXVK_ENABLE_NVAPI=1`) / DirectX 11 (experimental), which swaps in the bundled dxvk-nvapi v0.9.2 (fetched in CI with pinned hashes) with backup/restore.
+>
+> **Not device-tested yet:** the spoof, the Unreal Engine HDR modes, and Phase 1's zero-copy changes. Phase 1's copy path is proven on the Pocket FIT.
+>
+> **Still open:**
+> - Unreal Engine HDR currently shows on X11 too (proposed: Wayland-only);
+> - layer v12 (UBWC zero-copy) is built but untested;
+> - the native-Vulkan spoof + extension blacklist → layer v13.
+
+## 2026-09-15 — 🎛️ **Wayland driver settings (GPU name spoof) + "Unreal Engine HDR" (DirectX 12 fix / DirectX 11 with bundled dxvk-nvapi): branch `feat/wayland-gpu-spoof`** (on top of `feat/wayland-perf-p1` `b612a869`; CI only, not device-tested, not merged)
+
+> **Wayland driver settings: the gear next to "Wayland game driver"** (container editor, game editor, XMB). Same `graphicsDriverConfig` keys as X11's driver configuration, so choices follow a game across backends; OK writes only these keys.
+> - **GPU name (spoof):** the X11 list, off by default ("Device"), with the NVIDIA (NVAPI/DLSS/Reflex) and AMD (AGS) warning. On Wayland it reaches DirectX games through `DXVK_CONFIG`:
+>   - `dxgi.customVendorId/DeviceId/DeviceDesc` covers D3D10/11, and D3D12, whose adapter vkd3d-proton takes from DXVK's DXGI; `d3d9.custom*` covers D3D9/D3D8, which ignore the dxgi keys.
+>   - Our keys go first (in DXVK a later value wins, and an `[exe]` piece scopes what follows). A key the user sets in DXVK_CONFIG or DXVK_CONFIG_FILE is left out. The name is quoted (an unquoted value stops at a space); ids are 4 hex digits (DXVK's parsePciId).
+>   - WRAPPER_* stay exported for the future Turnip patch. Exact-name lookup (X11's contains() lands on the wrong card for GTX 560/770/1060).
+> - **Max device memory** → `dxgi.maxDeviceMemory`. **Present mode:** mailbox / fifo only (the compositor has no tearing-control); a stored immediate/relaxed stays, labelled X11-only. **OneUI / HyperOS fix** → `FD_DEV_FEATURES=enable_tp_ubwc_flag_hint=1` (it already reached Wayland; now shown there).
+> - **Not on Wayland:** Vulkan version (the Wayland Turnips hard-code apiVersion and never call `vk_get_version_override`, so `MESA_VK_VERSION_OVERRIDE` does nothing), BCn, resourceType, syncFrame, disablePresentWait, and the extension blacklist (needs the Turnip patch, layer v13).
+> - Session log: `gpu       spoof: "NVIDIA GeForce GTX 1080" (vendor 10de device 1b80) via DXVK_CONFIG (dxgi + d3d9)`.
+>
+> **Unreal Engine HDR** (container default, per-game override, XMB; both backends; under HDR output): Off · DirectX 12 fix · DirectX 11 (experimental, NVAPI).
+> - **DirectX 12 fix** = `DXVK_ENABLE_NVAPI=1`: skips DXVK's isHDRDisallowed(), which turns HDR off for "-Win64-Shipping" exes before d3d12.dll loads (UE4 creates DXGI first, so `-dx12` games lose HDR too).
+> - **DirectX 11** = that, plus dxvk-nvapi v0.9.2 (jp7677, MIT) swapped into system32/syswow64 at every launch, `WINEDLLOVERRIDES += nvapi,nvapi64=n` and `DXVK_NVAPI_ALLOW_OTHER_DRIVERS=1`, plus a hint to spoof an NVIDIA GPU (GTX 1080: Pascal, what dxvk-nvapi reports on other drivers).
+>   - The prefix's own files are backed up once to `.wine/bannerlator-nvapi/backup/`, with the marker `installed.properties`. Every copy goes through a temp file + rename; a slot is "ours" only by sha256.
+>   - Off or DX12 puts the prefix's files back.
+> - **Bundling:** `_build.yml` downloads the tarball pinned in `assets/dxvk-nvapi/manifest.json` (sha256 `60c28422…70d6`) and checks both dlls (`nvapi64.dll` `1bcf9b68…e12e`, `nvapi.dll` `afb3bfad…6d19`). The dlls are never committed.
+> - Session log: one `nvapi` line with the mode, files, env, and anything that still blocks it (HDR output off, DXVK older than 2.6, no NVIDIA spoof, DX wrapper not DXVK).
+>
+> **Status:** CI dispatched on this branch (all three flavours). Not device-tested. **Roll back:** `feat/wayland-perf-p1` `b612a869`.
+
+## 2026-09-15 — ⚙️ **Wayland performance Phase 1, app/compositor half: branch `feat/wayland-perf-p1`** (off `8fd31faa`; CI only, not device-tested, not merged)
+
+> **What changed (code `0255dfea` compositor, `3c4b8983` app):**
+> - **`perf` line every 10 s** in `Download/Wayland-logs/wayland-*.log`, next to the stats line:
+>   `perf  last 10 s: T ticks, S scenes, N on screen (copy C, zero-copy Z, layer copy L) | render_scene a/m ms | base K black kept, P presented | acquire a/m ms | present a/m ms (n) | fence wait a/m ms (n, G GPU release waits) | release a/m ms (n, h held) | D pool drops` (a/m = average/max).
+> - The GPU-frame import line no longer says "(zero-copy)" on the copy path.
+> - **Zero-copy: the black base frame is presented once and kept**, not cleared and presented every refresh; effects / frame generation no longer run on it. A resized surface is noticed by asking it (every 100 ms at most).
+> - **Copy path: only the letterbox bars are blacked** when one draw covers the scene.
+> - **Layer pool: 5 buffers**, release fences waited for on the GPU (VK_KHR_external_semaphore_fd) instead of a CPU poll; the pool asks gralloc for UBWC (`AHARDWAREBUFFER_USAGE_VENDOR_0` + `COMPOSER_OVERLAY`) with the plain and linear requests as fallbacks, and logs the layout it got.
+> - **Compositor thread** named `wl-compositor`, asks for THREAD_PRIORITY_URGENT_DISPLAY; Thread Priority Boost matches it.
+> - **CPU affinity now arms on Wayland** (from the game's first presented frame: pid + executable from the compositor).
+> - **Prefer big cores = every core ≥ 70% of the peak max frequency** (both backends; 8 Gen 3: cpu7 → cpus 2-7), logged once per session.
+> - Not changed: presentMode and TU_DEBUG defaults (A/B with env vars in a test container), the Turnip zero-copy bit (Track B, layer v12).
+>
+> **Status:** CI dispatched on this branch; the Pocket FIT device test is a separate agent. **Roll back:** main `8fd31faa`.
+
+## 2026-09-15 12:40 — 🔖 **CHECKPOINT before Wayland performance Phase 1** (the fallback point)
+
+> **Tips.**
+> - Bannerlator main `0f2d47b1`: the pre-release 8 code, AIO 2.1.0 baked into the container template, and the Start-menu "AIO Graphics Test (HDR)" entry; versionName 3.1.1, vc85.
+> - Pre-release `3.1.2-wayland-pre8` is live (tag → `35b496a2`); 3.1.1 is Latest.
+> - proton-wine Wayland line `825a546ca3a` = layer v11; the next layer build stamps versionCode 12.
+> - AIO-Graphics-Test main `582454dc` = release 2.1.0.
+> - The Pocket FIT runs the pre8 pubg APK with layers -9/-10/-11; the user's containers 3/4/6/7 are untouched.
+>
+> **Saved AIO baselines** (Pocket FIT, Adreno 750, one launch cycling all eight APIs, same container and Proton), X11 vs Wayland copy path:
+>
+> | API | X11 | Wayland |
+> |---|---|---|
+> | Vulkan | 752 | 596 |
+> | OpenGL | 172 | 230 |
+> | D3D12 | 430 | 336 |
+> | D3D11 | 2298 | 2144 |
+> | D3D10 | 396 | 303 |
+> | D3D9 | 292 | 284 |
+> | D3D8 | 291 | 288 |
+> | DirectDraw | 224 | 231 |
+>
+> **Why Wayland isn't faster yet.** Two read-only audits looked at our code and four other projects (GameNative, WinNative, StevenMXZ Ludashi, Pipetto). Proven in code:
+> - zero-copy renders into linear gralloc buffers: the Turnip patch never sets the UBWC usage bit, and the `TU_DEBUG=noconform,sysmem` default forces bypass rendering;
+> - the compositor clears and presents a black base frame every refresh with a CPU fence wait, even in zero-copy;
+> - one compositor thread does everything (X11 renders on its own thread with 2 frames in flight);
+> - the container's `mailbox` present mode reaches Wayland games;
+> - CPU affinity never arms on Wayland, and "prefer big cores" pins to a single core on 8 Gen 3.
+>
+> **Phase 1** (approved): measurement hooks, skip the black base during zero-copy, UBWC for zero-copy, the CPU affinity / big-core / thread-priority fixes, more pool buffers, and A/B of existing settings. It will be device-tested on the Pocket FIT with the AIO Graphics Test on Wayland (8 APIs × 10–15 s) against the table above.
+>
+> **Roll back:** main `0f2d47b1`, the pre8 APK, layer `-11`.
+
+## 2026-09-15 10:25 — 🧪 **AIO Graphics Test v2.1.0 (the HDR test card) released and baked into new containers; "AIO Graphics Test (HDR)" in the Start menu**
+
+> - **AIO v2.1.0** is Latest in The412Banner/AIO-Graphics-Test (tag `2.1.0` → `582454dc`; build run 34979767242, release run 34980102732). Its new `release.yml` publishes server-side.
+>   - Assets: `AIO-Graphics-Test-64bit.exe` (4,289,335 B, sha256 `1c27a4a7…`) and `-32bit.exe` (4,367,103 B, sha256 `d8fa9b02…`).
+>   - The HDR card is Display Tests → HDR; `--hdr` opens straight on it.
+> - **Container template:** the new `bake-aio.yml` workflow (`82059399`) re-baked `container_pattern_common.tzst` on the runner (run 34980372357, commit `69ec7ca5`), with no 84 MB upload from the phone.
+>   - It swapped only the two exes under `drive_c/AIO Graphics Test v2/` for 2.1.0, with the siblings' owner and mode.
+>   - Still 237 entries; the embedded exes' sha256 match the release; the template is now 84,885,816 B.
+> - **Start menu:** a new "AIO Graphics Test (HDR)" group (32/64-bit, `--hdr`), commit `abb98231`.
+> - CI build of the branch: run 34980627779, all three flavours green. main fast-forwarded `82059399` → `69ec7ca5`.
+> - New containers only: existing containers keep the AIO they were created with. The new exe is on the AIO release page.
+> - The Gamehub-Components HDR test release was deleted (tag kept); pre-release 8 replaces it.
+
+## 2026-09-15 07:20 — 🏁 **Wayland pre-release 8 live: real HDR10, layer v11, HDR test card; the code is merged to main**
+
+> **Release `3.1.2-wayland-pre8`** (pre-release, not Latest; 3.1.1 stays Latest)
+> - Tag → `35b496a2` on `release/3.1.2-wayland-pre8`; release.yml run 34960984503.
+> - Assets:
+>   - `Bannerlator-3.1.2-wayland-pre8-{standard,pubg,ludashi}.apk` (versionName `3.1.2-wayland-pre8`, versionCode 85);
+>   - `proton-11.0-2.1-arm64ec-wayland-v11.wcp` (sha256 `7f58c98d…`, installs as `Proton-11.0-2.1-arm64ec-11`);
+>   - `AIO-Graphics-Test-HDR-64bit.exe` (AIO-Graphics-Test `feat/hdr-test-scene` `5174cc11`, sha256 `19ed2433…`);
+>   - `README-Wayland-test-kit.txt`.
+> - The layer and the test card were fetched from their CI runs and hash-checked server-side.
+> - The pre-release 7 release was deleted; its tag stays.
+>
+> **What shipped**
+> - HDR10 on Wayland (opt-in, HDR screens only):
+>   - the HDR output setting and the live drawer switch;
+>   - HDR kept through composition, effects, windowed games and frame generation (FP16 engine into a 10-bit HDR10 swapchain);
+>   - the HUD HDR line;
+>   - heat and brightness evidence beside the headroom lines;
+>   - an explicit HDR headroom request (Android 15+).
+> - v11: games see the real screen description.
+> - The Fusion HUD defaults and the frame generation picker on Wayland.
+> - The public build has **no** DETECT_SCREEN_* permissions and no screenshot/recording detection; `feat/wayland-hdr` keeps them for test builds.
+>
+> **Proven:**
+> - On the Galaxy Z Fold 8 Ultra (Adreno 840):
+>   - zero-copy 10-bit PQ;
+>   - the composed path;
+>   - frame generation at 120 fps in HDR10 with 0 tone-mapped frames;
+>   - 3.0–3.6x headroom on the light test card.
+> - The screen description reached DXGI on three phones (1345 / 1207 / 892 nits).
+>
+> **Not proven:**
+> - that the headroom request helps a ROG Phone 9 Pro, which got no HDR boost;
+> - scRGB;
+> - the SDR handheld was not re-run on this exact build.
+>
+> **main** fast-forwarded `55566dbd` → `d1a002be`: the public HDR merge `4938f357` + pre-release 8 docs + the updated Wayland deck (live on Pages). versionName stays 3.1.1. Post-merge CI: run 34962219312. The Wayland layer line in proton-wine is at v11 (`825a546ca3a`); the next layer build stamps versionCode 12.
+
+## 2026-09-15 00:05 — 🔖 **CHECKPOINT: HDR round 2d + Wayland layer v11 + HDR test card published for the Fold; untested overnight** (nothing merged to main, no Bannerlator release)
+
+> **Where things are.**
+> - Bannerlator: `feat/wayland-hdr` = `527fa8f0` (round 2d, CI 34925154897), not merged. `feat/fusion-hud-defaults` = `d41a86da` (code `1a9dbe57`), not merged; it rides the HDR branch through merge `be2f4501`.
+> - proton-wine: `fix/wayland-hdr-edid-v11` = `825a546ca3a` (code `48fb81bc902`, CI 34925241464, wcp sha256 `7f58c98d4482e54d6acbb588e65b93efade4a7cb3e152e19227dd2312620309e`, installs as `Proton-11.0-2.1-arm64ec-11`). `feat/winewayland-desktop-11.0-2` is still `459bf7a8a7c` (v9).
+> - AIO-Graphics-Test: `feat/hdr-test-scene` = `52f317c1` (CI 34924769970), no AIO release.
+> - All three are on the test pre-release `bannerlator-hdr-test-r1` in The412Banner/Gamehub-Components, together with SHA256SUMS; older test builds were removed from it. Pre-release 7 stays the public Wayland tester link and 3.1.1 stays Latest.
+>
+> **Proven on the Galaxy Z Fold 8 Ultra so far** (non-rooted, Adreno 840, HDR10/HLG/HDR10+, Android reports 1351 nits):
+> - HDR10 end to end: a game's own 10-bit PQ frames go zero-copy to a BT2020_PQ display layer.
+> - The drawer HDR output switch tone-maps correctly.
+> - Screen effects and windowed programs stay HDR through the composed 10-bit picture.
+> - Every HUD HDR state was seen, including `HDR tone-mapped`.
+> - DXVK 2.4.1 does HDR10.
+> - Zero washed-out frames in every run.
+>
+> Android's HDR/SDR headroom drops for screen captures (screenshots matched to the second) and for heat. A light test card holds 3.61x steady, while God of War loses it within 30 s as the phone throttles.
+>
+> **What round 2d, v11 and the test card change (all untested):**
+> 1. **Frame generation can keep HDR.** The compositor read only the first 32 surface format/colour-space pairs, and the phone lists 11 colour spaces per format, so the HDR pairs were missed. It now reads all pairs, picks A2B10G10R10/HDR10 (then FP16, then 8-bit), passes VK_EXT_hdr_metadata when available, and runs frame generation on HDR frames in FP16. If a chain fails to build, it falls back to 8-bit.
+> 2. **Headroom evidence in the log.** Thermal status and thermal headroom, brightness and its mode, and screenshot/recording callbacks are logged beside the headroom lines. The no-headroom lines name the likely cause. The two DETECT_SCREEN_* permissions are for test builds only and must be removed before HDR is merged to main.
+> 3. **Layer v11: games now see the real screen.** The Wayland session runs as a Windows virtual desktop. win32u's `add_virtual_source()` built the only active monitor from an empty `gdi_monitor`, so it got `Default_Monitor` + `BAD_EDID`. DXVK read that monitor and fell back to 1499/799/0.01 nits. The virtual monitor now inherits the primary monitor's EDID. It carries into v8 together with v10's `612401793ce`.
+> 4. **HDR test card (DX11 PQ scene):** a true fullscreen mode (a borderless popup covering the whole desktop, so the compositor can use zero-copy), a report rewritten every few seconds, and a clean exit.
+>
+> **Morning test on the Fold:**
+> - The card should say "DXGI reports your screen (~1345 nits)" and `fullscreen: yes (1280 x 960 at 0,0)`.
+> - With frame generation on, the HUD should read `HDR` and the 10-bit banding strip should stay smooth.
+> - wine_debug should show the `win32u: display update … on a virtual desktop … Device Parameters\EDID 256 bytes` line.
+> - The Wayland log should show `screen swapchain built as HDR10 …` and the FP16 frame-generation lines.
+>
+> **Afterwards:** fast-forward the Wayland layer line to v11. Queued for later: Auto HDR for SDR games in the compositor.
+>
+> **Rollback:** app = the round 2c build (`be2f4501`, run 34915289832) or pre-release 7; layer = `-10` / `-9` via the card's revert; test card = run 34921945484.
+
+## 2026-09-15 — 🌈 **Wayland HDR round 2e: ask for HDR headroom explicitly (layer + screen surface), log the display's ceiling and the HDR layer's screen coverage, fix the no-headroom cause wording** (`feat/wayland-hdr`, on `527fa8f0`; CI only)
+
+> **2d results (lead):** the user's Fold passed everything (68 surface pairs → HDR10 swapchain A2B10G10R10, FG in FP16 at 120 fps with 600 HDR10-swapchain frames / 10 s and 0 tone-mapped, zero-copy 599 / 10 s, VK_EXT_hdr_metadata, headroom 3.00 steady, thermal NONE, brightness 255/255 auto still 3.00). A tester's ASUS ROG Phone 9 Pro (Adreno 830, API 36): HDR frames correct but the HDR/SDR ratio stayed 1.00 all session (not hot, not recording, brightness 8-223 manual, composed path, layer ~80% of 2400x1080, card windowed).
+> **Built:** `setDesiredHdrHeadroom` on the game layer (NDK, API 35) and on the SurfaceView for the HDR10 swapchain path (API 35, reflection) — content peak / 203 capped at the display's highest ratio, cleared when HDR stops, logged once per change; `Display.getHighestHdrSdrRatio()` (Android 16+, reflection) in the first display line and the verdict; the HDR layer's coverage %; "brightness at maximum" only for manual ≥ 250, else "this phone may not boost HDR from apps (asked …, highest ratio …)". Tester note: "Round 2e" (ROG: AIO card fullscreen, HDR10 vs SDR, 400/600/1000 vs 203 patches; Fold: 1-minute regression). `HDR_RECON.md` §11.7.
+
+## 2026-09-15 — 🌈 **Wayland HDR round 2d: every surface format scanned (the "no HDR10 swapchain" was a 32-entry array), HDR10 swapchain metadata, FP16 frame generation for HDR, thermal/brightness/recording evidence beside the headroom** (`feat/wayland-hdr`, on the lead's `be2f4501`; CI only)
+
+> **Fold evidence (2c, lead):** the AIO HDR card held headroom 3.61; God of War fell to 1.00 within 30 s with fps 47 → 13 and GPU 95 % (heat/load, unprovable from the log). Test E (FG 2× on the card) logged `lists no HDR10 swapchain format (37/0 37/1000104001 … 37/1000104012)` and tone-mapped; the HUD read `HDR tone-mapped` correctly.
+> **Built:** (1) `swap_init` reads all pairs (the Fold lists 11 colour spaces per format; the old `fmts[32]` dropped the 10-bit/FP16 rows) and logs the total, colour spaces per format and every HDR-capable pair; HDR10 pick A2B10G10R10 → A2R10G10B10 → FP16 → 8-bit, SDR fallback if the driver refuses. (2) `VK_EXT_hdr_metadata` in HDR sessions: the game's metadata on the HDR10 swapchain. (3) FG on HDR frames in FP16 where the engine can (lsfg-vk's own HDR format): FP16 scene + encode output + effects + ring; a failed FP16 chain refuses the format and restarts the engine in 8 bits. (4) Evidence: thermal status + listener + headroom, brightness + mode + observer, screenshot (API 34) and screen recording (API 35) callbacks (normal permissions) → the no-headroom lines, the 10 s line and the verdict name the likely cause. Tester note: "Round 2d" section at the top of `docs/HDR-test-r2.md`. Details: `HDR_RECON.md` §11.6.
+
+## 2026-09-14 23:55 — 🌈 **HDR10 on Wayland, round 2: a real setting, HDR kept through effects / windows / zero-copy off / frame generation, and a live in-game switch** (`feat/wayland-hdr`; testing build for the user's Galaxy Fold, NOT for main; CI only, nothing device-proven yet)
+
+> **Round 1 is proven on the Fold** (God of War + DXVK v3.1: 10-bit zero-copy, `BT2020_PQ`, HDR/SDR ratio 1.00 → 2.51, `HDR on screen: yes`). DXVK 2.4.1 showed no HDR option (`VK_EXT_swapchain_colorspace supported: 0`) — the Wine specialist fixes that in layer v10.
+>
+> **(a) Setting.** *HDR output (HDR10)* in the container editor, game shortcut and XMB (shortcut `waylandHdr` 1/0/unset wins over the container's; one resolver `display/WaylandHdr.effective`). Greyed with the reason on screens without HDR10; help text says it applies from the next launch. `BANNER_WAYLAND_HDR` still overrides. ON exports `DXVK_HDR=1` unless the user set it. (Editors built by an android-app-engineer agent on `feat/wayland-hdr-editors`, merged `68103fd0`.)
+> **(b) HUD** `Wayland · HDR` while HDR frames are really on screen (tagged < 1.5 s ago, ratio > 1.01 where reported); `Wayland · HDR (no headroom)` when HDR frames are on screen but the ratio has been ≤ 1.01 for 5 s+ (the Fold's 2nd run: 3.23 then 1.00 for 3+ min at max brightness while the verdict still said "rose to 3.23"); `Wayland · HDR off` while the drawer switch is off. The 10 s line, the steady ratio line and the verdict now carry the current ratio, a brightness-at-maximum hint during a no-headroom streak, and the share of HDR time with headroom (`headroom above 1.00 for P% of the HDR time (a of b s), now R`).
+> **(c) DXVK < 3 warning — built, then REMOVED on the lead's correction:** the premise was wrong (Wine already exposes `VK_EXT_swapchain_colorspace` at instance level; DXVK ≥ 2.1 checks the device list, logs 0 on every Mesa system incl. the working v3.1 run, and never uses it for the HDR decision). GoW's missing HDR option on DXVK 2.4.1 is unexplained → Fold A/B.
+> **(d) Brightness hand-off** `BANNER_WAYLAND_HDR_MAX_NITS` / `_MAX_AVG_NITS` / `_MIN_NITS` (decimal nits from `getHdrCapabilities`, unknown / 0-max omitted), **only when the game's display lists HDR10** (an SDR panel never gets an EDID claiming PQ), logged in one `session environment:` line. Layer v10 (run 34909438885, wcp `31d165a5…`, `Proton-11.0-2.1-arm64ec-10`) turns them into EDID: Fold 1351/1351/0 → DXGI 1345.43 / 1345.43 / 0.01.
+> **(e) HDR-aware composition** (`hdr_compose.c` + `hdr_encode.frag`, routes in `compositor.c hdr_plan`): effects, a window above (display without a second layer), windowed, zero-copy off → the whole scene composed into one 10-bit PQ BT.2020 picture (SDR at 203 nits, effects in 10-bit) on the game's layer, tagged; frame generation → HDR10 swapchain where the surface lists `A2B10G10R10`/`HDR10_ST2084`, else a correct tone-map to SDR; unimported frames stay layer-only. Details: `waylandcomp/HDR_RECON.md` §11.
+> **Lead's addition: live "HDR output" switch** in the drawer's Graphics tab, HDR sessions only, per session (starts on): off = the same frames tone-mapped to SDR, untagged, no relaunch, game untouched; each flip logged; counted in the verdict.
+>
+> **Commits:** `b1e9510d` core, `a361e2c3`, `68103fd0` editors merge, `8f1fefc5` composition, `23a447ee` link fix (`duplicate symbol: upscale_vert_code` → hdr_compose.c's own copy), `68fcd348` live switch + effects-format flip-flop fix (the plain base frame set the chain back to 8-bit every frame → 13 pipelines rebuilt per frame under the HDR picture), then log-text/doc commit. Quick compositor builds 34909269426 (`23a447ee`) ✅, 34910376790 (`68fcd348`) ✅.
+>
+> **Later the same night (lead):** the DXVK < 3 warning dropped (premise wrong, see (c)); brightness vars on HDR10 displays only; live headroom (see (b)); `0e746b0e` the HDR pass forgets its cached views when an image is destroyed (a reused handle could have drawn through a stale view). **Build under test: run 34911468350 ✅ on `009f69ab` (headSha verified; standard/pubg/ludashi `Bannerlator-hdr-r2-*`), quick compositor build 34911466487 ✅.** Full runs 34910378252 / 34911026074 / 34911182630 were cancelled as stale.
+>
+> **First Fold run of round 2 (lead, 20:23):** gate opened from "the container's HDR output setting" (no env vars); `DXVK_HDR=1` + `BANNER_WAYLAND_HDR_MAX_NITS=1351 _MAX_AVG_NITS=1351 _MIN_NITS=0.0005` auto-exported; instance enabled `VK_EXT_swapchain_colorspace`; GoW 5121 frames 10-bit zero-copy + 1 layer copy, ratio 2.98; HUD showed `Wayland · HDR (no headroom)`, the 5 s line fired, summary "headroom above 1.00 for 9% of the HDR time (19 of 218 s)". **The headroom loss was the user's SCREEN RECORDING** (started ~20:23:59, ratio 2.98 → 1.00 at 20:24:00.9 until the end) → every no-headroom hint now says "brightness at maximum, or the screen is being recorded (Android turns HDR headroom off while recording)" (committed, NOT built — batched with the next Fold round). Not exercised yet: drawer switch, effects, zero-copy off, FG, window above, windowed.
+>
+> **Round 2b (user's HUD request, lead):** the HDR state moved off the `<latency> · Wayland` line (it overflowed the pill: `40.3ms · Wayland · HDR (no headroom)`) onto its own line directly under it — `HDR` / `HDR (no headroom)` / `HDR off` / `HDR tone-mapped` / `HDR ready` — only in HDR-gate-open sessions (all other HUDs unchanged); the pill fits its capsule to the taller content (`fitCapsule`); Full/Tiles/Minimal/Mega carry it too. Batched with the recording hint (`6b463f24`).
+>
+> **Tester note:** `docs/HDR-test-r2.md` (setup with the setting, tests A–H incl. flipping the switch on a bright scene, effects, zero-copy off, frame generation, window above, windowed, DXVK 2.4.1 on v10; expected lines per route; failure lines). Hand-over through the lead (Gamehub-Components release, with the v10 layer). **No Pocket FIT work** (user: no handheld testing right now).
+
+## 2026-09-14 17:00 — 🌈 **HDR10 on the Wayland backend, round 1: opt-in gate + wp_color_manager_v1 + BT2020_PQ on the game's display layer** (`feat/wayland-hdr`, off `main` `4c3fb73b`; testing build for the user's Galaxy Fold, NOT for main)
+
+> **What it is.** The compositor half of `waylandcomp/HDR_RECON.md` Phase A. The game half already ships (Mesa's Wayland WSI in our Turnip is a `wp_color_manager_v1` client; DXVK takes `VK_COLOR_SPACE_HDR10_ST2084_EXT` with `DXVK_HDR=1`; the zero-copy WSI already maps `A2B10G10R10` to a gralloc `R10G10B10A2`). No layer change.
+>
+> **Gate (nothing changes without it).** `BANNER_WAYLAND_HDR=1` (container or shortcut env) AND the game's display lists HDR10 (`DisplayHdrInfo.supportsHdr10`) AND display layers with `ASurfaceTransaction_setBufferDataSpace` AND the zero-copy global. Closed = no colour-management global, no 10-bit formats, and a `color … HDR gate CLOSED: <why>` + `HDR on screen: no, because …` line. `=force` skips the display check (testing on SDR panels). On an HDR10 display the app turns zero-copy on for the session (an HDR frame is only right on the game's own layer).
+>
+> **Open gate offers** `wp_color_manager_v1` v1 (perceptual; parametric + mastering metadata; BT.2020 + ST 2084 PQ — exactly what Mesa lists HDR10 from) and `AB30`/`XB30` dma-buf formats. Image descriptions are double-buffered on `wl_surface.commit`; the game layer gets `BT2020_PQ` + SMPTE 2086 / CTA-861.3 from the game's `vkSetHdrMetadataEXT`. A never-tagged layer is never touched.
+>
+> **Non-zero-copy decision (round 1):** no tone-mapping anywhere. An HDR fullscreen game KEEPS its display layer: screen effects and frame generation are skipped for it (logged on/off). What still cannot keep the layer (a window above it on a display that cannot compose a second layer, a windowed game, zero-copy switched off) goes through the 8-bit copy untone-mapped, counted with its reason. The pool (8-bit) layer copy keeps the PQ tag.
+>
+> **Proof without root:** `color` lines in `Download/Wayland-logs/wayland-*.log` (gate + inputs, bind, every image description, buffer format changes, dataspace + metadata on the layer, 10 s HDR stats, HDR/SDR ratio samples from `Display.getHdrSdrRatio()` every second, verdict `HDR on screen: …`), plus DXVK's `<exe>_dxgi.log`/`_d3d11.log`.
+>
+> **CI:** `25dd6034` compositor-only build 34893896427 ✅; full build 34894335581 ❌ (javac: `Display.registerHdrSdrRatioListener` not in the compile SDK stubs) → `5325e5d6` reflection, run 34895296297 ✅ → `a194c1ef` (an HDR subsurface whose 10-bit frame the compositor cannot import still goes on the display layer — a Vulkan swapchain is a subsurface and the old layer-only fallback looked at toplevels only; the format line says "imported" / "could NOT import") → `5d628a54` (verdict counts only HDR/SDR readings taken while HDR frames were on screen), **run 34897295593 ✅ (headSha verified) = the build under test**; quick compositor builds 34896797528 / 34897292907 ✅.
+>
+> **Fold hand-over (lead's call):** a GitHub release in `The412Banner/Gamehub-Components`, tag `bannerlator-hdr-test-r1`, cut server-side by the lead (first from 34895296297, APKs replaced in place with 34897295593's `Bannerlator-hdr-r1-standard`). Tester note = `docs/HDR-test-r1.md` (game, env vars `BANNER_WAYLAND_HDR=1` + `DXVK_HDR=1` on the game's shortcut, what to look for, which files to send back, success/failure log lines). Nothing staged on the phone.
+>
+> **Pocket FIT:** on hold until the user's go (lead's rule). Plan: switch off (user's Wizardry + Insane2 unchanged), `=1` on a ZZ copy (gate closed), `=force` (gate open, SDR game untouched), then reinstall the `cd553d8c` reference.
+## 2026-09-14 17:25 — 🌈 **HDR round 1 in flight** (branch `feat/wayland-hdr`; nothing merged, no Bannerlator release)
+
+> **Why now.** `app/src/main/cpp/waylandcomp/HDR_RECON.md` parked HDR until an HDR panel was in the loop and multi-layer presentation had landed. Both are now true: the user's Galaxy Fold (Adreno 840, API 37) reports `HDR10, HLG, HDR10+ | 1351 nits | HDR/SDR headroom available`.
+>
+> **Round 1, app-only (no wcp change).** Opt-in `BANNER_WAYLAND_HDR=1` + the display's own HDR10 capability as the gate (closed on the SDR Pocket FIT); `wp_color_manager_v1` v1 subset (perceptual; parametric + mastering; BT.2020 + PQ); 10-bit `AB30`/`XB30` dma-buf formats; `BT2020_PQ` dataspace + SMPTE 2086 / CTA 861.3 metadata on the zero-copy game layer; effects and frame generation skipped for an HDR game (logged); frames that cannot keep the layer go through the copy untone-mapped with a counted reason; live `getHdrSdrRatio()` samples as the non-root proof that the panel really showed HDR. Every one of the eight bundled v9 Wayland drivers already carries `wp_color_manager_v1`, `banner_ahb_v1` and `VK_EXT_hdr_metadata` (checked with `strings`).
+>
+> **Builds.** `b2c882b0` failed javac (`Display.registerHdrSdrRatioListener` is not in the compileSdk 34 stubs; now reflection + a 1 s sampler). `5325e5d6` (run 34895296297) was published first, then a hole was found: an HDR game on a subsurface whose 10-bit buffer the compositor's own Turnip cannot import would be black. `a194c1ef` routes such a fullscreen HDR subsurface onto the display layer; `5d628a54` makes the verdict count only HDR/SDR readings taken while HDR frames were on screen. Replacement build: run 34897295593.
+>
+> **Distribution, kept off Bannerlator's release page on the user's request:** a pre-release in The412Banner/Gamehub-Components, tag `bannerlator-hdr-test-r1`, published server-side by that repo's `Bannerlator test build release` workflow (fetches the APKs from a green Bannerlator run, verifies the commit, optionally attaches a proton-wine layer by sha). Tester note: `docs/HDR-test-r1.md` on the branch. Test setup: layer `Proton-11.0-2.1-arm64ec-9`, any Wayland game driver, compositor driver unchanged; shortcut Env Vars `BANNER_WAYLAND_HDR=1` + `DXVK_HDR=1`; in-game HDR on.
+>
+> **Next:** refresh the Gamehub release with run 34897295593 + the v9 layer; the user tests on the Fold and sends back the session log + the game's DXVK logs; Pocket FIT regression waits for the user's go. Rollback point: the 15:50 checkpoint below (main `cd553d8c`).
+
+## 2026-09-14 15:50 — 🔖 **CHECKPOINT: Wayland pre-release 7 live with the v9 layer; main carries two small fixes on top**
+
+> **Public tester link:** `3.1.2-wayland-pre7` (pre-release, tag → `5907fd2a`, release branch `release/3.1.2-wayland-pre7` tip `1d7b0941`). Assets: `Bannerlator-3.1.2-wayland-pre7-{standard,pubg,ludashi}.apk` (versionName `3.1.2-wayland-pre7`, versionCode 85), `proton-11.0-2.1-arm64ec-wayland-v9.wcp` (sha256 `bce6e7cc0e8b4251e9cc1b58a11c3efe6a485857ec02b270a7bb9a61940e6961`, installs as `Proton-11.0-2.1-arm64ec-9`), `README-Wayland-test-kit.txt`. Pre-release 6 deleted (tag kept). **3.1.1 is still Latest**; the in-app updater offers nothing new.
+>
+> **main = `cd553d8c`** (versionName `3.1.1`, versionCode 85; build run 34887132494 ✅, pubg `e41af47b473d792fcf62f7eafb9e731d14a7609096b117c869e6cfa844f2e3c0`). Since the pre-release 7 app: `49248c3e` Frame Generation picker live on Wayland in the container, shortcut and XMB editors (was greyed with a stale "not available on Wayland yet" note) and `cd553d8c` the compositor's `dmabuf` / `opengl` log lines for phones with no display device and GL software fallback, plus the `BANNER_WAYLAND_NO_RENDER_NODE=1` repro switch. No pre-release 8 yet (the user's call); it would be the pre-release 7 app + these two, v9 carried over.
+>
+> **Wayland layer line `11.0-2.1-arm64ec`:** proton-wine `feat/winewayland-desktop-11.0-2` = `459bf7a8a7c` (versionCode 9; the next build must stamp 10). Banners-Turnip `wayland` = `644f1a5c` (the no-DRM-node EGL patch). v8 added the XP Control Panel fix, v9 the OpenGL fix for phones that expose no `/dev/dri` node (proven on a retail Adreno 840 by the user, and on the Pocket FIT in both normal and forced no-node modes).
+>
+> **Carry into v8 (all seven AIO parents, to be built together when Wayland is done):** proton-wine `2b01f10fcd7` (explorer: `::` names skip `GetFullPathNameW`) + `6b8452edae4` (XP Start menu Control Panel → `control.exe` + icon); `android/wayland-deps/usr/lib/libEGL.so.1` from a Banners-Turnip `wayland` run at or after `644f1a5c` plus the `TURNIP.md` "render node is optional since versionCode 9" paragraph; and the Wayland support itself. Wine-side libwayland is 1.25.0 (the compositor is on the current 1.26.0); bump it in a later layer build.
+>
+> **Pocket FIT state:** installed app = the frame-gen build `c6e9db8b…` (main-equivalent minus the log lines); layers `-7`, `-8`, `-9` installed; the user's containers 3 ("P11-2 Arm"), 6 ("p11-6 GE v6") and 7 ("wayland") on `Proton-11.0-2.1-arm64ec-9` (updated by the user through the app), each with `.layer-update-backup/` snapshots. `/sdcard/Download/Wayland/` = `Bannerlator-wayland-main-cd553d8c-pubg.apk` + the v9 wcp + README. Everything left over from testing has been removed.
+>
+> **Open, none blocking:** New Container Defaults do not reach a new arm64ec container's settings (seeded from the first Wine in the list; also why a new container starts with Show FPS off, which explains the "missing HUD" seen once), and the Defaults screen cannot pick Wayland; no warning for an unusable explicit compositor-driver pick; driver-delete cleanup skips the Defaults profile; the prefix-update step is not headless on Wayland (`XDG_RUNTIME_DIR` leaks through `ProcessBuilder`); the Mono fix is unproven on x86_64 layers; a brand-new container's first launch stalled black once (Insane 2), relaunch clean; the OpenGL threaded-driver crash itself is unfixed (safe mode works around it). The user has not yet reported the frame-gen picker test.
+>
+> **Roll back to here:** `git checkout cd553d8c` (app) · proton-wine `459bf7a8a7c` / Banners-Turnip `644f1a5c` (layer) · reinstall `Bannerlator-wayland-main-cd553d8c-pubg.apk` from the Wayland folder and point a container at `Proton-11.0-2.1-arm64ec-9` (or use the card's layer revert to go back to -8).
+
+## 2026-09-14 14:05 — ⬛📱 **Native OpenGL black with sound on phones that expose no DRM node (Adreno 830/840): the fix is in the Wayland LAYER (v9); this branch only adds a repro switch + session-log lines** (`fix/wayland-gl-no-drm-node`, off `main` `f81a666e`; testing build, not for pre-release 7)
+
+> **The report.** The user's own A840 (standard flavour, layer `Proton-11.0-2.1-arm64ec-8`, Turnip a8xx-white): Wizardry 30 s of `0 GPU frames from games | ~293 window redraws`, and at the game's first dma-buf bind `feedback ready: 8 format/modifier pairs, main device 0:0`. The phone gives apps no `/dev/dri` node, so `dmabuf_render_node()` returns 0.
+>
+> **Root cause (Mesa, read at 7cda7850 — the tree that ships libEGL/libgallium; `platform_wayland.c` is identical at all six refs the layer builds and at upstream main).** `default_dmabuf_feedback_main_device()` → `loader_get_render_node(0:0)` finds nothing → `fd_render_gpu` stays -1 (no wl_drm fallback: `HAVE_BIND_WL_DISPLAY` is off in our build). `dri2_initialize_wayland_drm()` still builds the kopper screen (fd -1 already means "no DRM" in `kopper_init_screen` → `pipe_loader_vk_probe_dri` → `zink_create_screen`), then **`dri2_setup_device(disp, false)` (platform_wayland.c:2752) fails**: `loader_is_device_render_capable(-1)` is false and `dri_query_compatible_render_only_device_fd(-1)` returns -1 → `eglInitialize` retries `Zink=FALSE, ForceSoftware=TRUE` → swrast, which this build cannot draw → black.
+>
+> **Fix = layer only** (Banners-Turnip `wayland` `644f1a5c`, `patches/wayland/egl_wayland_no_drm_node.py` → proton-wine `Proton-11.0-2.1-arm64ec-9`). Pre-release 7's app works unchanged with it.
+>
+> **Proven (2026-09-14 15:00–15:15).** The user's A840 renders Wizardry on layer v9 with pre-release 7's app (v9 now replaces v8 on pre-release 7). Pocket FIT, pre-release-7-equivalent app (`fix/wayland-framegen-settings`, pubg `c6e9db8b…`) + v9, node present: `main device 226:128` → `presenting GPU frames … XR24, qcom_compressed` → `300 GPU frames from games`, Wine `accelerated: 1` `zink … Turnip Adreno (TM) 750`; Insane 2 (DXVK) 143 fps. This branch's build (pubg `6040fe41…`, run 34878127212) with `BANNER_WAYLAND_NO_RENDER_NODE=1`: on v8 `main device 0:0` + `0 GPU frames | 300 window redraws` + the new `opengl … fell back to software rendering … expect a black picture` line (fired 11 s after the game connected); on v9 the new `dmabuf … no DRM device named (forced …)` line, `300 GPU frames from games`, Wine `MESA-EGL: warning: wayland-egl: the compositor names no DRM render node this process can open; running zink on the Vulkan device without one`, HUD "OpenGL 30.0 fps". Not merged; the fgfix app was reinstalled afterwards.
+>
+> **This branch (debug/visibility, own testing):** `BANNER_WAYLAND_NO_RENDER_NODE=1` (container/shortcut env) → `nativeSetNoRenderNode` → the compositor advertises `main device 0:0` on a device that has a node (reproduces the A840 on the Pocket FIT without touching `/dev/dri`). Session log: `dmabuf` line when the main device is 0:0 (`… OpenGL games need Wayland layer versionCode 9 or newer …`), and an `opengl` line once per program that asked for dma-buf feedback and then drew 150 wl_shm frames with no dma-buf buffer (`… its OpenGL fell back to software rendering … expect a black picture`).
+
+## 2026-09-14 09:20 — 🧪 **No more Wine Mono download prompt on first boot or after a layer switch — every layer** (`fix/wine-mono-prompt` `83c28493`, run 34847411880 green, headSha verified, pubg `e6b37f4e…`; device-proven: new container + real layer switch on Wayland, X11 on GE 11.0-6; box64/Wine 9.5 and a live .NET run still untested)
+
+> **The bug.** A new container's first boot, and the first launch after a container's layer changed, opened Wine's "Wine Mono Installer" dialog (Cancel / Install = download from winehq.org). Seen today on `Proton-11.0-2.1-arm64ec-7` (Wayland session logs 07:17 and 08:06, and 09-13 15:22 where Install was clicked).
+>
+> **Mechanism (source + device).** Stale prefix → ntdll spawns `wineboot --init` → `rundll32 setupapi,InstallHinfSection DefaultInstall 128 wine.inf` → `RegisterDllsSection` registers `mscoree.dll` → mscoree's `DllRegisterServer` calls `install_wine_mono()` → no `C:\windows\mono`, no `share/wine/mono` → `control.exe appwiz.cpl install_mono` → nothing in MonoCabDir / datadir / `~/.cache/wine` → `get_url()` (never NULL) → the dialog. The Wayland log of 09-13 15:22 shows exactly that chain: `rundll32.exe` → `control.exe` → window "Wine Mono Installer" → `msiexec` after Install.
+>
+> **Not a Wayland-layer difference.** The five installed arm64ec layers ship the SAME prefixPack (sha256 `ade99dc8…`) with no `.update-timestamp`, so every new container updates on first boot; the stamp mismatches after any layer switch. `mscoree` `DllRegisterServer` → `install_wine_mono` and the appwiz dialog are byte-identical on upstream Wine 9.5 and all seven parent branches plus `feat/winewayland-desktop-11.0-2`. Wine 9.5 prompted too: container 4 has `.cache/wine/wine-mono-9.0.0-x86.msi` from 2026-08-23 20:58, two minutes after that layer was installed. Only the x86_64 Proton pack is immune (stamp says `disable`, so it never updates). No layer ships Mono. Gecko never prompts during an update (no layer's mshtml `DllRegisterServer` loads Gecko); it prompts only when a program uses mshtml, which stays as is.
+>
+> **Fix (app only, `GuestProgramLauncherComponent`).** The stale-prefix step that Wayland already ran before the session (`updatePrefixBeforeSession`, same stamp test as wineboot) now runs for X11 too (`box64 wine` on x86_64 layers), and its env gets `mscoree=d` appended to `WINEDLLOVERRIDES`. setupapi then skips mscoree's registration (its COM classes are already in every prefixPack), so no prompt and no network. The game session's env is untouched, so a .NET game still loads mscoree and the Wine Mono the Components installer put in the prefix. X11 keeps `DISPLAY` for the step (its X server is already up), so its update runs exactly as it did in-session. Why not in-session: ntdll hands the first process's env to `wineboot --init`, so the override would reach the game.
+>
+> **Device, so far (Pocket FIT).** BEFORE (installed `a39e8805…`, = main): new container "ZZ Mono Before" on `Proton-11.0-2.1-arm64ec-7`, Wayland, Turnip r4 → **"Wine Mono Installer" on screen**; `ps`: `wine wineboot -h` (parent = app) → `wineboot.exe --init` → `rundll32.exe setupapi,InstallHinfSection DefaultInstall 128 …wine.inf` → `control.exe appwiz.cpl install_mono`; `control.exe` environ carried `XDG_RUNTIME_DIR=/data/user/0/com.tencent.ig/files/.wayland-rt` (see finding below); step `finished in 88214 ms` after Cancel. AFTER (this build `e6b37f4e…`, sha-verified installed): same layer/backend/driver, "ZZ Mono After" → **no dialog, desktop up**; `prefix update: … before the Wayland session, WINEDLLOVERRIDES=mscoree=d` then `finished in 5018 ms (wineboot exit 0), .update-timestamp now "1789358770"`; the session's explorer environ has no `WINEDLLOVERRIDES`; Wayland log has no `control.exe`. `system.reg`/`user.reg` of the two prefixes: same 17,410 keys and byte size, only per-boot device GUIDs differ.
+>
+> **Layer switch and another layer, same build (from launches by others, captured by the same logcat filter).** 10:55, the user's container 7 moved `-7` → `Proton-11.0-2.1-arm64ec-8` by the in-app updater: `prefix update: .update-timestamp "1789358770" != wine.inf mtime 1789390901 … before the Wayland session, WINEDLLOVERRIDES=mscoree=d` → `finished in 8320 ms`, its Wayland log has no `control.exe` / no "Wine Mono Installer", nothing new in its `.cache/wine`. 10:12, a new container on GE `Proton-11.0-6-arm64ec-6`: `… before the X11 session, WINEDLLOVERRIDES=mscoree=d` → `finished in 6291 ms` (every dialog case took 60–88 s: the step waits for a click). Control: at 11:10 and 11:14 another build (`14e10dde…`, no fix) was installed and two new containers on `-8` opened "Wine Mono Installer" again.
+>
+> **Not device-tested yet.** The x86_64 path (`box64 wine wineboot -h`, Wine 9.5 / Proton x86_64 without a `disable` stamp) is CI-green only; failure falls back to the old in-session update. A managed exe after installing `mono-10.4.1` from Components was not run; what is proven is that the session's own environment carries no `mscoree` override. Throwaway containers "ZZ Mono Before" (10) and "ZZ Mono After" (11) are still on the device.
+>
+> **Finding (not changed here).** The Wayland step was never headless: `waylandcomp_jni.c` `setenv("XDG_RUNTIME_DIR")` lands in the app process env, Android's `ProcessBuilder` starts children from it and `ProcessHelper.exec` only adds our map, so `env.remove("XDG_RUNTIME_DIR")` has no effect and libwayland connects to `wayland-0`. That is why the dialog was visible on Wayland.
+>
+
+## 2026-09-14 08:43 — 🏷️ **Cards name the X11 backend too: "Vulkan (X11)", "OpenGL (X11)", "SurfaceFlinger (X11)"** (`fix/renderer-chip-backend` `acd06e7d`, run 34843443878, pubg `a39e8805…`)
+
+> **The request.** Wayland cards already read "Vulkan (Wayland)"; an X11 card read a bare "Vulkan" or "OpenGL", so the backend could not be told apart at a glance. `rendererLabelOf()`'s X11 branch now appends "(X11)" — every stored renderer id is an X11 present path. Display only: the chip, launch overlay, XMB and Big Picture share the label; the editors keep their own renderer state and nothing compares against it.
+>
+> **Device.** Installed and sha-verified on the Pocket FIT. Games list: The Crew 2 and Watch Dogs (Wine 9.5 x86-64, X11) read **"Vulkan (X11)"**; Stumble Guys, Team Fortress 2, Skyrim, Titanfall 2 and Wizardry read **"Vulkan (Wayland)"**.
+## 2026-09-14 11:25 — ✅ **Device-proven: a Wayland container no longer starts with a blank Compositor driver; it gets a Turnip that can import the game's frames, and the session renders** (`fix/wayland-compositor-driver-default`, code `7f1b2254`, run 34846772508, pubg `14e10dde…`, installed and sha-verified)
+
+> **Waited 09:13–11:06 for the shared phone** (lock held by two other engineers in turn, then the user in sessions and Discord). Held it 11:06–11:21. Installed `/sdcard/Download/Bannerlator-compdrv-pubg.apk` with `pm install -r`; installed `base.apk` sha256 `14e10dde00c6304343fa4c33fea7e93419df9284c924bc5d41cf6d596d4befd8`. Layer `Proton-11.0-2.1-arm64ec-8`. This build is left installed.
+
+> **1. Create on Wayland, compositor field untouched.** New container "ZZ compdrv wl": Wine Version `Proton-11.0-2.1-arm64ec-8`, Display backend **Wayland**. The field filled itself in the same UI dump that showed the backend change:
+> ```
+> 'Mesa Turnip v26.3.0-20260830-r4'   EditText   (Compositor driver)
+> 'Picked for you: the driver in your New Container Defaults.'
+> ```
+> No red warning. logcat, the verdict for every installed driver (all five probed in 70 ms):
+> ```
+> 11:08:58.959 I/CompositorDriver: v819: not usable - proprietary Qualcomm driver, not a Turnip (not probed)
+> 11:08:58.972 I/CompositorDriver: turnip-sdk36: usable - imports dmabufs, Vulkan 1.4.335
+> 11:08:58.992 I/CompositorDriver: WN-Turnip-1.10-p Axxx: usable - imports dmabufs, Vulkan 1.4.359
+> 11:08:59.012 I/CompositorDriver: Mesa Turnip v26.3.0-20260830-r4: usable - imports dmabufs, Vulkan 1.4.359
+> 11:08:59.027 I/CompositorDriver: Mesa Turnip v26.3.0-7cda785 (Android + Wayland): usable - imports dmabufs, Vulkan 1.4.362
+> 11:08:59.027 I/CompositorDriver: default for a Wayland form: Mesa Turnip v26.3.0-20260830-r4 (the New Container Defaults driver; newest usable is Mesa Turnip v26.3.0-7cda785 (Android + Wayland))
+> ```
+> Saved `xuser-12/.container`: `graphicsDriverConfig … version=Mesa Turnip v26.3.0-20260830-r4 …`, `extraData.displayBackend=wayland`. (Its other driver keys, e.g. `vulkanVersion=1.3`, are the built-in defaults rather than the arm64ec profile's `1.4`: the seeding bug below, untouched here.) First launch, `wayland-2026-09-14_11-10-00.log`:
+> ```
+> 11:10:00.617  gpu       compositor renders on Adreno (TM) 750 with libvulkan_freedreno.so
+> 11:10:00.617  gpu       driver folder /data/user/0/com.tencent.ig/files/contents/adrenotools/Mesa Turnip v26.3.0-20260830-r4/
+> 11:10:04.530  program   connected over Wayland: explorer.exe (pid 32403)
+> 11:10:06.769  window    opened "Wine Mono Installer" (control.exe) 396x186 at 442,267
+> 11:10:10.627  stats     last 10 s: 20 frames on screen (2.0 fps) | 0 GPU frames from games | 13 window redraws | 2 windows open
+> ```
+> Screenshot: the XP desktop, taskbar and the Mono dialog drawn, not black. Escape closed the Mono prompt (`window closed "Wine Mono Installer"`), explorer came back after first boot.
+
+> **2. X11 created normally keeps its old default.** "ZZ compdrv x11" on the same layer, backend left at X11: `version=turnip-sdk36`, `extraData.displayBackend=x11` (the writer's X11 finalize, same value the user's X11 container `xuser-4` carries), and **zero** `CompositorDriver` lines, so no Wayland probe ran for an X11 form.
+
+> **3. Edit path.**
+> - **A stored Turnip is kept.** That X11 container (`turnip-sdk36`) switched to Wayland shows `turnip-sdk36`: no fill, no note, no warning. Saved on Wayland and launched (`wayland-2026-09-14_11-14-21.log`): `compositor renders on Adreno (TM) 750 with vulkan.ad08XX.so` / `driver folder …/adrenotools/turnip-sdk36/`, desktop and dialog on screen. So the **bundled** Turnip works as the compositor driver, the no-imports case.
+> - **An explicit X11 "System" gets the default on Wayland and comes back on X11.** Set "System" in the X11 driver config dialog (Graphics Driver Version → System → OK), then Display backend → Wayland: `'Mesa Turnip v26.3.0-20260830-r4'` + `'Picked for you: the driver in your New Container Defaults.'` Back to X11 and saved: `.container` `version=System`, `displayBackend=x11`.
+> - **An explicit pick is never replaced.** Wayland again (filled r4), then picked `Mesa Turnip v26.3.0-7cda785 (Android + Wayland)` from the dropdown: the "Picked for you" note goes away. X11 → Wayland round trip: still `…7cda785 (Android + Wayland)`, neither restored to System nor refilled. Saved on Wayland: `version=Mesa Turnip v26.3.0-7cda785 (Android + Wayland)`, `displayBackend=wayland`; reopened, the field shows it with no note.
+
+> **4. New Container Defaults cannot reach Wayland on this phone (pre-existing, not fixed).** Opened read-only: Architecture `arm64ec`, Display backend `X11`, with the hint "The selected layer does not include winewayland and its Wayland Turnip." Defaults mode judges Wayland capability against `selectedWineVersion`, which there is the first wine entry (`Wine-9.5-X86_64-1`), not a layer of the chosen architecture. The fill runs in defaults mode through the same `loadContainerData`/`onDisplayBackendChanged` hooks, but it could not be exercised through the UI here. Nothing saved; the profile's mtime is still 2026-09-05.
+
+> **Device left clean.** Both ZZ containers removed through the app's Remove (`Remove "ZZ compdrv x11" permanently?`, `Remove "ZZ compdrv wl" permanently?`), `xuser-12`/`xuser-13` gone. At the lead's request, re-took the lock at 11:22 and also removed the Mono engineer's leftovers the same way (`Remove "ZZ Mono Before" permanently?`, `Remove "ZZ Mono After" permanently?`, ids 10 and 11), checking that `com.tencent.ig` was the focused app before every input batch. Left: `xuser-3` "P11-2 Arm", `xuser-4` "Wine 9.5 x86-64", `xuser-6` "p11-6 GE v6", `xuser-7` "wayland", all untouched. The defaults profile is untouched, temp dumps and screenshots are deleted, the lock was released at 11:24 and Termux is back in front. My two session logs stay in `Wayland-logs/`.
+
+## 2026-09-14 09:10 — 🧭 **A Wayland container no longer starts with a blank Compositor driver: the form fills in the newest installed Turnip that can import the game's frames** (`fix/wayland-compositor-driver-default` `7f1b2254`, off `main` `c518c7af`; run 34846772508 green, pubg `14e10dde…` staged as `/sdcard/Download/Bannerlator-compdrv-pubg.apk`)
+
+> **Build.** Run 34846772508 green on all three flavours at `7f1b2254` (headSha verified). pubg `14e10dde00c6304343fa4c33fea7e93419df9284c924bc5d41cf6d596d4befd8`. Two earlier runs (34846176385, 34846678820) were cancelled by me when the defaults-profile preference and its log line were added; neither is a result.
+
+> **The report.** A new container created with Display backend = Wayland showed an empty "Compositor driver" field and the red `Wayland needs a Turnip driver here. "System" cannot import the game's frames and shows a black screen.` The user had to pick a Turnip by hand or the session was black.
+
+> **Why the field was BLANK and not "System".** `Container.DEFAULT_GRAPHICSDRIVERCONFIG` carries `version=` (empty). The picker's options are `compositorDriverChoices()` = supported bundled ids + imports, with "System" left out on purpose, and the field was rendered as `if (version in choices) version else ""`. Neither `""` nor a carried-over `"System"` is ever in that list, so both rendered as nothing. At launch both mean the same thing: `XServerDisplayActivity`'s Wayland resolve skips adrenotools for an empty or "System" id, the compositor opens the system Vulkan driver, and `vkCreateDevice` fails on the missing dmabuf-import extensions. The same mapping sat in all three editors (container, shortcut pop-up, XMB).
+
+> **Why nothing filled it.** Nothing ever looked. The only place an empty version is replaced is the writer's X11 finalize (`applyFormTo`: empty → `DefaultVersion.WRAPPER_ADRENO` if supported, else "System"), which is invisible to the form and knows nothing about Wayland.
+>
+> **And the user's own default never arrived.** The Pocket FIT has a New Container Defaults profile for arm64ec naming `version=Mesa Turnip v26.3.0-20260830-r4` (there is no x86_64 profile). The create form seeds its arch-agnostic fields, `graphicsDriverConfig` among them, from the arch of the FIRST wine entry, which here is `Wine-9.5-X86_64-1`; with no x86_64 profile it falls back to the built-in empty `version=`. Picking the arm64ec Proton afterwards re-seeds only the arch-dependent fields (emulator, box64, FEXCore). So the user's saved Turnip never reached an arm64ec container.
+
+> **The rule (form state, all three paths).** `ContainerDetailViewModel.syncCompositorDriverWithBackend()` runs when the form loads (create, edit, New Container Defaults), when the Display backend changes and when a wine change makes a stored Wayland effective. On the EFFECTIVE Wayland backend with an empty or "System" version it fills in `defaultCompositorDriver()`'s pick; an explicit value is never replaced, an explicit pick from the dropdown is kept from then on, and going back to X11 before saving restores the pre-fill value (the same `version` key is the X11 game driver's). A save pressed while the probe is still running waits for it. `applyFormTo` is untouched.
+
+> **How the default is chosen (evidence, not names).** Candidates are exactly what the picker offers. A driver whose `meta.json` declares a proprietary vendor (the bundled `v819` says `"vendor": "Qualcomm"`) is not a Turnip and is skipped without being probed, as is an import that is not a Mesa `libvulkan_*` build (the config dialog's existing never-probe-a-blob rule). Every other candidate is probed through the same native path the config dialog's extension list uses: it must load itself (no fall-back to the system ICD) and list all four dmabuf-import extensions the compositor enables at `vkCreateDevice` (`VK_KHR_external_memory_fd`, `VK_EXT_external_memory_dma_buf`, `VK_EXT_image_drm_format_modifier`, `VK_KHR_image_format_list`, from `waylandcomp/src/vk_present.c`). Of those, the driver the user's own **New Container Defaults** name for that architecture wins if it passes; otherwise the one reporting the highest Vulkan version wins (the newest Mesa), a tie keeping the picker's order. The app's bundled Turnip (`turnip-sdk36`, Mesa 26.0.0-devel, `meta.json` has no vendor) goes through the same test, so a user with no imports still gets one. If nothing passes, the field reads "System", the red warning stays, and a **Download a Turnip driver** button opens the existing Adrenotools driver sheet; installing one re-runs the search. Every verdict is logged to logcat under tag `CompositorDriver`.
+
+> **Label fix on its own, in all three editors.** The field now names what is stored: "System" for empty/"System", `<id> (not available)` for an id the picker no longer offers, the id otherwise; the red warning also covers a missing id. The shortcut and XMB editors get the label and warning only; they do not auto-fill (per-game values are overrides, left to the user).
+
+> **Device plan.** (1) Create `ZZ` on Proton-11.0-2.1-arm64ec-7 + Wayland without touching the compositor field → field shows a Turnip, `.container` carries it, first launch's session log names its driver folder and renders. (2) An X11 `ZZ` container with "System" switched to Wayland gets the default; back to X11 restores "System"; an explicit pick is not replaced. (3) An X11 container created normally keeps `turnip-sdk36`. (4) The logcat verdicts for every installed driver.
+
+## 2026-09-14 08:20 — ✅ **Combined build device-proven: new containers keep Wayland and their drivers, the HUD names OpenGL for Wizardry, X11 unchanged** (`feat/wayland-phase2` `4a9b1c14`, run 34839775874, pubg `810d3346…`)
+
+> **Build.** Run 34839775874 green on `4a9b1c14` (headSha verified). pubg `810d3346509cf0164b0d14ad2d759d43519a546742cb1f42e1e304767015afdd`, staged as `/sdcard/Download/Bannerlator-p5d-pubg.apk`, installed with `pm install -r` and sha-verified on the Pocket FIT. Layer unchanged (`Proton-11.0-2.1-arm64ec-7`).
+
+> **1. Creating a container keeps what the screen showed.** Created "ZZ createtest" through the real UI: Proton 11.0-2.1-arm64ec-7, Display backend **Wayland**, Compositor driver **Mesa Turnip v26.3.0-20260830-r4**, Wayland game driver **Bundled (Adreno 6xx / 730–750)**, DXVK **2.4.1-1-gplasync-pre-reg-0**, VKD3D **3.0.1-d01924b6-1**, and the default `ZINK_DEBUG` **deleted** from the environment tab. The saved `.container` carried every one of them: `extraData.displayBackend=wayland`, `extraData.waylandGameDriver=bundled`, `graphicsDriverConfig version=Mesa Turnip v26.3.0-20260830-r4`, `dxwrapperConfig version=2.4.1-1-gplasync-pre-reg-0 … vkd3dVersion=3.0.1-d01924b6-1`, and no `ZINK_DEBUG`. Before this fix the first two were the ones lost. The editor re-opened with all of them.
+>
+> **First launch** of that container ran on Wayland (a new session log, `explorer.exe` connected over Wayland). Read back after the first boot had saved the file (`appVersion` now 85): backend, game driver and compositor driver unchanged, `ZINK_DEBUG` still absent, and the install marker `dxwrapper=dxvk-2.4.1-1-gplasync-pre-reg-0;vkd3d-3.0.1-d01924b6-1;none` proves the chosen DXVK/VKD3D were the ones actually extracted into the prefix.
+>
+> **Cards.** The three Wayland containers read "Vulkan (Wayland)", the X11 Wine 9.5 container still reads "Vulkan".
+
+> **2. HUD labels.** Wizardry (native OpenGL, Wayland): **`OpenGL` · 30.0 fps · Wayland** (was "DXVK"). Insane 2 (D3D9, Wayland): **`D3D9 · DXVK` · 141.4 fps · Wayland**. Insane 2 on an X11-forced copy: **`D3D9 · DXVK` · X11**, title screen at 1680 fps.
+>
+> ⚠️ The first X11 launch, started seconds after force-stopping the Wayland Insane 2 session, minimised itself: DXVK logged a third swapchain at **160x23** (a minimised window) after the 1280x720 one, the screen stayed black with a cursor and a tap did not restore it. A clean relaunch drew normally and logged only 105x76 → 1280x720, as the two earlier good runs (06:08, 07:00) did. Seen once, not reproduced.
+
+> **The user's own containers.** The 07:15 hand-swap of `xuser-3` ("P11-2 Arm") and `xuser-6` ("p11-6 GE v6") to the Wayland layer had written `displayBackend`/`waylandGameDriver` as **top-level** keys. The backend lives in `extraData` (`Container.getDisplayBackend()` = `getExtra("displayBackend")`), so neither container was ever on Wayland; `xuser-6` lost the dead keys on its next save at 07:21:34. Titanfall 2 and Half-Life 2 had run on Wayland only through their own shortcut overrides. Fixed with the app stopped: `extraData.displayBackend=wayland`, dead keys removed, owner and mode kept; a diff against the backup shows only those keys. Pre-fix copies in `/sdcard/Download/wayland-backup/xuser-{3,6}-pre-fix-0750/`.
+
+> **Found on the way, not fixed:**
+> - A new container's **Compositor driver** field is blank on Wayland, with the warning that "System" shows a black screen; it had to be picked by hand.
+> - Every new container on layer v7 gets Wine's **Mono downloader prompt** on first boot.
+> - In landscape the **"+" button covers the last container card's settings gear** (the list has no bottom padding); it was reached with keyboard focus.
+
+> **Device left clean.** "ZZ createtest" removed through the app's own Remove (dialog named it), the X11 shortcut copy deleted, temporary screenshots and the test log folder removed, rotation settings restored. The user's shortcuts untouched, including the `The Elder Scrolls V - Skyrim` shortcut they added to container 7.
+
+## 2026-09-14 (after the session crash) — 🧩 **Renderer labels + container-create fixes merged into `feat/wayland-phase2` for one combined build** (`9088f27b`, run 34839563917)
+
+> **Recovery note.** The session that owned the two fixes below crashed at ~07:31 while the user was in Titanfall 2. Both agents had already pushed and gone green (`7ec71021` run 34837932610, `5dd56079` run 34837591889); neither had been device-tested or merged. State was rebuilt from the transcript and the agents' own logs, nothing re-derived.
+>
+> **Merged, no conflicts:** the two branches touch disjoint files (labels: `XServerDisplayActivity`, `WineWaylandSupport`, the five card/launch surfaces; create: `Container`, `AdrenotoolsManager`, `ContainerDetailViewModel`). App-only: the layer stays `Proton-11.0-2.1-arm64ec-7`, no wcp change.
+>
+> **Device plan for this build:** (1) create a container with Wayland selected and read its `.container` back (`displayBackend`, `waylandGameDriver`, driver + DXVK/VKD3D choices); (2) Wizardry on Wayland → HUD must not say DXVK; (3) a D3D title on Wayland (HL2) → HUD still names D3D9 · DXVK; (4) Wayland cards read "Vulkan (Wayland)"; (5) an X11 launch unchanged.
+>
+> **User's own containers, changed by hand at 07:15–07:16 at their request:** `xuser-3` ("P11-2 Arm", was GE 11.0-6) and `xuser-6` ("P11-6 GE v6") now point at `Proton-11.0-2.1-arm64ec-7` with the Wayland backend. Prefixes untouched; `.container` + the three registry files backed up to `/sdcard/Download/wayland-backup/xuser-{3,6}-pre-wayland/`. First launch shows Wine's Mono prompt → Cancel.
+
+## 2026-09-14 (later) — 🏷️ **The HUD and the cards stop printing the container's config as the live renderer on Wayland** (`fix/wayland-renderer-labels` `7ec71021`, run 34837932610)
+
+> **The report.** Wizardry: The Labyrinth of Lost Souls, a native OpenGL title, showed "DXVK" in the HUD on Wayland, and Wayland container cards showed an "OpenGL" chip.
+>
+> **Why both lied.** The HUD seeded its renderer line from the container's X11 renderer setting and its wrapper from `dxwrapperConfig`. On Wayland the renderer setting picks a present path that never runs (the compositor is always Vulkan), and the configured wrapper only names what a D3D game *would* load. The cards had the same fault as a chip: `rendererLabelOf()` rendered the stored id.
+>
+> **The fix.** On Wayland the HUD starts at the one thing true of every session (the compositor's Vulkan, no wrapper named) and upgrades only on evidence. The existing resolvers (app-declared, engine log, DXVK/VKD3D wrapper logs) still prove the D3D API. A new per-process resolver answers the native case from the game's own `/proc/<pid>/maps`: the layer's host-side `libEGL.so.1` / `libgallium` / `libwayland-egl.so` mean OpenGL, `winevulkan.so` means Vulkan (both file-backed even on arm64ec, where the PE-only DLLs are invisible). Measured on a live Wayland D3D11/DXVK session (Titanfall 2): `winevulkan.so` mapped, none of the GL libraries, **but `opengl32.so` resident**, which is why `opengl32.so` is not treated as evidence. No evidence leaves the neutral label.
+>
+> The game and container cards (and the launch overlay, XMB and Big Picture, which share `buildLaunchSpec`) resolve the effective backend through `WineWaylandSupport.runsOnWayland` (the editors' rule, moved into the class that owns the capability probe) and show "Vulkan (Wayland)". X11 untouched on both surfaces.
+
+## 2026-09-14 (later) — 🧱 **Creating a container now saves what the create screen was showing** — create, edit and New Container Defaults go through one writer (`fix/container-create-settings` `5dd56079`, run 34837591889, pubg `e13d5b21…`, staged, not installed)
+
+> **The report.** "Selecting Wayland, then creating the container, leaves it back on X11", and "settings do not seem to be sticking on first time container launches not only for that but sometimes drivers and components like dxvk and vkd3d etc".
+
+> **What was actually wrong.** The container editor had **three** hand-maintained lists of what a save writes, and they had drifted:
+> 1. `buildCreateData()` — a JSON payload of ~40 keys handed to `ContainerManager.createContainerAsync`.
+> 2. the `createContainerAsync` callback — a second, different list re-applied through setters once the container existed (frame-gen, gyro, vibration, reshade, refresh, renderScale, autoCloseOnExit…).
+> 3. the **edit** branch of `doConfirm` — the full list, written straight onto the real container.
+>
+> Anything present in (3) but absent from both (1) and (2) was **silently dropped on create**. Mechanically diffing the three:
+>
+> | field | edit | create payload | create callback | result |
+> |---|---|---|---|---|
+> | `displayBackend` | ✅ `c.setDisplayBackend(…)` | ❌ | ❌ | **lost — every new container born X11** |
+> | `waylandGameDriver` | ✅ `c.setWaylandGameDriver(…)` | ❌ | ❌ | **lost — reverts to Auto** |
+> | `runAsAdmin` | ✅ `saveRunAsAdmin(c)` (registry) | ✅ flag → `ContainerManager` stamps EnableLUA | — | ok, different mechanism |
+> | everything else (70 fields) | ✅ | ✅ / ✅ | | ok |
+>
+> `displayBackend` never appears in the create payload at all — `grep -c '"displayBackend"'` over that block was **0** — and the view-model's own state was read only when seeding the form (`loadContainerData`) and in the Wayland capability guard (`onWineVersionChanged`). So the Wayland half of the report is exactly this: the value was chosen, shown, gated, and then thrown away at the moment of creation. `waylandGameDriver` — the *game's* Vulkan driver on a Wayland session — went with it, which is also the "drivers don't stick" half for anyone creating a Wayland container: that IS a driver setting, lost on create.
+>
+> **The same defect hit the New Container Defaults profile**, which is built from the same payload: a user could not save "Wayland" as their default at all, and `loadContainerData` seeded `displayBackend` from a profile that could never contain it.
+
+> **Followed the value the rest of the way, and the other half of the report is NOT in the create payload.** `graphicsDriver`, `graphicsDriverConfig`, `dxwrapper`, `dxwrapperConfig` and `wincomponents` *were* all in the payload and all survive to the `.container` file: `ContainerManager.createContainer` does `container.loadData(data)` → `container.saveData()`, and at first launch `XServerDisplayActivity.setupWineSystemFiles` extracts them because the marker extras (`container.getExtra("dxwrapper")`, `getExtra("wincomponents")`) are empty on a fresh container and `extractWinComponentFiles` forces every component through on `firstTimeBoot`. Two *other* things were rewriting driver config the user never chose, and both are fixed here — see below.
+
+> **The fix: one writer, not a fourth list.** A one-line `put("displayBackend", …)` would have fixed today's symptom and left the design that produced it, so `applyFormTo(container, …)` is now **the** place the form becomes container config, and all three callers use it:
+> - **edit** — called on the real container, then `saveData()`.
+> - **create** — called on a **throwaway** `Container(0, manager)`; its `getData()` *is* the payload. `Container.loadData` round-trips `getData()` in full, `extraData` included — the property `duplicateContainer` already depends on ("Copy the FULL source config (40+ fields) so nothing is dropped") — so every field reaches the new container and nothing is re-applied afterwards. Two keys are added by hand because `getData()` cannot carry them: `wineVersion` (omitted for the bundled main wine, but `createContainer` requires the key) and `runAsAdmin` (a registry stamp, not a config field).
+> - **New Container Defaults** — called on the profile template, which also deletes ~60 lines of computation duplicated from `doConfirm`.
+>
+> Net `-307/+211` in the view-model. A field added to the editor from now on is written once and sticks in create, edit and defaults together.
+
+> **Gating unchanged, and now it covers create too.** `applyFormTo` persists the **effective** backend (`isWaylandBackend` = stored Wayland **and** `WineWaylandSupport.isWaylandCapable(selectedWineVersion)`), which is the same line the edit path always used. Because create now goes through it, a container can no longer be *born* claiming a Wayland its Proton layer cannot drive — previously unreachable only because create wrote nothing at all.
+
+> **Two places that wrote configuration the user never chose, found on the way and fixed:**
+> - `AdrenotoolsManager.reloadContainers()` (runs on **every driver delete**) matched containers by driver *name* read from the driver's `meta.json`. An absent or unreadable `meta.json` makes `getDriverName()` return `""` — and `String.contains("")` is **true for everything**, so deleting one driver reset `graphicsDriverConfig.version` on **every container**, and pinned a `graphicsDriverConfig` override onto **every shortcut** that had only ever inherited one (`shortcut.getExtra("graphicsDriverConfig", container default)` read the inherited value straight back into `putExtra`). A null `version` would also NPE mid-loop and abandon the rest. Now: an empty driver name migrates nothing, a null version is skipped, and a shortcut with no override of its own is left inheriting (its container was just migrated anyway).
+> - `Container.checkObsoleteOrMissingProperties()` read an **absent** `appVersion` stamp as "written by app version 0" and re-added every `DEFAULT_ENV_VARS` entry. An absent stamp means *never booted* — which is exactly what a container the editor just wrote looks like, and what the defaults profile **always** looks like — so an env var the user deliberately deleted came back by itself. Only a container carrying a real old stamp is migrated now, and the stamp is parsed defensively (a junk value threw `NumberFormatException` straight out of `loadData`, which no caller catches). This also had to be right before create could carry `extraData` in its payload at all.
+
+> **Per-game shortcuts do NOT have this bug.** There is no create-vs-edit split to drift: creating a shortcut (`ExeShortcutImporter.writeExeShortcut`, or the `.desktop` generated from a `.lnk`) writes identity only — `Name`/`Exec`/`Icon`/`storeSource` — and a shortcut with no extra of its own **inherits** the container (`shortcut.getExtra(key, container-value)`). Every setting is written by the single `with(shortcut) { putExtra(...) }` block in `ShortcutsScreen` (which already carries `displayBackend` **and** `waylandGameDriver`), or by `XmbGameSettings`' equally single `xmb.set(p, key, …)`. One writer, so nothing to drop.
+
+## 2026-09-14 (later still) — 🌊🚦 **The overlay layer is now GATED on whether the display can actually compose it — and on this panel a window above the game keeps `DEVICE/DEVICE`** (`feat/wayland-phase5` `5334b3d3`, run 34834608772, pubg `5be0ea93…`)
+
+> Acting on the measurement from the previous entry, as a gate rather than a removal: the overlay layer capability stays, it is simply not raised on a display where raising it costs the hardware composition the first layer was worth having.
+
+> **The rule and where its inputs come from.** Raise the overlay only when the game layer is **not both rotated and scaled**. Neither input is a device or panel allowlist:
+> - **rotation** — `VkSurfaceCapabilitiesKHR::currentTransform`, captured when the swapchain is built and exposed as `vkp_surface_rotation_degrees()`. That is the presentation engine stating what it will do to *every* layer we hand it, so it follows the panel's install orientation and the session's orientation together, on any device. (It is also the same fact behind the long-standing `surface reports SUBOPTIMAL (panel rotation)` line.)
+> - **scale** — the game layer's own `src -> dst` rectangles, the ones passed to `ASurfaceTransaction_setGeometry`. Kept in `g_game_src`/`g_game_dst`, which survive a SurfaceControl retire and the recovery swap (the per-layer `geo_valid` does not).
+>
+> **Decided before the game is committed to a layer, not after.** `render_scene()` asks `sc_layer_overlay_affordable()` next to the existing `fx_blocks` test and drops `li = -1; over = 0` when the answer is no, so the whole scene goes down the copy path from the start. Deciding it inside `sc_layer_present_overlay()` alone would have shown the game layer and hidden it again on **every frame** — a per-frame visibility transaction, which is exactly the flicker this is supposed to avoid. The guard inside `sc_layer_present_overlay()` stays as belt and braces.
+
+> **Why the gate predicts instead of measuring, which would be better.** The composition type is not readable by an app. It lives in the Composer HAL; `ASurfaceTransactionStats` carries latch time and fences and nothing else; the only published copy is `dumpsys android.hardware.graphics.composer3.IComposer/default`, which needs `android.permission.DUMP` and string-parsing, and it would arrive at least a frame after the layer went up — so a measure-then-back-out would itself be the visible change being avoided. Hence the transform rule.
+
+> **Proved on device** (run 34834608772 green on all three flavours at `5334b3d3`; pubg sha256 `5be0ea936a5923b55191590537af728d005cf300113474f3bd5cee716145f44e`, installed and sha-verified, left installed). Wizardry on the game layer, Wine's Task Manager opened above it:
+> ```
+> 06:57:29.314  layer  overlay layer declined: this display rotates every layer 90° and the game layer is
+>                      scaled 1280x720 -> 1920x1080, and on that combination a second layer drops the whole
+>                      frame to GPU composition for the rest of the session (measured). The window above the
+>                      game goes on the copy path instead - same picture, one blit.
+> 06:57:29.314  layer  zero-copy paused: a window above the game would need a second display layer, which this
+>                      display cannot compose in hardware - whole scene on the copy path
+> 06:57:29.315  layer  layers hidden (scene is not a single fullscreen window)
+> ```
+> and the composer dump with that window up — **no `AHardwareBuffer` layers at all, everything DEVICE**:
+> ```
+> SurfaceView[com.tencent.ig/com.winlator.star. | z=0 DEVICE/DEVICE t=90
+> VRI[XServerDisplayActivity]#0(BLAST Consumer) | z=1 DEVICE/DEVICE t=0
+> VRI[ScreenDecorHwcOverlay]#0(BLAST Consumer)0 | z=2 DISPLAY_DECORATION/CLIENT t=0
+> ```
+> against the **three `DEVICE/CLIENT` layers** the same scene produced yesterday. **The picture is identical** — screenshot shows the Task Manager drawn crisply over Wizardry's title screen, right place, right size, no black box, no darkening, no black frame at the transition. **The frame rate is not worse**: `305 / 276 / 306 / 308 / 305 frames on screen (30.5 / 27.6 / 30.6 / 30.8 / 30.5 fps) | 300 GPU frames from games` with the window up, against `305 / 308 frames (30.5 / 30.8 fps) | 300 GPU frames` measured on the two-layer path yesterday. Same numbers, hardware composition kept.
+> **And it comes back by itself.** Closing the window: `effects  zero-copy resumed: the game is back on its own display layer`, the game layer is back in the dump (`AHardwareBuffer pid [31209] | z=0 DEVICE/DEVICE t=90`), `267 layer frames` in the next window. **The session never leaves `DEVICE/DEVICE` at any point** — which is the whole point, because before the gate this sequence cost it for the rest of the session.
+
+> **Short regression set, all green on the same build:**
+> - **Layer path with no window above** — baseline `300 frames on screen (30.0 fps) | 300 GPU frames from games | 300 layer frames`, composer `AHardwareBuffer z=0 DEVICE/DEVICE transform=90`. Unchanged.
+> - **Effects applied live** — `effects  scaling=None, CAS on 60%, Look="Custom"` → `chain ready: 13 passes (SGSR, SGSR HQ, NIS, FSR EASU+RCAS, CAS, colour, FXAA, Toon, HDR, NTSC, CRT, deband) on Adreno (TM) 750`, the game kept its layer (`300 layer frames`) and the composer stayed `DEVICE/DEVICE` with effects on. Switched off cleanly.
+> - **X11 launch** — an x11-forced copy of a container-7 shortcut: **zero** `OpenGL safe mode` / `GALLIUM_THREAD` lines, **zero** `overlay layer` lines, and **no new Wayland session log** (`wayland-2026-09-14_06-55-19.log` stayed newest). HDR still reported to logcat only. Insane 2 in-race at `D3D9 · DXVK · 202.4 fps · 4.9 ms · X11`.
+>
+> The fresh-SurfaceControl swap from the previous round is untouched — it is free and correct, and it still runs on any display where the overlay *is* raised.
+
+> **Device left clean:** app force-stopped, both `ZZ …` test shortcuts deleted, temp logs and screenshots removed, the stale staged APK removed. Container 7's Desktop is the user's seven. `Bannerlator-p5c-pubg.apk` is the only staged build and matches what is installed. No release, no tag, nothing in `/sdcard/Download/Wayland/`.
+
+## 2026-09-14 (later) — 🌊🧱 **Wayland phase 5, round 2: composition recovery MEASURED and it does NOT work on this panel; effects-live and X11 regressions green** (`feat/wayland-phase5` `93d40b88`, run 34832708528)
+
+> Picking up the three things the first round could not reach. Build under test for the device work was still `207154ce…` (run 34825893993 @ `217efe9e`) — `feat/wayland-phase2` had been merged in the meantime and fast-forwarded with no code drift, so the installed binary was exactly the code being measured.
+
+> ### ❌→📏 (1) Display-layer composition recovery — the mechanism works, the cure does not
+> **Getting two layers up.** Fullscreen HL2 was the wrong vehicle: it self-minimises when Wine's Task Manager takes guest focus (`window moved "HALF-LIFE 2 - Direct3D 9" (hl2.exe) to -32000,-32000` → `layers hidden`). **Wizardry works** — it is a borderless-fullscreen toplevel that does not minimise. A copy of its shortcut with `BANNER_WAYLAND_ZERO_COPY=1` puts it on the game layer (`300 layer frames` per 10 s at its 30 fps cap), and Wine's Task Manager then lands on the overlay layer:
+> ```
+> 06:00:45.211  layer  SurfaceControl "banner_wayland_overlay" created as a child of the screen surface (z=2)
+> 06:00:45.213  layer  banner_wayland_overlay geometry: buffer 0,0-404,453 -> screen 657,200-1263,879
+> 06:00:45.213  layer  2 display layers in use: "banner_wayland_game" (z=1) and "banner_wayland_overlay" (z=2) above it …
+> ```
+> **The recovery fires exactly as designed.** Closing the overlay window (the guest `taskmgr.exe` was ended from the host, because Wizardry holds a persistent pointer lock so taps never reach the guest window's close box):
+> ```
+> 06:03:47.177  layer  banner_wayland_overlay: SurfaceControl retired (window 0x79574d3530)
+> 06:03:47.177  layer  banner_wayland_overlay: gone (nothing is above the game any more)
+> 06:03:47.183  layer  composition recovery: banner_wayland_game got a fresh SurfaceControl …
+> 06:03:47.183  layer  banner_wayland_game geometry: buffer 0,0-1280,720 -> screen 0,0-1920,1080
+> 06:03:47.183  layer  banner_wayland_game: layer shown
+> ```
+> **6 ms** from the overlay retiring to the swap, SurfaceFlinger really hands out a new layer (its id goes `17632` → `17636`), and the game does not drop a frame across the boundary (`305 frames on screen (30.5 fps) | 300 GPU frames from games | 414 layer frames`). No black frame. The atomic-transaction design does what it claims.
+>
+> **But it does not bring hardware composition back, and that is now measured rather than assumed.** `dumpsys android.hardware.graphics.composer3.IComposer/default`, one line per layer, reproduced twice end to end:
+> ```
+> one layer (baseline)                        AHardwareBuffer z: 0  composition: DEVICE/DEVICE  transform: 90/0/0
+> two layers (overlay up)                     z: 0 DEVICE/CLIENT · z: 1 DEVICE/CLIENT · z: 2 DEVICE/CLIENT
+> overlay retired + fresh SurfaceControl      z: 0 DEVICE/CLIENT          (and at +8 s, +16 s, +24 s)
+> layer path dropped entirely and re-created  z: 0 DEVICE/CLIENT
+> drawer opened and closed, no second window  z: 0 DEVICE/DEVICE          ← control
+> HOME + resume                               z: 0 DEVICE/DEVICE
+> ```
+> The control matters: the drawer alone does **not** cause the fallback on this build, so the second display layer really is the cause. And the cure is not the child layer — **HOME + resume re-creates the app's whole window and SurfaceView** (`VRI[XServerDisplayActivity]#0` becomes `#4` in the dump), which is the only thing that clears it. **So the phase-4 note written into `sc_layer.h` — "only re-creating the GAME layer's SurfaceControl clears it" — is wrong**; it was inferred from HOME + resume, which re-creates everything. The sticky client-composition state belongs to the parent surface or the display.
+>
+> **What was changed in response** (`93d40b88`): the swap is **kept** — it is free, correct, and the mechanism may well differ on hardware that is not rotating and scaling every layer — but the header comment, the function comment and the log line no longer promise an outcome that was not observed. The log line now reads `composition recovery: banner_wayland_game got a fresh SurfaceControl now that nothing is above the game (measured on this panel: hardware composition does NOT return from this alone)`, and `sc_layer.h` carries the five-line measurement table above.
+> **Recommendation, not implemented** (it is a behaviour change, not a bug fix): the only cure that keeps the single-layer win is **prevention** — do not put a second display layer up at all while the game layer is rotated and scaled, and send the window above the game down the copy path instead, which is what the pre-phase-4 code did. That costs one blit SurfaceFlinger would have done anyway and keeps `DEVICE/DEVICE` for the whole session. Re-creating the parent SurfaceView, the only other lever, would cost a real black frame and a swapchain rebuild — far worse than the few percent of GPU that client composition costs.
+
+> ### ✅ (2) Effects applied live, over a running game, still on the game's layer
+> CAS switched on from the drawer while Wizardry ran on the game layer:
+> ```
+> 06:07:10.861  effects  scaling=None, CAS on 60%, Look="Custom"
+> 06:07:10.862  effects  scene image 1280x720 for the effect chain
+> 06:07:11.500  effects  chain ready: 13 passes (SGSR, SGSR HQ, NIS, FSR EASU+RCAS, CAS, colour, FXAA, Toon, HDR, NTSC, CRT, deband) on Adreno (TM) 750
+> 06:07:13.616  stats    last 10 s: 283 frames on screen (28.3 fps) | 284 GPU frames from games | … | 283 layer frames
+> ```
+> The chain built live, the game **kept its display layer** through it (`283 layer frames` — the chain's result goes into the game's own layer, not the compositor's swapchain), and the composer stayed `DEVICE/DEVICE` **with effects on**. Switched back off cleanly (`effects  all off: scaling=None (plain blit)`).
+
+> ### ✅ (3) X11 is untouched
+> A copy of a container-7 shortcut forced to `displayBackend=x11` (Insane 2). In the whole session logcat: **zero** occurrences of `OpenGL safe mode` or `GALLIUM_THREAD` (the export is gated on the Wayland backend), and **no new Wayland session log was created** (`wayland-2026-09-14_05-57-53.log` stayed the newest), so nothing wrote into the compositor log either. The HDR read still runs — it is backend-agnostic by design — and goes to logcat only: `06:08:14.269 I XServerDisplayActivity: HDR: HDR capability of "Built-in Screen" (display 0, Android API 34): formats none | …`. The game itself: in-race at `D3D9 · DXVK · 121.8 fps · 8.2 ms · X11`.
+
+> ### ◑ (4) HDR re-read on a display change — still code-only, and here is exactly how far it got
+> Nothing can be plugged into this device's USB-C port today, so a simulated secondary display was used instead (`settings put global overlay_display_devices "1280x720/213"`, removed again afterwards). The framework did create it and report it — `DisplayDeviceInfo{"Overlay #1" … type OVERLAY, hdrCapabilities null}`, `DisplayViewport{type=VIRTUAL, displayId=7}` — and `onDisplayAdded` reached the reporter. **No second line was logged, correctly**: the game stayed on the built-in panel, so `hdrTargetDisplay()` returned the same display and `sameAs()` suppressed the duplicate, which is the de-duplication the row is supposed to do. Moving the game onto the simulated display through the TV tab was not reached before the session was wound up. So: the listener, the per-display read and the de-duplication are all exercised; **the "log again with different values when the game's display changes" path is code, not a device result.** One useful detail fell out of it — a display can report `hdrCapabilities null`, which `DisplayHdrInfo.read()` already handles (formats become `unknown` rather than throwing).
+
+> ### ✅ Corrected build verified on device
+> Run **34832708528** green on all three flavours at `93d40b88`; pubg sha256 **`b6b98793bfa1071d33583b029072f3724a33f0479ccc352491f14dca4bd0eb6d`**, installed and sha-verified, and **left installed**. The whole two-layer arc was driven once more on it — third independent reproduction — and the log line now says what is true:
+> ```
+> 06:35:03.393  layer  banner_wayland_overlay: gone (nothing is above the game any more)
+> 06:35:03.399  layer  composition recovery: banner_wayland_game got a fresh SurfaceControl now that nothing is above the game (measured on this panel: hardware composition does NOT return from this alone)
+> ```
+> Same 6 ms, same persisting `DEVICE/CLIENT`.
+
+> **Device left clean:** app force-stopped, every `ZZ …` test shortcut deleted, temp logs and screenshots removed, the simulated display setting deleted (`settings get global overlay_display_devices` → `null`). Container 7's Desktop is the user's seven. Only `Bannerlator-p5b-pubg.apk` is staged in `/sdcard/Download/` (the installed build); the stale one was removed. No release, no tag, nothing in `/sdcard/Download/Wayland/`.
+
+## 2026-09-14 — 🌊🔧 **Wayland phase 5 DEVICE RESULTS: OpenGL safe mode and HDR reporting PROVEN; layer composition recovery UNPROVEN (device handed back mid-test)** (`feat/wayland-phase5` `217efe9e`, run 34825893993, pubg `207154ce…`)
+
+> Build: CI run **34825893993** green on all three flavours at `217efe9e` (headSha verified). pubg APK sha256 **`207154ce007a5279bf985a400dbd2e8394bb3691d89945d1e680b18f26c2bd5e`**, installed on the Pocket FIT and sha-verified against the installed `base.apk`. Container 7, `Proton-11.0-2.1-arm64ec-7`, unchanged — no `.wcp` work in this phase.
+>
+> Testing stopped part-way on the user's instruction (the phone was needed). What is below is what was actually observed; what was not reached is named as such and nothing is inferred.
+
+> ### ✅ (a) OpenGL safe mode — proved as an A/B/A on one shortcut, with no hand-typed env var anywhere
+> A copy of the Wizardry shortcut **without** the `envVars=GALLIUM_THREAD=0` line the user added (`ZZ Wiz GL`, deleted afterwards) was launched three times on container 7. Nothing else changed between runs.
+> - **ON (the default, nothing configured)** — `09-14 05:22:09.149 I XServerDisplayActivity: wayland: OpenGL safe mode on - exporting GALLIUM_THREAD=0`, then the game **ran for 90+ s at its own 30 fps cap**: `05:23:09.155 stats last 10 s: 302 frames on screen (30.2 fps) | 300 GPU frames from games`, repeated `300 | 300` for every window after. Screenshot: the title screen (Continue / Settings / Exit), HUD `30.0 fps · 33.3ms · Wayland`. An earlier run of the same shortcut held the same 30 fps for **three minutes**.
+> - **OFF, flipped in the in-game drawer** — the row wrote to the shortcut, the owner `resolvedWaylandGlSafeMode()` reads: `waylandGlSafeMode=0` appeared in the `.desktop` immediately, and the helper text switched to the "Off:" wording. The game kept running (30.1 fps) because the variable is only read when Mesa starts — which is what the row says. Relaunched: `05:25:53.288 I XServerDisplayActivity: wayland: OpenGL safe mode is OFF for this launch - Mesa's threaded context stays on`, then
+> ```
+> 05:26:10.832  vulkan    "Wizardry…" (LoLS_win32.exe) is presenting GPU frames through Wayland: 1280x720, format XR24, qcom_compressed
+> 05:26:11.141  program   disconnected: LoLS_win32.exe (pid 24534)
+> 05:26:13.307  stats     last 10 s: 17 frames on screen (1.7 fps) | 1 GPU frames from games
+> ```
+> **309 ms from the first presented frame to gone**, one GPU frame in the whole window — the documented silent death, reproduced on demand. No tombstone was written (newest in `/data/tombstones` is still 2026-09-12), no Wine exception, no dialog; logcat's only trace is `ActivityManager: Process com.tencent.ig (pid 24320) has died: fg TOP`.
+> - **ON again** (flag restored, same shortcut, same binary): `05:29:12.723 stats last 10 s: 300 frames on screen (30.0 fps) | 300 GPU frames from games` and steady for the rest of the run.
+> So the switch, and nothing else, decides whether that game lives. The row is at the bottom of the drawer's Graphics tab under Zero-copy presentation, labelled **"OpenGL safe mode"**, and reads *"On: stops native OpenGL games disappearing with no error. Costs a little OpenGL speed; DirectX games are unaffected. Saved for this game — takes effect the next time it starts."*
+>
+> ⚠️ **What this means for the user's own Wizardry shortcut.** Its `envVars=GALLIUM_THREAD=0` is now **redundant** — safe mode exports exactly that by default — but it is not merely cosmetic: the launch path deliberately leaves an explicit user value alone (`wayland: OpenGL safe mode on, but GALLIUM_THREAD=0 is already set in the environment variables - leaving the user's value alone`), so **while that line is there the in-game toggle cannot turn the protection off for that game**. Removing it hands the game to the switch. Left in place as instructed.
+
+> ### ✅ (b) HDR capability reporting — the line is in the session log and the row is in the Task Manager
+> First line of every Wayland session log, before the compositor's own opening line (the pre-open buffer in `banner_log()` doing its job):
+> ```
+> 05:16:37.485  display   HDR capability of "Built-in Screen" (display 0, Android API 34): formats none | luminance max 500 nits, max average 500 nits, min 0 nits | HDR/SDR headroom not available on this display -- SDR only: an HDR layer here would be tone-mapped and dropped to GPU composition [session start]
+> ```
+> Identical in all five sessions driven today. That matches the recon figures exactly (`supportedHdrTypes=[]`, `mMaxLuminance=500.0`, `hdrSdrRatio not_available`) — so **this device reports no HDR of any kind**, and the report says so in one line a tester can paste. In-game Task Manager, CONTAINER block, between Resolution and Device: `HDR    none · panel 500 nits` (screenshot taken on both Wizardry and Half-Life 2 sessions). No toggle, by design.
+> **Not exercised:** the re-read on display change. The listener is registered and the read is per-display (`ExternalDisplayController.getExternalGameDisplay()` picks the TV when the game is on it), but nothing was plugged into the USB-C port, so the "log again when the display changes" path is code, not a device result.
+
+> ### ❌ (c) Display-layer composition recovery — NOT PROVEN
+> Implemented and building, but the measurement was not reached. What was established:
+> - **Baseline confirmed on this build.** Half-Life 2 with zero-copy on, one display layer: `layer: 17493 name: AHardwareBuffer pid [28765] z: 0 composition: DEVICE/DEVICE … transform: 90/0/0` in `dumpsys android.hardware.graphics.composer3.IComposer/default`.
+> - **The overlay pair was never up.** Fullscreen HL2 **minimises itself** when the Wine Task Manager takes guest focus — `05:33:21.720 window moved "HALF-LIFE 2 - Direct3D 9" (hl2.exe) to -32000,-32000` → `05:33:21.724 layer layers hidden (scene is not a single fullscreen window)` — so the scene went to the copy path instead of game-layer + overlay-layer. Relaunched with `-window -noborder -width 1280 -height 720` (which is how the phase-4 multi-layer round got its pair), the layer came up correctly (`SurfaceControl "banner_wayland_game" created`, `DEVICE/DEVICE`) and the Wine Task Manager did open over it, but HL2 had by then gone `Not Responding` from a mistimed input during a map load, and the device had to be handed back before a clean run.
+> **So `DEVICE/CLIENT` with an overlay up, the `composition recovery: banner_wayland_game got a fresh SurfaceControl …` line, and the return to `DEVICE/DEVICE` are all still unobserved.** Re-test recipe, for whoever picks it up: windowed HL2 (`-window -noborder`), let it settle at the main menu, drawer → Task Manager → New Task → `taskmgr.exe` → OK → close the drawer, dump the composer (expect DEVICE/CLIENT on both layers), then close the Task Manager window and dump again on the next frame (expect the recovery line then DEVICE/DEVICE).
+
+> ### ◑ (d) Regressions — one of three
+> - ✅ **Half-Life 2 with zero-copy on, unchanged.** `05:30:26.406 vulkan "HALF-LIFE 2 - Direct3D 9" (hl2.exe) is presenting GPU frames through Wayland: 1280x720, format XB24, linear (zero-copy)` → `zero-copy: presenting … without a copy`, then **seven consecutive 10 s windows of `600 frames on screen (60.0 fps) | 600 GPU frames from games | 0 window redraws | 600 zero-copy frames`**. Frames are still copy-free and the rate is the same 60 fps this game has held on every previous Wayland build. HUD: `D3D9 · DXVK · 60.0 fps · 16.7 ms · Wayland`.
+> - ❌ **Effects chain applied live** — not reached.
+> - ❌ **X11 launch** — not reached. (An `x11` copy of a container-7 shortcut was prepared for it and deleted unused.) The code path is gated on `waylandMode` in both places it could touch X11 — the `GALLIUM_THREAD` export and the session-log write — and the HDR read itself is backend-agnostic, but that is a code argument, not a device result.
+
+> **Device left clean:** app force-stopped, nothing running, all three `ZZ …` test shortcuts deleted, temporary logs and screenshots removed. Container 7's Desktop is exactly as found (AIO Graphics Test, DiRT Rally 2.0, DiRT Showdown, God of War, Insane2, SPRAWL zero, Wizardry — the user's own `SPRAWL zero` was added at 04:37 today and was not touched). Nothing staged in `/sdcard/Download/Wayland/`, no release, no tag. The phase-5 build (`207154ce…`) is left installed.
+
+## 2026-09-14 — 🧭🌊 **CHECKPOINT: Wayland phase 5 in CI** (`feat/wayland-phase5` `217efe9e`, run 34825893993)
+
+> Three app-side changes, no Proton layer change (the shipped layer stays `Proton-11.0-2.1-arm64ec-7`). Branch cut from `origin/feat/wayland-phase2` `3f26c4b1`. Written before the device tests, per the checkpoint rule.
+>
+> **1. OpenGL safe mode** — `GALLIUM_THREAD=0` promoted from a hand-typed env var to a real per-container setting with a per-game override and a live drawer row, **default ON**, Wayland only. `Container.isWaylandGlSafeMode()` / `setWaylandGlSafeMode()`, `resolvedWaylandGlSafeMode()`, and `WaylandGlSafeModeRow` under Zero-copy presentation on the Graphics tab. It is deliberately **not** a live switch: Mesa reads the variable when the guest's GL driver starts, so the row is the next-launch default and the helper text says exactly that instead of pretending the flip reached the running game. The writer writes the SAME owner the resolver reads (the shortcut on a shortcut launch, else the container) — that is the shape `resolvedMatchRefreshRate()` gets wrong, where the resolver prefers a shortcut extra while the drawer writes the container and the in-game toggle goes inert. The export sits next to `BANNER_WSI_AHB`, gated on `waylandMode` so X11 is untouched, and an explicit `GALLIUM_THREAD` in the user's own environment variables still wins (logged either way).
+>
+> **2. HDR capability reporting**, reporting only — no toggle, because nothing in the stack emits HDR metadata and a greyed switch would be misleading. New `display/DisplayHdrInfo.java` reads the real platform answer with every API version-guarded and every call wrapped: per-mode `getSupportedHdrTypes()` on API 34+, else `Display.getHdrCapabilities()`; desired max / max-average / min luminance; `isHdrSdrRatioAvailable()` / `getHdrSdrRatio()`. One `display` line per session in the compositor's session log and an `HDR` row in the Task Manager's CONTAINER block. Capability is **per display** and changes at runtime, so it is read live for the display the game is on (`ExternalDisplayController.getExternalGameDisplay()` was added for that) and re-logged whenever the answer changes. `banner_log()` now buffers up to 32 lines logged before the session file exists and flushes them when it opens — the compositor thread opens that file asynchronously, so the app's first report would otherwise have reached logcat only.
+>
+> **3. Display-layer composition recovery** — acting on what the multi-layer round measured into `sc_layer.h`: a second display layer flips the frame to `DEVICE/CLIENT` and it does **not** come back when the overlay goes; only a new `ASurfaceControl` for the GAME layer clears it. Retiring the overlay now arms the game layer, and the next frame is presented on a fresh SurfaceControl while the old one is hidden and unparented **in the same transaction**. SurfaceFlinger applies a transaction atomically, so no composited frame is ever missing the game: no black frame and no dropped frame beyond the layer creation itself. `add_complete_on()` takes the release fence and the retire from the OLD SurfaceControl; the zero-copy same-token shortcut is skipped while a swap is due and reports no release for that buffer (it moved, it is not free).
+>
+> **Device state at checkpoint:** AYANEO Pocket FIT, `3.1.2-wayland-pre6` sha `48377d13…` installed, container 7 on layer 7, nothing driven yet. Proof for (a)-(d) follows in the next entry.
+
 ## 2026-09-13 22:20-23:05 — 🌊🖼️ **Wizardry black screen on Wayland: native OpenGL windows have never presented — Mesa's EGL needs `zwp_linux_dmabuf_v1` v4 feedback** (`fix/wayland-gl-wizardry`)
 
 > **Symptom.** "Wizardry: The Labyrinth of Lost Souls" (`LoLS_win32.exe`, 32-bit x86 under FEX) on container 7 / Wayland / `Proton-11.0-2.1-arm64ec-6`: sound plays, the window opens, input works, the screen is solid black and the perf HUD never appears.
@@ -7935,3 +8595,12 @@ Not yet: Steamworks Shared 228980 download; auto-resume without the "Finish" tap
 - ✅🚀🌊 2026-09-13 22:10 — **3.1.2 Wayland pre-release 5 LIVE** (run 34797125679 @ `77cabc23`, prerelease, vc85; 3.1.1 still Latest): https://github.com/The412Banner/Bannerlator/releases/tag/3.1.2-wayland-pre5 — three APKs (pubg `4a8f4716…`), **the same `proton-11.0-2.1-arm64ec-wayland-v6.wcp`** (`828b66d5…`, app-only round), README; update.json deleted; **pre-release 4 deleted** (single rolling link). Deck on main `c5652ade`. Merged into the branch for this cut: `feat/wayland-vrr` (`19e03da0`) and `feat/wayland-multilayer` (code `d8b3d429`, CI 34795712344 + tip 34796666647 both green). Device + kit on pre5. **My own regression on the released build** (session `wayland-2026-09-13_22-03-36.log`): AIO Graphics Test on Wayland, `zero-copy: AIO-Graphics-Test-64bit.exe bound banner_ahb_v1 version 2 (follows the live switch)`, `presenting GPU frames through Wayland: 1172x686, XB24, qcom_compressed (zero-copy)`, steady 144.0 fps over five stats windows, two windows open, no errors. Test shortcut deleted; container 7's Desktop is the user's five.
 - 🐛🌊 2026-09-13 23:30 — **Native OpenGL on Wayland has NEVER worked; root-caused, half fixed.** User report: Wizardry LoLS (`LoLS_win32.exe`, 32-bit, GL) = sound + black screen + no HUD on Wayland. Evidence: session log `0 GPU frames from games` with ~300 `window redraws`/10 s and no `presenting GPU frames` line; wine log has no DXVK/VKD3D init but six `mesa_glthread` ATTENTION lines (GL-only). Chain: we advertised `zwp_linux_dmabuf_v1` **v3**; Mesa's EGL DRM path only reads `get_default_feedback` at **v≥4** and we ship no `wl_drm`, so `eglInitialize` retried with `ForceSoftware` → `swrast`; the layer's gallium is `zink+kopper+swrast` with `-Dllvm=disabled`, so nothing rasterised — the game's `wl_shm` buffer arrived **all zeros** (dumped live: 3,686,400 B, 0 non-zero) and the compositor blitted it faithfully. HUD never armed because it arms on the first GPU frame. **✅ Compositor half merged (`9e2e77b2`)**: dmabuf global at v4 with real feedback (sealed memfd format table, `main_device`, one tranche) — live proof `dmabuf feedback ready: 8 format/modifier pairs, main device 226:128`, Turnip's WSI binds at 4, and a purpose-built client probe verified v1-3 clients still get the old `format`/`modifier` events (bind 3 → 4 format + 12 modifier events; bind 4 → 0). Regressions green on that build (HL2 zero-copy `600 GPU | 600 zero-copy frames`; AIO all eight backends; effects on the layer path `613 layer frames`). **⛔ Remaining half is in the wcp's Mesa**: `banners-turnip-wayland/build_wayland.sh` patches `platform_wayland.c` to `if (ForceSoftware || Options.Zink) → dri2_initialize_wayland_swrast()`, and `registry_handle_global_swrast` has no dmabuf branch at any version, so our v4 global is ignored and the intended kopper path never engages (`LIBGL_KOPPER_DISABLE=1` changes nothing). Fix queued as **wcp v7**: drop the `|| Options.Zink` shortcut so EGL takes `dri2_initialize_wayland_drm()` → `driver_name=zink`, `kopper=true`. Client precondition holds (`/dev/dri/renderD128` 226:128, world-readable, opens as the app user). Env workarounds ruled out by evidence (`MESA_LOADER_DRIVER_OVERRIDE=zink` = no-op, winewayland already sets it; `LIBGL_ALWAYS_SOFTWARE=1` → game dies with `No matching GL pixel format available`). ⚠️ **Two of my earlier premises were WRONG:** the AIO Graphics Test is not a GL control on Wayland — it presents every backend through a Vulkan swapchain (`{mesa vk …}` queues, zero `{mesa egl …}`), and the same false claim is written into `proton-wine .../waylanddrv_main.c` (to be corrected in the v7 build); and this game is **worse on X11**, dying with `Could not create GL context: Invalid window handle`.
 - 🏁🌊🎮 2026-09-14 02:20 — **NATIVE OPENGL RENDERS ON WAYLAND (first time ever) + Wizardry PLAYABLE; shipped as pre-release 6.** (a) **wcp v7** (`436edf62…`, Turnip run 34804055227 @ `05dcce18`, proton-wine run 34804623989 @ `33d96b02`): dropped the `|| disp->Options.Zink` patch in `build_wayland.sh`, so EGL takes `dri2_initialize_wayland_drm()` → dmabuf at `MIN2(version,4)` → `main_device` from our feedback → `/dev/dri/renderD128` → `driver_name=zink, kopper=true`. Wine `+wgl`: `init_device_info - device_name: "zink Vulkan 1.4(Turnip Adreno (TM) 750 (MESA_TURNIP))", accelerated: 1, core_version: 46`. The old patch could never have worked: the swrast initialiser never sets `fd_render_gpu`, so with Zink-but-not-ForceSoftware it failed `loader_is_device_render_capable(-1)` and fell into the `Zink=FALSE; ForceSoftware=TRUE` retry. `-Dllvm=disabled` stays (nothing rasterises on CPU on this path); the script now **asserts** upstream's dispatcher shape instead of printing a skip line. The false "AIO proves OpenGL at ~230 fps" comment corrected in `waylanddrv_main.c` + `TURNIP.md` (the AIO's fps column is a STATIC reference table — never quote it). (b) **Wizardry's exit root-caused and NOT ours:** SIGSEGV (`sig=11 code=1`, SEGV_MAPERR) on Mesa's `u_threaded_context` util_queue thread `gdrv0` in libgallium — a plain pthread, so Wine's handler runs with no TEB, faults again 19 µs later (two `signal_generate`, **no `signal_deliver`**), kernel forces SIG_DFL and the process vanishes: no tombstone, no `+seh`, no exit reason. Cracked with a private ftrace instance on `signal:signal_generate` filtered by comm — **keep that as standard practice for non-Wine-thread crashes**. **Fix: `GALLIUM_THREAD=0`** in Env Vars → full intro cinematic, PRESS START, attract loop, 2862 swaps in one run, locked 30 fps (game's own cap), GPU 10 %, 4.7 W. Added to the user's Wizardry shortcut (backup `/sdcard/Download/wayland-backup/wizardry.desktop.bak`). Ruled out with evidence: Cg (never runs — 50 GL entry points resolved, none of the ARB program/shader ones; engine is Sony PSSG), our EGL/zink path (AIO `--force-gl` 4630 swaps 64-bit / 4310 32-bit), FEX vs box64, audio driver, pointer lock/geometry, zero-copy, zink bgc / Turnip sysmem / shader cache, `mesa_glthread`. (c) **Regressions on v7:** HL2 zero-copy 132.5-143.2 fps and 1325-1432 zero-copy frames per 10 s (v6: 124.5-141.8 / 1244-1418); effects `13 passes` at 144.0 fps; Notepad typing + clipboard both ways + xkb root on `-7`. ⚠️ AIO eight-backend sweep not re-proven (taps would not reach the window in the harness; keyboard input does reach the guest, so it is a harness problem — the app ran 3+ min per session across six sessions at 144 fps). (d) **Shipped: `3.1.2-wayland-pre6`** (run 34808796593 @ `fd3db7dc`, prerelease, vc85) with the v7 wcp + README; update.json dropped; **pre-release 5 deleted**; device + kit on pre6 (pubg `48377d13…`). ⚠️ Open risks: the DRM path walks `/sys/dev/char/226:128/...` — the Pocket FIT is SELinux Permissive, so an enforcing device is unproven (failure is graceful: EGL retries in software = a black GL window; check `logcat | grep 'avc: denied'`); devices exposing more than one Vulkan ICD would break zink's "only one device" fallback (winewayland sets exactly one today). Proper fix for the gallium crash needs the faulting PC (Mesa build with a surviving crash print, or a SIGSEGV handler chained ahead of Wine's) = another wcp; not done.
+- 🔖🌊 2026-09-14 03:00 — **CHECKPOINT: Wayland PHASE 5 starts** (user: "begin then"). Baseline: main **`8fc2f5ce`** (the display-layer + refresh-rate + OpenGL work merged; versionName kept at 3.1.1/vc85; verification build 34824400465), branch `feat/wayland-phase2` `7caa8e98`, shipped tester build `3.1.2-wayland-pre6` + wcp **v7** (`Proton-11.0-2.1-arm64ec-7`). This round is **app-only** (wcp stays v7):
+  1. **OpenGL safe mode** — default ON for GL sessions on Wayland with a drawer/container switch to turn it off, exporting `GALLIUM_THREAD=0`, so a GL game cannot vanish silently ([[project_bannerlator_wayland_gallium_thread_crash]]). Two greying reasons must stay distinct where relevant ("your screen/driver cannot" vs "not built yet").
+  2. **HDR capability reporting** — every session logs what the display reports (`Display.getHdrCapabilities().getSupportedHdrTypes()`, `isHdrSdrRatioAvailable()`, max luminance) so tester devices tell us whether HDR is worth building. The Pocket FIT reports `supportedHdrTypes=[]`, 500 nits, `hdrSdrRatio not_available` = **no HDR**. Capability is per-display and changes when an external screen is attached, so read it live, not once at launch.
+  3. **Display-layer composition recovery** — when the overlay layer goes away, retire and immediately re-create the game layer so the frame returns to hardware composition (today it stays CLIENT until something else rebuilds it; measured in `sc_layer.h`).
+  Not this round: the real fix for the gallium crash (needs a driver rebuild with surviving crash reporting → new wcp), the 10-bit slice, HDR itself (blocked on hardware that can show it), zero-copy by default (needs more devices), folding Wayland into the AIO layers.
+- 🛑🌊 2026-09-14 03:05 — **USER GATE: no new pre-release until the work is finished AND they approve it.** Everything stays local from here: branches pushed and merged as usual, but **no tag, no GitHub release, no published asset** for Wayland without an explicit go. Hand-over = refresh `/sdcard/Download/Wayland/` (APK + wcp + README) and install on the device. `3.1.2-wayland-pre6` stays as the current public tester link; the rolling-swap rules in [[feedback_wayland_prerelease3_wcp_swap]] resume when they green-light the next cut.
+- 🔖🌊 2026-09-14 03:10 — **ROLLBACK CHECKPOINT written (user ask): [[project_bannerlator_wayland_checkpoint_20260914_pre6]]**. Restore point = main **`8fc2f5ce`** / branch `feat/wayland-phase2` **`0a52cd7a`** (code `7caa8e98`) / proton-wine **`33d96b02`** / Turnip **`05dcce18`** / wcp **v7** `436edf62d00bef2f…` (`Proton-11.0-2.1-arm64ec-7`) / APK `48377d135e542464…` = `3.1.2-wayland-pre6` installed / container 7 on layer 7 (layer 6 still installed for a one-line revert) / share folder = pre6 APK + v7 wcp + README / Desktop = the user's six shortcuts (Wizardry carries `envVars=GALLIUM_THREAD=0`, backup `/sdcard/Download/wayland-backup/wizardry.desktop.bak`). Deck on Pages is one cut stale (says pre-release 5) — refresh at the next approved public cut. Known issues carried forward: silent GL-game death (gallium threaded context), two-layer CLIENT composition until the game layer is rebuilt, the shortcut-vs-container `matchRefreshRate` resolution bug, AIO sweep unproven on v7 (harness), SELinux-enforcing devices unproven for the new EGL DRM path.
+- ✅🌊 2026-09-14 05:40 — **Phase 5 merged (`f2adbaeb`, from `feat/wayland-phase5` code `217efe9e`, CI 34825893993 green, pubg `207154ce…` installed on the device).** No wcp change (layer stays `-7`), **no release** (user's gate). (a) **OpenGL safe mode PROVEN as an A/B/A on one shortcut with no hand-typed env var**: ON (default) → `wayland: OpenGL safe mode on - exporting GALLIUM_THREAD=0` + `302 frames on screen (30.2 fps) | 300 GPU frames` for 90 s; OFF from the drawer (writes `waylandGlSafeMode=0` to the **same owner the resolver reads**, so the toggle can never be inert — the `matchRefreshRate` bug is not reproduced) → `05:26:10.832 presenting GPU frames` → `05:26:11.141 program disconnected` = **309 ms, one frame**; ON again → 30 fps steady. (b) **HDR reporting PROVEN**: first line of every session log — `HDR capability of "Built-in Screen" (display 0, Android API 34): formats none | luminance max 500 nits… | HDR/SDR headroom not available -- SDR only: an HDR layer here would be tone-mapped and dropped to GPU composition`; Task Manager CONTAINER shows `HDR  none · panel 500 nits`. (d) HL2 zero-copy unchanged (seven windows of `600 frames | 600 GPU frames | 600 zero-copy frames`). ⚠️ **(c) display-layer composition recovery is CODE-ONLY, UNPROVEN**: the game+overlay pair never came up (fullscreen HL2 minimises itself when Wine's Task Manager takes guest focus → `window moved to -32000,-32000` → `layers hidden`; the windowed retry hung). `DEVICE/CLIENT`, the recovery log line and the return to `DEVICE/DEVICE` are all unobserved — re-test recipe is in the branch's log. Also unproven: the HDR re-read when a display is attached (nothing plugged in), effects applied live, and an X11 regression launch. 📌 **Wizardry's `envVars=GALLIUM_THREAD=0` is now redundant AND harmful** — the launch path leaves an explicit user value alone, so while that line is on the shortcut the in-game safe-mode toggle cannot turn it off for that game. Remove it when the device is free (user was driving). Device left on the phase-5 build, NOT the released pre6; share folder still holds pre6.
+- ✅🌊 2026-09-14 07:05 — **Overlay layer now GATED on the display's transform+scale; merged (`3320b192`, code `5334b3d3`, CI 34834608772 green, pubg `5be0ea93…` installed).** The phase-4 premise was wrong and is corrected in `sc_layer.h`: a second display layer flips the frame to `DEVICE/CLIENT` **for the rest of the session** on this panel, and rebuilding the game layer does NOT bring it back (reproduced 3×, also at +8/+16/+24 s, and after dropping the layer path entirely; the earlier "HOME+resume fixes it" reading was wrong because HOME+resume re-creates the app's whole window and SurfaceView, `VRI[XServerDisplayActivity]#0` → `#4`). Control: the drawer alone does not cause it. **Gate (prediction, not measure-then-back-out — the composition type is not readable by an app: it lives in the Composer HAL, `ASurfaceTransactionStats` carries only latch time + fences, and the `dumpsys` copy needs `android.permission.DUMP` and would arrive a frame late):** rotation from `VkSurfaceCapabilitiesKHR::currentTransform` (`vkp_surface_rotation_degrees()`, so it follows panel install orientation + session orientation on any device, no allowlist) and scale from the game layer's own src→dst rects, decided in `render_scene()` **before** the game is committed to a layer (deciding inside `sc_layer_present_overlay()` showed/hid the game layer every frame). Proven: `overlay layer declined: this display rotates every layer 90° and the game layer is scaled 1280x720 -> 1920x1080 …` + `zero-copy paused: … whole scene on the copy path`; composer dump shows **no AHardwareBuffer layers**, `SurfaceView … z=0 DEVICE/DEVICE t=90`; picture identical, no black frame; fps not worse (30.5/27.6/30.6/30.8/30.5 with the window up vs 30.5/30.8 on the two-layer path); closing the window → `zero-copy resumed: the game is back on its own display layer`, `267 layer frames`, still `DEVICE/DEVICE`. **The session never leaves DEVICE/DEVICE now**, where before it lost it permanently. Regressions: layer path with no window above `300 frames | 300 GPU | 300 layer frames` `DEVICE/DEVICE`; effects live `13 passes` keeping the layer; X11 untouched (no safe-mode/overlay lines, no session log, Insane 2 `D3D9 · DXVK · 202.4 fps · X11`). The fresh-SurfaceControl swap stays for displays where the overlay IS raised. ⏳ Still code-only: the HDR re-read when a display is attached (nothing can be plugged into USB-C; a simulated display was correctly de-duplicated because the game stayed on the built-in panel).

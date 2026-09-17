@@ -66,6 +66,14 @@ static uint64_t g_source_frames;
 static uint32_t g_planned;          /* generations planned for the current source frame */
 static int g_was_armed, g_generating_logged;
 static uint32_t g_built_w, g_built_h;
+static VkFormat g_built_fmt;
+/* Deeper formats (FP16 for HDR frames) the engine failed to build its chain in this session. */
+static VkFormat g_refused_fmt[4];
+static int g_refused_n;
+static int format_refused(VkFormat f) {
+    for (int i = 0; i < g_refused_n; i++) if (g_refused_fmt[i] == f) return 1;
+    return 0;
+}
 
 /* ---- stats ------------------------------------------------------------------------- */
 static _Atomic unsigned g_stat_generated;           /* since the last stats_take */
@@ -249,6 +257,23 @@ static int engine_usable(void) {
     return g_dev_ready && !g_dev_lost && fge_caps_ok(kind) && !start_failed_for(kind);
 }
 
+int vkp_framegen_format_ok(VkFormat fmt) {
+    if (fmt == VK_FORMAT_R8G8B8A8_UNORM) return 1;
+    if (!g_dev_ready || g_dev_lost || format_refused(fmt)) return 0;
+    return fge_format_ok(fmt);
+}
+
+/* The engine could not build its chain in a deeper format: refuse the format for the session and
+ * restart the engine on the next frame (a failed build is sticky inside both engines). */
+static void refuse_format(VkFormat fmt, int kind, int w, int h, const char *what) {
+    if (g_refused_n < (int)(sizeof(g_refused_fmt) / sizeof(g_refused_fmt[0]))) g_refused_fmt[g_refused_n++] = fmt;
+    FGLOG("%s could not %s in format %d (the HDR picture's FP16) at %dx%d: it restarts, and HDR frames go through "
+          "it in 8 bits from the next frame", fge_engine_name(kind), what, (int)fmt, w, h);
+    destroy_ring();
+    fge_stop();
+    g_engine_ok = 0; g_engine_kind = -1;
+}
+
 int vkp_framegen_active(void) {
     return atomic_load(&g_armed) && engine_usable();
 }
@@ -326,18 +351,23 @@ int vkp_framegen_run(VkCommandBuffer cmd, VkImage scene, VkImageView scene_view,
         fge_configure((uint32_t)mult, flow, hz, atomic_load(&g_model), atomic_load(&g_preset));
     }
     if (!fge_prepare((uint32_t)w, (uint32_t)h, fmt)) {
+        if (fmt != VK_FORMAT_R8G8B8A8_UNORM && fge_unavailable()) {
+            refuse_format(fmt, kind, w, h, "build its chain");
+            return 0;
+        }
         if (fge_unavailable()) {
             FGLOG("%s could not build its chain at %dx%d; frame generation stays off", fge_engine_name(kind), w, h);
             mark_failed(kind);
         }
         return 0;
     }
-    if (g_built_w != (uint32_t)w || g_built_h != (uint32_t)h) {
-        g_built_w = (uint32_t)w; g_built_h = (uint32_t)h;
+    if (g_built_w != (uint32_t)w || g_built_h != (uint32_t)h || g_built_fmt != fmt) {
+        g_built_w = (uint32_t)w; g_built_h = (uint32_t)h; g_built_fmt = fmt;
         g_generating_logged = 0;
     }
     uint32_t want = (uint32_t)(mult - 1);
     if (!ensure_ring((uint32_t)w, (uint32_t)h, fmt, want)) {
+        if (fmt != VK_FORMAT_R8G8B8A8_UNORM) { refuse_format(fmt, kind, w, h, "make its generation ring"); return 0; }
         FGLOG("no memory for the generation ring (%dx%d x%u); frame generation stays off", w, h, want);
         mark_failed(kind);
         return 0;
@@ -396,8 +426,9 @@ int vkp_framegen_run(VkCommandBuffer cmd, VkImage scene, VkImageView scene_view,
                               0, 0, NULL, 0, NULL, nb, bars);
         if (!g_generating_logged) {
             g_generating_logged = 1;
-            FGLOG("generating: %s x%d at %dx%d (%u interpolated frame%s per game frame)",
-                  fge_engine_name(kind), mult, w, h, n_gen, n_gen == 1 ? "" : "s");
+            FGLOG("generating: %s x%d at %dx%d (%u interpolated frame%s per game frame%s)",
+                  fge_engine_name(kind), mult, w, h, n_gen, n_gen == 1 ? "" : "s",
+                  fmt == VK_FORMAT_R16G16B16A16_SFLOAT ? ", FP16: the HDR picture" : "");
         }
     }
     return (int)n_gen;

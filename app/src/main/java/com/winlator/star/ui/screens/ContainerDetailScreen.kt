@@ -903,9 +903,10 @@ private fun TopLevelFields(
                 disabledOptions = if (waylandCapable) emptySet() else setOf(backendLabels[1]),
                 onSelect = {
                     val picked = backendValues[backendLabels.indexOf(it)]
-                    viewModel.displayBackend =
+                    viewModel.onDisplayBackendChanged(
                         if (picked == Container.DISPLAY_BACKEND_WAYLAND && !waylandCapable) Container.DISPLAY_BACKEND_X11
                         else picked
+                    )
                 }
             )
             if (viewModel.isWaylandBackend) {
@@ -946,14 +947,19 @@ private fun TopLevelFields(
         var showWrapperManager by remember { mutableStateOf(false) }
         val compositorDriverOnly = viewModel.isWaylandBackend
         var compositorChoices by remember { mutableStateOf<List<String>>(emptyList()) }
+        var compositorChoicesLoaded by remember { mutableStateOf(false) }
+        // Bumped after a driver is installed from the warning below, to re-read the choices.
+        var compositorChoicesKey by remember { mutableIntStateOf(0) }
+        var showDriverDownload by remember { mutableStateOf(false) }
         // Wayland GAME driver choices (bundled variants + imported Linux ICDs) and the variant Auto
         // resolves to on this GPU — the latter is a native probe, so it runs with the compositor
         // choices off-main under graphicsProbeMutex (cached per process after the first run).
         var waylandGameDriverValues by remember { mutableStateOf<List<String>>(emptyList()) }
         var waylandAutoPick by remember { mutableStateOf(com.winlator.star.core.WaylandGameDriver.autoVariantIfKnown()) }
-        LaunchedEffect(compositorDriverOnly) {
+        LaunchedEffect(compositorDriverOnly, compositorChoicesKey) {
             if (!compositorDriverOnly) return@LaunchedEffect
             compositorChoices = compositorDriverChoices(context) // same source as the config dialog
+            compositorChoicesLoaded = true
             waylandGameDriverValues = com.winlator.star.core.WaylandGameDriver.optionValues(context)
             waylandAutoPick = waylandAutoVariant(context)
         }
@@ -964,8 +970,8 @@ private fun TopLevelFields(
                 LabeledDropdown(
                     label = "Compositor driver",
                     options = compositorChoices,
-                    selectedOption = if (compositorVersion in compositorChoices) compositorVersion else "",
-                    onSelect = { viewModel.graphicsDriverConfig = withGraphicsDriverVersion(viewModel.graphicsDriverConfig, it) },
+                    selectedOption = compositorDriverLabel(compositorVersion, compositorChoices, compositorChoicesLoaded),
+                    onSelect = { viewModel.onCompositorDriverPicked(it) },
                     modifier = Modifier.weight(1f)
                 )
             } else {
@@ -995,12 +1001,48 @@ private fun TopLevelFields(
         if (compositorDriverOnly) {
             // The compositor imports the game's dmabufs, which only an installed Turnip can do:
             // an empty/"System" version falls back to the system libvulkan (see
-            // XServerDisplayActivity's Wayland driver resolve) and shows a black screen. Warn only.
-            if (compositorVersion.isEmpty() || compositorVersion == "System") {
-                Text(
-                    """Wayland needs a Turnip driver here. "System" cannot import the game's frames and shows a black screen.""",
+            // XServerDisplayActivity's Wayland driver resolve) and shows a black screen. The view-model
+            // fills an empty/"System" one with the newest installed driver that proves it can import
+            // them (defaultCompositorDriver); the warning is for when none can, or for a stored id
+            // that is no longer available — then with a way to get one.
+            when {
+                viewModel.compositorDriverSearching -> Text(
+                    "Looking for an installed Turnip that can import the game's frames…",
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                compositorDriverUnusable(compositorVersion, compositorChoices, compositorChoicesLoaded) -> {
+                    Text(
+                        if (viewModel.compositorDriverNoneUsable)
+                            """No installed driver can import the game's frames, so this runs on "System" and shows a black screen. Wayland needs a Turnip driver here."""
+                        else
+                            """Wayland needs a Turnip driver here. "System" or a missing driver cannot import the game's frames and shows a black screen.""",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                    TextButton(onClick = { showDriverDownload = true }) {
+                        Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Download a Turnip driver")
+                    }
+                }
+                viewModel.compositorDriverAutoPicked == compositorVersion -> Text(
+                    if (viewModel.compositorDriverPickedFromDefaults)
+                        "Picked for you: the driver in your New Container Defaults."
+                    else
+                        "Picked for you: the newest installed Turnip that can import the game's frames.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            if (showDriverDownload) {
+                com.winlator.star.ui.screens.adrenodownload.AdrenoDriverDownloadSheet(
+                    onDismiss = { showDriverDownload = false },
+                    onDriverInstalled = {
+                        showDriverDownload = false
+                        compositorChoicesKey++
+                        viewModel.onCompositorDriversChanged()
+                    }
                 )
             }
             Text(
@@ -1012,24 +1054,99 @@ private fun TopLevelFields(
             // Wayland game driver: what the GAME renders on (winewayland sets VK_ICD_FILENAMES from
             // it). Auto / the three bundled Turnip variants / each imported Linux ICD. A stored
             // imported:<id> whose import is gone is still listed (labelled missing) so the editor
-            // shows what is saved; launch falls back to Auto for it.
+            // shows what is saved; launch falls back to Auto for it. The gear opens the settings that
+            // reach a Wayland game (GPU name spoof, memory cap, present mode, UBWC hint), stored in
+            // the same graphicsDriverConfig keys as X11's driver configuration.
             run {
                 val stored = viewModel.waylandGameDriver
                 val values = if (stored in waylandGameDriverValues) waylandGameDriverValues
                              else waylandGameDriverValues + stored
                 val labels = values.map { com.winlator.star.core.WaylandGameDriver.optionLabel(context, it, waylandAutoPick) }
-                LabeledDropdown(
-                    label = "Wayland game driver",
-                    options = labels,
-                    selectedOption = labels[values.indexOf(stored)],
-                    onSelect = { viewModel.waylandGameDriver = values[labels.indexOf(it)] }
-                )
+                var showWaylandDriverSettings by remember { mutableStateOf(false) }
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    LabeledDropdown(
+                        label = "Wayland game driver",
+                        options = labels,
+                        selectedOption = labels[values.indexOf(stored)],
+                        onSelect = { viewModel.waylandGameDriver = values[labels.indexOf(it)] },
+                        modifier = Modifier.weight(1f)
+                    )
+                    IconButton(onClick = { showWaylandDriverSettings = true }) {
+                        Icon(Icons.Default.Settings, contentDescription = "Wayland driver settings")
+                    }
+                }
                 Text(
                     com.winlator.star.core.WaylandGameDriver.HELP_TEXT,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                val spoof = com.winlator.star.core.GpuSpoof.gpuNameOf(viewModel.graphicsDriverConfig)
+                if (com.winlator.star.core.GpuSpoof.isSpoofing(spoof)) Text(
+                    "GPU name spoof: $spoof (the gear)",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                if (showWaylandDriverSettings) WaylandDriverSettingsDialog(
+                    initialConfig = viewModel.graphicsDriverConfig,
+                    onConfirm = { viewModel.graphicsDriverConfig = it; showWaylandDriverSettings = false },
+                    onDismiss = { showWaylandDriverSettings = false }
+                )
             }
+            Spacer(Modifier.height(8.dp))
+            // HDR output (HDR10), see display.WaylandHdr. On a screen that doesn't report HDR10 the
+            // switch is greyed with the reason but still shows what is stored (launch turns nothing on
+            // there).
+            run {
+                val hdrUnavailable = remember { com.winlator.star.display.WaylandHdr.unavailableReason(context) }
+                val hdrOn = viewModel.waylandHdr
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Switch(
+                        enabled = hdrUnavailable == null,
+                        checked = hdrOn,
+                        onCheckedChange = { viewModel.waylandHdr = it }
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        com.winlator.star.display.WaylandHdr.TITLE,
+                        color = if (hdrUnavailable == null) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                if (hdrUnavailable != null) {
+                    Text(
+                        hdrUnavailable,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Text(
+                    com.winlator.star.display.WaylandHdr.HELP_TEXT,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+        // Unreal Engine HDR (both backends; under HDR output on Wayland): Off / DirectX 12 fix /
+        // DirectX 11 (experimental, NVAPI). See core.UnrealHdr; the DirectX 11 mode swaps the bundled
+        // dxvk-nvapi into the prefix at launch (core.DxvkNvapi) and Off puts the prefix's files back.
+        run {
+            Spacer(Modifier.height(8.dp))
+            val modes = com.winlator.star.core.UnrealHdr.MODES
+            val labels = modes.map { com.winlator.star.core.UnrealHdr.label(it) }
+            LabeledDropdown(
+                label = com.winlator.star.core.UnrealHdr.TITLE,
+                options = labels,
+                selectedOption = com.winlator.star.core.UnrealHdr.label(viewModel.unrealHdr),
+                onSelect = { viewModel.unrealHdr = modes[labels.indexOf(it)] }
+            )
+            if (viewModel.unrealHdr == com.winlator.star.core.UnrealHdr.DX11) UnrealHdrDx11Notes(
+                gpuName = com.winlator.star.core.GpuSpoof.gpuNameOf(viewModel.graphicsDriverConfig),
+                wayland = compositorDriverOnly
+            )
+            Text(
+                com.winlator.star.core.UnrealHdr.help(compositorDriverOnly),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
         if (showWrapperManager) WrapperManagerDialog(onDismiss = {
             showWrapperManager = false
@@ -1398,16 +1515,16 @@ private fun TopLevelFields(
         // FG's present-mode/mailbox delivery only exists on the Vulkan host renderer; OpenGL (GLRenderer)
         // and SurfaceFlinger (ASR) have no present-mode control, so FG is unsupported there — gate the
         // whole dropdown on Vulkan and grey it out otherwise (combined with the lsfg-DLL option gate).
-        // On Wayland the renderer gate is meaningless (the compositor is Vulkan) — FG is simply not
-        // wired to the compositor yet, so it is disabled with that reason and DISPLAYS it; the stored
-        // engine is untouched and comes back with the X11 backend.
+        // On Wayland the renderer gate does not apply: frame generation runs inside the compositor,
+        // which is always Vulkan, and the in-game drawer arms the engine picked here
+        // (resolvedFrameGenEngine), so the picker is live on both backends.
         val fgWayland = viewModel.isWaylandBackend
-        val fgVulkan = !fgWayland && viewModel.selectedRenderer == "Vulkan"
-        val fgShown = if (fgWayland) "Not available on Wayland yet" else fgEngineLabels[fgSelIdx]
+        val fgVulkan = fgWayland || viewModel.selectedRenderer == "Vulkan"
+        val fgShown = fgEngineLabels[fgSelIdx]
         Row(verticalAlignment = Alignment.CenterVertically) {
             LabeledDropdown(
                 label = stringResource(R.string.frame_generation),
-                options = if (fgWayland) listOf(fgShown) else fgEngineLabels,
+                options = fgEngineLabels,
                 selectedOption = fgShown,
                 onSelect = { viewModel.frameGenEngine = fgEngines[fgEngineLabels.indexOf(it)] },
                 enabled = fgVulkan,
@@ -1420,7 +1537,7 @@ private fun TopLevelFields(
         }
         if (!fgVulkan) {
             Text(
-                text = if (fgWayland) "Not available on Wayland yet (frame generation has not been wired to the Wayland compositor)" else stringResource(R.string.frame_generation_requires_vulkan),
+                text = stringResource(R.string.frame_generation_requires_vulkan),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(start = 52.dp, top = 2.dp, bottom = 4.dp)
@@ -1536,7 +1653,9 @@ private fun TopLevelFields(
                     color = MaterialTheme.colorScheme.primary
                 )
             }
-            // Same Wayland gate as Frame Generation above (LSFG Native isn't wired to the compositor).
+            // X11 only: this compat mode is handed to the X11 Vulkan renderer (setLsfgVk11Compat). On
+            // Wayland LSFG Native runs on the compositor's own device, which is always a modern Turnip,
+            // so the mode is neither read nor needed there.
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = if (fgWayland) Modifier.alpha(0.5f) else Modifier
@@ -1550,7 +1669,7 @@ private fun TopLevelFields(
                 Text(stringResource(R.string.lsfg_vk11_compat), modifier = Modifier.weight(1f))
             }
             Text(
-                text = if (fgWayland) "Not available on Wayland yet (frame generation has not been wired to the Wayland compositor)" else stringResource(R.string.lsfg_vk11_compat_hint),
+                text = if (fgWayland) "Not used on Wayland: frame generation runs in the compositor on your Turnip driver, which does not need this compatibility mode." else stringResource(R.string.lsfg_vk11_compat_hint),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(start = 52.dp, top = 2.dp, bottom = 4.dp)
@@ -2813,11 +2932,217 @@ private fun CompactDropdown(
  * absent); every other key/value is kept byte-for-byte. Used by the Wayland "Compositor driver"
  * pickers, which must not disturb the X11 game-driver options stored alongside.
  */
-internal fun withGraphicsDriverVersion(config: String, version: String): String {
+internal fun withGraphicsDriverVersion(config: String, version: String): String =
+    withGraphicsDriverKeys(config, mapOf("version" to version))
+
+/**
+ * [config] (`k=v;k=v`) with each key of [values] replaced in place, or appended when absent; every
+ * other key/value is kept byte-for-byte. The Wayland pickers and driver settings write through this,
+ * so the X11 game-driver options stored in the same string are never disturbed.
+ */
+internal fun withGraphicsDriverKeys(config: String, values: Map<String, String>): String {
     val parts = config.split(";").filter { it.isNotEmpty() }.toMutableList()
-    val idx = parts.indexOfFirst { it.substringBefore("=") == "version" }
-    if (idx >= 0) parts[idx] = "version=$version" else parts.add("version=$version")
+    for ((key, value) in values) {
+        val idx = parts.indexOfFirst { it.substringBefore("=") == key }
+        if (idx >= 0) parts[idx] = "$key=$value" else parts.add("$key=$value")
+    }
     return parts.joinToString(";")
+}
+
+/**
+ * Present modes a Wayland game can use: Mesa's Wayland WSI offers mailbox and fifo; immediate (and
+ * relaxed) need the tearing-control protocol, which the compositor doesn't offer, and Mesa ignores a
+ * MESA_VK_WSI_PRESENT_MODE the surface can't do. The same presentMode key as X11.
+ */
+internal val WAYLAND_PRESENT_MODES = listOf("mailbox", "fifo")
+
+internal const val WAYLAND_DRIVER_SETTINGS_HELP =
+    "For games that refuse to start or misbehave on an Adreno GPU. GPU name makes DirectX games (DXVK, " +
+        "and D3D12 through it) see another graphics card; native Vulkan and OpenGL games still see the real " +
+        "one for now. Off by default (Device). Warning: an NVIDIA name can make a game try NVAPI, DLSS or " +
+        "Reflex, and an AMD name can send it down AMD AGS paths; go back to Device if a game misbehaves. " +
+        "These are the X11 driver configuration's settings, so they follow the game across backends."
+
+/**
+ * The Wayland game driver's settings (the gear next to "Wayland game driver"): the graphicsDriverConfig
+ * keys that reach a Wayland game — gpuName (the spoof, handed to DXVK through DXVK_CONFIG),
+ * maxDeviceMemory (dxgi.maxDeviceMemory), presentMode (MESA_VK_WSI_PRESENT_MODE) and fdDevFeatures
+ * (FD_DEV_FEATURES for the game's Turnip). Same keys as GraphicsDriverConfigDialog, so a choice
+ * survives switching backends; OK writes only these back (withGraphicsDriverKeys). The X11 wrapper
+ * plumbing (extensions, BCn, resource type, sync/present-wait) and Vulkan version are left out: nothing
+ * on the Wayland path reads them, and the Wayland Turnips ignore MESA_VK_VERSION_OVERRIDE.
+ */
+@Composable
+internal fun WaylandDriverSettingsDialog(
+    initialConfig: String,
+    onConfirm: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val context = LocalContext.current
+    val cfg = remember(initialConfig) {
+        initialConfig.split(";").associate { elem ->
+            val parts = elem.split("=")
+            parts[0] to if (parts.size > 1) parts[1] else ""
+        }
+    }
+    var gpuName by remember(initialConfig) { mutableStateOf(com.winlator.star.core.GpuSpoof.gpuNameOf(initialConfig)) }
+    val storedPresent = cfg["presentMode"]?.ifEmpty { null } ?: "mailbox"
+    var presentMode by remember(initialConfig) { mutableStateOf(storedPresent) }
+    var fdDevFeatures by remember(initialConfig) { mutableStateOf(cfg["fdDevFeatures"] == "1") }
+    val deviceMemoryEntries = remember { context.resources.getStringArray(R.array.device_memory_entries).toList() }
+    var memoryEntry by remember(initialConfig) {
+        val stored = cfg["maxDeviceMemory"] ?: "0"
+        mutableStateOf(deviceMemoryEntries.firstOrNull { StringUtils.parseNumber(it) == stored } ?: deviceMemoryEntries.first())
+    }
+    var gpuNames by remember { mutableStateOf(listOf(com.winlator.star.core.GpuSpoof.DEVICE)) }
+    LaunchedEffect(Unit) {
+        gpuNames = withContext(Dispatchers.IO) { com.winlator.star.core.GpuSpoof.names(context) }
+    }
+    var vendorWarning by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(gpuName) {
+        vendorWarning = withContext(Dispatchers.IO) { com.winlator.star.core.GpuSpoof.vendorWarning(context, gpuName) }
+    }
+    // A stored X11-only mode (immediate / relaxed) stays listed, labelled, so OK keeps it for X11.
+    val presentValues = WAYLAND_PRESENT_MODES + (if (storedPresent in WAYLAND_PRESENT_MODES) emptyList() else listOf(storedPresent))
+    val presentLabels = presentValues.map { if (it in WAYLAND_PRESENT_MODES) it else "$it (X11 only, not used here)" }
+
+    var helpRes by remember { mutableStateOf<Int?>(null) }
+    helpRes?.let { HelpDialog(it) { helpRes = null } }
+
+    OutlinedAlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Wayland driver settings") },
+        text = {
+            val maxContentHeight = (LocalConfiguration.current.screenHeightDp * 0.7f).dp
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = maxContentHeight)
+                    .verticalScroll(rememberScrollState())
+            ) {
+                Text(
+                    WAYLAND_DRIVER_SETTINGS_HELP,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    LabeledDropdown(
+                        stringResource(R.string.gpu_name) + " (spoof)",
+                        if (gpuName in gpuNames) gpuNames else gpuNames + gpuName,
+                        gpuName, { gpuName = it }, modifier = Modifier.weight(1f)
+                    )
+                    IconButton(onClick = { helpRes = R.string.help_gpu_name }) {
+                        Icon(Icons.Default.Help, contentDescription = "What is this?", modifier = Modifier.size(18.dp))
+                    }
+                }
+                vendorWarning?.let {
+                    Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                }
+                Spacer(Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    LabeledDropdown(
+                        stringResource(R.string.graphics_driver_max_device_memory), deviceMemoryEntries,
+                        memoryEntry, { memoryEntry = it }, modifier = Modifier.weight(1f)
+                    )
+                    IconButton(onClick = { helpRes = R.string.help_max_device_memory }) {
+                        Icon(Icons.Default.Help, contentDescription = "What is this?", modifier = Modifier.size(18.dp))
+                    }
+                }
+                Text(
+                    "What DirectX games are told the GPU's memory is (DXVK's dxgi.maxDeviceMemory).",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    LabeledDropdown(
+                        stringResource(R.string.graphics_driver_present_modes), presentLabels,
+                        presentLabels[presentValues.indexOf(presentMode).coerceAtLeast(0)],
+                        { presentMode = presentValues[presentLabels.indexOf(it)] }, modifier = Modifier.weight(1f)
+                    )
+                    IconButton(onClick = { helpRes = R.string.help_wrapper_present_modes }) {
+                        Icon(Icons.Default.Help, contentDescription = "What is this?", modifier = Modifier.size(18.dp))
+                    }
+                }
+                Text(
+                    "Wayland offers mailbox and fifo only: immediate needs tearing, which the compositor doesn't allow.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = fdDevFeatures, onCheckedChange = { fdDevFeatures = it })
+                    Text("OneUI / HyperOS Fix (UBWC flag hint)", modifier = Modifier.weight(1f))
+                    IconButton(onClick = { helpRes = R.string.help_oneui_hyperos_fix }) {
+                        Icon(Icons.Default.Help, contentDescription = "What is this?", modifier = Modifier.size(18.dp))
+                    }
+                }
+                Text(
+                    "Gives the game's Turnip FD_DEV_FEATURES=enable_tp_ubwc_flag_hint=1, for Samsung and Xiaomi " +
+                        "phones whose games show corrupt textures; leave off otherwise.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                onConfirm(
+                    withGraphicsDriverKeys(
+                        initialConfig,
+                        linkedMapOf(
+                            "gpuName" to gpuName,
+                            "maxDeviceMemory" to StringUtils.parseNumber(memoryEntry),
+                            "presentMode" to presentMode,
+                            "fdDevFeatures" to if (fdDevFeatures) "1" else "0",
+                        )
+                    )
+                )
+            }) { Text(stringResource(android.R.string.ok)) }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text(stringResource(android.R.string.cancel)) }
+        }
+    )
+}
+
+/**
+ * Notes under an "Unreal Engine HDR" picker set to DirectX 11: a hint to spoof an NVIDIA GPU while
+ * none is reported (UE4 takes its NVAPI path only on one; never forced), and a build that carries no
+ * dxvk-nvapi. Both facts are read off the main thread.
+ */
+@Composable
+internal fun UnrealHdrDx11Notes(gpuName: String, wayland: Boolean) {
+    val context = LocalContext.current
+    var nvidia by remember(gpuName) { mutableStateOf(true) }
+    var bundled by remember { mutableStateOf<String?>("") } // "" = not read yet, null = not in this build
+    LaunchedEffect(gpuName) {
+        val facts = withContext(Dispatchers.IO) {
+            com.winlator.star.core.GpuSpoof.isNvidia(context, gpuName) to
+                com.winlator.star.core.DxvkNvapi.bundledVersion(context)
+        }
+        nvidia = facts.first
+        bundled = facts.second
+    }
+    when (val b = bundled) {
+        null -> Text(
+            "This build carries no dxvk-nvapi: DirectX 11 mode installs nothing and only the DirectX 12 fix applies.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error
+        )
+        "" -> {}
+        else -> Text(
+            "Bundled: dxvk-nvapi $b.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+    if (!nvidia) Text(
+        com.winlator.star.core.UnrealHdr.nvidiaHint(wayland),
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.primary
+    )
 }
 
 /**
@@ -2847,6 +3172,121 @@ internal fun importedDriverVersions(context: Context): List<String> =
  */
 internal suspend fun compositorDriverChoices(context: Context): List<String> =
     (supportedBundledDriverVersions(context) + importedDriverVersions(context)).distinct()
+
+/**
+ * What the Wayland "Compositor driver" field shows for the stored `version`. The picker leaves
+ * "System" out on purpose, so matching the stored value against the options (the old
+ * `if (v in choices) v else ""`) rendered both a new container's empty version and a carried-over
+ * "System" as a BLANK field. Name what is stored instead: empty behaves exactly like "System" at
+ * launch (XServerDisplayActivity's Wayland resolve skips adrenotools for both), and an id the
+ * picker no longer offers is shown as not available rather than hidden. [choicesLoaded] keeps the
+ * stored id as-is while the choice list is still being probed.
+ */
+internal fun compositorDriverLabel(version: String, choices: List<String>, choicesLoaded: Boolean): String = when {
+    version.isEmpty() || version == "System" -> "System"
+    choicesLoaded && version !in choices -> "$version (not available)"
+    else -> version
+}
+
+/** True when [version] cannot drive the Wayland compositor: "System"/empty, or an id the picker doesn't offer. */
+internal fun compositorDriverUnusable(version: String, choices: List<String>, choicesLoaded: Boolean): Boolean =
+    version.isEmpty() || version == "System" || (choicesLoaded && version !in choices)
+
+/**
+ * The dmabuf-import device extensions the Wayland compositor enables at vkCreateDevice
+ * (waylandcomp vk_present.c dev_init). A driver without all four fails device creation, which is
+ * the black screen "System" gives. VK_KHR_swapchain, the fifth extension it enables, comes from
+ * Android's Vulkan loader for every driver, so it tells the candidates nothing.
+ */
+private val COMPOSITOR_IMPORT_EXTENSIONS = listOf(
+    "VK_KHR_external_memory_fd", "VK_EXT_external_memory_dma_buf",
+    "VK_EXT_image_drm_format_modifier", "VK_KHR_image_format_list",
+)
+
+private class CompositorDriverVerdict(val usable: Boolean, val vulkanVersion: List<Int>, val reason: String)
+
+// Per-process verdicts keyed by driver id + its folder's mtime, so a re-import under the same id is
+// probed again. Read and written only under graphicsProbeMutex.
+private val compositorDriverVerdicts = HashMap<String, CompositorDriverVerdict>()
+
+/**
+ * The driver a Wayland form fills into an empty/"System" Compositor driver, or null when no
+ * installed driver can do the job. Decided from what each driver proves about itself, not from
+ * its name:
+ *  1. candidates are exactly what the picker offers ([compositorDriverChoices]);
+ *  2. a driver whose meta.json declares a proprietary vendor (Qualcomm, e.g. the bundled v819) is
+ *     not a Turnip and is skipped unprobed, as is an import that isn't a Mesa libvulkan_* build —
+ *     the config dialog's rule: proprietary blobs are never probed in-process;
+ *  3. every other candidate is probed like the config dialog's extension list: it must load itself
+ *     (no silent fall-back to the system ICD) and list all of [COMPOSITOR_IMPORT_EXTENSIONS];
+ *  4. [preferred] — the driver the user's own New Container Defaults name — wins when it passes;
+ *     otherwise the one reporting the highest Vulkan version (the newest Mesa) does, a tie keeping
+ *     the picker's order.
+ * The Turnip bundled with the app goes through the same test, so a user who never imported a
+ * driver still gets it when it passes.
+ */
+internal suspend fun defaultCompositorDriver(context: Context, preferred: String? = null): String? {
+    val choices = compositorDriverChoices(context)   // takes graphicsProbeMutex itself
+    return withContext(Dispatchers.IO) {
+        val mgr = AdrenotoolsManager(context)
+        val imported = importedDriverVersions(context).toSet()
+        graphicsProbeMutex.withLock {
+            val usable = choices.map { it to compositorDriverVerdict(context, mgr, it, it in imported) }
+                .filter { it.second.usable }
+            val newest = usable
+                .maxWithOrNull(Comparator { a, b -> compareVulkanVersions(a.second.vulkanVersion, b.second.vulkanVersion) })
+                ?.first
+            val fromDefaults = usable.firstOrNull { it.first == preferred }?.first
+            android.util.Log.i("CompositorDriver", "default for a Wayland form: " + when {
+                fromDefaults != null -> "$fromDefaults (the New Container Defaults driver; newest usable is $newest)"
+                newest != null -> "$newest (newest usable" +
+                    (if (preferred != null) "; New Container Defaults names $preferred, which is not usable" else "") + ")"
+                else -> "none (no installed driver can import the game's frames)"
+            })
+            fromDefaults ?: newest
+        }
+    }
+}
+
+private fun compositorDriverVerdict(context: Context, mgr: AdrenotoolsManager, id: String, imported: Boolean): CompositorDriverVerdict {
+    val dir = File(mgr.getDriverPath(id))
+    val key = "$id@${dir.lastModified()}"
+    compositorDriverVerdicts[key]?.let { return it }
+    val vendor = mgr.getDriverVendor(id)
+    val library = mgr.getLibraryName(id)
+    val verdict = when {
+        // Without its folder the native probe would silently report the SYSTEM driver's extensions.
+        !dir.isDirectory -> CompositorDriverVerdict(false, emptyList(), "not installed")
+        vendor.contains("qualcomm", ignoreCase = true) ->
+            CompositorDriverVerdict(false, emptyList(), "proprietary $vendor driver, not a Turnip (not probed)")
+        imported && !library.startsWith("libvulkan", ignoreCase = true) ->
+            CompositorDriverVerdict(false, emptyList(), "not a Mesa build ($library, not probed)")
+        else -> {
+            val exts = runCatching { GPUInformation.enumerateExtensions(id, context)?.toSet() }.getOrNull() ?: emptySet()
+            val fellBack = GPUInformation.driverLoadedFellBack()
+            val missing = COMPOSITOR_IMPORT_EXTENSIONS.filterNot { it in exts }
+            when {
+                fellBack || exts.isEmpty() -> CompositorDriverVerdict(false, emptyList(), "does not load on this GPU")
+                missing.isNotEmpty() -> CompositorDriverVerdict(false, emptyList(), "missing ${missing.joinToString()}")
+                else -> {
+                    val v = runCatching { GPUInformation.getVulkanVersion(id, context) }.getOrNull() ?: ""
+                    CompositorDriverVerdict(true, v.split('.').mapNotNull { it.trim().toIntOrNull() }, "imports dmabufs, Vulkan $v")
+                }
+            }
+        }
+    }
+    android.util.Log.i("CompositorDriver", "$id: ${if (verdict.usable) "usable" else "not usable"} - ${verdict.reason}")
+    compositorDriverVerdicts[key] = verdict
+    return verdict
+}
+
+private fun compareVulkanVersions(a: List<Int>, b: List<Int>): Int {
+    for (i in 0 until maxOf(a.size, b.size)) {
+        val d = a.getOrElse(i) { 0 }.compareTo(b.getOrElse(i) { 0 })
+        if (d != 0) return d
+    }
+    return 0
+}
 
 /**
  * The bundled Wayland Turnip variant "Auto" resolves to on this GPU (WaylandGameDriver.VARIANT_*),

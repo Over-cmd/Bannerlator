@@ -438,6 +438,17 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         controllerTestPaused = false
+        // A game may still be playing on the TV. Tapping the launcher brings THIS task forward — the
+        // companion screen is in a task of its own, deliberately, so the system has no reason to prefer
+        // it — and the user was left looking at the games list with nothing to say a session was live.
+        // Hand the screen over to the companion, which is where "Send input back to the TV" and "End the
+        // game" are, and which sends the controller back to the TV as it comes up.
+        //
+        // The companion answers for itself whether there is anything to come back to, from the state the
+        // SESSION maintains: no live TV session and this is a no-op, so an ordinary handheld session (or
+        // no session at all) lands exactly where it always did. Nothing here reaches the session on the
+        // TV: the game keeps playing, untouched, whichever way this goes.
+        com.winlator.star.display.TvCompanionActivity.resumeForLiveSession(this)
     }
 
     // ---- Settings-side Controller Test input fork ----
