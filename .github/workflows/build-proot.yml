@@ -1,22 +1,28 @@
-name: Build proot (NDK 27)
+name: Build proot (Termux fork, NDK)
 
-# proot for the Linux runtime, built on its own with NDK 27 rather than by the app's CMake with
-# whatever NDK the app pins. On device, the same source built with NDK 29 mangles the traced
-# syscall (execve returns ENOSYS, then PEEKDATA EIO / EFAULT reading tracee memory) while
-# WinNative's NDK 27 build of it works, so proot is pinned to the toolchain it is known to work
-# with and shipped as prebuilt jniLibs.
+# proot for the Linux runtime: Termux's fork at the exact version that runs on our devices via
+# proot-distro, built with the NDK against Termux's own talloc, and made self-contained
+# (libtalloc.so beside it, RUNPATH $ORIGIN) so it ships as prebuilt jniLibs.
+#
+# Why not the tree in app/src/main/cpp/proot: on device it fails at the first exec whatever NDK
+# builds it (execve returns ENOSYS/EFAULT, then PEEKDATA EIO) — it is an old snapshot of this
+# fork, thousands of lines behind in the ptrace/exec core — while the Termux binary of this
+# version works on the same rootfs.
 
 on:
   push:
     branches:
       - 'feat/linux-gamescope-runtime'
     paths:
-      - 'app/src/main/cpp/proot/**'
       - '.github/workflows/build-proot.yml'
   workflow_dispatch:
 
 permissions:
   contents: read
+
+env:
+  PROOT_VERSION: 5.1.107.92
+  TALLOC_DEB: libtalloc_2.4.3_aarch64.deb
 
 jobs:
   proot:
@@ -32,22 +38,47 @@ jobs:
           ndk-version: r27c
           add-to-path: false
 
-      - name: Configure and build
+      - name: Fetch the Termux proot fork and Termux's talloc
         run: |
-          cmake -S app/src/main/cpp/proot -B build-proot \
-            -DCMAKE_TOOLCHAIN_FILE="${{ steps.ndk.outputs.ndk-path }}/build/cmake/android.toolchain.cmake" \
-            -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-26 \
-            -DCMAKE_BUILD_TYPE=Release
-          cmake --build build-proot -j"$(nproc)"
-          mkdir -p out/arm64-v8a
-          cp build-proot/libproot.so build-proot/libproot-loader.so out/arm64-v8a/
+          set -e
+          sudo apt-get install -y -qq patchelf >/dev/null
+          curl -fsSL --retry 5 -o proot.zip "https://github.com/termux/proot/archive/v${PROOT_VERSION}.zip"
+          unzip -q proot.zip && mv "proot-${PROOT_VERSION}" proot-src
+          # Termux's own libtalloc for aarch64: headers to build against, the library to ship.
+          mkdir -p talloc && cd talloc
+          IDX=$(curl -fsSL --retry 5 "https://packages.termux.dev/apt/termux-main/dists/stable/main/binary-aarch64/Packages")
+          DEB=$(printf '%s\n' "$IDX" | awk '/^Package: libtalloc$/{f=1} f&&/^Filename:/{print $2; exit}')
+          echo "talloc deb: $DEB"
+          curl -fsSL --retry 5 -o talloc.deb "https://packages.termux.dev/apt/termux-main/$DEB"
+          ar x talloc.deb && tar -xf data.tar.*
+          find . -name 'libtalloc.so*' -o -name 'talloc.h' | head
+
+      - name: Build
+        run: |
+          set -e
+          NDK="${{ steps.ndk.outputs.ndk-path }}"
+          BIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          TAL=$(dirname "$(find talloc -name talloc.h | head -1)")
+          TLIB=$(dirname "$(find talloc -name 'libtalloc.so.2' | head -1)")
+          # Link against a copy named the way it ships, so NEEDED comes out as libtalloc.so.
+          mkdir -p out/arm64-v8a && cp "$TLIB/libtalloc.so.2" out/arm64-v8a/libtalloc.so
+          make -C proot-src/src -j"$(nproc)" \
+            CC="$BIN/aarch64-linux-android26-clang" \
+            STRIP="$BIN/llvm-strip" OBJCOPY="$BIN/llvm-objcopy" OBJDUMP="$BIN/llvm-objdump" \
+            CPPFLAGS="-I$TAL -DARG_MAX=131072 -DVERSION=\"${PROOT_VERSION}\"" \
+            LDFLAGS="-L$PWD/out/arm64-v8a -l:libtalloc.so -Wl,-z,noexecstack -Wl,-rpath,\$ORIGIN" \
+            PROOT_UNBUNDLE_LOADER=/nonexistent proot loader
+          cp proot-src/src/proot out/arm64-v8a/libproot.so
+          cp proot-src/src/loader/loader out/arm64-v8a/libproot-loader.so
+          patchelf --set-rpath '$ORIGIN' out/arm64-v8a/libproot.so
+          "$BIN/llvm-readelf" -d out/arm64-v8a/libproot.so | grep -E "NEEDED|RUNPATH"
+          "$BIN/llvm-readelf" -h out/arm64-v8a/libproot-loader.so | grep -E "Type|Entry"
           ls -la out/arm64-v8a
-          "${{ steps.ndk.outputs.ndk-path }}"/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf -h out/arm64-v8a/libproot-loader.so | grep -E "Type|Entry"
           for f in out/arm64-v8a/*.so; do echo "$(sha256sum "$f" | cut -d' ' -f1)  $(basename "$f")"; done | tee out/SHA256SUMS
 
       - uses: actions/upload-artifact@v4
         with:
-          name: proot-ndk27-${{ github.run_number }}
+          name: proot-termux-${{ github.run_number }}
           path: out/
           compression-level: 0
           retention-days: 30
