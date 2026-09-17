@@ -50,6 +50,12 @@ jobs:
 
       - name: Activar Android SDK y NDK del Servidor
         uses: android-actions/setup-android@v3
+        with:
+          # 🚨 BYPASS ERROR 10% DE TOOLS:
+          # Indicamos explícitamente a la acción que instale únicamente 'platform-tools' y las
+          # 'cmdline-tools' modernas. Al omitir la palabra 'tools' antigua de Google, el gestor
+          # sdkmanager no se detendrá y completará la configuración del entorno al 100%.
+          packages: 'platform-tools, cmdline-tools;latest'
 
       - name: Parche de Memoria y Saneamiento de Audio Nativo C
         run: |
