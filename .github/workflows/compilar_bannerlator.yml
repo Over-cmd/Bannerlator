@@ -91,8 +91,11 @@ jobs:
       - name: Compilar el APK Oficial Modificado (Variante Standard Debug)
         run: |
           ./gradlew clean
-          # Compilación directa de la variante Standard Debug de tu repositorio
+          # 🚨 RASTREADOR DE ERRORES: Añadimos --stacktrace y --info para ver qué librería 
+          # nativa de 32 bits causó el fallo a los 8 minutos, permitiendo repararla al vuelo.
           ./gradlew assembleStandardDebug \
+            --stacktrace \
+            --info \
             --no-daemon \
             -Dorg.gradle.daemon=false \
             -Dkotlin.compiler.execution.strategy="in-process" \
