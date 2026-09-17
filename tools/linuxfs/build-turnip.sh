@@ -49,7 +49,19 @@ cpu = 'aarch64'
 endian = 'little'
 EOF
 
-[ -f build/build.ninja ] || meson setup build "$src" --cross-file cross.ini --buildtype release \
+# Programs Mesa runs on the BUILD machine. Without this it asks the sysroot's pkg-config for
+# wayland-scanner and gets the aarch64 binary, which the build host cannot execute.
+cat > native.ini <<EOF
+[binaries]
+c = 'gcc'
+cpp = 'g++'
+pkg-config = '/usr/bin/pkg-config'
+cmake = '/usr/bin/cmake'
+wayland-scanner = '$(command -v wayland-scanner)'
+glslangValidator = '$(command -v glslangValidator)'
+EOF
+
+[ -f build/build.ninja ] || meson setup build "$src" --cross-file cross.ini --native-file native.ini --buildtype release \
   -Dvulkan-drivers=freedreno -Dfreedreno-kmds=msm,kgsl -Dgallium-drivers= -Dplatforms=wayland,x11 \
   -Dopengl=false -Dgbm=disabled -Dglx=disabled -Degl=disabled -Dllvm=disabled -Dvulkan-layers= -Dtools=
 ninja -C build src/freedreno/vulkan/libvulkan_freedreno.so
