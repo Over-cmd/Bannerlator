@@ -104,6 +104,16 @@
 >
 > **Confirmed we are not missing any Wayland work of Max's:** across his whole gamescope branch the only compositor file touched is `compositor.c` (166 lines), and all ten markers of it are present in ours — fullscreen configure, seat fan-out, `wl_output` 4 + name/description, `wl_seat` 9, `axis_value120`.
 
+### 🏁 2026-09-17 18:41 — NATIVE ARM STEAM CLIENT FULLY WORKING ON DEVICE
+
+> Signed in as The412Banner, **Online**, Big Picture interactive: real library (Battlefield, Brawlhalla, Half-Life, Crystal Clash), game pages with Install / space required / playtime / controller support, friends list live, account settings. **60–67 fps, Vulkan, Adreno 750, Wayland**, 15 ms frametime, 3–9 W.
+>
+> The full chain, device-proven: proot → gamescope 3.16.29 → Xwayland (glamor on Zink) → Valve's native aarch64 client → steamwebhelper (6 CEF processes) → gamepad UI, compositing through our own Wayland compositor on Turnip.
+>
+> **The `WebUITransport` peer check never appeared in the log** — the `net.c` shim answering Steam's `lsof` with both address halves worked first try, so the thing that blocked Max for a day never surfaced for us.
+>
+> **Not shippable yet — one gap:** the proot on the device is Termux's *binary*, hand-dropped into the APK's `lib/arm64/` (originals saved in `.orig-ndk29/`, `libproot.so` is a shebang wrapper adding `-i`). `build-proot.yml` must go green so proot ships as prebuilt jniLibs and `add_subdirectory(proot)` can be dropped. Rootfs **r2** also owed: `xkeyboard-config` (hand-installed on r1) and the Downloads logging script.
+
 ### Phase 1 — proot in the build (`ba0a5786`)
 
 > The tree had been sitting in `cpp/proot` unused since the old Xvfb Steam attempt, absent from `CMakeLists.txt`. Our copy is an older base than his and is CRLF/tab-formatted, so his diffs do not apply; the changes were ported by hand.
