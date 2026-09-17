@@ -44,6 +44,13 @@
 >
 > **Rootfs build:** four host-toolchain failures in a row, each one step further — meson 1.3.2 (pip), `glslangValidator` (`glslang-tools`), `wayland-scanner`/cmake/`wayland-protocols` (host tools + target `.pc` files), then Mesa asking the *sysroot's* pkg-config for `wayland-scanner` and getting the aarch64 binary (a Meson native file). Then one transient mirror 500 out of ~300 fetches; every curl now retries.
 
+### Gates passing (late 2026-09-17)
+
+> - **APK `35267143258` green at `39c11fa3`** — the full branch compiles: proot, compositor changes, activity wiring, installer, Linux Runtime tab. Checked the artifact itself rather than trusting the colour: `libproot.so` (126 KB) and `libproot-loader.so` (2.4 KB) are in `lib/arm64-v8a/`, and the loader is a static `EXEC` with one `LOAD` at `0x2000000000` (= arm64 `LOADER_ADDRESS`), no `INTERP`, no `DYNAMIC` — the freestanding flat binary proot execs, not a disguised shared object.
+> - **Rootfs build reached the end.** The wall that mattered was version, not path: Mesa 26.2's Wayland module demands `wayland-scanner` **>= 1.26** on the build machine and Ubuntu 24.04 ships 1.22, so the scanner is now built alone from the pinned 1.26.0 release (seconds) and handed to Meson through a native file. Then: **298 packages, Mesa `[725/725]`, `libvulkan_freedreno.so` 15.7 MB** — Turnip with the KGSL backend, cross-built. The run died on the last line because the script `cd`s into its work dir and the workflow passed a relative output path; pinned absolute on both sides.
+> - Hand-off APK dispatched at head `8072b875` → run `35268263770`.
+> - One warning to keep an eye on from the qemu hook pass: `gdk-pixbuf-query-loaders` could not create `loaders.cache` — the loaders dir is missing in the aarch64 package layout. Cosmetic for Steam (pcmanfm icons at worst); not blocking.
+
 ### Phase 1 — proot in the build (`ba0a5786`)
 
 > The tree had been sitting in `cpp/proot` unused since the old Xvfb Steam attempt, absent from `CMakeLists.txt`. Our copy is an older base than his and is CRLF/tab-formatted, so his diffs do not apply; the changes were ported by hand.
