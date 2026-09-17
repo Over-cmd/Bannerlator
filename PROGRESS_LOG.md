@@ -30,6 +30,20 @@
 >
 > **Phase 5 (in progress).** `LinuxRuntimeInstaller` downloads the rootfs from a catalog row, checks its sha256, unpacks to a staging directory and swaps it in, so a failed install cannot leave a half runtime that `isInstalled()` would launch. It carries its own extractor rather than the shared one: a distribution rootfs is full of **hard links**, which the shared extractor writes as empty files.
 
+### Second pass over the WinNative diff (`ebe412d7`)
+
+> Going back over his compositor diff hunk by hunk after the first port turned up **three misses in one hunk**, all hard blockers:
+>
+> - `wl_output` advertised **2**; libdecor, which gamescope links, binds it at **4**, and binding above the advertised version is a protocol error that kills the client on connect. Now 4, with the `name`/`description` events that version adds, sent before `done`.
+> - `wl_seat` advertised **5**; gamescope's Wayland backend refuses a seat older than **8**. Now 9.
+> - a version-9 seat means a version-9 pointer, and from 8 `axis_discrete` is replaced by `axis_value120` and **must not be sent**. The scroll fan-out I had written still sent `axis_discrete` — a protocol error on the very pointers this work adds. Now sends whichever the pointer's version allows.
+>
+> Lesson recorded: when porting from a proven tree, diff the *whole* file, not the parts the commit message names.
+>
+> **Runtime layout, for the record:** `files/linuxfs` is one shared rootfs per app install, beside `imagefs` — not per container. A gamescope session uses its container only for screen size, audio driver, fps cap and as the shortcut's home; none of the Wine settings apply. Steam's login and library live inside the rootfs, so they are app-wide. Updating or removing the runtime affects every gamescope entry at once.
+>
+> **Rootfs build:** four host-toolchain failures in a row, each one step further — meson 1.3.2 (pip), `glslangValidator` (`glslang-tools`), `wayland-scanner`/cmake/`wayland-protocols` (host tools + target `.pc` files), then Mesa asking the *sysroot's* pkg-config for `wayland-scanner` and getting the aarch64 binary (a Meson native file). Then one transient mirror 500 out of ~300 fetches; every curl now retries.
+
 ### Phase 1 — proot in the build (`ba0a5786`)
 
 > The tree had been sitting in `cpp/proot` unused since the old Xvfb Steam attempt, absent from `CMakeLists.txt`. Our copy is an older base than his and is CRLF/tab-formatted, so his diffs do not apply; the changes were ported by hand.
