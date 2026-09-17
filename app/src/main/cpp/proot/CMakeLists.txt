@@ -45,7 +45,7 @@ target_link_libraries(libproot.so
                       talloc)
 
 # The loader is a freestanding flat binary proot execs at LOADER_ADDRESS in place of every
-# program; it is named like a library so the APK installer places it beside libproot.so.
+# program; it is named like a library so the installer places it beside libproot.so.
 add_executable(libproot-loader.so
                src/loader/loader.c)
 target_compile_options(libproot-loader.so PRIVATE -ffreestanding -fno-stack-protector -fno-pic -fno-pie)

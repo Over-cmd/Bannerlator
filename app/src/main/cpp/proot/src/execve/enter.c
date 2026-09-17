@@ -20,31 +20,27 @@
  * 02110-1301 USA.
  */
 
-#include <sys/types.h>  /* lstat(2), lseek(2), */
-#include <sys/stat.h>   /* lstat(2), lseek(2), fchmod(2), */
-#include <unistd.h>     /* access(2), lstat(2), close(2), read(2), */
-#include <errno.h>      /* E*, */
-#include <assert.h>     /* assert(3), */
-#include <talloc.h>     /* talloc*, */
-#include <sys/mman.h>   /* PROT_*, */
-#include <string.h>     /* strlen(3), strcpy(3), */
-#include <stdlib.h>     /* getenv(3), */
-#include <stdio.h>      /* fwrite(3), */
-#include <fcntl.h>      /* open(2), */
-#include <assert.h>     /* assert(3), */
+#include <assert.h>    /* assert(3), */
+#include <errno.h>     /* E*, */
+#include <stdio.h>     /* fwrite(3), */
+#include <stdlib.h>    /* getenv(3), */
+#include <string.h>    /* strlen(3), strcpy(3), */
+#include <sys/mman.h>  /* PROT_*, */
+#include <sys/stat.h>  /* lstat(2), lseek(2), fchmod(2), */
+#include <sys/types.h> /* lstat(2), lseek(2), */
+#include <talloc.h>    /* talloc*, */
+#include <unistd.h>    /* access(2), lstat(2), close(2), read(2), */
 
-#include "execve/execve.h"
-#include "execve/elf.h"
-#include "path/path.h"
-#include "path/temp.h"
-#include "path/binding.h"
-#include "tracee/tracee.h"
-#include "syscall/syscall.h"
-#include "syscall/sysnum.h"
-#include "tracee/mem.h"
-#include "tracee/reg.h"
 #include "arch.h"
 #include "cli/note.h"
+#include "execve/elf.h"
+#include "execve/execve.h"
+#include "path/binding.h"
+#include "path/path.h"
+#include "path/temp.h"
+#include "syscall/syscall.h"
+#include "syscall/sysnum.h"
+#include "tracee/tracee.h"
 
 #define P(a) PROGRAM_FIELD(load_info->elf_header, *program_header, a)
 
@@ -54,73 +50,74 @@
  * 0.
  */
 static int add_mapping(const Tracee *tracee UNUSED, LoadInfo *load_info,
-		const ProgramHeader *program_header)
-{
-	size_t index;
-	word_t start_address;
-	word_t end_address;
-	static word_t page_size = 0;
-	static word_t page_mask = 0;
+                       const ProgramHeader *program_header) {
+  size_t index;
+  word_t start_address;
+  word_t end_address;
+  static word_t page_size = 0;
+  static word_t page_mask = 0;
 
-	if (page_size == 0) {
-		page_size = sysconf(_SC_PAGE_SIZE);
-		if ((int) page_size <= 0)
-			page_size = 0x1000;
-		page_mask = ~(page_size - 1);
-	}
+  if (page_size == 0) {
+    page_size = sysconf(_SC_PAGE_SIZE);
+    if ((int)page_size <= 0)
+      page_size = 0x1000;
+    page_mask = ~(page_size - 1);
+  }
 
-	if (load_info->mappings == NULL)
-		index = 0;
-	else
-		index = talloc_array_length(load_info->mappings);
+  if (load_info->mappings == NULL)
+    index = 0;
+  else
+    index = talloc_array_length(load_info->mappings);
 
-	load_info->mappings = talloc_realloc(load_info, load_info->mappings, Mapping, index + 1);
-	if (load_info->mappings == NULL)
-		return -ENOMEM;
+  load_info->mappings =
+      talloc_realloc(load_info, load_info->mappings, Mapping, index + 1);
+  if (load_info->mappings == NULL)
+    return -ENOMEM;
 
-	start_address = P(vaddr) & page_mask;
-	end_address   = (P(vaddr) + P(filesz) + page_size) & page_mask;
+  start_address = P(vaddr) & page_mask;
+  end_address = (P(vaddr) + P(filesz) + page_size) & page_mask;
 
-	load_info->mappings[index].fd     = -1; /* Unknown yet.  */
-	load_info->mappings[index].offset = P(offset) & page_mask;
-	load_info->mappings[index].addr   = start_address;
-	load_info->mappings[index].length = end_address - start_address;
-	load_info->mappings[index].flags  = MAP_PRIVATE | MAP_FIXED;
-	load_info->mappings[index].prot   =  ( (P(flags) & PF_R ? PROT_READ  : 0)
-					| (P(flags) & PF_W ? PROT_WRITE : 0)
-					| (P(flags) & PF_X ? PROT_EXEC  : 0));
+  load_info->mappings[index].fd = -1; /* Unknown yet.  */
+  load_info->mappings[index].offset = P(offset) & page_mask;
+  load_info->mappings[index].addr = start_address;
+  load_info->mappings[index].length = end_address - start_address;
+  load_info->mappings[index].flags = MAP_PRIVATE | MAP_FIXED;
+  load_info->mappings[index].prot =
+      ((P(flags) & PF_R ? PROT_READ : 0) | (P(flags) & PF_W ? PROT_WRITE : 0) |
+       (P(flags) & PF_X ? PROT_EXEC : 0));
 
-	/* "If the segment's memory size p_memsz is larger than the
-	 * file size p_filesz, the "extra" bytes are defined to hold
-	 * the value 0 and to follow the segment's initialized area."
-	 * -- man 7 elf.  */
-	if (P(memsz) > P(filesz)) {
-		/* How many extra bytes in the current page?  */
-		load_info->mappings[index].clear_length = end_address - P(vaddr) - P(filesz);
+  /* "If the segment's memory size p_memsz is larger than the
+   * file size p_filesz, the "extra" bytes are defined to hold
+   * the value 0 and to follow the segment's initialized area."
+   * -- man 7 elf.  */
+  if (P(memsz) > P(filesz)) {
+    /* How many extra bytes in the current page?  */
+    load_info->mappings[index].clear_length =
+        end_address - P(vaddr) - P(filesz);
 
-		/* Create new pages for the remaining extra bytes.  */
-		start_address = end_address;
-		end_address   = (P(vaddr) + P(memsz) + page_size) & page_mask;
-		if (end_address > start_address) {
-			index++;
-			load_info->mappings = talloc_realloc(load_info, load_info->mappings,
-							Mapping, index + 1);
-			if (load_info->mappings == NULL)
-				return -ENOMEM;
+    /* Create new pages for the remaining extra bytes.  */
+    start_address = end_address;
+    end_address = (P(vaddr) + P(memsz) + page_size) & page_mask;
+    if (end_address > start_address) {
+      index++;
+      load_info->mappings =
+          talloc_realloc(load_info, load_info->mappings, Mapping, index + 1);
+      if (load_info->mappings == NULL)
+        return -ENOMEM;
 
-			load_info->mappings[index].fd     = -1;  /* Anonymous.  */
-			load_info->mappings[index].offset =  0;
-			load_info->mappings[index].addr   = start_address;
-			load_info->mappings[index].length = end_address - start_address;
-			load_info->mappings[index].clear_length = 0;
-			load_info->mappings[index].flags = MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED;
-			load_info->mappings[index].prot   = load_info->mappings[index - 1].prot;
-		}
-	}
-	else
-		load_info->mappings[index].clear_length = 0;
+      load_info->mappings[index].fd = -1; /* Anonymous.  */
+      load_info->mappings[index].offset = 0;
+      load_info->mappings[index].addr = start_address;
+      load_info->mappings[index].length = end_address - start_address;
+      load_info->mappings[index].clear_length = 0;
+      load_info->mappings[index].flags =
+          MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED;
+      load_info->mappings[index].prot = load_info->mappings[index - 1].prot;
+    }
+  } else
+    load_info->mappings[index].clear_length = 0;
 
-	return 0;
+  return 0;
 }
 
 /**
@@ -128,31 +125,31 @@ static int add_mapping(const Tracee *tracee UNUSED, LoadInfo *load_info,
  * executable and is a regular file.  This function returns -errno if
  * an error occured, 0 otherwise.
  */
-int translate_and_check_exec(Tracee *tracee, char host_path[PATH_MAX], const char *user_path)
-{
-	struct stat statl;
-	int status;
+int translate_and_check_exec(Tracee *tracee, char host_path[PATH_MAX],
+                             const char *user_path) {
+  struct stat statl;
+  int status;
 
-	if (user_path[0] == '\0')
-		return -ENOEXEC;
+  if (user_path[0] == '\0')
+    return -ENOEXEC;
 
-	status = translate_path(tracee, host_path, AT_FDCWD, user_path, true);
-	if (status < 0)
-		return status;
+  status = translate_path(tracee, host_path, AT_FDCWD, user_path, true);
+  if (status < 0)
+    return status;
 
-	status = access(host_path, F_OK);
-	if (status < 0)
-		return -ENOENT;
+  status = access(host_path, F_OK);
+  if (status < 0)
+    return -ENOENT;
 
-	status = access(host_path, X_OK);
-	if (status < 0)
-		return -EACCES;
+  status = access(host_path, X_OK);
+  if (status < 0)
+    return -EACCES;
 
-	status = lstat(host_path, &statl);
-	if (status < 0)
-		return -EPERM;
+  status = lstat(host_path, &statl);
+  if (status < 0)
+    return -EPERM;
 
-	return 0;
+  return 0;
 }
 
 /**
@@ -161,55 +158,54 @@ int translate_and_check_exec(Tracee *tracee, char host_path[PATH_MAX], const cha
  * 0.
  */
 static int add_interp(Tracee *tracee, int fd, LoadInfo *load_info,
-		const ProgramHeader *program_header)
-{
-	char host_path[PATH_MAX];
-	char *user_path;
-	int status;
+                      const ProgramHeader *program_header) {
+  char host_path[PATH_MAX];
+  char *user_path;
+  int status;
 
-	/* Only one PT_INTERP segment is allowed.  */
-	if (load_info->interp != NULL)
-		return -EINVAL;
+  /* Only one PT_INTERP segment is allowed.  */
+  if (load_info->interp != NULL)
+    return -EINVAL;
 
-	load_info->interp = talloc_zero(load_info, LoadInfo);
-	if (load_info->interp == NULL)
-		return -ENOMEM;
+  load_info->interp = talloc_zero(load_info, LoadInfo);
+  if (load_info->interp == NULL)
+    return -ENOMEM;
 
-	user_path = talloc_size(tracee->ctx, P(filesz) + 1);
-	if (user_path == NULL)
-		return -ENOMEM;
+  user_path = talloc_size(tracee->ctx, P(filesz) + 1);
+  if (user_path == NULL)
+    return -ENOMEM;
 
-	/* Remember pread(2) doesn't change the
-	 * current position in the file.  */
-	status = pread(fd, user_path, P(filesz), P(offset));
-	if ((size_t) status != P(filesz)) /* Unexpected size.  */
-		status = -EACCES;
-	if (status < 0)
-		return status;
+  /* Remember pread(2) doesn't change the
+   * current position in the file.  */
+  status = pread(fd, user_path, P(filesz), P(offset));
+  if ((size_t)status != P(filesz)) /* Unexpected size.  */
+    status = -EACCES;
+  if (status < 0)
+    return status;
 
-	user_path[P(filesz)] = '\0';
+  user_path[P(filesz)] = '\0';
 
-	status = translate_and_check_exec(tracee, host_path, user_path);
-	if (status < 0)
-		return status;
+  status = translate_and_check_exec(tracee, host_path, user_path);
+  if (status < 0)
+    return status;
 
-	load_info->interp->host_path = talloc_strdup(load_info->interp, host_path);
-	if (load_info->interp->host_path == NULL)
-		return -ENOMEM;
+  load_info->interp->host_path = talloc_strdup(load_info->interp, host_path);
+  if (load_info->interp->host_path == NULL)
+    return -ENOMEM;
 
-	load_info->interp->user_path = talloc_strdup(load_info->interp, user_path);
-	if (load_info->interp->user_path == NULL)
-		return -ENOMEM;
+  load_info->interp->user_path = talloc_strdup(load_info->interp, user_path);
+  if (load_info->interp->user_path == NULL)
+    return -ENOMEM;
 
-	return 0;
+  return 0;
 }
 
 #undef P
 
 struct add_load_info_data {
-	LoadInfo *load_info;
-	Tracee *tracee;
-	int fd;
+  LoadInfo *load_info;
+  Tracee *tracee;
+  int fd;
 };
 
 /**
@@ -219,92 +215,91 @@ struct add_load_info_data {
  * occurred, otherwise 0.
  */
 static int add_load_info(const ElfHeader *elf_header,
-			const ProgramHeader *program_header, void *data_)
-{
-	struct add_load_info_data *data = data_;
-	int status;
+                         const ProgramHeader *program_header, void *data_) {
+  struct add_load_info_data *data = data_;
+  int status;
 
-	switch (PROGRAM_FIELD(*elf_header, *program_header, type)) {
-	case PT_LOAD:
-		status = add_mapping(data->tracee, data->load_info, program_header);
-		if (status < 0)
-			return status;
-		break;
+  switch (PROGRAM_FIELD(*elf_header, *program_header, type)) {
+  case PT_LOAD:
+    status = add_mapping(data->tracee, data->load_info, program_header);
+    if (status < 0)
+      return status;
+    break;
 
-	case PT_INTERP:
-		status = add_interp(data->tracee, data->fd, data->load_info, program_header);
-		if (status < 0)
-			return status;
-		break;
+  case PT_INTERP:
+    status =
+        add_interp(data->tracee, data->fd, data->load_info, program_header);
+    if (status < 0)
+      return status;
+    break;
 
-	case PT_GNU_STACK:
-		data->load_info->needs_executable_stack |=
-			((PROGRAM_FIELD(*elf_header, *program_header, flags) & PF_X) != 0);
-		break;
+  case PT_GNU_STACK:
+    data->load_info->needs_executable_stack |=
+        ((PROGRAM_FIELD(*elf_header, *program_header, flags) & PF_X) != 0);
+    break;
 
-	default:
-		break;
-	}
+  default:
+    break;
+  }
 
-	return 0;
+  return 0;
 }
 
 /**
  * Extract the load info from @load->host_path.  This function returns
  * -errno if an error occured, otherwise it returns 0.
  */
-static int extract_load_info(Tracee *tracee, LoadInfo *load_info)
-{
-	struct add_load_info_data data;
-	int fd = -1;
-	int status;
+static int extract_load_info(Tracee *tracee, LoadInfo *load_info) {
+  struct add_load_info_data data;
+  int fd = -1;
+  int status;
 
-	assert(load_info != NULL);
-	assert(load_info->host_path != NULL);
+  assert(load_info != NULL);
+  assert(load_info->host_path != NULL);
 
-	fd = open_elf(load_info->host_path, &load_info->elf_header);
-	if (fd < 0)
-		return fd;
+  fd = open_elf(load_info->host_path, &load_info->elf_header);
+  if (fd < 0)
+    return fd;
 
-	/* Sanity check.  */
-	switch (ELF_FIELD(load_info->elf_header, type)) {
-	case ET_EXEC:
-	case ET_DYN:
-		break;
+  /* Sanity check.  */
+  switch (ELF_FIELD(load_info->elf_header, type)) {
+  case ET_EXEC:
+  case ET_DYN:
+    break;
 
-	default:
-		status = -EINVAL;
-		goto end;
-	}
+  default:
+    status = -EINVAL;
+    goto end;
+  }
 
-	data.load_info = load_info;
-	data.tracee    = tracee;
-	data.fd        = fd;
+  data.load_info = load_info;
+  data.tracee = tracee;
+  data.fd = fd;
 
-	status = iterate_program_headers(tracee, fd, &load_info->elf_header, add_load_info, &data);
+  status = iterate_program_headers(tracee, fd, &load_info->elf_header,
+                                   add_load_info, &data);
 end:
-	if (fd >= 0)
-		close(fd);
+  if (fd >= 0)
+    close(fd);
 
-	return status;
+  return status;
 }
 
 /**
  * Add @load_base to each adresses of @load_info.
  */
-static void add_load_base(LoadInfo *load_info, word_t load_base)
-{
-	size_t nb_mappings;
-	size_t i;
+static void add_load_base(LoadInfo *load_info, word_t load_base) {
+  size_t nb_mappings;
+  size_t i;
 
-	nb_mappings = talloc_array_length(load_info->mappings);
-	for (i = 0; i < nb_mappings; i++)
-		load_info->mappings[i].addr += load_base;
+  nb_mappings = talloc_array_length(load_info->mappings);
+  for (i = 0; i < nb_mappings; i++)
+    load_info->mappings[i].addr += load_base;
 
-	if (IS_CLASS64(load_info->elf_header))
-		load_info->elf_header.class64.e_entry += load_base;
-	else
-		load_info->elf_header.class32.e_entry += load_base;
+  if (IS_CLASS64(load_info->elf_header))
+    load_info->elf_header.class64.e_entry += load_base;
+  else
+    load_info->elf_header.class32.e_entry += load_base;
 }
 
 /**
@@ -312,47 +307,45 @@ static void add_load_base(LoadInfo *load_info, word_t load_base)
  * objects of @tracee.
  *
  */
-static void compute_load_addresses(Tracee *tracee)
-{
-	if (IS_POSITION_INDENPENDANT(tracee->load_info->elf_header)
-	    && tracee->load_info->mappings[0].addr == 0) {
+static void compute_load_addresses(Tracee *tracee) {
+  if (IS_POSITION_INDENPENDANT(tracee->load_info->elf_header) &&
+      tracee->load_info->mappings[0].addr == 0) {
 #if defined(HAS_LOADER_32BIT)
-		if (IS_CLASS32(tracee->load_info->elf_header))
-			add_load_base(tracee->load_info, EXEC_PIC_ADDRESS_32);
-		else
+    if (IS_CLASS32(tracee->load_info->elf_header))
+      add_load_base(tracee->load_info, EXEC_PIC_ADDRESS_32);
+    else
 #endif
-		add_load_base(tracee->load_info, EXEC_PIC_ADDRESS);
-	}
+      add_load_base(tracee->load_info, EXEC_PIC_ADDRESS);
+  }
 
-	/* Nothing more to do?  */
-	if (tracee->load_info->interp == NULL)
-		return;
+  /* Nothing more to do?  */
+  if (tracee->load_info->interp == NULL)
+    return;
 
-	if (IS_POSITION_INDENPENDANT(tracee->load_info->interp->elf_header)
-	    && tracee->load_info->interp->mappings[0].addr == 0) {
+  if (IS_POSITION_INDENPENDANT(tracee->load_info->interp->elf_header) &&
+      tracee->load_info->interp->mappings[0].addr == 0) {
 #if defined(HAS_LOADER_32BIT)
-		if (IS_CLASS32(tracee->load_info->elf_header))
-			add_load_base(tracee->load_info->interp, INTERP_PIC_ADDRESS_32);
-		else
+    if (IS_CLASS32(tracee->load_info->elf_header))
+      add_load_base(tracee->load_info->interp, INTERP_PIC_ADDRESS_32);
+    else
 #endif
-		add_load_base(tracee->load_info->interp, INTERP_PIC_ADDRESS);
-	}
+      add_load_base(tracee->load_info->interp, INTERP_PIC_ADDRESS);
+  }
 }
 
 /**
  * Get the path to the loader for the given @tracee.  This function
  * returns NULL if an error occurred.
  */
-static inline const char *get_loader_path(const Tracee *tracee)
-{
-	static char *loader_path = NULL;
+static inline const char *get_loader_path(const Tracee *tracee) {
+  static char *loader_path = NULL;
 
-	if (IS_CLASS32(tracee->load_info->elf_header))
-		loader_path = getenv("PROOT_LOADER_32");
-	else
-		loader_path = getenv("PROOT_LOADER");
-	
-	return loader_path;
+  if (IS_CLASS32(tracee->load_info->elf_header))
+    loader_path = getenv("PROOT_LOADER_32");
+  else
+    loader_path = getenv("PROOT_LOADER");
+
+  return loader_path;
 }
 
 /**
@@ -360,311 +353,84 @@ static inline const char *get_loader_path(const Tracee *tracee)
  * translate_load_*().  This function returns -errno if an error
  * occured, otherwise 0.
  */
+int translate_execve_enter(Tracee *tracee) {
+  char user_path[PATH_MAX];
+  char host_path[PATH_MAX];
+  char new_exe[PATH_MAX];
+  const char *loader_path;
+  int status;
 
-#ifndef AT_EMPTY_PATH
-#define AT_EMPTY_PATH 0x1000
-#endif
-#define SHEBANG_MAX 256
-#define SHEBANG_LEVELS 4
+  if (IS_NOTIFICATION_PTRACED_LOAD_DONE(tracee)) {
+    /* Syscalls can now be reported to its ptracer.  */
+    tracee->as_ptracee.ignore_loader_syscalls = false;
 
-/**
- * A tracee executing "/proc/self/fd/N" expects the kernel to open the
- * descriptor before the exec closes it; the loader runs after, so hand
- * it the descriptor's target instead.  Returns -errno on error.
- */
-static int resolve_proc_fd(pid_t pid, char host_path[PATH_MAX])
-{
-	char prefix[32];
-	char *end;
-	long fd;
-	int length;
+    /* Cancel this spurious execve, it was only used as a
+     * notification.  */
+    set_sysnum(tracee, PR_void);
+    return 0;
+  }
 
-	length = snprintf(prefix, sizeof(prefix), "/proc/%d/fd/", pid);
-	if (length < 0 || strncmp(host_path, prefix, length) != 0)
-		return 0;
-	errno = 0;
-	fd = strtol(host_path + length, &end, 10);
-	if (errno != 0 || end == host_path + length || *end != '\0')
-		return 0;
-	return readlink_proc_pid_fd(pid, fd, host_path);
-}
+  status = get_sysarg_path(tracee, user_path, SYSARG_1);
+  if (status < 0)
+    return status;
 
-/**
- * Read the "#!" line of @host_path into @interp and @argument (the rest of
- * the line, one argument as the kernel passes it).  Returns 1 for a script,
- * 0 for anything else, -errno on error.
- */
-static int extract_shebang(const char *host_path, char interp[PATH_MAX],
-			char argument[SHEBANG_MAX])
-{
-	char line[SHEBANG_MAX];
-	char *start, *end, *tail;
-	ssize_t size;
-	int fd;
+  /* Translate this path (user -> host), then check it is executable.  */
+  status = translate_and_check_exec(tracee, host_path, user_path);
+  if (status < 0)
+    return status;
 
-	fd = open(host_path, O_RDONLY);
-	if (fd < 0)
-		return -errno;
-	size = read(fd, line, sizeof(line) - 1);
-	close(fd);
-	if (size < 2 || line[0] != '#' || line[1] != '!')
-		return 0;
-	line[size] = '\0';
-	end = strchr(line, '\n');
-	if (end != NULL)
-		*end = '\0';
+  strcpy(new_exe, host_path);
+  status = detranslate_path(tracee, new_exe, NULL);
+  if (status >= 0) {
+    talloc_unlink(tracee, tracee->new_exe);
+    tracee->new_exe = talloc_strdup(tracee, new_exe);
+  } else
+    tracee->new_exe = NULL;
 
-	start = line + 2;
-	while (*start == ' ' || *start == '\t')
-		start++;
-	end = start;
-	while (*end != '\0' && *end != ' ' && *end != '\t')
-		end++;
-	if (end == start || end - start >= PATH_MAX)
-		return -ENOEXEC;
-	memcpy(interp, start, end - start);
-	interp[end - start] = '\0';
+  talloc_unlink(tracee, tracee->load_info);
 
-	while (*end == ' ' || *end == '\t')
-		end++;
-	tail = end + strlen(end);
-	while (tail > end && (tail[-1] == ' ' || tail[-1] == '\t' || tail[-1] == '\r'))
-		tail--;
-	*tail = '\0';
-	strcpy(argument, end);
-	return 1;
-}
+  tracee->load_info = talloc_zero(tracee, LoadInfo);
+  if (tracee->load_info == NULL)
+    return -ENOMEM;
 
-static word_t push_string(Tracee *tracee, const char *string)
-{
-	size_t size = strlen(string) + 1;
-	word_t address = alloc_mem(tracee, size);
-	if (address == 0 || write_data(tracee, address, string, size) < 0)
-		return 0;
-	return address;
-}
+  tracee->load_info->host_path = talloc_strdup(tracee->load_info, host_path);
+  if (tracee->load_info->host_path == NULL)
+    return -ENOMEM;
 
-/**
- * Replace argv[0] of the current execve with "@interp [@argument] @file",
- * as the kernel does for a script; the rest of argv is kept.  Returns
- * -errno on error, 0 otherwise.
- */
-static int prepend_shebang_argv(Tracee *tracee, const char *interp,
-			const char *argument, const char *file)
-{
-	const size_t max_args = 1 << 16;
-	word_t old_argv = peek_reg(tracee, CURRENT, SYSARG_2);
-	word_t *argv;
-	word_t entry;
-	word_t address;
-	size_t count = 0, head = 0, i;
-	int status;
+  tracee->load_info->user_path = talloc_strdup(tracee->load_info, user_path);
+  if (tracee->load_info->user_path == NULL)
+    return -ENOMEM;
 
-	/* How many entries follow argv[0]?  */
-	if (old_argv != 0) {
-		for (;;) {
-			status = read_data(tracee, &entry, old_argv + sizeof(word_t) * count, sizeof(word_t));
-			if (status < 0)
-				return status;
-			if (entry == 0 || count >= max_args)
-				break;
-			count++;
-		}
-	}
-	/* argv[0] is replaced; keep argv[1..count-1].  */
-	if (count > 0)
-		count--;
+  status = extract_load_info(tracee, tracee->load_info);
+  if (status < 0)
+    return status;
 
-	argv = talloc_array(tracee->ctx, word_t, count + 4);
-	if (argv == NULL)
-		return -ENOMEM;
-
-	argv[head++] = push_string(tracee, interp);
-	if (argument[0] != '\0')
-		argv[head++] = push_string(tracee, argument);
-	argv[head++] = push_string(tracee, file);
-	for (i = 0; i < head; i++)
-		if (argv[i] == 0)
-			return -EFAULT;
-
-	for (i = 0; i < count; i++) {
-		status = read_data(tracee, &argv[head + i], old_argv + sizeof(word_t) * (i + 1), sizeof(word_t));
-		if (status < 0)
-			return status;
-	}
-	argv[head + count] = 0;
-
-	address = alloc_mem(tracee, sizeof(word_t) * (head + count + 1));
-	if (address == 0)
-		return -EFAULT;
-	status = write_data(tracee, address, argv, sizeof(word_t) * (head + count + 1));
-	if (status < 0)
-		return status;
-	poke_reg(tracee, SYSARG_2, address);
-	return 0;
-}
-
-/**
- * Rewrite an execveat(2) into the execve(2) the rest of this file
- * understands: the target becomes SYSARG_1 (named through /proc/self/fd for
- * an fd-relative call, which resolve_proc_fd() then turns into the real
- * path), and argv/envp shift down from SYSARG_3/4 to SYSARG_2/3.
- * Returns -errno on error.
- */
-static int normalize_execveat_enter(Tracee *tracee)
-{
-	char path[PATH_MAX];
-	char rewritten[PATH_MAX];
-	word_t flags;
-	int dirfd;
-	int status;
-
-	dirfd = (int) peek_reg(tracee, CURRENT, SYSARG_1);
-	flags = peek_reg(tracee, CURRENT, SYSARG_5);
-
-	status = get_sysarg_path(tracee, path, SYSARG_2);
-	if (status < 0)
-		return status;
-
-	if (path[0] == '/')
-		status = snprintf(rewritten, sizeof(rewritten), "%s", path);
-	else if (path[0] == '\0' && (flags & AT_EMPTY_PATH) != 0)
-		status = snprintf(rewritten, sizeof(rewritten), "/proc/self/fd/%d", dirfd);
-	else if (dirfd == AT_FDCWD)
-		status = snprintf(rewritten, sizeof(rewritten), "%s", path);
-	else
-		status = snprintf(rewritten, sizeof(rewritten), "/proc/self/fd/%d/%s", dirfd, path);
-	if (status < 0 || (size_t) status >= sizeof(rewritten))
-		return -ENAMETOOLONG;
-
-	status = set_sysarg_path(tracee, rewritten, SYSARG_1);
-	if (status < 0)
-		return status;
-	poke_reg(tracee, SYSARG_2, peek_reg(tracee, CURRENT, SYSARG_3));
-	poke_reg(tracee, SYSARG_3, peek_reg(tracee, CURRENT, SYSARG_4));
-	set_sysnum(tracee, PR_execve);
-	return 0;
-}
-
-int translate_execve_enter(Tracee *tracee)
-{
-	char user_path[PATH_MAX];
-	char host_path[PATH_MAX];
-	char new_exe[PATH_MAX];
-	const char *loader_path;
-	int status;
-
-	if (IS_NOTIFICATION_PTRACED_LOAD_DONE(tracee)) {
-		/* Syscalls can now be reported to its ptracer.  */
-		tracee->as_ptracee.ignore_loader_syscalls = false;
-
-		/* Cancel this spurious execve, it was only used as a
-		 * notification.  */
-		set_sysnum(tracee, PR_void);
-		return 0;
-	}
-
-	if (get_sysnum(tracee, ORIGINAL) == PR_execveat) {
-		status = normalize_execveat_enter(tracee);
-		if (status < 0)
-			return status;
-	}
-
-	status = get_sysarg_path(tracee, user_path, SYSARG_1);
-	if (status < 0)
-		return status;
-
-    /* Translate this path (user -> host), then check it is executable.  */
-    status = translate_and_check_exec(tracee, host_path, user_path);
+  if (tracee->load_info->interp != NULL) {
+    status = extract_load_info(tracee, tracee->load_info->interp);
     if (status < 0)
-        return status;
+      return status;
 
-	status = resolve_proc_fd(tracee->pid, host_path);
-	if (status < 0)
-		return status;
+    /* An ELF interpreter is supposed to be
+     * standalone.  */
+    if (tracee->load_info->interp->interp != NULL) {
+      TALLOC_FREE(tracee->load_info->interp->interp);
+      return -EINVAL;
+    }
+  }
 
-	/* A "#!" script reaches the kernel as-is through the loader and fails
-	 * with ENOEXEC; do what the kernel would: run its interpreter with argv
-	 * rewritten, up to a few levels of interpreters.  */
-	{
-		char interp[PATH_MAX];
-		char argument[SHEBANG_MAX];
-		int level;
+  compute_load_addresses(tracee);
 
-		for (level = 0; level < SHEBANG_LEVELS; level++) {
-			status = extract_shebang(host_path, interp, argument);
-			if (status < 0)
-				return status;
-			if (status == 0)
-				break;
-			status = prepend_shebang_argv(tracee, interp, argument, user_path);
-			if (status < 0)
-				return status;
-			strcpy(user_path, interp);
-			status = translate_and_check_exec(tracee, host_path, user_path);
-			if (status < 0)
-				return status;
-			status = resolve_proc_fd(tracee->pid, host_path);
-			if (status < 0)
-				return status;
-		}
-		if (level == SHEBANG_LEVELS)
-			return -ELOOP;
-	}
+  /* Execute the loader instead of the program.  */
+  loader_path = get_loader_path(tracee);
+  if (loader_path == NULL)
+    return -ENOENT;
 
-	strcpy(new_exe, host_path);
-	status = detranslate_path(tracee, new_exe, NULL);
-	if (status >= 0) {
-		talloc_unlink(tracee, tracee->new_exe);
-		tracee->new_exe = talloc_strdup(tracee, new_exe);
-	}
-	else
-		tracee->new_exe = NULL;
+  status = set_sysarg_path(tracee, loader_path, SYSARG_1);
+  if (status < 0)
+    return status;
 
-	talloc_unlink(tracee, tracee->load_info);
+  /* Mask to its ptracer syscalls performed by the loader.  */
+  tracee->as_ptracee.ignore_loader_syscalls = true;
 
-	tracee->load_info = talloc_zero(tracee, LoadInfo);
-	if (tracee->load_info == NULL)
-		return -ENOMEM;
-
-	tracee->load_info->host_path = talloc_strdup(tracee->load_info, host_path);
-	if (tracee->load_info->host_path == NULL)
-		return -ENOMEM;
-
-	tracee->load_info->user_path = talloc_strdup(tracee->load_info, user_path);
-	if (tracee->load_info->user_path == NULL)
-		return -ENOMEM;
-
-	status = extract_load_info(tracee, tracee->load_info);
-	if (status < 0)
-		return status;
-
-	if (tracee->load_info->interp != NULL) {
-		status = extract_load_info(tracee, tracee->load_info->interp);
-		if (status < 0)
-			return status;
-
-		/* An ELF interpreter is supposed to be
-		 * standalone.  */
-		if (tracee->load_info->interp->interp != NULL) {
-			TALLOC_FREE(tracee->load_info->interp->interp);
-			return -EINVAL;
-		}
-	}
-
-	compute_load_addresses(tracee);
-
-	/* Execute the loader instead of the program.  */
-	loader_path = get_loader_path(tracee);
-	if (loader_path == NULL)
-		return -ENOENT;
-
-	status = set_sysarg_path(tracee, loader_path, SYSARG_1);
-	if (status < 0)
-		return status;
-
-	/* Mask to its ptracer syscalls performed by the loader.  */
-	tracee->as_ptracee.ignore_loader_syscalls = true;
-
-	return 0;
+  return 0;
 }
