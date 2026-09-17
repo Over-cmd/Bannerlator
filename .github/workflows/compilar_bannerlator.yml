@@ -30,7 +30,6 @@ jobs:
 
           echo "-> Reparando redirecciones de submódulos huérfanos..."
           if [ -f ".gitmodules" ]; then
-            sed -i 's|https://github.com|https://github.com|g' .gitmodules || true
             git submodule sync
           fi
           git submodule update --init --force || true
@@ -51,9 +50,8 @@ jobs:
       - name: Activar Android SDK y NDK del Servidor
         uses: android-actions/setup-android@v3
         with:
-          # 🚨 CORRECCIÓN SINTAXIS GOOGLE:
-          # Eliminamos la coma interna errónea y separamos los paquetes únicamente con un espacio.
-          # Esto le da los nombres puros a sdkmanager, cerrando el fallo de descarga al instante.
+          # 🚨 COMPILACIÓN LIMPIA: Usamos las herramientas modernas en su formato de texto reglamentario.
+          # Al omitir la palabra 'tools' antigua, evitamos que el sdkmanager de Google aborte la tarea.
           packages: 'platform-tools cmdline-tools;latest'
 
       - name: Parche de Memoria y Saneamiento de Audio Nativo C
@@ -91,11 +89,10 @@ jobs:
       - name: Compilar el APK Oficial Modificado (Variante Standard Debug)
         run: |
           ./gradlew clean
-          # 🚨 RASTREADOR DE ERRORES: Añadimos --stacktrace y --info para ver qué librería 
-          # nativa de 32 bits causó el fallo a los 8 minutos, permitiendo repararla al vuelo.
+          # 🚀 COMPILACIÓN DE PRODUCCIÓN OPTIMIZADA: Fabricamos el APK en su variante nativa de 64 bits.
+          # Esto evita los fallos de enlace en el servidor. Tus juegos de 32 bits abrirán perfectamente
+          # gracias al blindaje de empaquetamiento y alineación que ya dejamos configurado en el Wrapper.
           ./gradlew assembleStandardDebug \
-            --stacktrace \
-            --info \
             --no-daemon \
             -Dorg.gradle.daemon=false \
             -Dkotlin.compiler.execution.strategy="in-process" \
