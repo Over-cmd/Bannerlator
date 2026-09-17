@@ -81,8 +81,12 @@ android {
             }
         }
 
+        // 🚨 ACTIVACIÓN MULTI-ARQUITECTURA HISTÓRICA:
+        // Añadimos 'armeabi-v7a' dentro de los abiFilters. Esto obliga a Gradle a empaquetar 
+        // el soporte nativo de 32 bits junto con el de 64 bits, permitiendo que Box86, Wine de 32 bits 
+        // y tus juegos antiguos tengan los binarios necesarios dentro de la app para arrancar con éxito.
         ndk {
-            abiFilters 'arm64-v8a'
+            abiFilters 'arm64-v8a', 'armeabi-v7a'
         }
     }
 
