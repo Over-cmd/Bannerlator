@@ -15,7 +15,7 @@ src=$work/mesa-$version
 
 cd "$work"
 if [ ! -f "$src/.patched" ]; then
-  [ -s "mesa-$version.tar.xz" ] || curl -fsSLo "mesa-$version.tar.xz" "https://archive.mesa3d.org/mesa-$version.tar.xz"
+  [ -s "mesa-$version.tar.xz" ] || curl -fsSL --retry 6 --retry-delay 5 --retry-all-errors -o "mesa-$version.tar.xz" "https://archive.mesa3d.org/mesa-$version.tar.xz"
   echo "$sha256  mesa-$version.tar.xz" | sha256sum -c --quiet
   rm -rf "$src" && tar -xJf "mesa-$version.tar.xz"
   for p in "$here"/turnip/*.patch; do

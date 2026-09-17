@@ -23,7 +23,7 @@ mkdir -p "$work/db" "$work/pkgs" "$work/rootfs"
 cd "$work"
 
 for repo in core extra alarm; do
-  [ -s "db/$repo.db" ] || curl -fsSLo "db/$repo.db" "$mirror/$repo/$repo.db"
+  [ -s "db/$repo.db" ] || curl -fsSL --retry 6 --retry-delay 5 --retry-all-errors -o "db/$repo.db" "$mirror/$repo/$repo.db"
   mkdir -p "db/x_$repo"
   tar -xzf "db/$repo.db" -C "db/x_$repo"
 done
@@ -76,12 +76,12 @@ while read -r entry; do
   # A mirror error page is not a package; fetch again rather than fail at extraction.
   if ! tar -tf "pkgs/$file" >/dev/null 2>&1; then
     rm -f "pkgs/$file"
-    curl -fsSLo "pkgs/$file" "$mirror/$entry"
+    curl -fsSL --retry 6 --retry-delay 5 --retry-all-errors -o "pkgs/$file" "$mirror/$entry"
     tar -tf "pkgs/$file" >/dev/null
   fi
 done < pkglist.txt
 
-[ -s base.tar.gz ] || curl -fsSLo base.tar.gz "$base_url"
+[ -s base.tar.gz ] || curl -fsSL --retry 6 --retry-delay 5 --retry-all-errors -o base.tar.gz "$base_url"
 
 rm -rf rootfs && mkdir rootfs
 # The base tarball is owned by root:root with device nodes; extracted unprivileged it becomes
@@ -106,7 +106,7 @@ rm -f rootfs/usr/share/vulkan/icd.d/nvidia_icd.json
 # Debian's build links only sonames the rootfs has, so its two libraries are enough.
 gtk2_deb=libgtk2.0-0t64_2.24.33-7_arm64.deb
 gtk2_sha=28b2f1622197443f07f25a93e03db1a964184946ac12f501b8221c895026d0ca
-[ -s "pkgs/$gtk2_deb" ] || curl -fsSLo "pkgs/$gtk2_deb" "http://deb.debian.org/debian/pool/main/g/gtk+2.0/$gtk2_deb"
+[ -s "pkgs/$gtk2_deb" ] || curl -fsSL --retry 6 --retry-delay 5 --retry-all-errors -o "pkgs/$gtk2_deb" "http://deb.debian.org/debian/pool/main/g/gtk+2.0/$gtk2_deb"
 echo "$gtk2_sha  pkgs/$gtk2_deb" | sha256sum -c --quiet
 rm -rf gtk2 && mkdir gtk2 && (cd gtk2 && ar x "../pkgs/$gtk2_deb" && tar -xf data.tar.*)
 for n in gtk gdk; do
