@@ -83,6 +83,16 @@
 >
 > **Then, in order:** dedicated GameScope container the way Max does it (normal creation from the newest Proton, then `runtime=gamescope`); rootfs **r2** (session-script logging is only in the repo, not r1); shared Steam library (bind our downloads into `steamapps/`); controllers (fake evdev); Runtime row in the container editor.
 
+### Evening, home: the proot blocker bisected to the NDK
+
+> New-proot APK (`d4b538ab`, WinNative's tree) installed and launched: **identical failure** — `execve("/usr/bin/env"): Function not implemented`, `ptrace(PEEKDATA): I/O error`, `Bad address`. So the source was never the problem.
+>
+> **Bisect as root, cross-pairing binaries:** Termux's proot + **our** loader → runs. **Our** proot + Termux's loader → fails. Termux + Termux → runs. The loader is fine; **our `libproot.so` binary is what's broken.** Same source, different build: **we build with NDK 29 (`29.0.14206865`), WinNative with NDK 27 (`27.3.13750724`)**; CMake flags otherwise identical. Our binary also has no `process_vm_*` linked (Termux's does), so every tracee memory access goes through `PTRACE_PEEKDATA` — exactly the path that dies. The symptom triple reads as a mangled syscall number at `execve` (ENOSYS), then garbage register/memory reads (EIO, EFAULT).
+>
+> **Fix in flight:** `build-proot.yml` builds proot on its own with NDK 27 (`nttld/setup-ndk r27c`, android-26, arm64-v8a) → run `35280875827`. A/B plan: drop the built `libproot.so`/loader into the installed app's `lib/arm64/` as root (dir is root-writable, `system:system` 755, `apk_data_file`) and relaunch — minutes per iteration instead of a 30-minute app build. If it runs, proot ships as prebuilt jniLibs pinned to NDK 27 and leaves the app's CMake.
+>
+> Max's `main`-branch CI artifacts predate the gamescope branch (no proot in them), so no shortcut from his APK.
+
 ### Phase 1 — proot in the build (`ba0a5786`)
 
 > The tree had been sitting in `cpp/proot` unused since the old Xvfb Steam attempt, absent from `CMakeLists.txt`. Our copy is an older base than his and is CRLF/tab-formatted, so his diffs do not apply; the changes were ported by hand.
