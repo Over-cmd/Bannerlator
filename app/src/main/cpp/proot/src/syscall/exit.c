@@ -345,6 +345,7 @@ void translate_syscall_exit(Tracee *tracee)
 	}
 
 	case PR_execve:
+	case PR_execveat:
 		translate_execve_exit(tracee);
 		return;
 
