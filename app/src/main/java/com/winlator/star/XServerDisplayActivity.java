@@ -8480,9 +8480,18 @@ public class XServerDisplayActivity extends AppCompatActivity {
         guest.add("BL_WIDTH=" + xServer.screenInfo.width);
         guest.add("BL_HEIGHT=" + xServer.screenInfo.height);
         guest.add("BL_FPS=" + (resolvedFpsLimiterEnabled() ? Math.max(0, resolvedFpsLimiterValue()) : 0));
-        File logDir = new File(getExternalFilesDir(null), "wayland-logs");
+        // Debug logging until the runtime is stable: every launch gets its own file under the
+        // public Downloads folder — the whole session (proot, gamescope, Steam stdout) goes in it,
+        // and the script copies Steam's own logs beside it at exit — so a user can hand over a
+        // folder without digging into app-private storage.
+        File logDir = com.winlator.star.linux.LinuxRuntime.debugLogDir();
         logDir.mkdirs();
-        guest.add("BL_LOG=" + new File(logDir, "linux-session.log").getPath());
+        String stamp = new java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US)
+                .format(new java.util.Date());
+        File sessionLog = new File(logDir, "session-" + stamp + ".log");
+        guest.add("BL_LOG=" + sessionLog.getPath());
+        guest.add("BL_DEBUG_DIR=" + new File(logDir, "session-" + stamp).getPath());
+        Log.i("XServerDisplayActivity", "Linux session log: " + sessionLog.getPath());
         guest.add(com.winlator.star.linux.LinuxRuntime.SESSION_SCRIPT);
         guest.addAll(session);
 

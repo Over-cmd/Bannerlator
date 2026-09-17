@@ -33,6 +33,13 @@ public final class LinuxRuntime {
     /** Shortcut extra naming which of the modes above a Linux entry launches. */
     public static final String EXTRA_LINUX_MODE = "linux_mode";
     private static final String KGSL_DEVICE = "/dev/kgsl-3d0";
+    /** Where every Linux session's debug log lands: public, so a user can just hand the folder over. */
+    public static final String DEBUG_LOG_DIR = "Bannerlator-LinuxSteam";
+
+    public static File debugLogDir() {
+        return new File(android.os.Environment.getExternalStoragePublicDirectory(
+                android.os.Environment.DIRECTORY_DOWNLOADS), DEBUG_LOG_DIR);
+    }
 
     private LinuxRuntime() {}
 

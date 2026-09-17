@@ -10,9 +10,25 @@ export HOME=${HOME:-/root}
 mode=${1:-desktop}
 shift || true
 if [ -n "${BL_LOG:-}" ] && [ -z "${BL_INSIDE:-}" ]; then
+  mkdir -p "$(dirname "$BL_LOG")" 2>/dev/null
   exec >>"$BL_LOG" 2>&1
   echo "== bannerlator-session $(date) mode=$mode $*"
+  echo "== uid=$(id -u) size=${BL_WIDTH:-?}x${BL_HEIGHT:-?} fps=${BL_FPS:-0} icd=${VK_ICD_FILENAMES:-none}"
+  echo "== gamescope: $(gamescope --version 2>&1 | head -1)"
+  echo "== rootfs: $(cat /.version 2>/dev/null || echo unversioned)"
 fi
+
+# Until the runtime is stable, Steam's own logs are copied beside the session log at exit so a
+# failed launch can be handed over as one folder.
+collect_steam_logs() {
+  [ -n "${BL_DEBUG_DIR:-}" ] || return 0
+  local steam_root=${XDG_DATA_HOME:-$HOME/.local/share}/Steam
+  mkdir -p "$BL_DEBUG_DIR" 2>/dev/null || return 0
+  [ -d "$steam_root/logs" ] && cp -r "$steam_root/logs" "$BL_DEBUG_DIR/steam-logs" 2>/dev/null
+  [ -f "$HOME/.steam/steam/logs/steamwebhelper.log" ] && cp "$HOME/.steam/steam/logs/steamwebhelper.log" "$BL_DEBUG_DIR/" 2>/dev/null
+  [ -f "$steam_root/steam.pid" ] && cp "$steam_root/steam.pid" "$BL_DEBUG_DIR/" 2>/dev/null
+  echo "== steam logs copied to $BL_DEBUG_DIR"
+}
 export XDG_DATA_HOME=${XDG_DATA_HOME:-$HOME/.local/share}
 export XDG_CONFIG_HOME=${XDG_CONFIG_HOME:-$HOME/.config}
 export XDG_CACHE_HOME=${XDG_CACHE_HOME:-$HOME/.cache}
@@ -71,6 +87,8 @@ case $mode in
         -no-cef-sandbox -cef-force-gpu -cef-ozone-platform=x11 \
         -cef-use-gl=angle -cef-use-angle=vulkan "$@"
       rc=$?
+      echo "== steam exited rc=$rc"
+      collect_steam_logs
       [ "$rc" -eq 42 ] || exit "$rc"
     done
     ;;
