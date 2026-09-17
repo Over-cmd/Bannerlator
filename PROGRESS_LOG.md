@@ -16,6 +16,20 @@
 > - **Two compositor gaps, both ones Max hit first.** `compositor.c:1154` has `.set_fullscreen = xdg_toplevel_noop_parent`, so we never send the configure gamescope waits for before dropping its libdecor frame; and `compositor.c:428` keeps one pointer resource per seat, where gamescope holds two pointer/keyboard pairs and reads input on the second. Both are correctness bugs in our xdg-shell and seat handling that any client could hit, so they belong on the Wayland line regardless. Phase 2.
 > - **The GPU situation on the Pocket FIT is the same as on his tablet.** `/dev/dri/card0` and `renderD128` exist at mode 0666 but are labelled `u:object_r:graphics_device:s0`, which stock policy does not grant `untrusted_app`; `/dev/kgsl-3d0` is `gpu_device`, which it does. So presenting KGSL as `/dev/dri/renderD<n>`, faking the `/sys/dev/char` entries libdrm reads, and keeping a PRIME handle table are needed here too. Phase 3.
 
+### Phases 2–5 in flight
+
+> **Phase 1 gate passed.** CI `35261996392` green on all three flavors: proot compiles, links its freestanding loader and packages as a jniLib.
+>
+> **Phase 2 (`594943c7`).** Both compositor fixes landed. `set_fullscreen`/`unset_fullscreen` now reconfigure with the fullscreen state (gamescope draws nothing until it sees it) and a toplevel's first configure goes through the same path. Every seat delivery — enter/leave, motion, buttons, axis, keys — walks all of a client's `wl_pointer`/`wl_keyboard` objects instead of the first; gamescope holds two pairs and reads input on the second. **This changes input delivery on the live Wayland path, so it wants a regression check on device.**
+>
+> **Phases 3–4 assets (`a8110ffa`).** `tools/linuxfs` ported and renamed (`bannerlator-session`, `libblsession.so`, `BL_*`, `/etc/bannerlator/`), carrying Max's corrected lsof answer. `build-linuxfs.yml` assembles the rootfs on an Ubuntu runner and fails the job if gamescope, Xwayland, the Turnip build, the preload, the session scripts or GTK 2 are missing. `workflow_dispatch` only works for a file already on the default branch, so while this lives on its own branch the job runs on pushes that touch it.
+>
+> First rootfs run resolved **297 packages**, extracted the base, applied the Turnip KGSL patch, and died at meson: Ubuntu ships 1.3.2 and Mesa 26.2 wants >= 1.4. Taking meson from pip instead.
+>
+> **Phase 4 wiring (`1a716976`).** `Container` carries a Runtime (`wine` / `gamescope`), overridable per shortcut. Choosing gamescope pins the backend to Wayland and **bypasses the Wayland layer check** — that check asks whether the selected Proton layer ships `winewayland.so`, and a gamescope session has no Wine in it at all. `setupXEnvironment` hands the session over before any Wine component is built.
+>
+> **Phase 5 (in progress).** `LinuxRuntimeInstaller` downloads the rootfs from a catalog row, checks its sha256, unpacks to a staging directory and swaps it in, so a failed install cannot leave a half runtime that `isInstalled()` would launch. It carries its own extractor rather than the shared one: a distribution rootfs is full of **hard links**, which the shared extractor writes as empty files.
+
 ### Phase 1 — proot in the build (`ba0a5786`)
 
 > The tree had been sitting in `cpp/proot` unused since the old Xvfb Steam attempt, absent from `CMakeLists.txt`. Our copy is an older base than his and is CRLF/tab-formatted, so his diffs do not apply; the changes were ported by hand.
