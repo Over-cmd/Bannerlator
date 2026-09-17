@@ -73,8 +73,10 @@
 >
 > **On the device right now:** APK `8072b875` installed (old proot — will fail at the first exec until the new APK is staged); rootfs r1 at `files/linuxfs` as the app uid with the Valve client (933 MB) inside and `.steam` links fixed; session script already patched with the Downloads logging; shortcuts `Steam (Linux)` + `Linux Desktop` in container 8; `/sdcard/Download/Bannerlator-LinuxSteam/` exists.
 >
-> **Resume sequence (needs internet for step 1 only):**
-> 1. `gh run download 35274984079 -p "*pubg*"` → `cp` to `/sdcard/Download/` → user installs → confirm sha over the bridge.
+> **Update 17:27:** run `35274984079` green; APK **staged** at `/sdcard/Download/Bannerlator-gamescope-proot3-pubg.apk` (534,905,828 B, sha256 `6107345bae4161caa9e7701614b9dbc4238739c1df71af966fc91b247e9b5d21`, headSha `d4b538ab`; both proot libs in, loader `EXEC` at `0x2000000000`). Not installed yet — **no internet needed to resume.**
+>
+> **Resume sequence:**
+> 1. Install that APK → confirm sha over the bridge.
 > 2. `am start -n com.tencent.ig/com.winlator.star.XServerDisplayActivity --ei container_id 8 --es shortcut_path "/data/data/com.tencent.ig/files/imagefs/home/xuser-8/.wine/drive_c/users/xuser/Desktop/Linux Desktop.desktop"` → expect pcmanfm under gamescope. Log: `/sdcard/Download/Bannerlator-LinuxSteam/session-*.log`; proot stderr is in the session pid's logcat under `System.out`.
 > 3. Same with `Steam (Linux).desktop` → client updates itself (exit 42 loop) → gamepad UI → sign in.
 > 4. Upload the 752 MB asset: `gh release create linuxfs-r1 /sdcard/Download/linuxfs-r1.tar.zst#linuxfs.tar.zst -R The412Banner/winlator-contents …` — **`linuxfs.json` is already live and points at it**, so the in-app Install fails for everyone else until this lands.
