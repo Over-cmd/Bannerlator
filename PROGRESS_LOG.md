@@ -67,6 +67,20 @@
 >
 > Max's five new commits reviewed: the two proot fixes (now in via the swap); a fake evdev input layer for controllers, `steam-library`/`steam-compat` scripts and a Proton compat tool for running Windows games through Proton+FEX inside the session — all follow-ups, none needed for the client to come up.
 
+### ⏸️ CHECKPOINT 2026-09-17 ~17:20 — paused until the user is home (no Wi-Fi at work)
+
+> **State of the branch** `feat/linux-gamescope-runtime` @ `d4b538ab` (+ log commits), all pushed. Cloud build **`35274984079`** = the APK with **WinNative's proot tree swapped in wholesale** — the fix for the only blocker found on device. It builds without us; the artifact is downloaded when there is internet again.
+>
+> **On the device right now:** APK `8072b875` installed (old proot — will fail at the first exec until the new APK is staged); rootfs r1 at `files/linuxfs` as the app uid with the Valve client (933 MB) inside and `.steam` links fixed; session script already patched with the Downloads logging; shortcuts `Steam (Linux)` + `Linux Desktop` in container 8; `/sdcard/Download/Bannerlator-LinuxSteam/` exists.
+>
+> **Resume sequence (needs internet for step 1 only):**
+> 1. `gh run download 35274984079 -p "*pubg*"` → `cp` to `/sdcard/Download/` → user installs → confirm sha over the bridge.
+> 2. `am start -n com.tencent.ig/com.winlator.star.XServerDisplayActivity --ei container_id 8 --es shortcut_path "/data/data/com.tencent.ig/files/imagefs/home/xuser-8/.wine/drive_c/users/xuser/Desktop/Linux Desktop.desktop"` → expect pcmanfm under gamescope. Log: `/sdcard/Download/Bannerlator-LinuxSteam/session-*.log`; proot stderr is in the session pid's logcat under `System.out`.
+> 3. Same with `Steam (Linux).desktop` → client updates itself (exit 42 loop) → gamepad UI → sign in.
+> 4. Upload the 752 MB asset: `gh release create linuxfs-r1 /sdcard/Download/linuxfs-r1.tar.zst#linuxfs.tar.zst -R The412Banner/winlator-contents …` — **`linuxfs.json` is already live and points at it**, so the in-app Install fails for everyone else until this lands.
+>
+> **Then, in order:** dedicated GameScope container the way Max does it (normal creation from the newest Proton, then `runtime=gamescope`); rootfs **r2** (session-script logging is only in the repo, not r1); shared Steam library (bind our downloads into `steamapps/`); controllers (fake evdev); Runtime row in the container editor.
+
 ### Phase 1 — proot in the build (`ba0a5786`)
 
 > The tree had been sitting in `cpp/proot` unused since the old Xvfb Steam attempt, absent from `CMakeLists.txt`. Our copy is an older base than his and is CRLF/tab-formatted, so his diffs do not apply; the changes were ported by hand.
