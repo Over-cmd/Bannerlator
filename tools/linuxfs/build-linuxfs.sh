@@ -96,7 +96,10 @@ while read -r entry; do
     --exclude=.PKGINFO --exclude=.MTREE --exclude=.INSTALL --exclude=.BUILDINFO --exclude=.CHANGELOG
 done < pkglist.txt
 
-chmod -R u+w rootfs
+# Everything is read and written as one unprivileged user, here and on the device: a package that
+# ships a setuid helper without owner read (dbus-daemon-launch-helper) would otherwise fail the
+# final tar after the whole build.
+chmod -R u+rwX rootfs
 # Arch's Turnip only knows the msm DRM kernel driver; Android reaches the Adreno through KGSL.
 # build-turnip.sh cross-builds Mesa's Turnip with the KGSL backend against this rootfs.
 "$here/build-turnip.sh" "$work/turnip" "$work/rootfs"
@@ -138,6 +141,7 @@ printf 'root:x:0:\n' > rootfs/etc/group
 # GSettings schemas and the font cache. Only these run from the rootfs, under qemu.
 proot -q "$(command -v qemu-aarch64-static)" -r rootfs -w / -b /dev -b /proc /bin/bash -c '
   export PATH=/usr/bin:/bin
+  mkdir -p /usr/lib/gdk-pixbuf-2.0/2.10.0
   update-mime-database /usr/share/mime
   gdk-pixbuf-query-loaders --update-cache
   glib-compile-schemas /usr/share/glib-2.0/schemas
