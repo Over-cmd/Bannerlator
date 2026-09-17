@@ -95,8 +95,12 @@ public final class LinuxRuntimeInstaller {
         File archive = new File(context.getCacheDir(), "linuxfs.tar.zst");
         try {
             if (listener != null) listener.onProgress("Downloading", 0);
-            boolean ok = Downloader.downloadFile(release.url, archive, true, (progress) -> {
-                if (listener != null) listener.onProgress("Downloading", progress);
+            // Downloader reports a 0..1 fraction, or -1 while the total size is unknown.
+            boolean ok = Downloader.downloadFile(release.url, archive, true, (fraction) -> {
+                if (listener != null) {
+                    listener.onProgress("Downloading",
+                            fraction < 0 ? -1 : Math.round(fraction * 100f));
+                }
             });
             if (!ok) {
                 Log.w(TAG, "download failed");

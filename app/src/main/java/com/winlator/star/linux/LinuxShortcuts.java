@@ -3,6 +3,7 @@ package com.winlator.star.linux;
 import android.util.Log;
 
 import com.winlator.star.container.Container;
+import com.winlator.star.container.Shortcut;
 import com.winlator.star.core.FileUtils;
 
 import java.io.File;
@@ -21,8 +22,12 @@ public final class LinuxShortcuts {
 
     public static final String STEAM_NAME = "Steam (Linux)";
     private static final String STEAM_FILE = "Steam (Linux).desktop";
-    /** Exec is never run as written — the runtime decides — but the library needs a stable value. */
-    private static final String STEAM_EXEC = "linux:steam";
+    /**
+     * Exec is never run as written — the Linux runtime decides what to launch from the extras
+     * below. It keeps the "wine " prefix every other shortcut has because {@link Shortcut} derives
+     * its {@code path} by cutting at that prefix, and an entry without it gets a mangled path.
+     */
+    private static final String STEAM_EXEC = "wine linux:steam";
 
     private LinuxShortcuts() {}
 
