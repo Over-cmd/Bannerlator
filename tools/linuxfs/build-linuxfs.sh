@@ -19,7 +19,7 @@ base_url=http://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz
 seeds=(gamescope mesa vulkan-freedreno xorg-xwayland xorg-xhost xorg-xrandr vulkan-tools wayland-utils
   mesa-utils foot pcmanfm unzip dbus libpulse nss libnm curl ca-certificates fontconfig freetype2
   bash coreutils grep sed gawk which findutils glib2 libglvnd ibus libxcomposite libxdamage libxrandr
-  wayland wayland-protocols libxcb libxshmfence
+  wayland wayland-protocols libxcb libxshmfence xkeyboard-config xorg-xkbcomp
   libxtst libxi ttf-dejavu openal libvdpau lsof)
 
 mkdir -p "$work/db" "$work/pkgs" "$work/rootfs"
