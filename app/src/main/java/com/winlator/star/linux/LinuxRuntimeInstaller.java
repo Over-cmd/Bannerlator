@@ -164,7 +164,7 @@ public final class LinuxRuntimeInstaller {
              TarArchiveInputStream tar = new TarArchiveInputStream(in)) {
             TarArchiveEntry entry;
             String base = destination.getCanonicalPath() + File.separator;
-            while ((entry = tar.getNextEntry()) != null) {
+            while ((entry = tar.getNextTarEntry()) != null) {
                 File file = new File(destination, entry.getName());
                 // Refuse anything that would land outside the runtime directory.
                 if (!(file.getCanonicalPath() + (entry.isDirectory() ? File.separator : "")).startsWith(base)
