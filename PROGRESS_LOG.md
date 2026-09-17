@@ -1,5 +1,33 @@
 # Star-Compose — Progress Log
 
+## 2026-09-17 — Linux runtime: gamescope + native ARM Steam, phase 1 (branch `feat/linux-gamescope-runtime`)
+
+> **What this is.** A second runtime beside Wine: a glibc aarch64 rootfs (`linuxfs`) run under proot, with Valve's **gamescope** as a Wayland client of our own compositor, Xwayland on Zink for X11 programs, and Valve's **native aarch64** Linux Steam client. No Wine, no box64, no FEX — the client is a real arm64 ELF. Modelled on Max's WinNative `feature/wayland-gamescope`; both repos are GPL-3.0, so his `tools/linuxfs` and preloads are adaptable with attribution.
+>
+> **Product shape (user's call).** `linuxfs` ships the way the Steam client does — a catalog row users opt into, which the app downloads, extracts and installs, leaving a permanent **Steam (Linux)** entry in the Games tab. It is a separate track from Wayland, but it runs on the Wayland compositor.
+>
+> **Phases.** 1 a Linux ELF runs as our uid · 2 gamescope composites into our surface · 3 the GPU (glibc Turnip, KGSL presented as a DRM node) · 4 Steam · 5 the download/install product.
+
+### What was checked before writing anything
+
+> - `targetSdkVersion 28` keeps us in `untrusted_app_27`, the last SELinux domain allowed to exec a file out of `files/`. **Raising it ends this approach.**
+> - `abiFilters 'arm64-v8a'` with `useLegacyPackaging = true`, so `add_executable(lib*.so)` is packaged and extracted like any other jniLib — which is how proot and its loader ship.
+> - **Our compositor already advertises every global gamescope's Wayland backend demands** (it aborts if one is missing): `wl_compositor` 6, `wl_subcompositor`, `wl_shm`, `xdg_wm_base`, `zwp_linux_dmabuf_v1` 4, `wp_viewporter`, `wp_presentation` 2, relative-pointer, pointer-constraints, `wl_seat` 5, `wl_output` 2.
+> - **Two compositor gaps, both ones Max hit first.** `compositor.c:1154` has `.set_fullscreen = xdg_toplevel_noop_parent`, so we never send the configure gamescope waits for before dropping its libdecor frame; and `compositor.c:428` keeps one pointer resource per seat, where gamescope holds two pointer/keyboard pairs and reads input on the second. Both are correctness bugs in our xdg-shell and seat handling that any client could hit, so they belong on the Wayland line regardless. Phase 2.
+> - **The GPU situation on the Pocket FIT is the same as on his tablet.** `/dev/dri/card0` and `renderD128` exist at mode 0666 but are labelled `u:object_r:graphics_device:s0`, which stock policy does not grant `untrusted_app`; `/dev/kgsl-3d0` is `gpu_device`, which it does. So presenting KGSL as `/dev/dri/renderD<n>`, faking the `/sys/dev/char` entries libdrm reads, and keeping a PRIME handle table are needed here too. Phase 3.
+
+### Phase 1 — proot in the build (`ba0a5786`)
+
+> The tree had been sitting in `cpp/proot` unused since the old Xvfb Steam attempt, absent from `CMakeLists.txt`. Our copy is an older base than his and is CRLF/tab-formatted, so his diffs do not apply; the changes were ported by hand.
+>
+> - `add_subdirectory(proot)`, and the loader relinked as a **freestanding flat binary** at `LOADER_ADDRESS` (`0x2000000000` on arm64, matching `--image-base`), named `libproot-loader.so` so the installer places it beside `libproot.so`.
+> - `statx` translated like the other `*at` syscalls — glibc stats through it — with the wrinkle that its `AT_` flags are in arg 3, not arg 4, and kept off the seccomp fast path so it reaches the tracer at all.
+> - The **whole `set*id` family** answered inside proot. Android's app seccomp policy traps them; our tree already answered `setresuid`/`setresgid`, but not `setuid`/`setgid`/`setreuid`/`setregid`/`setfsuid`/`setfsgid`, which Xwayland's xkbcomp and the X access control call. Without privileges a process may only take an id it already holds, so the answer is known without the kernel.
+> - `PROOT_NO_SECCOMP` disables the accelerator, which otherwise hides syscalls from the tracer while debugging.
+>
+> CI run `35261996392`, headSha verified `ba0a5786`. This gate is *compiles*, nothing more — no rootfs exists yet, so nothing has been run on device.
+
+
 ## 2026-09-16 — Fix: a physical stick bound to mouse movement now moves the cursor (branch `fix/physical-lane-mouse-move`)
 
 > **Bug (user):** in the drawer's *Physical Controller Test / Bind*, binding the right stick to mouse up/down/left/right did not move the Windows mouse or the on-screen cursor.
