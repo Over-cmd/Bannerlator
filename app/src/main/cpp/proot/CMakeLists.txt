@@ -2,7 +2,14 @@ cmake_minimum_required(VERSION 3.22.1)
 
 project(PRoot)
 
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O2 -Wno-unused-function -Wimplicit-function-declaration")
+# _GNU_SOURCE is not optional here. bionic guards process_vm_readv, process_vm_writev and pipe2
+# behind __USE_GNU, which only _GNU_SOURCE defines, and proot reads and writes the traced process's
+# memory through the first two. Without it they compile as undeclared functions, which C assumes
+# return int - so on a 64-bit target their results are truncated and every exec through proot dies
+# with "Bad address". minSdkVersion 26 clears the API 23 guard on those symbols.
+#
+# An implicit declaration is therefore an error, not a warning: it is how this broke silently once.
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O2 -Wno-unused-function -D_GNU_SOURCE -Werror=implicit-function-declaration")
 
 add_library(talloc STATIC
             talloc/talloc.c)
