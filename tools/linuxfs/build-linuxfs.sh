@@ -120,6 +120,36 @@ for n in gtk gdk; do
   ln -sfn "lib$n-x11-2.0.so.0.2400.33" "rootfs/usr/lib/lib$n-x11-2.0.so.0"
 done
 
+# Proton ships its own GStreamer plugins but not the libraries they link against, and Arch's are all
+# too new to satisfy them: nettle 4.0 gives libnettle.so.9 (wanted .8), libtheora 1.2.0 gives
+# libtheoradec.so.2 (wanted .1), libvpx 1.17 gives libvpx.so.12 (wanted .9). Without these the HLS,
+# theora and vpx plugins fail to load and anything that plays video through Proton's media stack -
+# the EA app's onboarding, in-game intro movies - silently has no decoder. Same trick as the GTK 2
+# fetch above: take the exact sonames from a distro that still ships them.
+gst_debs="
+libnettle8_3.8.1-2_arm64.deb c945ff210df69cf7b95e935b8fa936e81c1c1f475355e3d5db83510b174f0cd6 https://deb.debian.org/debian/pool/main/n/nettle/libnettle8_3.8.1-2_arm64.deb
+libtheora0_1.1.1+dfsg.1-16.1build3_arm64.deb 78ebaa1c851465dac9e13532623a4e41d28ed55f3df0353daf7c29d96a2e2b87 http://ports.ubuntu.com/ubuntu-ports/pool/main/libt/libtheora/libtheora0_1.1.1+dfsg.1-16.1build3_arm64.deb
+libvpx9_1.14.0-1ubuntu2_arm64.deb 809bf0d9435520793838a99072ca365ab23956def3583c3b8b4e253135d8e9f4 http://ports.ubuntu.com/ubuntu-ports/pool/main/libv/libvpx/libvpx9_1.14.0-1ubuntu2_arm64.deb
+"
+rm -rf gstlibs && mkdir gstlibs
+# A here-string, not a pipe: a pipeline's loop body runs in a subshell, where a failed
+# sha256sum -c would not abort the build and the guard would be decorative.
+while read -r deb sha url; do
+  [ -n "$deb" ] || continue
+  [ -s "pkgs/$deb" ] || curl -fsSL --retry 6 --retry-delay 5 --retry-all-errors -o "pkgs/$deb" "$url"
+  echo "$sha  pkgs/$deb" | sha256sum -c --quiet
+  (cd gstlibs && ar x "../pkgs/$deb" && tar -xf data.tar.* && rm -f data.tar.* control.tar.* debian-binary)
+done <<< "$gst_debs"
+# Copy the real objects and re-create the soname symlinks the loader actually resolves.
+find gstlibs/usr/lib -maxdepth 2 -name '*.so.*' -type f -exec cp -a {} rootfs/usr/lib/ \;
+for so in rootfs/usr/lib/libnettle.so.8.* rootfs/usr/lib/libtheoradec.so.1.* rootfs/usr/lib/libtheoraenc.so.1.* \
+          rootfs/usr/lib/libtheora.so.0.* rootfs/usr/lib/libvpx.so.9.*; do
+  [ -f "$so" ] || continue
+  base=$(basename "$so")
+  ln -sfn "$base" "rootfs/usr/lib/$(echo "$base" | sed -E 's/(\.so\.[0-9]+).*/\1/')"
+done
+ls -l rootfs/usr/lib/libnettle.so.8 rootfs/usr/lib/libtheoradec.so.1 rootfs/usr/lib/libvpx.so.9
+
 cp -a "$here/overlay/." rootfs/
 # Preloaded into every session process: what the kernel or the app sandbox withholds, answered
 # in the process itself; see preload/*.c.
