@@ -6716,6 +6716,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // Abnormal teardown (no exit() worker ran): never leave the app's Steam session suspended.
         // Non-blocking — the reconnect is posted to the CM pump. No-op unless a real-Steam launch
         // suspended it this session.
+        linuxSessionWatchStop = true;
         releaseRealSteamSession("activity destroyed", 0L);
         clearOfflineSteamPresence("activity destroyed");
         // Hide the drawer's Friends tab source + leave any in-game chat thread (the full Friends
@@ -8469,34 +8470,84 @@ public class XServerDisplayActivity extends AppCompatActivity {
             "com.xiaoji.egggame",     // GameHub
     };
 
-    /** Package names from {@link #COMPETING_STEAM_CLIENTS} that currently have a live process. */
-    private java.util.List<String> runningCompetingSteamClients() {
+    /**
+     * Which of {@link #COMPETING_STEAM_CLIENTS} are installed. Installed, not running: since
+     * Android 7 {@code getRunningAppProcesses()} returns only the caller's own processes, so a
+     * process check can never see another app (tested - GameHub with two live processes went
+     * unnoticed). {@code getPackageInfo} is fine at targetSdk 28, which predates package-visibility
+     * filtering.
+     */
+    private java.util.List<String> installedCompetingSteamClients() {
         java.util.List<String> out = new java.util.ArrayList<>();
-        try {
-            android.app.ActivityManager am =
-                    (android.app.ActivityManager) getSystemService(ACTIVITY_SERVICE);
-            java.util.List<android.app.ActivityManager.RunningAppProcessInfo> procs =
-                    am == null ? null : am.getRunningAppProcesses();
-            if (procs == null) return out;
-            for (android.app.ActivityManager.RunningAppProcessInfo p : procs) {
-                for (String pkg : COMPETING_STEAM_CLIENTS) {
-                    if (p.processName != null && p.processName.startsWith(pkg) && !out.contains(pkg)) out.add(pkg);
-                }
-            }
-        } catch (Throwable ignore) {}
+        for (String pkg : COMPETING_STEAM_CLIENTS) {
+            try { getPackageManager().getPackageInfo(pkg, 0); out.add(pkg); }
+            catch (Throwable ignore) {}
+        }
         return out;
     }
 
+    private static String competingClientName(String pkg) {
+        return "com.xiaoji.egggame".equals(pkg) ? "GameHub" : pkg;
+    }
+
+    private volatile boolean linuxSessionWatchStop = false;
+
+    /**
+     * The check that actually works, because it reads the symptom rather than guessing at the
+     * cause: the runtime's Steam client writes {@code 'Session Replaced'} to its own connection log
+     * the moment another client takes the account, and that file is ours to read. Watch the bytes
+     * appended after the session starts for a few minutes and say so plainly the first time it
+     * happens - naming the installed app if there is one, and catching apps this code has never
+     * heard of otherwise. Off the launch path; stops with the activity.
+     */
+    private void watchLinuxSteamForSessionReplaced() {
+        final File log = new File(com.winlator.star.linux.LinuxRuntime.rootDir(this),
+                "root/.local/share/Steam/logs/connection_log.txt");
+        final long startLen = log.isFile() ? log.length() : 0L;
+        linuxSessionWatchStop = false;
+        Thread t = new Thread(() -> {
+            long offset = startLen;
+            long deadline = System.currentTimeMillis() + 4 * 60 * 1000L;
+            while (!linuxSessionWatchStop && System.currentTimeMillis() < deadline) {
+                try { Thread.sleep(5000); } catch (InterruptedException e) { return; }
+                if (!log.isFile()) continue;
+                long len = log.length();
+                if (len < offset) offset = 0;              // rotated
+                if (len == offset) continue;
+                try (java.io.RandomAccessFile raf = new java.io.RandomAccessFile(log, "r")) {
+                    raf.seek(offset);
+                    byte[] buf = new byte[(int) Math.min(len - offset, 512 * 1024)];
+                    int got = raf.read(buf);
+                    offset = len;
+                    if (got <= 0) continue;
+                    String chunk = new String(buf, 0, got, java.nio.charset.StandardCharsets.UTF_8);
+                    if (chunk.contains("Session Replaced")) {
+                        java.util.List<String> installed = installedCompetingSteamClients();
+                        String hint = installed.isEmpty()
+                                ? "another app on this device is signed into your Steam account. Close it and launch again."
+                                : "close " + competingClientName(installed.get(0)) + " - it is signed into your Steam account too - and launch again.";
+                        Log.w("BH_REALSTEAM", "Linux Steam client was signed out ('Session Replaced'); installed rivals: " + installed);
+                        runOnUiThread(() -> showToast(this, "Steam signed the Linux client out: " + hint));
+                        return;
+                    }
+                } catch (Throwable ignore) {}
+            }
+        }, "LinuxSteamSessionWatch");
+        t.setDaemon(true);
+        t.start();
+    }
+
     private void suspendAppSteamForLinuxSession() {
-        // Warn about the clients we cannot stop before holding the one we can.
-        java.util.List<String> rivals = runningCompetingSteamClients();
+        // Warn about the clients we cannot stop before holding the one we can. Installed is the
+        // most a normal app can know; the watcher below catches the actual sign-out.
+        java.util.List<String> rivals = installedCompetingSteamClients();
         if (!rivals.isEmpty()) {
-            String who = rivals.contains("com.xiaoji.egggame") ? "GameHub" : rivals.get(0);
-            Log.w("BH_REALSTEAM", "competing Steam client running: " + rivals
-                    + " - it will sign the Linux client out after every login");
-            runOnUiThread(() -> showToast(this, who + " is signed into Steam too and will keep "
-                    + "signing the Linux client out. Close " + who + " first."));
+            String who = competingClientName(rivals.get(0));
+            Log.w("BH_REALSTEAM", "competing Steam client installed: " + rivals);
+            runOnUiThread(() -> showToast(this, "If " + who + " is open, close it first - it signs "
+                    + "into your Steam account and will sign the Linux client out."));
         }
+        watchLinuxSteamForSessionReplaced();
         if (realSteamSessionHeld) return;
         try {
             SteamRepository.getInstance().suspendForRealSteam();
