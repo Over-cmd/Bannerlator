@@ -9,6 +9,15 @@ is how they reach a device without an app reinstall being able to replace them.
     libtalloc.so.2    proot links against it; shipped under its SONAME, which is what the loader
                       asks for. A file called libtalloc.so is one it will never find.
 
+⚠️ **These are Termux's published binaries, not our build — deliberately.** Our build of the same
+fork starts fine but breaks GTK inside the runtime: the first icon a GTK client loads aborts the
+process and takes the session with it (`Gtk:ERROR ... ensure_surface_for_gicon`, preceded by a
+`bwrap` invocation). A/B on device, same rootfs, same app: ours aborts twice per session, Termux's
+zero. The cause is that Termux builds with `PROOT_WITH_LIBANDROID_SHMEM=true` against
+`libandroid-shmem`, routing System V shared memory — which Android does not have — through it.
+`build-proot.yml` now does the same; **swap these for our own artifact once a build with that change
+is verified on device.**
+
 Built by `.github/workflows/build-proot.yml` from
 <https://github.com/termux/proot> `v5.1.107.92` with the NDK, against Termux's own talloc, with
 `RUNPATH $ORIGIN` so libtalloc is found beside proot. The copies here come from that workflow and
