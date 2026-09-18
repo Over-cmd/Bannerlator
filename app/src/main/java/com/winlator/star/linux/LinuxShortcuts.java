@@ -30,6 +30,12 @@ public final class LinuxShortcuts {
      * its {@code path} by cutting at that prefix, and an entry without it gets a mangled path.
      */
     private static final String STEAM_EXEC = "wine linux:steam";
+    /**
+     * The Games tab draws a card from {@code Icon=} resolved under the container's hicolor dirs,
+     * not from the cover art - that one only reaches the launch screen. Both are the same image
+     * here, written to both places.
+     */
+    private static final String ICON_NAME = "steam-linux";
 
     private LinuxShortcuts() {}
 
@@ -62,16 +68,36 @@ public final class LinuxShortcuts {
             Log.w(TAG, "cannot create " + dir);
             return "";
         }
+        return copyTile(context, out) ? out.getPath() : "";
+    }
+
+    private static File iconFile(Container container) {
+        return new File(container.getIconsDir(64), ICON_NAME + ".png");
+    }
+
+    /** Copies the tile into the container's icon dir. Returns false if it could not be written. */
+    private static boolean writeIcon(Context context, Container container) {
+        File out = iconFile(container);
+        if (out.isFile()) return true;
+        File dir = out.getParentFile();
+        if (dir != null && !dir.isDirectory() && !dir.mkdirs()) {
+            Log.w(TAG, "cannot create " + dir);
+            return false;
+        }
+        return copyTile(context, out);
+    }
+
+    private static boolean copyTile(Context context, File out) {
         try (java.io.InputStream in = context.getResources().openRawResource(
                      com.winlator.star.R.drawable.steam_tile);
              java.io.OutputStream os = new java.io.FileOutputStream(out)) {
             byte[] buf = new byte[8192];
             for (int n; (n = in.read(buf)) > 0; ) os.write(buf, 0, n);
+            return true;
         } catch (Exception e) {
-            Log.w(TAG, "could not write the tile for " + STEAM_NAME, e);
-            return "";
+            Log.w(TAG, "could not write " + out, e);
+            return false;
         }
-        return out.getPath();
     }
 
     public static boolean createSteamShortcut(Container container) {
@@ -84,8 +110,10 @@ public final class LinuxShortcuts {
             Log.w(TAG, "cannot create " + desktopDir);
             return false;
         }
+        boolean haveIcon = context != null && writeIcon(context, container);
         String content = "[Desktop Entry]\n"
                 + "Name=" + STEAM_NAME + "\n"
+                + (haveIcon ? "Icon=" + ICON_NAME + "\n" : "")
                 + "Exec=" + STEAM_EXEC + "\n"
                 + "Type=Application\n"
                 + "StartupWMClass=gamescope\n"
@@ -121,14 +149,41 @@ public final class LinuxShortcuts {
      * generic placeholder for good. The bitmap is decoded here too: the path alone would only
      * show up on the load after next.
      */
-    public static void ensureCoverArt(Context context, Shortcut shortcut) {
+    public static void ensureArt(Context context, Shortcut shortcut) {
         if (context == null || !isLinuxEntry(shortcut)) return;
+
         String current = shortcut.getCustomCoverArtPath();
-        if (current != null && !current.isEmpty() && new File(current).isFile()) return;
-        String cover = writeCoverArt(context);
-        if (cover.isEmpty()) return;
-        shortcut.setCustomCoverArtPath(cover);
-        shortcut.setCoverArt(BitmapFactory.decodeFile(cover));
+        if (current == null || current.isEmpty() || !new File(current).isFile()) {
+            String cover = writeCoverArt(context);
+            if (!cover.isEmpty()) {
+                shortcut.setCustomCoverArtPath(cover);
+                shortcut.setCoverArt(BitmapFactory.decodeFile(cover));
+            }
+        }
+
+        if (shortcut.icon != null || shortcut.container == null) return;
+        if (!writeIcon(context, shortcut.container)) return;
+        addIconLine(shortcut.file);
+        shortcut.icon = BitmapFactory.decodeFile(iconFile(shortcut.container).getPath());
+    }
+
+    /**
+     * Adds {@code Icon=} to an entry that has none. It cannot go through {@code putExtra}: that
+     * writes the [Extra Data] section, and the card reads the [Desktop Entry] one.
+     */
+    private static void addIconLine(File desktop) {
+        StringBuilder out = new StringBuilder();
+        boolean inserted = false;
+        for (String line : FileUtils.readLines(desktop)) {
+            if (line.trim().startsWith("Icon=")) return;
+            out.append(line).append('\n');
+            if (!inserted && line.trim().startsWith("Name=")) {
+                out.append("Icon=").append(ICON_NAME).append('\n');
+                inserted = true;
+            }
+        }
+        if (!inserted) return;
+        FileUtils.writeString(desktop, out.toString());
     }
 
     public static boolean removeSteamShortcut(Container container) {
