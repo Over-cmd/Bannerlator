@@ -8230,6 +8230,40 @@ public class XServerDisplayActivity extends AppCompatActivity {
         waylandSurfaceView.setOnTouchListener((v, ev) -> {
             int vw = v.getWidth(), vh = v.getHeight();
             if (vw <= 0 || vh <= 0) return true;
+            // Touchscreen mode (the same "touchscreen_toggle" X11 uses): every finger goes to the
+            // guest as a real wl_touch sequence with its own id, so a game gets multi-touch instead
+            // of one synthesised mouse. The touchpad cursor is not used in this mode.
+            if (waylandTouchscreenMode()) {
+                int act = ev.getActionMasked();
+                if (waylandCursorView != null && waylandCursorView.getVisibility() != View.GONE)
+                    waylandCursorView.setVisibility(View.GONE);
+                switch (act) {
+                    case android.view.MotionEvent.ACTION_DOWN:
+                    case android.view.MotionEvent.ACTION_POINTER_DOWN: {
+                        int i = ev.getActionIndex();
+                        waylandSendFinger(com.winlator.star.wayland.WaylandCompositor.TOUCH_DOWN,
+                                ev.getPointerId(i), ev.getX(i), ev.getY(i), vw, vh);
+                        break;
+                    }
+                    case android.view.MotionEvent.ACTION_MOVE:
+                        for (int i = 0; i < ev.getPointerCount(); i++)
+                            waylandSendFinger(com.winlator.star.wayland.WaylandCompositor.TOUCH_MOVE,
+                                    ev.getPointerId(i), ev.getX(i), ev.getY(i), vw, vh);
+                        break;
+                    case android.view.MotionEvent.ACTION_UP:
+                    case android.view.MotionEvent.ACTION_POINTER_UP: {
+                        int i = ev.getActionIndex();
+                        waylandSendFinger(com.winlator.star.wayland.WaylandCompositor.TOUCH_UP,
+                                ev.getPointerId(i), ev.getX(i), ev.getY(i), vw, vh);
+                        break;
+                    }
+                    case android.view.MotionEvent.ACTION_CANCEL:
+                        com.winlator.star.wayland.WaylandCompositor.sendTouch(
+                                com.winlator.star.wayland.WaylandCompositor.TOUCH_CANCEL, 0, 0, 0);
+                        break;
+                }
+                return true;
+            }
             if (waylandCursorX < 0) { waylandCursorX = vw / 2f; waylandCursorY = vh / 2f; }
             switch (ev.getActionMasked()) {
                 case android.view.MotionEvent.ACTION_DOWN:
@@ -8418,6 +8452,20 @@ public class XServerDisplayActivity extends AppCompatActivity {
         if (waylandVsyncRunning) return;
         waylandVsyncRunning = true;
         android.view.Choreographer.getInstance().postFrameCallback(waylandVsyncCallback);
+    }
+
+    /** Touchscreen mode: fingers go to the guest as wl_touch. Shared with X11's setting. */
+    private boolean waylandTouchscreenMode() {
+        SharedPreferences sp = preferences != null ? preferences
+                : PreferenceManager.getDefaultSharedPreferences(this);
+        return sp != null && sp.getBoolean("touchscreen_toggle", false);
+    }
+
+    /** One finger to the compositor, view pixels -> output space (the same mapping the pointer uses). */
+    private void waylandSendFinger(int action, int id, float x, float y, int vw, int vh) {
+        int ox = (int) (Math.max(0f, Math.min(vw, x)) / vw * 1920f);
+        int oy = (int) (Math.max(0f, Math.min(vh, y)) / vh * 1080f);
+        com.winlator.star.wayland.WaylandCompositor.sendTouch(action, id, ox, oy);
     }
 
     private void updateWaylandCursor(int vw, int vh, int action) {
