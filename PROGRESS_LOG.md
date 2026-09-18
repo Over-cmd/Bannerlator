@@ -8,6 +8,26 @@
 >
 > **Phases.** 1 a Linux ELF runs as our uid · 2 gamescope composites into our surface · 3 the GPU (glibc Turnip, KGSL presented as a DRM node) · 4 Steam · 5 the download/install product.
 
+### 2026-09-18 — Half-Life launches: three games, three rendering paths
+
+> `hl.exe` at 348 MB resident, `[Gamescope WSI] Executable name: hl.exe`, swapchain 13.88 ms, HUD
+> **OpenGL 66.9 fps / 14.9 ms**. GoldSrc renders in OpenGL, so it runs Wine WGL → Zink → Vulkan →
+> Turnip rather than DXVK — a third rendering path proven, alongside Brawlhalla and Stumble Guys
+> (both DXVK, ~72 fps).
+>
+> **It went through its Windows build, not the Linux one.** A native-Linux title that also ships a
+> Windows build can take the ordinary Proton path and skip every native-Linux problem — but the
+> platform switch is only reachable from the client UI: *Properties → Compatibility → Force the use
+> of a specific Steam Play compatibility tool → **Proton (ARM64)***. Setting a per-app
+> CompatToolMapping, writing `platform_override_source "windows"` into the app manifest, and driving
+> `steam://validate` and `steam://install` were all tried and measured: Steam honoured the Proton
+> mapping and built a `compatdata/70` prefix, but never fetched the Windows depot. Once the UI toggle
+> was used it downloaded `hl.exe`, `hlds.exe` and `hltv.exe` and launched straight away.
+>
+> The native-Linux work still matters for titles Valve ships only as Linux builds — CS:S and HL2
+> among them — and its last blocker is measured: `shmget`/`semget`/`msgget` return ENOSYS in the
+> guest, so the System V shim now builds for i686 and x86_64 as well.
+
 ### 2026-09-18 — r1 uploaded, r2 cut and live; native-Linux games root-caused
 
 > **The runtime is downloadable.** The missing 789,000,670 B asset is uploaded to the `linuxfs-r1`
