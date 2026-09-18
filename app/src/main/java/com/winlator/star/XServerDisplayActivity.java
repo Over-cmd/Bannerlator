@@ -8527,7 +8527,13 @@ public class XServerDisplayActivity extends AppCompatActivity {
                         if (sp > 0) msg = msg.substring(sp + 1).trim();
                         if (!msg.isEmpty()) last = msg;
                     }
-                    if (last != null && preloaderDialog != null) preloaderDialog.stepOnUiThread(2, last);
+                    // ONLY while the preloader is genuinely up. PreloaderState.step() re-creates a
+                    // hidden preloader ("_ui.value ?: PreloaderUi()") and forces phase=SETUP, so
+                    // stepping after it closed resurrects it permanently over the running session -
+                    // which is exactly what happened: Steam was up and audible behind a stuck
+                    // "starting the Steam client" card. Once it is gone, so is this watcher.
+                    if (preloaderDialog == null || !preloaderDialog.isShowing()) return;
+                    if (last != null) preloaderDialog.stepOnUiThread(2, last);
                 } catch (Throwable ignore) {}
             }
         }, "LinuxFirstRunProgress");
