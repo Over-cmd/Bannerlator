@@ -8500,6 +8500,11 @@ public class XServerDisplayActivity extends AppCompatActivity {
         EnvVars hostEnv = new EnvVars();
         hostEnv.put("PROOT_LOADER", com.winlator.star.linux.LinuxRuntime.prootLoader(this).getPath());
         hostEnv.put("PROOT_TMP_DIR", getCacheDir().getPath());
+        // The runtime's proot links against a libtalloc that sits beside it. Android's linker does
+        // not search a plain executable's own directory, so it has to be named here or the process
+        // dies before it starts, with the reason only in `logcat -b crash`.
+        String prootLibs = com.winlator.star.linux.LinuxRuntime.prootLibraryPath(this);
+        if (!prootLibs.isEmpty()) hostEnv.put("LD_LIBRARY_PATH", prootLibs);
 
         // The games this app already downloaded, handed to the Steam client as a library folder so
         // the same install serves both launchers and nothing is fetched twice.

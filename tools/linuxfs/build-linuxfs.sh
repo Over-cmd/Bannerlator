@@ -143,6 +143,14 @@ done
 # This script has cd'd into the work dir, so only it knows where both of those actually are.
 mkdir -p "$(dirname "$out")/guest-shims"
 cp rootfs/usr/local/lib/libblsysv-*.so "$(dirname "$out")/guest-shims/"
+# proot and its loader are Android/bionic binaries: they are not part of this rootfs, they are what
+# creates it. They ride along in the tarball so that installing the runtime delivers them, which
+# keeps an app reinstall from replacing the one binary the whole runtime depends on. See
+# prebuilt/proot/README.md for why they are prebuilt and for the licence and source pointers.
+mkdir -p rootfs/opt/android-host
+cp -a "$here"/prebuilt/proot/proot "$here"/prebuilt/proot/loader \
+      "$here"/prebuilt/proot/libtalloc.so.2 "$here"/prebuilt/proot/README.md rootfs/opt/android-host/
+chmod 755 rootfs/opt/android-host/proot rootfs/opt/android-host/loader
 mkdir -p rootfs/dev rootfs/proc rootfs/sys rootfs/tmp rootfs/root rootfs/run/user
 chmod 1777 rootfs/tmp
 # The dynamic loader takes its search path from here; ldconfig cannot run without the target CPU.
