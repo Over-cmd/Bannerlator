@@ -42,6 +42,7 @@ jobs:
             proot qemu-user-static \
             gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
             gcc-i686-linux-gnu gcc-x86-64-linux-gnu \
+            libc6-dev-i386-cross libc6-dev-amd64-cross \
             ninja-build pkg-config glslang-tools bison flex cmake \
             libwayland-dev libwayland-bin wayland-protocols libexpat1-dev
           # Ubuntu ships meson 1.3; Mesa 26.2 needs >= 1.4, so take it from pip.
