@@ -21,6 +21,9 @@ import shutil
 import sys
 
 TOOL = "bannerlator-proton-arm64"
+# The client lists its own "Proton Experimental (ARM64)" and "Proton 11.0 (ARM64)" in the same
+# Compatibility dropdown, and those are the two that cannot start a game here. Ours has to be
+# unmistakable at a glance, or a user picks a neighbour and gets a launch that fails silently.
 # Newest first: whichever the client has downloaded is used.
 SOURCES = ("Proton Experimental (ARM64)", "Proton 11.0 (ARM64)")
 # Written by us; everything else in the depot is symlinked through.
@@ -37,7 +40,7 @@ COMPAT_TOOL_VDF = """"compatibilitytools"
 		"%s"
 		{
 			"install_path" "."
-			"display_name" "Proton (ARM64)"
+			"display_name" "Bannerlator Proton (ARM64)"
 			"from_oslist" "windows"
 			"to_oslist" "linux"
 		}
