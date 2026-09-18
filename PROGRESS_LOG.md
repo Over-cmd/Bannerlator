@@ -1,5 +1,383 @@
 # Star-Compose — Progress Log
 
+## 2026-09-17 — Linux runtime: gamescope + native ARM Steam, phase 1 (branch `feat/linux-gamescope-runtime`)
+
+> **What this is.** A second runtime beside Wine: a glibc aarch64 rootfs (`linuxfs`) run under proot, with Valve's **gamescope** as a Wayland client of our own compositor, Xwayland on Zink for X11 programs, and Valve's **native aarch64** Linux Steam client. No Wine, no box64, no FEX — the client is a real arm64 ELF. Modelled on Max's WinNative `feature/wayland-gamescope`; both repos are GPL-3.0, so his `tools/linuxfs` and preloads are adaptable with attribution.
+>
+> **Product shape (user's call).** `linuxfs` ships the way the Steam client does — a catalog row users opt into, which the app downloads, extracts and installs, leaving a permanent **Steam (Linux)** entry in the Games tab. It is a separate track from Wayland, but it runs on the Wayland compositor.
+>
+> **Phases.** 1 a Linux ELF runs as our uid · 2 gamescope composites into our surface · 3 the GPU (glibc Turnip, KGSL presented as a DRM node) · 4 Steam · 5 the download/install product.
+
+### 2026-09-18 — r4: the first runtime that installs without root
+
+> `linuxfs-r4` is live: sha256 `26cfa553...`, 789,167,503 B, catalog repointed, download URL
+> verified 200 with a matching content-length. Before publishing, the tarball was listed to confirm
+> it really carries `opt/android-host/{proot,loader,libtalloc.so.2}` with their exec bits.
+>
+> The proot in it is built by this project from the Termux fork `v5.1.107.92`. That closes a problem
+> that turned out to be older than this branch: the copy in the app comes from an old snapshot of
+> upstream proot 5.1.0 and cannot exec anything on a current Android, so **no released build has ever
+> been able to start the runtime** - every working install had been patched by hand. Two things had
+> to be true at once to see it. The workflow that builds the fork already existed and was already
+> right about the source, but it shipped talloc as `libtalloc.so` when the name recorded in NEEDED
+> comes from the SONAME, `libtalloc.so.2`; and nothing consumed its artifact, so the good binary was
+> built and discarded on every run while the apk compiled the dead tree.
+>
+> Carrying proot in the runtime rather than the apk also fixes the shape of the problem: it is no
+> longer the one binary an app update replaces, which is exactly how a working device was broken
+> earlier tonight.
+>
+> What this unblocks is the part that matters: a device nobody has touched can now install the
+> runtime and run it. That is the precondition for testing on a second device, which is the real
+> validation and has not happened yet.
+
+### 2026-09-18 — the _GNU_SOURCE theory was wrong; proot is still broken
+
+> `9e2b2c44` defined `_GNU_SOURCE` and made implicit declarations an error, on the theory that
+> undeclared `process_vm_readv`/`process_vm_writev` were having their 64-bit returns truncated. The
+> build came out clean - no "call to undeclared" warnings at all - and **the packaged proot fails
+> exactly as before**. The commit is worth keeping, because those functions should be declared, but
+> it is not the fix and the log should not pretend otherwise.
+>
+> This was caught by testing the binary in isolation, pulled straight out of the APK and run through
+> the bridge, before installing anything. That is the right order and it is how it should be done
+> from now on: the previous round installed first and cost an hour of recovery.
+>
+> What is actually established. Bisection puts the defect in **our proot binary, not our loader**: a
+> working proot paired with our loader runs fine, while our proot fails with either loader, so the
+> 2,416-byte loader is correct and judging it by size was a mistake. A verbose run shows proot
+> resolving its bindings, the executable and argv correctly and failing only at the execve step where
+> it injects the loader into the traced process. Our binary is 126,696 bytes against a working
+> 214,416, and our source tree has no `extension/` directory where the upstream one does, so the
+> CMake build compiles a subset of proot's sources - worth checking whether something the Android
+> execve path needs simply is not built in.
+>
+> Two ways forward, neither chosen: work out what Termux patches into proot for Android and apply it
+> here, or ship a known-good proot build instead of ours. The second is faster but is a licensing and
+> provenance decision rather than a technical one.
+
+### 2026-09-18 — the packaged proot is broken, and it blocks every fresh user
+
+> Installing the new APK on the test device stopped the runtime from starting at all: the session
+> activity opened and exited within a second, no session log, nothing in logcat. The reason only
+> appears in the **crash buffer**, which is worth remembering for any future "it exits instantly":
+>
+> ```
+> CANNOT LINK EXECUTABLE ".../libproot-real.so": library "libtalloc.so.2" not found
+> ```
+>
+> Behind that is the real problem. **`build-proot.yml` produces a broken proot**: its freestanding
+> loader comes out at 2,416 bytes where a working one is 18,136. proot starts, prints its banner and
+> dies. Every session that has ever worked on this device worked because the device was running a
+> hand-patched proot taken from Termux, and installing an APK overwrites it. Both the new APK and the
+> older one it was rolled back to ship the same broken pair, so this is not a regression from this
+> branch - it has been true all along and was masked by the patch.
+>
+> **No shipped APK can start the Linux runtime.** That makes it the first thing to fix, ahead of
+> anything else on this track: r3 and the automatic Proton selection cannot reach a fresh user until
+> proot builds correctly. The device patch and the exact restore steps are written down in memory,
+> including the two details that are easy to miss - Termux's proot is dynamically linked against
+> libtalloc, and Android's linker will not search the app's own library directory for a plain
+> executable, so the wrapper has to export LD_LIBRARY_PATH.
+
+### 2026-09-18 — r3 live, APK staged: the fresh-user path is complete
+
+> **`linuxfs-r3` is live and verified**: sha256 `38f116b4...`, 788,991,458 B, `linuxfs.json`
+> repointed at it, and the download URL returns 200 with a matching content-length. r3 is the first
+> runtime that selects the ARM64 Proton by itself, so a user no longer points each title at a
+> compatibility tool by hand.
+>
+> **The APK is built and staged** as `Bannerlator-3.1.2-linuxsteam-pubg.apk` (sha256 `a0187ec8...`,
+> versionCode 85, unchanged). It carries the frame-counter fix and the real
+> `-i Process.myUid()` proot invocation, which retires the hand-written `libproot.so` wrapper with a
+> hardcoded uid that had been sitting on the test device.
+>
+> That completes the path for someone starting from nothing: install the APK, install the Linux
+> Runtime from Contents, open Steam (Linux) from the Games tab, sign in, install a game, launch it.
+> **Neither artifact has been device-tested yet.** The two things to watch on the first run are the
+> frame counter reading real numbers on a Source title, and games starting without the Compatibility
+> box being touched. A game currently installed as a Linux build will re-download its Windows depot
+> once on that first session.
+>
+> The rootfs run that produced r3 reports as failed, and it is worth knowing why: the tarball built
+> and uploaded at step 6, and only the extra step that collects the guest shims failed afterwards,
+> because it looked for the rootfs in the workspace while the build script cds into RUNNER_TEMP. The
+> script now places those shims beside the tarball itself.
+
+### 2026-09-18 — picking Proton automatically, the frame counter, and where VAC stands
+
+> **Users should not have to tick the Compatibility box per game.** The `"0"` mapping is the
+> client's "Steam Play for all other titles" and only decides how a title is *installed*, so it
+> settles new downloads and leaves anything already installed as a Linux build running as one -
+> which is exactly why Half-Life stayed on `hl_linux` until that box was ticked by hand. Ticking it
+> writes a per-app entry at priority 250, and that is what moves a title across. So the registrar now
+> writes one per installed title, skipping the client's own tools and runtimes by app id. The first
+> session after this costs a Windows-depot download for each game currently installed as Linux.
+>
+> **The frame counter was blind, not broken.** The HUD read `0.0 fps / 1000.0ms` on the Source titles
+> while GPU load and power draw moved correctly. `take_dmabuf` only ever receives GPU buffers, so
+> every buffer reaching it is a presented frame - but the counter also asked whether the compositor
+> had imported the buffer or whether it carried a gralloc handle. That is a question about the copy
+> path, not about whether a frame happened, and a game whose buffers go straight to the display layer
+> satisfies neither. The surface-binding code four lines above already had the right rule written
+> down. Needs an APK to verify on device.
+>
+> **A packaging bug of my own broke the rootfs build**: the guest-shim loop wrote each shim to `$out`,
+> which already held the path of the tarball the script produces, so the final `zstd -o "$out"` wrote
+> a 1.31 GiB archive into `libblsysv-x86_64.so` while tar was reading that directory. Both shims had
+> compiled correctly; only packaging was broken.
+>
+> **VAC is open and instrumented.** Counter-Strike: Source launches but drops to insecure mode.
+> Nothing passes `-insecure` - `localconfig.vdf` had no launch options at all - and Steam integration
+> is healthy: the game reports `CClientSteamContext logged on = 1`, with Proton's real
+> `steamclient.dll` and `steamclient64.dll` in the prefix. So VAC itself is declining. `-condebug` is
+> now set for the app, and the log gave the verdict at connect: `Connecting to
+> 104.167.215.199:27015...` followed by `You are in insecure mode.  You must restart before you can
+> connect to secure servers.` "You must restart" means the session started insecure - VAC never
+> initialised at process start, before a server was ever chosen.
+>
+> Everything under our control is correct, so what is left is whether Valve's ARM Linux client can
+> hand a Proton game the Windows VAC module at all. That reads as a gap in the ARM client rather than
+> anything in this runtime, and it fits the app's SteamLite path working: that one runs the *Windows*
+> Steam client inside the same prefix, where a Windows VAC module loads natively, while here Steam is
+> an aarch64 Linux process outside it. Going further would mean reverse-engineering anti-cheat
+> plumbing, so this stops here; the answer is to offer both paths and send VAC-secured multiplayer to
+> SteamLite.
+>
+> The same log turned up something separate worth its own look: `Network: IP 127.0.0.1` - the game
+> enumerated only loopback as its local address. Not fatal, since the server browser works and it
+> reached the server, but that is the `net` preload's interface enumeration and it could bite real
+> multiplayer.
+
+### 2026-09-18 — four games playable, and what the screenshots prove
+
+> Brawlhalla, Stumble Guys, Half-Life and **Half-Life 2**, all through the native Linux Steam client.
+> HL2 is genuinely being played, not sitting on a menu: City 17, crowbar out, HEALTH 100 / SUIT 30,
+> Vulkan, GPU 62-71%.
+>
+> Two results worth more than the launches themselves. **Half-Life's server browser lists 153
+> internet servers with real latencies (29-144 ms)**, so networking works end to end through the
+> Linux client, proot and the `net` shim - these titles are multiplayer-capable, not just rendering.
+> And **Steam's in-game overlay works**, down to the official Half-Life 2 controller layout with a
+> full Xbox mapping, which means Steam Input is live too.
+>
+> Three rendering paths are now proven: DXVK (Brawlhalla, Stumble Guys), Wine WGL → Zink (Half-Life's
+> GoldSrc, which is OpenGL) and Vulkan (HL2).
+>
+> **One bug the screenshots exposed:** the perf HUD reads `0.0 fps / 1000.0ms` on every one of these
+> Source titles while GPU percentage and power draw move correctly - so the frame counter is not
+> hooking on this path, though it does for Brawlhalla. Cosmetic, but it makes the HUD useless for
+> exactly the games that just started working.
+
+### 2026-09-18 — Half-Life launches: three games, three rendering paths
+
+> `hl.exe` at 348 MB resident, `[Gamescope WSI] Executable name: hl.exe`, swapchain 13.88 ms, HUD
+> **OpenGL 66.9 fps / 14.9 ms**. GoldSrc renders in OpenGL, so it runs Wine WGL → Zink → Vulkan →
+> Turnip rather than DXVK — a third rendering path proven, alongside Brawlhalla and Stumble Guys
+> (both DXVK, ~72 fps).
+>
+> **It went through its Windows build, not the Linux one.** A native-Linux title that also ships a
+> Windows build can take the ordinary Proton path and skip every native-Linux problem — but the
+> platform switch is only reachable from the client UI: *Properties → Compatibility → Force the use
+> of a specific Steam Play compatibility tool → **Proton (ARM64)***. Setting a per-app
+> CompatToolMapping, writing `platform_override_source "windows"` into the app manifest, and driving
+> `steam://validate` and `steam://install` were all tried and measured: Steam honoured the Proton
+> mapping and built a `compatdata/70` prefix, but never fetched the Windows depot. Once the UI toggle
+> was used it downloaded `hl.exe`, `hlds.exe` and `hltv.exe` and launched straight away.
+>
+> The native-Linux work still matters for titles Valve ships only as Linux builds — CS:S and HL2
+> among them — and its last blocker is measured: `shmget`/`semget`/`msgget` return ENOSYS in the
+> guest, so the System V shim now builds for i686 and x86_64 as well.
+
+### 2026-09-18 — r1 uploaded, r2 cut and live; native-Linux games root-caused
+
+> **The runtime is downloadable.** The missing 789,000,670 B asset is uploaded to the `linuxfs-r1`
+> release, which is deliberately left a **draft** — r1 predates the launch fixes and would install
+> fine and then launch nothing. **`linuxfs-r2` is the first public runtime**: built by CI from
+> `9dc41739`, the exact commit proven to launch Brawlhalla end to end, sha256 `5d32a176…`,
+> 788,990,267 B. `linuxfs.json` is repointed at it and the URL that used to 404 now returns 200 with
+> a matching content-length.
+>
+> **The registrar needed a second half.** The client writes its own **per-app** CompatToolMapping
+> entry at priority 250, which outranks the `"0"` default — so setting that default alone changed
+> nothing. Every Proton the client can pick is one this runtime cannot start, so every Proton
+> mapping is now repointed and non-Proton tools are left alone. Proven from a clean state:
+> `compatibilitytools.d` emptied, the client's own `config.vdf` restored, and the session registered
+> the tool by itself and launched the game.
+>
+> **Native-Linux x86 titles (Half-Life, CS:S, HL2) are a different wall, now understood.** They
+> never touch the Proton path. Valve's `fex-compat-tool` dies before doing anything because Steam
+> launches it with fd 1 and 2 closed, so `sys.stdout` is `None` and `os.dup(sys.stdout.fileno())`
+> raises. Past that, **FEX cannot present its rootfs here at all**: with `FEX_ROOTFS` absolute, with
+> `FEX_PORTABLE`, as a name under `~/.fex-emu/RootFS/`, and with nothing set, the result is
+> byte-identical — `libc.so.6: cannot open shared object file` — though the guest tree holds that
+> libc. FEX serves its rootfs through a mount namespace, which an Android app does not get; the same
+> class of wall as pressure-vessel. Windows games are untouched by this because arm64ec Wine runs
+> FEX as a DLL inside the Wine process and never needs a rootfs — which is exactly why Proton works
+> here and native Linux does not.
+>
+> FEX itself is healthy: `FEX /usr/bin/uname -m` prints `x86_64` once `LD_LIBRARY_PATH` names the
+> guest libraries directly. With Valve's scout `i386` tree supplying the 32-bit set the Arch guest
+> lacks, Half-Life run by hand from its own directory loads every library, starts its breakpad
+> handler and reaches `SteamAPI_Init`. Launched through Steam with the same path wired into the
+> compat tool the library failures are gone, but the game still exits without output. Not solved,
+> and the compat-tool patches live in Valve's depot, so shipping them needs the symlink mirror used
+> for Proton.
+
+### 2026-09-18 — first game launch: Brawlhalla (`c3711182`)
+
+> **The x86-64 Windows build of Brawlhalla runs and presents** through the native Linux Steam
+> client: arm64ec Wine → FEX → DXVK → Turnip → gamescope's WSI layer → our Wayland compositor.
+> `Brawlhalla.exe` at 2.6 GB RSS, `[Gamescope WSI] Swapchain received new refresh cycle: 13.88ms`
+> (~72 fps presenting), and a clean shutdown afterwards — no crash signature.
+>
+> **The blocker was one line in a manifest.** Steam downloads a native aarch64 Proton as an ordinary
+> depot — `Proton Experimental (ARM64)` (4427310) and `Proton 11.0 (ARM64)` (4628740), both carrying
+> `files/bin-arm64/wine` — and both toolmanifests declare `require_tool_appid 4185400`, the Steam
+> Linux Runtime 4 for arm64. Steam therefore stacks **pressure-vessel** underneath, pressure-vessel
+> needs unprivileged **user namespaces**, and an Android app does not get them. Steam then dropped
+> the launch silently: no window, no log, straight back to the library. That silence is why no
+> compatibility tool ever appeared to run, and why the search through FEX rootfs and graphics
+> providers turned up nothing — nothing was being executed. ROCKNIX strips the same line.
+>
+> **`bannerlator-steam-compat` now re-registers Valve's own depot** as
+> `compatibilitytools.d/bannerlator-proton-arm64/`: every entry symlinked, so nothing is copied and
+> the client still updates the real depot, with our own `toolmanifest.vdf` minus
+> `require_tool_appid`. Proton takes its base directory from `dirname(sys.argv[0])` without
+> resolving it, so `files/` resolves back through the symlink. Zero extra download. The
+> FEX-under-Proton tool and `bannerlator-fex-rootfs` are gone — the ARM64 build drives the host's
+> Turnip directly and wants no graphics provider.
+>
+> **Two traps worth remembering.** Wine derives its server directory from `getuid()` and refuses any
+> prefix whose `st_uid` differs (`wine: '…/pfx' is not owned by you`); 547 paths inside `linuxfs`
+> had been left root-owned by debugging through the root bridge, so **nothing may be created in the
+> rootfs as root**. And an x86-64 prefix is wrong for arm64ec Wine, which wants
+> `files/share/default_pfx_arm64` — delete `compatdata/<appid>` and let it rebuild. Separately,
+> Steam rebuilds `LD_PRELOAD` for every game process and appended ours to its overlay entry without
+> a separator, so `libblsession.so` was silently dropped for everything it launched; the preload now
+> lives in the rootfs's `/etc/ld.so.preload`, which Steam cannot mangle.
+>
+> **Still open.** The 752 MB `linuxfs-r1.tar.zst` asset upload (`linuxfs.json` is live and points at
+> nothing), rootfs r2, a dedicated GameScope container, and the Runtime row in the container editor.
+
+### What was checked before writing anything
+
+> - `targetSdkVersion 28` keeps us in `untrusted_app_27`, the last SELinux domain allowed to exec a file out of `files/`. **Raising it ends this approach.**
+> - `abiFilters 'arm64-v8a'` with `useLegacyPackaging = true`, so `add_executable(lib*.so)` is packaged and extracted like any other jniLib — which is how proot and its loader ship.
+> - **Our compositor already advertises every global gamescope's Wayland backend demands** (it aborts if one is missing): `wl_compositor` 6, `wl_subcompositor`, `wl_shm`, `xdg_wm_base`, `zwp_linux_dmabuf_v1` 4, `wp_viewporter`, `wp_presentation` 2, relative-pointer, pointer-constraints, `wl_seat` 5, `wl_output` 2.
+> - **Two compositor gaps, both ones Max hit first.** `compositor.c:1154` has `.set_fullscreen = xdg_toplevel_noop_parent`, so we never send the configure gamescope waits for before dropping its libdecor frame; and `compositor.c:428` keeps one pointer resource per seat, where gamescope holds two pointer/keyboard pairs and reads input on the second. Both are correctness bugs in our xdg-shell and seat handling that any client could hit, so they belong on the Wayland line regardless. Phase 2.
+> - **The GPU situation on the Pocket FIT is the same as on his tablet.** `/dev/dri/card0` and `renderD128` exist at mode 0666 but are labelled `u:object_r:graphics_device:s0`, which stock policy does not grant `untrusted_app`; `/dev/kgsl-3d0` is `gpu_device`, which it does. So presenting KGSL as `/dev/dri/renderD<n>`, faking the `/sys/dev/char` entries libdrm reads, and keeping a PRIME handle table are needed here too. Phase 3.
+
+### Phases 2–5 in flight
+
+> **Phase 1 gate passed.** CI `35261996392` green on all three flavors: proot compiles, links its freestanding loader and packages as a jniLib.
+>
+> **Phase 2 (`594943c7`).** Both compositor fixes landed. `set_fullscreen`/`unset_fullscreen` now reconfigure with the fullscreen state (gamescope draws nothing until it sees it) and a toplevel's first configure goes through the same path. Every seat delivery — enter/leave, motion, buttons, axis, keys — walks all of a client's `wl_pointer`/`wl_keyboard` objects instead of the first; gamescope holds two pairs and reads input on the second. **This changes input delivery on the live Wayland path, so it wants a regression check on device.**
+>
+> **Phases 3–4 assets (`a8110ffa`).** `tools/linuxfs` ported and renamed (`bannerlator-session`, `libblsession.so`, `BL_*`, `/etc/bannerlator/`), carrying Max's corrected lsof answer. `build-linuxfs.yml` assembles the rootfs on an Ubuntu runner and fails the job if gamescope, Xwayland, the Turnip build, the preload, the session scripts or GTK 2 are missing. `workflow_dispatch` only works for a file already on the default branch, so while this lives on its own branch the job runs on pushes that touch it.
+>
+> First rootfs run resolved **297 packages**, extracted the base, applied the Turnip KGSL patch, and died at meson: Ubuntu ships 1.3.2 and Mesa 26.2 wants >= 1.4. Taking meson from pip instead.
+>
+> **Phase 4 wiring (`1a716976`).** `Container` carries a Runtime (`wine` / `gamescope`), overridable per shortcut. Choosing gamescope pins the backend to Wayland and **bypasses the Wayland layer check** — that check asks whether the selected Proton layer ships `winewayland.so`, and a gamescope session has no Wine in it at all. `setupXEnvironment` hands the session over before any Wine component is built.
+>
+> **Phase 5 (in progress).** `LinuxRuntimeInstaller` downloads the rootfs from a catalog row, checks its sha256, unpacks to a staging directory and swaps it in, so a failed install cannot leave a half runtime that `isInstalled()` would launch. It carries its own extractor rather than the shared one: a distribution rootfs is full of **hard links**, which the shared extractor writes as empty files.
+
+### Second pass over the WinNative diff (`ebe412d7`)
+
+> Going back over his compositor diff hunk by hunk after the first port turned up **three misses in one hunk**, all hard blockers:
+>
+> - `wl_output` advertised **2**; libdecor, which gamescope links, binds it at **4**, and binding above the advertised version is a protocol error that kills the client on connect. Now 4, with the `name`/`description` events that version adds, sent before `done`.
+> - `wl_seat` advertised **5**; gamescope's Wayland backend refuses a seat older than **8**. Now 9.
+> - a version-9 seat means a version-9 pointer, and from 8 `axis_discrete` is replaced by `axis_value120` and **must not be sent**. The scroll fan-out I had written still sent `axis_discrete` — a protocol error on the very pointers this work adds. Now sends whichever the pointer's version allows.
+>
+> Lesson recorded: when porting from a proven tree, diff the *whole* file, not the parts the commit message names.
+>
+> **Runtime layout, for the record:** `files/linuxfs` is one shared rootfs per app install, beside `imagefs` — not per container. A gamescope session uses its container only for screen size, audio driver, fps cap and as the shortcut's home; none of the Wine settings apply. Steam's login and library live inside the rootfs, so they are app-wide. Updating or removing the runtime affects every gamescope entry at once.
+>
+> **Rootfs build:** four host-toolchain failures in a row, each one step further — meson 1.3.2 (pip), `glslangValidator` (`glslang-tools`), `wayland-scanner`/cmake/`wayland-protocols` (host tools + target `.pc` files), then Mesa asking the *sysroot's* pkg-config for `wayland-scanner` and getting the aarch64 binary (a Meson native file). Then one transient mirror 500 out of ~300 fetches; every curl now retries.
+
+### Gates passing (late 2026-09-17)
+
+> - **APK `35267143258` green at `39c11fa3`** — the full branch compiles: proot, compositor changes, activity wiring, installer, Linux Runtime tab. Checked the artifact itself rather than trusting the colour: `libproot.so` (126 KB) and `libproot-loader.so` (2.4 KB) are in `lib/arm64-v8a/`, and the loader is a static `EXEC` with one `LOAD` at `0x2000000000` (= arm64 `LOADER_ADDRESS`), no `INTERP`, no `DYNAMIC` — the freestanding flat binary proot execs, not a disguised shared object.
+> - **Rootfs build reached the end.** The wall that mattered was version, not path: Mesa 26.2's Wayland module demands `wayland-scanner` **>= 1.26** on the build machine and Ubuntu 24.04 ships 1.22, so the scanner is now built alone from the pinned 1.26.0 release (seconds) and handed to Meson through a native file. Then: **298 packages, Mesa `[725/725]`, `libvulkan_freedreno.so` 15.7 MB** — Turnip with the KGSL backend, cross-built. The run died on the last line because the script `cd`s into its work dir and the workflow passed a relative output path; pinned absolute on both sides.
+> - Hand-off APK dispatched at head `8072b875` → run `35268263770`.
+> - One warning to keep an eye on from the qemu hook pass: `gdk-pixbuf-query-loaders` could not create `loaders.cache` — the loaders dir is missing in the aarch64 package layout. Cosmetic for Steam (pcmanfm icons at worst); not blocking.
+
+### Hand-off APK staged
+
+> Run `35268263770` at `8072b875` green → `pubg` artifact staged as **`/sdcard/Download/Bannerlator-gamescope-final-pubg.apk`** (534,905,742 bytes, sha256 `21e23a011702b5a5a64af0b577bbd88184d19ba2df5336f931f08f8e245ed036`; both proot libs confirmed inside). **Test order:** a normal Wayland game launch first (the seat fan-out and the `wl_seat` 9 / `wl_output` 4 bumps changed the live Wayland path), then Contents → Linux Runtime → Install (needs `linuxfs.json` published), then the Steam (Linux) entry.
+
+### First device run (2026-09-17 evening) — the app-side chain works; our old proot did not
+
+> Rootfs r1 published as a **local copy** (`/sdcard/Download/linuxfs-r1.tar.zst`, 789,000,670 B, sha256 `7002a594…a38b`; the 752 MB GitHub upload 500'd and is deferred to better internet — **`linuxfs.json` is already live and points at an asset that is not there yet**), unpacked with GNU tar (hard links kept, 76,069 entries, 3.2 GB) and swapped into `files/linuxfs` as the app uid with `.version` r1. Valve's arm64 client (933 MB) fetched from here and copied in, `.steam` links recreated with in-rootfs targets. `Steam (Linux)` and a `Linux Desktop` shortcut written into container 8.
+>
+> **Launch by intent (`container_id 8`, `shortcut_path`) → the whole app-side chain fired:** runtime resolved to gamescope, `linuxSessionArgs` = `[desktop]`, `LinuxLauncher` exec'd `libproot.so --kill-on-exit -r …/files/linuxfs …` with `PROOT_LOADER`/`PROOT_TMP_DIR`. Then proot died in 56 ms: `execve("/usr/bin/env"): Function not implemented`, `ptrace(PEEKDATA): I/O error`, `can't chmod …: Bad address`.
+>
+> **Diagnosis, not a guess:** as root it fails identically with seccomp on *and* off (`PROOT_NO_SECCOMP=1`) → not the sandbox. Under Termux's known-good proot the *same* rootfs runs `/usr/bin/env` → not the rootfs. Our proot was an older base whose `loader.c`/`assembly-arm64.h` differ from WinNative's (which never touched them) — the loader does not work on this kernel. **Fix `d4b538ab`: our proot tree replaced wholesale with WinNative's proven one** (carries everything hand-ported plus `#!` interpreters and `execveat`, and handles `setresuid`). Cloud build `35274984079`; the hand-ported `45fe2a8a` is superseded.
+>
+> Also shipped: per-launch debug logs under `Downloads/Bannerlator-LinuxSteam/` (`e3cc9695`) — the script half is in `tools/linuxfs`, so it lands in rootfs **r2**, not the installed r1; patch on device for now.
+>
+> Max's five new commits reviewed: the two proot fixes (now in via the swap); a fake evdev input layer for controllers, `steam-library`/`steam-compat` scripts and a Proton compat tool for running Windows games through Proton+FEX inside the session — all follow-ups, none needed for the client to come up.
+
+### ⏸️ CHECKPOINT 2026-09-17 ~17:20 — paused until the user is home (no Wi-Fi at work)
+
+> **State of the branch** `feat/linux-gamescope-runtime` @ `d4b538ab` (+ log commits), all pushed. Cloud build **`35274984079`** = the APK with **WinNative's proot tree swapped in wholesale** — the fix for the only blocker found on device. It builds without us; the artifact is downloaded when there is internet again.
+>
+> **On the device right now:** APK `8072b875` installed (old proot — will fail at the first exec until the new APK is staged); rootfs r1 at `files/linuxfs` as the app uid with the Valve client (933 MB) inside and `.steam` links fixed; session script already patched with the Downloads logging; shortcuts `Steam (Linux)` + `Linux Desktop` in container 8; `/sdcard/Download/Bannerlator-LinuxSteam/` exists.
+>
+> **Update 17:27:** run `35274984079` green; APK **staged** at `/sdcard/Download/Bannerlator-gamescope-proot3-pubg.apk` (534,905,828 B, sha256 `6107345bae4161caa9e7701614b9dbc4238739c1df71af966fc91b247e9b5d21`, headSha `d4b538ab`; both proot libs in, loader `EXEC` at `0x2000000000`). Not installed yet — **no internet needed to resume.**
+>
+> **Resume sequence:**
+> 1. Install that APK → confirm sha over the bridge.
+> 2. `am start -n com.tencent.ig/com.winlator.star.XServerDisplayActivity --ei container_id 8 --es shortcut_path "/data/data/com.tencent.ig/files/imagefs/home/xuser-8/.wine/drive_c/users/xuser/Desktop/Linux Desktop.desktop"` → expect pcmanfm under gamescope. Log: `/sdcard/Download/Bannerlator-LinuxSteam/session-*.log`; proot stderr is in the session pid's logcat under `System.out`.
+> 3. Same with `Steam (Linux).desktop` → client updates itself (exit 42 loop) → gamepad UI → sign in.
+> 4. Upload the 752 MB asset: `gh release create linuxfs-r1 /sdcard/Download/linuxfs-r1.tar.zst#linuxfs.tar.zst -R The412Banner/winlator-contents …` — **`linuxfs.json` is already live and points at it**, so the in-app Install fails for everyone else until this lands.
+>
+> **Then, in order:** dedicated GameScope container the way Max does it (normal creation from the newest Proton, then `runtime=gamescope`); rootfs **r2** (session-script logging is only in the repo, not r1); shared Steam library (bind our downloads into `steamapps/`); controllers (fake evdev); Runtime row in the container editor.
+
+### Evening, home: the proot blocker bisected to the NDK
+
+> New-proot APK (`d4b538ab`, WinNative's tree) installed and launched: **identical failure** — `execve("/usr/bin/env"): Function not implemented`, `ptrace(PEEKDATA): I/O error`, `Bad address`. So the source was never the problem.
+>
+> **Bisect as root, cross-pairing binaries:** Termux's proot + **our** loader → runs. **Our** proot + Termux's loader → fails. Termux + Termux → runs. The loader is fine; **our `libproot.so` binary is what's broken.** Same source, different build: **we build with NDK 29 (`29.0.14206865`), WinNative with NDK 27 (`27.3.13750724`)**; CMake flags otherwise identical. Our binary also has no `process_vm_*` linked (Termux's does), so every tracee memory access goes through `PTRACE_PEEKDATA` — exactly the path that dies. The symptom triple reads as a mangled syscall number at `execve` (ENOSYS), then garbage register/memory reads (EIO, EFAULT).
+>
+> **Fix in flight:** `build-proot.yml` builds proot on its own with NDK 27 (`nttld/setup-ndk r27c`, android-26, arm64-v8a) → run `35280875827`. A/B plan: drop the built `libproot.so`/loader into the installed app's `lib/arm64/` as root (dir is root-writable, `system:system` 755, `apk_data_file`) and relaunch — minutes per iteration instead of a 30-minute app build. If it runs, proot ships as prebuilt jniLibs pinned to NDK 27 and leaves the app's CMake.
+>
+> Max's `main`-branch CI artifacts predate the gamescope branch (no proot in them), so no shortcut from his APK.
+
+### ✅ 2026-09-17 ~18:35 — gamescope session RUNS on device; Steam client self-updating
+
+> **pcmanfm rendered under gamescope**, HUD reading Adreno 750 / Vulkan / Wayland, and then the native arm64 Steam client launched and pulled its own 665 MB update (Steam dir 933 MB → 3.9 GB). proot → gamescope → Xwayland (glamor on Zink) → GTK app → Valve's client, all on the device.
+>
+> **Two real blockers, both now understood:**
+>
+> 1. **Our proot binary was broken, not our proot source.** Bisected by cross-pairing: Termux's proot + *our* loader runs; *our* proot + Termux's loader does not. Same for the NDK-27 rebuild, so it was never the toolchain either — the tree in `cpp/proot` is an old snapshot of the Termux fork, thousands of lines behind in the ptrace/exec core (`syscall/enter.c` alone differs by ~2,500 lines). Termux's binary of the fork at v5.1.107.92 runs the rootfs; that is what `build-proot.yml` now builds.
+> 2. **`-i uid:gid` is required.** Xwayland's `Popen()` does `setgid(getgid()); setuid(getuid())` in the child and `_exit(127)`s if either fails; Android's app seccomp policy traps both, so xkbcomp never exec'd and Xwayland died with "XKB: Failed to compile keymap". Proved by instrumenting `/usr/bin/xkbcomp` — the log stayed empty (never invoked), then with `-i` it was invoked and returned warnings only. **Note the earlier `setpriv` A/B that seemed to clear `-i` was invalid: it ran in a root shell, which carries no app seccomp filter.** Also needed: `xkeyboard-config` (the closure never pulled it; `/usr/share/X11/xkb` was empty) — seeded for rootfs r2, hand-installed on r1.
+>
+> **Confirmed we are not missing any Wayland work of Max's:** across his whole gamescope branch the only compositor file touched is `compositor.c` (166 lines), and all ten markers of it are present in ours — fullscreen configure, seat fan-out, `wl_output` 4 + name/description, `wl_seat` 9, `axis_value120`.
+
+### 🏁 2026-09-17 18:41 — NATIVE ARM STEAM CLIENT FULLY WORKING ON DEVICE
+
+> Signed in as The412Banner, **Online**, Big Picture interactive: real library (Battlefield, Brawlhalla, Half-Life, Crystal Clash), game pages with Install / space required / playtime / controller support, friends list live, account settings. **60–67 fps, Vulkan, Adreno 750, Wayland**, 15 ms frametime, 3–9 W.
+>
+> The full chain, device-proven: proot → gamescope 3.16.29 → Xwayland (glamor on Zink) → Valve's native aarch64 client → steamwebhelper (6 CEF processes) → gamepad UI, compositing through our own Wayland compositor on Turnip.
+>
+> **The `WebUITransport` peer check never appeared in the log** — the `net.c` shim answering Steam's `lsof` with both address halves worked first try, so the thing that blocked Max for a day never surfaced for us.
+>
+> **Not shippable yet — one gap:** the proot on the device is Termux's *binary*, hand-dropped into the APK's `lib/arm64/` (originals saved in `.orig-ndk29/`, `libproot.so` is a shebang wrapper adding `-i`). `build-proot.yml` must go green so proot ships as prebuilt jniLibs and `add_subdirectory(proot)` can be dropped. Rootfs **r2** also owed: `xkeyboard-config` (hand-installed on r1) and the Downloads logging script.
+
+### Phase 1 — proot in the build (`ba0a5786`)
+
+> The tree had been sitting in `cpp/proot` unused since the old Xvfb Steam attempt, absent from `CMakeLists.txt`. Our copy is an older base than his and is CRLF/tab-formatted, so his diffs do not apply; the changes were ported by hand.
+>
+> - `add_subdirectory(proot)`, and the loader relinked as a **freestanding flat binary** at `LOADER_ADDRESS` (`0x2000000000` on arm64, matching `--image-base`), named `libproot-loader.so` so the installer places it beside `libproot.so`.
+> - `statx` translated like the other `*at` syscalls — glibc stats through it — with the wrinkle that its `AT_` flags are in arg 3, not arg 4, and kept off the seccomp fast path so it reaches the tracer at all.
+> - The **whole `set*id` family** answered inside proot. Android's app seccomp policy traps them; our tree already answered `setresuid`/`setresgid`, but not `setuid`/`setgid`/`setreuid`/`setregid`/`setfsuid`/`setfsgid`, which Xwayland's xkbcomp and the X access control call. Without privileges a process may only take an id it already holds, so the answer is known without the kernel.
+> - `PROOT_NO_SECCOMP` disables the accelerator, which otherwise hides syscalls from the tracer while debugging.
+>
+> CI run `35261996392`, headSha verified `ba0a5786`. This gate is *compiles*, nothing more — no rootfs exists yet, so nothing has been run on device.
+
+
 ## 2026-09-16 — Fix: a physical stick bound to mouse movement now moves the cursor (branch `fix/physical-lane-mouse-move`)
 
 > **Bug (user):** in the drawer's *Physical Controller Test / Bind*, binding the right stick to mouse up/down/left/right did not move the Windows mouse or the on-screen cursor.

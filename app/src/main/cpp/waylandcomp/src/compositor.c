@@ -267,6 +267,7 @@ struct surface {
     struct wl_list child_link;
     int sub_x, sub_y, sub_pending_x, sub_pending_y, sub_pending;
     int below_parent;
+    int fullscreen;                         /* xdg_toplevel.set_fullscreen: no client decorations */
 
     char *title;                            /* xdg_toplevel title, for the session log */
     int announced_vulkan;                   /* logged its first dmabuf frame */
@@ -286,7 +287,7 @@ static struct wl_event_source *g_render_idle, *g_frame_timer;
  * window) a fallback timer renders instead. */
 static int g_dirty;                         /* something changed since the last render */
 static int64_t g_last_vsync_ns;             /* last tick, 0 = none yet */
-static int64_t g_refresh_ns = 16666667;     /* screen refresh interval, from the ticks */
+static int64_t g_refresh_ns = 16666667;     /* measured tick interval (pacing only, never reported) */
 static struct wl_event_source *g_fallback_timer;
 static int g_fallback_armed;
 
@@ -811,7 +812,11 @@ static void take_dmabuf(struct surface *s, struct dmabuf_buffer *b, struct wl_re
                                : "the compositor's driver could NOT import it (nothing can show it)");
         s->hdr_fmt_logged = b->format;
     }
-    if (s == g_hud_surface && (b->img || ahb_swapchain_has_ahb(b))) banner_on_game_frame();
+    /* Every buffer that reaches take_dmabuf is a presented GPU frame, so the HUD counts it.
+     * Asking whether the compositor could import it, as this used to, is a question about the
+     * copy path and not about whether a frame happened: a game whose buffers go straight to
+     * the display layer draws on screen while the counter sat at 0.0 fps and 1000.0 ms. */
+    if (s == g_hud_surface) banner_on_game_frame();
 }
 
 /* ---- hooks for ahb_swapchain.c (zero-copy layers) */
@@ -868,13 +873,26 @@ static void feedback_discard_all(struct wl_list *list) {
     }
 }
 
+/* The current mode's refresh interval in ns, from the rate the app read off the display. */
+static uint32_t nominal_refresh_ns(void) {
+    int mhz = g_output_refresh_mhz;
+    if (mhz <= 0) mhz = 60000;
+    return (uint32_t)(1000000000000LL / (int64_t)mhz);
+}
+
 static void feedback_present_all(struct wl_list *list, int64_t t) {
     struct wl_resource *fb, *tmp;
     uint64_t sec = (uint64_t)(t / 1000000000LL);
     uint32_t nsec = (uint32_t)(t % 1000000000LL);
     wl_resource_for_each_safe(fb, tmp, list) {
+        /* The protocol's "refresh" is the NOMINAL interval of the current mode, a constant - not
+         * the interval this frame happened to take. Reporting the measured average instead makes a
+         * variable-refresh panel look like a mode change on every frame: gamescope re-derives its
+         * pacing each time ("Changed refresh to: 119.2 ... 121.4hz", 826 times in a minute on a
+         * Galaxy Z Fold, none on a fixed-refresh device). Report the panel's rate, which the app
+         * gives us and wl_output already advertises. */
         wp_presentation_feedback_send_presented(fb, (uint32_t)(sec >> 32), (uint32_t)sec, nsec,
-                                                (uint32_t)g_refresh_ns, 0, 0,
+                                                nominal_refresh_ns(), 0, 0,
                                                 WP_PRESENTATION_FEEDBACK_KIND_VSYNC);
         wl_resource_destroy(fb);
     }
@@ -1273,6 +1291,34 @@ static void xdg_toplevel_resize(struct wl_client *c, struct wl_resource *r, stru
                                 uint32_t serial, uint32_t edges) {}
 static void xdg_toplevel_set_i32(struct wl_client *c, struct wl_resource *r, int32_t w, int32_t h) {}
 static void xdg_toplevel_noop(struct wl_client *c, struct wl_resource *r) {}
+/* Size 0x0 = the client picks; active, and fullscreen when asked. gamescope waits for the
+ * fullscreen state before it drops its libdecor frame, and never draws until it arrives. */
+static void send_toplevel_configure(struct surface *s) {
+    struct wl_array states;
+    wl_array_init(&states);
+    uint32_t *st = wl_array_add(&states, sizeof(uint32_t));
+    *st = XDG_TOPLEVEL_STATE_ACTIVATED;
+    if (s->fullscreen) {
+        st = wl_array_add(&states, sizeof(uint32_t));
+        *st = XDG_TOPLEVEL_STATE_FULLSCREEN;
+    }
+    xdg_toplevel_send_configure(s->xdg_toplevel, 0, 0, &states);
+    wl_array_release(&states);
+    xdg_surface_send_configure(s->xdg_surface, wl_display_next_serial(g_display));
+}
+static void xdg_toplevel_set_fullscreen(struct wl_client *c, struct wl_resource *r,
+                                        struct wl_resource *output) {
+    struct surface *s = wl_resource_get_user_data(r);
+    if (!s || !s->xdg_surface || !s->xdg_toplevel || s->fullscreen) return;
+    s->fullscreen = 1;
+    send_toplevel_configure(s);
+}
+static void xdg_toplevel_unset_fullscreen(struct wl_client *c, struct wl_resource *r) {
+    struct surface *s = wl_resource_get_user_data(r);
+    if (!s || !s->xdg_surface || !s->xdg_toplevel || !s->fullscreen) return;
+    s->fullscreen = 0;
+    send_toplevel_configure(s);
+}
 static const struct xdg_toplevel_interface xdg_toplevel_impl = {
     .destroy = xdg_toplevel_destroy_req,
     .set_parent = xdg_toplevel_noop_parent,
@@ -1285,8 +1331,8 @@ static const struct xdg_toplevel_interface xdg_toplevel_impl = {
     .set_min_size = xdg_toplevel_set_i32,
     .set_maximized = xdg_toplevel_noop,
     .unset_maximized = xdg_toplevel_noop,
-    .set_fullscreen = xdg_toplevel_noop_parent,
-    .unset_fullscreen = xdg_toplevel_noop,
+    .set_fullscreen = xdg_toplevel_set_fullscreen,
+    .unset_fullscreen = xdg_toplevel_unset_fullscreen,
     .set_minimized = xdg_toplevel_noop,
 };
 static void xdg_toplevel_resource_destroy(struct wl_resource *r) {
@@ -1305,18 +1351,10 @@ static void xdg_surface_get_toplevel(struct wl_client *c, struct wl_resource *r,
     struct wl_resource *tl = wl_resource_create(c, &xdg_toplevel_interface, wl_resource_get_version(r), id);
     if (!tl) { wl_client_post_no_memory(c); return; }
     wl_resource_set_implementation(tl, &xdg_toplevel_impl, s, xdg_toplevel_resource_destroy);
-    if (s) {
-        s->role = ROLE_TOPLEVEL;
-        s->xdg_toplevel = tl;
-    }
-    /* Size 0x0 = the client picks; active. Then the surface configure that applies it. */
-    struct wl_array states;
-    wl_array_init(&states);
-    uint32_t *st = wl_array_add(&states, sizeof(uint32_t));
-    *st = XDG_TOPLEVEL_STATE_ACTIVATED;
-    xdg_toplevel_send_configure(tl, 0, 0, &states);
-    wl_array_release(&states);
-    xdg_surface_send_configure(r, wl_display_next_serial(g_display));
+    if (!s) return;
+    s->role = ROLE_TOPLEVEL;
+    s->xdg_toplevel = tl;
+    send_toplevel_configure(s);
 }
 static void xdg_surface_get_popup(struct wl_client *c, struct wl_resource *r, uint32_t id,
                                   struct wl_resource *parent, struct wl_resource *positioner) {}
@@ -1732,6 +1770,10 @@ static void bind_output(struct wl_client *c, void *data, uint32_t ver, uint32_t 
     wl_output_send_mode(r, WL_OUTPUT_MODE_CURRENT | WL_OUTPUT_MODE_PREFERRED,
                         g_output_w > 0 ? g_output_w : 1920, g_output_h > 0 ? g_output_h : 1080,
                         g_output_refresh_mhz > 0 ? g_output_refresh_mhz : 60000);
+    if (ver >= WL_OUTPUT_NAME_SINCE_VERSION) {
+        wl_output_send_name(r, "Bannerlator-1");
+        wl_output_send_description(r, "Bannerlator display");
+    }
     if (ver >= 2) {
         wl_output_send_scale(r, 1);
         wl_output_send_done(r);
@@ -2409,6 +2451,16 @@ static struct seat_keyboard *keyboard_for(struct wl_client *client) {
     return NULL;
 }
 
+/* A client may hold more than one wl_pointer/wl_keyboard: gamescope creates a second pair and
+ * reads input on its own thread, so an event sent only to the first object is never seen.
+ * Every delivery below walks all of the client's objects. */
+#define for_each_pointer_of(client, sp) \
+    for (int _i = 0; _i < g_nptrs; _i++) \
+        if (((sp) = &g_ptrs[_i]), wl_resource_get_client((sp)->ptr) == (client))
+#define for_each_keyboard_of(client, sk) \
+    for (int _i = 0; _i < g_nkbs; _i++) \
+        if (((sk) = &g_kbs[_i]), wl_resource_get_client((sk)->kb) == (client))
+
 /* Topmost window whose scene rectangle contains the point (no-desktop fallback). */
 static struct surface *toplevel_at(double x, double y) {
     struct surface *s;
@@ -2429,31 +2481,39 @@ static void pointer_focus(struct wl_resource *target, wl_fixed_t fx, wl_fixed_t 
             wl_pointer_send_frame(g_ptrs[i].ptr);
         g_ptrs[i].focus = NULL;
     }
-    struct seat_pointer *sp = pointer_for(client);
-    if (sp && sp->focus != target) {
+    struct seat_pointer *sp;
+    int entered = 0;
+    for_each_pointer_of(client, sp) {
+        if (sp->focus == target) continue;
         sp->focus = target;
         wl_pointer_send_enter(sp->ptr, wl_display_next_serial(g_display), target, fx, fy);
-        constraints_focus_entered(target, client);
+        entered = 1;
     }
+    if (entered) constraints_focus_entered(target, client);
 }
 
 static void keyboard_focus(struct wl_resource *target) {
-    struct seat_keyboard *sk = keyboard_for(wl_resource_get_client(target));
-    if (!sk || sk->focus == target) return;
+    struct wl_client *client = wl_resource_get_client(target);
+    struct seat_keyboard *sk;
+    int need = 0;
+    for_each_keyboard_of(client, sk) if (sk->focus != target) need = 1;
+    if (!need) return;
     for (int i = 0; i < g_nkbs; i++) {
-        if (!g_kbs[i].focus || &g_kbs[i] == sk) continue;
+        if (!g_kbs[i].focus || g_kbs[i].focus == target) continue;
         wl_keyboard_send_leave(g_kbs[i].kb, wl_display_next_serial(g_display), g_kbs[i].focus);
         g_kbs[i].focus = NULL;
     }
     struct wl_array keys;
     wl_array_init(&keys);
-    if (sk->focus) wl_keyboard_send_leave(sk->kb, wl_display_next_serial(g_display), sk->focus);
-    sk->focus = target;
-    wl_keyboard_send_enter(sk->kb, wl_display_next_serial(g_display), target, &keys);
-    /* Baseline modifiers = none; Shift/Ctrl arrive as their own key events. */
-    wl_keyboard_send_modifiers(sk->kb, wl_display_next_serial(g_display), 0, 0, 0, 0);
+    for_each_keyboard_of(client, sk) {
+        if (sk->focus == target) continue;
+        sk->focus = target;
+        wl_keyboard_send_enter(sk->kb, wl_display_next_serial(g_display), target, &keys);
+        /* Baseline modifiers = none; Shift/Ctrl arrive as their own key events. */
+        wl_keyboard_send_modifiers(sk->kb, wl_display_next_serial(g_display), 0, 0, 0, 0);
+    }
     wl_array_release(&keys);
-    banner_clipboard_keyboard_focus(wl_resource_get_client(target)); /* wl_data_device selection follows focus */
+    banner_clipboard_keyboard_focus(client); /* wl_data_device selection follows focus */
 }
 
 /* ------------------------------------------------------------------ pointer constraints
@@ -2871,21 +2931,24 @@ static void pointer_input(double x, double y, int relative, uint32_t button, int
     if (!target) return;
 
     struct wl_client *client = wl_resource_get_client(target->resource);
-    struct seat_pointer *sp = pointer_for(client);
-    if (!sp) return;
+    struct seat_pointer *sp;
+    if (!pointer_for(client)) return;
     int tx = 0, ty = 0;
     if (target != g_desktop && target->placed) { tx = target->x; ty = target->y; }
     wl_fixed_t fx = wl_fixed_from_double(g_ptr_x - tx), fy = wl_fixed_from_double(g_ptr_y - ty);
     uint32_t t = now_ms();
 
     pointer_focus(target->resource, fx, fy);
-    if (!(k && k->is_lock)) wl_pointer_send_motion(sp->ptr, t, fx, fy);
+    if (!(k && k->is_lock))
+        for_each_pointer_of(client, sp) wl_pointer_send_motion(sp->ptr, t, fx, fy);
     send_relative_motion(client, dx, dy);
-    if (button)
-        wl_pointer_send_button(sp->ptr, wl_display_next_serial(g_display), t, button,
-                               pressed ? WL_POINTER_BUTTON_STATE_PRESSED : WL_POINTER_BUTTON_STATE_RELEASED);
-    if (wl_resource_get_version(sp->ptr) >= WL_POINTER_FRAME_SINCE_VERSION)
-        wl_pointer_send_frame(sp->ptr);
+    for_each_pointer_of(client, sp) {
+        if (button)
+            wl_pointer_send_button(sp->ptr, wl_display_next_serial(g_display), t, button,
+                                   pressed ? WL_POINTER_BUTTON_STATE_PRESSED : WL_POINTER_BUTTON_STATE_RELEASED);
+        if (wl_resource_get_version(sp->ptr) >= WL_POINTER_FRAME_SINCE_VERSION)
+            wl_pointer_send_frame(sp->ptr);
+    }
     /* A click lands text input (the soft keyboard's IME text) on the window under the pointer:
      * that's where Wine's focus goes, and winewayland routes IME updates per process. */
     if (button && pressed && !(k && k->is_lock)) {
@@ -3012,17 +3075,23 @@ static void scroll_event(int steps) {
     struct surface *target = g_active_constraint ? g_active_constraint->surface
                            : g_desktop ? g_desktop : (g_grab ? g_grab : toplevel_at(g_ptr_x, g_ptr_y));
     if (!target || !steps) return;
-    struct seat_pointer *sp = pointer_for(wl_resource_get_client(target->resource));
-    if (!sp) return;
+    struct wl_client *client = wl_resource_get_client(target->resource);
+    struct seat_pointer *sp;
+    if (!pointer_for(client)) return;
     int tx = 0, ty = 0;
     if (target != g_desktop && target->placed) { tx = target->x; ty = target->y; }
     uint32_t t = now_ms();
     pointer_focus(target->resource, wl_fixed_from_double(g_ptr_x - tx), wl_fixed_from_double(g_ptr_y - ty));
-    if (wl_resource_get_version(sp->ptr) >= WL_POINTER_AXIS_DISCRETE_SINCE_VERSION)
-        wl_pointer_send_axis_discrete(sp->ptr, WL_POINTER_AXIS_VERTICAL_SCROLL, steps);
-    wl_pointer_send_axis(sp->ptr, t, WL_POINTER_AXIS_VERTICAL_SCROLL, wl_fixed_from_int(steps * 10));
-    if (wl_resource_get_version(sp->ptr) >= WL_POINTER_FRAME_SINCE_VERSION)
-        wl_pointer_send_frame(sp->ptr);
+    for_each_pointer_of(client, sp) {
+        /* From version 8 the discrete event is replaced by value120 and must not be sent. */
+        if (wl_resource_get_version(sp->ptr) >= WL_POINTER_AXIS_VALUE120_SINCE_VERSION)
+            wl_pointer_send_axis_value120(sp->ptr, WL_POINTER_AXIS_VERTICAL_SCROLL, steps * 120);
+        else if (wl_resource_get_version(sp->ptr) >= WL_POINTER_AXIS_DISCRETE_SINCE_VERSION)
+            wl_pointer_send_axis_discrete(sp->ptr, WL_POINTER_AXIS_VERTICAL_SCROLL, steps);
+        wl_pointer_send_axis(sp->ptr, t, WL_POINTER_AXIS_VERTICAL_SCROLL, wl_fixed_from_int(steps * 10));
+        if (wl_resource_get_version(sp->ptr) >= WL_POINTER_FRAME_SINCE_VERSION)
+            wl_pointer_send_frame(sp->ptr);
+    }
     wl_display_flush_clients(g_display);
 }
 
@@ -3042,11 +3111,13 @@ static void key_event(uint32_t evdev, int pressed) {
         wl_list_for_each_reverse(s, &g_toplevels, toplevel_link) { target = s; break; }
     }
     if (!target) return;
-    struct seat_keyboard *sk = keyboard_for(wl_resource_get_client(target->resource));
-    if (!sk) return;
+    struct wl_client *client = wl_resource_get_client(target->resource);
+    struct seat_keyboard *sk;
+    if (!keyboard_for(client)) return;
     keyboard_focus(target->resource);
-    wl_keyboard_send_key(sk->kb, wl_display_next_serial(g_display), now_ms(), evdev,
-                         pressed ? WL_KEYBOARD_KEY_STATE_PRESSED : WL_KEYBOARD_KEY_STATE_RELEASED);
+    for_each_keyboard_of(client, sk)
+        wl_keyboard_send_key(sk->kb, wl_display_next_serial(g_display), now_ms(), evdev,
+                             pressed ? WL_KEYBOARD_KEY_STATE_PRESSED : WL_KEYBOARD_KEY_STATE_RELEASED);
     wl_display_flush_clients(g_display);
 }
 
@@ -3331,10 +3402,12 @@ int banner_wayland_run(void) {
     wl_global_create(display, &wl_subcompositor_interface, 1, NULL, bind_subcompositor);
     wl_global_create(display, &wp_viewporter_interface, 1, NULL, bind_viewporter);
     wl_display_init_shm(display); /* wl_shm global + pool/buffer handling */
-    wl_global_create(display, &wl_output_interface, 2, NULL, bind_output);
+    /* libdecor binds wl_output at 4; a lower version is a protocol error for the client. */
+    wl_global_create(display, &wl_output_interface, 4, NULL, bind_output);
     wl_global_create(display, &xdg_wm_base_interface, 1, NULL, bind_xdg_wm_base);
     wl_global_create(display, &zwp_linux_dmabuf_v1_interface, 4, NULL, bind_dmabuf);
-    wl_global_create(display, &wl_seat_interface, 5, NULL, bind_seat);
+    /* gamescope's Wayland backend refuses a seat older than 8. */
+    wl_global_create(display, &wl_seat_interface, 9, NULL, bind_seat);
     wl_global_create(display, &banner_desktop_v1_interface, 1, NULL, bind_desktop);
     wl_global_create(display, &wp_presentation_interface, 2, NULL, bind_presentation);
     wl_global_create(display, &zwp_pointer_constraints_v1_interface, 1, NULL, bind_pointer_constraints);

@@ -135,12 +135,14 @@ private enum class HubTab(val label: String, val railLabel: String) {
     DOWNLOAD("Download Components", "Download"),
     INSTALLED("Installed", "Installed"),
     MY_FILES("My Files", "My Files"),
+    LINUX("Linux Runtime", "Linux"),
 }
 
 private fun tabIcon(t: HubTab): ImageVector = when (t) {
     HubTab.DOWNLOAD -> Icons.Filled.Download
     HubTab.MY_FILES -> Icons.Filled.Folder
     HubTab.INSTALLED -> Icons.Filled.CheckCircle
+    HubTab.LINUX -> Icons.Filled.DeveloperBoard
 }
 
 @Composable
@@ -247,6 +249,7 @@ private fun HubTabContent(vm: ContentsHubViewModel, tab: HubTab, wide: Boolean) 
         HubTab.DOWNLOAD -> DownloadTab(vm, wide)
         HubTab.MY_FILES -> MyFilesTab(vm)
         HubTab.INSTALLED -> InstalledTab(vm)
+        HubTab.LINUX -> LinuxRuntimeTab()
     }
 }
 

@@ -223,6 +223,9 @@ import androidx.compose.ui.text.input.KeyboardType
 import com.winlator.star.container.Container
 import com.winlator.star.container.GameDetails
 import com.winlator.star.container.Shortcut
+import com.winlator.star.linux.LinuxRuntimeInstaller
+import com.winlator.star.linux.LinuxRuntimeUpdate
+import com.winlator.star.linux.LinuxShortcuts
 import com.winlator.star.reshade.ReshadeManager
 import com.winlator.star.contentdialog.GraphicsDriverConfigDialog
 import com.winlator.star.contents.AdrenotoolsManager
@@ -524,6 +527,9 @@ fun ShortcutsScreen(vm: ShortcutsViewModel = viewModel()) {
                 return
             }
         }
+        // The Linux runtime's own entry is not a Windows game: SteamLite, Goldberg and "Raw .exe"
+        // all mean nothing for it, and the sheet was an extra tap on every single launch.
+        if (LinuxShortcuts.isLinuxEntry(shortcut)) { launchShortcutNow(activity, shortcut); return }
         val remembered = shortcut.getExtra("launchMode", "").isNotEmpty() &&
             shortcut.getExtra("launchModeRemembered", "") == "1"
         when {
@@ -1127,6 +1133,7 @@ fun ShortcutsScreen(vm: ShortcutsViewModel = viewModel()) {
                                     showGog = remember(shortcut) { isGogShortcut(shortcut) },
                                     showAmazon = remember(shortcut) { isAmazonShortcut(shortcut) },
                                     showCustom = remember(shortcut) { isCustomOriginShortcut(shortcut) },
+                                    showLinux = remember(shortcut) { LinuxShortcuts.isLinuxEntry(shortcut) },
                                 )
                             },
                             sdBadge = { shortcut ->
@@ -5216,6 +5223,7 @@ private fun ShortcutItemLayoutL(
                     showGog = remember(shortcut) { isGogShortcut(shortcut) },
                     showAmazon = remember(shortcut) { isAmazonShortcut(shortcut) },
                     showCustom = remember(shortcut) { isCustomOriginShortcut(shortcut) },
+                                    showLinux = remember(shortcut) { LinuxShortcuts.isLinuxEntry(shortcut) },
                     modifier = Modifier.padding(start = 6.dp),
                 )
             }
@@ -5477,6 +5485,7 @@ private fun ShortcutGridItem(
             showGog = remember(shortcut) { isGogShortcut(shortcut) },
             showAmazon = remember(shortcut) { isAmazonShortcut(shortcut) },
             showCustom = remember(shortcut) { isCustomOriginShortcut(shortcut) },
+            showLinux = remember(shortcut) { LinuxShortcuts.isLinuxEntry(shortcut) },
             modifier = Modifier
                 .align(Alignment.TopStart)
                 .padding(6.dp),
@@ -5511,6 +5520,55 @@ private fun ShortcutGridItem(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
+                }
+                // The Linux entry is the runtime's own tile, so it carries the runtime's state:
+                // while an install runs, the same "Downloading 45% · about 2 min left" the Contents
+                // tab shows, from the same source; otherwise a chip when a newer build is waiting.
+                if (remember(shortcut) { LinuxShortcuts.isLinuxEntry(shortcut) }) {
+                    val rt by LinuxRuntimeUpdate.state.collectAsState()
+                    val linuxCtx = LocalContext.current
+                    val linuxScope = rememberCoroutineScope()
+                    // Ask the catalog once so the chip appears even when Contents was never opened.
+                    LaunchedEffect(Unit) {
+                        LinuxRuntimeUpdate.refreshInstalled(linuxCtx)
+                        if (rt.available == null) {
+                            val rel = withContext(Dispatchers.IO) { LinuxRuntimeInstaller.fetchRelease() }
+                            LinuxRuntimeUpdate.setAvailable(rel)
+                        }
+                    }
+                    if (rt.busy) {
+                        Spacer(Modifier.height(3.dp))
+                        Text(
+                            text = LinuxRuntimeUpdate.line(rt),
+                            fontSize = 10.sp,
+                            color = Color.White,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        LinearProgressIndicator(
+                            progress = { if (rt.percent in 0..100) rt.percent / 100f else 0f },
+                            modifier = Modifier.fillMaxWidth().height(3.dp).padding(top = 2.dp),
+                        )
+                    } else if (rt.updateAvailable) {
+                        Spacer(Modifier.height(3.dp))
+                        Row(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(MaterialTheme.colorScheme.primary)
+                                .clickable {
+                                    linuxScope.launch { LinuxRuntimeUpdate.runInstall(linuxCtx) }
+                                }
+                                .padding(horizontal = 6.dp, vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                text = "Update to ${rt.available}",
+                                fontSize = 10.sp,
+                                color = MaterialTheme.colorScheme.onPrimary,
+                                maxLines = 1,
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -9413,6 +9471,24 @@ private fun AmazonBadge(modifier: Modifier = Modifier) {
     }
 }
 
+/** The Linux runtime's own pill: these entries are not user-added games and are not from a store. */
+@Composable
+private fun LinuxBadge(modifier: Modifier = Modifier) {
+    Row(
+        modifier = modifier
+            .clip(RoundedCornerShape(4.dp))
+            .background(Color(0xFF5C4B8A)),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            "LINUX",
+            color = Color.White,
+            style = MaterialTheme.typography.labelSmall,
+            modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp),
+        )
+    }
+}
+
 /** Amazon-brand orange pill, sized identically to the EPIC/EOS/GOG/STEAM/CUSTOM pills. */
 @Composable
 private fun CustomBadge(modifier: Modifier = Modifier) {
@@ -9449,6 +9525,9 @@ private fun isGogShortcut(shortcut: Shortcut): Boolean =
  * is excluded, so store-library games never show the CUSTOM badge.
  */
 private fun isCustomOriginShortcut(shortcut: Shortcut): Boolean {
+    // The Linux runtime's own entries carry no store tag, so they would otherwise read as
+    // user-added games. They are neither: they get their own badge.
+    if (LinuxShortcuts.isLinuxEntry(shortcut)) return false
     val src = shortcut.getExtra("storeSource", "")
     if (src.isNotEmpty() && src != "custom") return false
     if (isSteamOriginShortcut(shortcut)) return false
@@ -9911,9 +9990,11 @@ private fun ShortcutBadgeOverlay(
     showAmazon: Boolean = false,
     showCustom: Boolean = false,
     showEa: Boolean = false,
+    showLinux: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
-    if (!showSteam && !showEpic && !showEos && !showGog && !showAmazon && !showCustom && !showEa) return
+    if (!showSteam && !showEpic && !showEos && !showGog && !showAmazon && !showCustom && !showEa
+        && !showLinux) return
     Row(modifier = modifier, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
         if (showSteam) SteamBadge()
         if (showEa) EaBadge()
@@ -9922,6 +10003,7 @@ private fun ShortcutBadgeOverlay(
         if (showGog) GogBadge()
         if (showAmazon) AmazonBadge()
         if (showCustom) CustomBadge()
+        if (showLinux) LinuxBadge()
     }
 }
 

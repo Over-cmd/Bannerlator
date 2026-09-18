@@ -1,0 +1,262 @@
+#!/usr/bin/python3
+# Makes the ARM64 Proton the client already downloaded usable here, and sets it as the default tool
+# for Windows titles (CompatToolMapping "0" in config.vdf) when the user has not chosen one. Run
+# before the client starts; it rewrites config.vdf on exit.
+#
+#   bannerlator-steam-compat <steam root>
+#
+# Valve ships a native aarch64 Proton (arm64ec Wine with FEX as the x86 layer) as an ordinary depot,
+# which is exactly what this runtime wants. Its toolmanifest declares require_tool_appid 4185400 -
+# Steam Linux Runtime 4 for arm64 - so Steam stacks pressure-vessel underneath it, and
+# pressure-vessel needs unprivileged user namespaces, which an Android app does not get. Steam then
+# drops the launch on the floor: no window, no log, straight back to the library.
+#
+# So the depot is re-registered here as a compatibility tool of our own: every entry symlinked so
+# nothing is copied and Steam still updates the real depot, but with a toolmanifest that leaves out
+# require_tool_appid. Proton takes its base directory from dirname(sys.argv[0]) without resolving
+# it, so it reads files/ through those symlinks and runs directly on this rootfs.
+import os
+import re
+import shutil
+import sys
+
+TOOL = "bannerlator-proton-arm64"
+# Valve's own ARM64 Proton, by the name the client registers it under. Used only to bootstrap a
+# fresh install: naming it is what makes the client offer it and fetch the depot.
+SEED_TOOL = "proton-experimental-arm64"
+# The extra Steam library the app mounts the installed games into (see bannerlator-steam-library).
+# installed_apps() scans it too; it lives only in the sibling script, so define it here as well.
+LIBRARY = "/mnt/bannerlator"
+# The client lists its own "Proton Experimental (ARM64)" and "Proton 11.0 (ARM64)" in the same
+# Compatibility dropdown, and those are the two that cannot start a game here. Ours has to be
+# unmistakable at a glance, or a user picks a neighbour and gets a launch that fails silently.
+# Newest first: whichever the client has downloaded is used.
+SOURCES = ("Proton Experimental (ARM64)", "Proton 11.0 (ARM64)")
+# Written by us; everything else in the depot is symlinked through.
+OWN_FILES = ("toolmanifest.vdf", "compatibilitytool.vdf")
+# The client assigns a Proton to a Windows title by itself, as a per-app CompatToolMapping entry at
+# priority 250 - which outranks the "0" default, so setting that default alone changes nothing. Every
+# Proton it can pick is one this runtime cannot start: the ARM64 ones want pressure-vessel (see
+# above) and the x86_64 ones want pressure-vessel and FEX on top. Ours is the only one that runs
+# here, so every Proton mapping is repointed at it. Tools that are not Proton are left alone.
+COMPAT_TOOL_VDF = """"compatibilitytools"
+{
+	"compat_tools"
+	{
+		"%s"
+		{
+			"install_path" "."
+			"display_name" "Bannerlator Proton (ARM64)"
+			"from_oslist" "windows"
+			"to_oslist" "linux"
+		}
+	}
+}
+"""
+TOKEN = re.compile(r'\s*(?:"((?:[^"\\]|\\.)*)"|([{}])|//[^\n]*)')
+
+
+def tokenize(text):
+    tokens = []
+    pos = 0
+    while pos < len(text):
+        m = TOKEN.match(text, pos)
+        if not m or m.end() == pos:
+            break
+        pos = m.end()
+        if m.group(2):
+            tokens.append(m.group(2))
+        elif m.group(1) is not None:
+            tokens.append('"' + m.group(1) + '"')
+    return tokens
+
+
+def find_block(tokens, path):
+    """Index of the '{' opening the block at path, or None."""
+    depth, want, i = 0, 0, 0
+    while i < len(tokens):
+        t = tokens[i]
+        if t == "{":
+            depth += 1
+        elif t == "}":
+            depth -= 1
+            if depth < want:
+                return None
+        elif depth == want and i + 1 < len(tokens) and tokens[i + 1] == "{":
+            if t.lower() == '"%s"' % path[want].lower():
+                if want == len(path) - 1:
+                    return i + 1
+                want += 1
+        i += 1
+    return None
+
+
+def block_end(tokens, start):
+    depth = 0
+    for i in range(start, len(tokens)):
+        if tokens[i] == "{":
+            depth += 1
+        elif tokens[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return i
+    return len(tokens)
+
+
+def serialize(tokens):
+    out, depth, i = [], 0, 0
+    while i < len(tokens):
+        t = tokens[i]
+        if t == "}":
+            depth -= 1
+            out.append("\t" * depth + "}")
+            i += 1
+        elif i + 1 < len(tokens) and tokens[i + 1] == "{":
+            out.append("\t" * depth + t)
+            out.append("\t" * depth + "{")
+            depth += 1
+            i += 2
+        else:
+            out.append("\t" * depth + t + "\t\t" + tokens[i + 1])
+            i += 2
+    return "\n".join(out) + "\n"
+
+
+# Steam's own tools and runtimes live in steamapps beside the games; they are not titles and must
+# not be mapped to a compatibility tool.
+NOT_GAMES = frozenset((
+    "228980",    # Steamworks Common Redistributables
+    "1070560",   # Steam Linux Runtime 1.0 (scout)
+    "1391110",   # Steam Linux Runtime 2.0 (soldier)
+    "1493710",   # Proton Experimental
+    "3127680",   # FEX
+    "4183110",   # Steam Linux Runtime 4.0
+    "4185400",   # Steam Linux Runtime 4.0 - Arm64
+    "4427310",   # Proton Experimental (ARM64)
+    "4628740",   # Proton 11.0 (ARM64)
+))
+
+
+def installed_apps(steam_root):
+    """App ids of the titles the client has installed, tools and runtimes excluded."""
+    apps = set()
+    for library in (steam_root, LIBRARY):
+        steamapps = os.path.join(library, "steamapps")
+        try:
+            names = os.listdir(steamapps)
+        except OSError:
+            continue
+        for name in names:
+            m = re.fullmatch(r"appmanifest_(\d+)\.acf", name)
+            if m and m.group(1) not in NOT_GAMES:
+                apps.add(m.group(1))
+    return sorted(apps, key=int)
+
+
+def register_default(config_path, apps=(), name=None):
+    """Writes the mapping. `name` defaults to our own tool; the first-run seed passes Valve's."""
+    tool = name or TOOL
+    with open(config_path, encoding="utf-8", errors="replace") as f:
+        tokens = tokenize(f.read())
+    steam = find_block(tokens, ["InstallConfigStore", "Software", "Valve", "Steam"])
+    if steam is None:
+        return
+    mapping = find_block(tokens[steam + 1:], ["CompatToolMapping"])
+    entry = ['"0"', "{", '"name"', '"%s"' % tool, '"config"', '""', '"priority"', '"75"', "}"]
+    if mapping is None:
+        end = block_end(tokens, steam)
+        tokens[end:end] = ['"CompatToolMapping"', "{"] + entry + ["}"]
+    else:
+        mapping += steam + 1
+        # Repoint every per-app entry the client aimed at a Proton it cannot actually start.
+        for i in range(mapping, block_end(tokens, mapping)):
+            named = tokens[i + 1].strip('"').lower()
+            if tokens[i] == '"name"' and named.startswith("proton") and named != tool:
+                tokens[i + 1] = '"%s"' % tool
+        if find_block(tokens[mapping + 1:], ["0"]) is None:
+            tokens[mapping + 1:mapping + 1] = entry
+        # The "0" default only decides how a title is installed, so it settles new downloads and
+        # leaves anything already installed as a Linux build running as one. An entry per installed
+        # app is what the client's own Compatibility checkbox writes, and is what makes it switch.
+        for app in apps:
+            if find_block(tokens[mapping + 1:], [app]) is not None:
+                continue
+            tokens[mapping + 1:mapping + 1] = [
+                '"%s"' % app, "{", '"name"', '"%s"' % tool, '"config"', '""', '"priority"', '"250"', "}"]
+    tmp = config_path + ".bannerlator"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(serialize(tokens))
+    os.replace(tmp, config_path)
+
+
+def find_source(steam_root):
+    """The ARM64 Proton depot the client has downloaded, or None."""
+    common = os.path.join(steam_root, "steamapps", "common")
+    for name in SOURCES:
+        depot = os.path.join(common, name)
+        # bin-arm64 is what makes it the native build rather than the x86_64 one.
+        if os.path.isdir(os.path.join(depot, "files", "bin-arm64")):
+            return depot
+    return None
+
+
+def build_tool(depot, tool_dir):
+    """Mirror the depot into tool_dir as symlinks, with our own manifests."""
+    # Rebuilt from scratch each run: the client updates the depot and entries come and go.
+    if os.path.islink(tool_dir):
+        os.unlink(tool_dir)
+    elif os.path.isdir(tool_dir):
+        shutil.rmtree(tool_dir)
+    os.makedirs(tool_dir)
+
+    for name in sorted(os.listdir(depot)):
+        if name not in OWN_FILES:
+            os.symlink(os.path.join(depot, name), os.path.join(tool_dir, name))
+
+    with open(os.path.join(depot, "toolmanifest.vdf"), encoding="utf-8", errors="replace") as f:
+        manifest = f.read()
+    # The one line that costs us the launch.
+    manifest = re.sub(r'(?m)^[ \t]*"require_tool_appid".*\n', "", manifest)
+    with open(os.path.join(tool_dir, "toolmanifest.vdf"), "w", encoding="utf-8") as f:
+        f.write(manifest)
+    with open(os.path.join(tool_dir, "compatibilitytool.vdf"), "w", encoding="utf-8") as f:
+        f.write(COMPAT_TOOL_VDF % TOOL)
+
+
+def main():
+    steam_root = sys.argv[1]
+    depot = find_source(steam_root)
+    if depot is None:
+        # Nothing of ours to register yet - but the client will not even OFFER an ARM64 Proton until
+        # something names one, so a new user has no way to ask for it. Point the default at Valve's
+        # own ARM64 Proton by name: the client then registers it, and downloads the depot the first
+        # time a Windows title launches. The next session finds that depot and replaces this with
+        # our own copy (register_default repoints any name starting with "proton"), which is the one
+        # that actually starts a game here.
+        config = os.path.join(steam_root, "config", "config.vdf")
+        if os.path.isfile(config):
+            seeded = SEED_TOOL
+            try:
+                text = open(config, encoding="utf-8", errors="replace").read()
+            except OSError:
+                text = ""
+            if seeded not in text and TOOL not in text:
+                register_default(config, (), name=seeded)
+                print("bannerlator-steam-compat: seeded the default to %s so the client offers and "
+                      "fetches it" % seeded, file=sys.stderr)
+                return
+        print("bannerlator-steam-compat: no ARM64 Proton installed yet", file=sys.stderr)
+        return
+    tools = os.path.join(steam_root, "compatibilitytools.d")
+    os.makedirs(tools, exist_ok=True)
+    build_tool(depot, os.path.join(tools, TOOL))
+    print("bannerlator-steam-compat: registered %s from %s" % (TOOL, os.path.basename(depot)))
+    config = os.path.join(steam_root, "config", "config.vdf")
+    if os.path.isfile(config):
+        apps = installed_apps(steam_root)
+        register_default(config, apps)
+        print("bannerlator-steam-compat: %d installed title(s) set to %s" % (len(apps), TOOL))
+
+
+if __name__ == "__main__":
+    main()

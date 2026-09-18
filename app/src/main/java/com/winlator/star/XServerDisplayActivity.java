@@ -775,8 +775,16 @@ public class XServerDisplayActivity extends AppCompatActivity {
                     line = line.toLowerCase();
                     // The layer's Mesa EGL/Zink. "libegl.so.1" is Mesa's soname — Android's platform
                     // EGL is /system/lib64/libEGL.so (no ".1"), so this can't match the host's.
-                    if (line.indexOf("libegl.so.1") >= 0 || line.indexOf("libgallium") >= 0
-                            || line.indexOf("libwayland-egl.so") >= 0) { gl = true; break; }
+                    // In a gamescope session the Mesa GL stack is NOT evidence of a GL game: the
+                    // session script exports GALLIUM_DRIVER=zink and MESA_LOADER_DRIVER_OVERRIDE=zink
+                    // for everything in it (Steam's CEF needs GL and the rootfs ships no native GL
+                    // driver), so gamescope, Xwayland, Steam and its helpers all map libgallium -
+                    // eleven processes in one measured session - and a Proton game inherits the same
+                    // environment while rendering D3D11 through DXVK. Treat it the way the X11
+                    // resolver already treats opengl32: resident, and proof of nothing. Zink runs GL
+                    // on Vulkan here anyway, so the neutral "Vulkan" stays underlying-accurate.
+                    if (!gamescopeMode && (line.indexOf("libegl.so.1") >= 0 || line.indexOf("libgallium") >= 0
+                            || line.indexOf("libwayland-egl.so") >= 0)) { gl = true; break; }
                     if (line.indexOf("winevulkan.so") >= 0 || line.indexOf("winevulkan.dll") >= 0
                             || line.indexOf("vulkan-1.dll") >= 0) vulkan = true;
                 }
@@ -1452,6 +1460,8 @@ public class XServerDisplayActivity extends AppCompatActivity {
     // our embedded compositor instead of the X11 server. All branches are guarded by this flag,
     // so the X11 path is unchanged when it's false. See WAYLAND_RUNTIME.md.
     private boolean waylandMode = false;
+    // The session runs gamescope in the Linux runtime instead of Wine; the compositor is its display.
+    private boolean gamescopeMode = false;
     // HUD metric sampling for wayland mode (see startWaylandCompositor): its own thread, never the
     // compositor's. update() self-throttles to 500 ms and posts the view refresh to the UI thread.
     private android.os.HandlerThread waylandHudThread;
@@ -2463,6 +2473,16 @@ public class XServerDisplayActivity extends AppCompatActivity {
             waylandMode = Container.DISPLAY_BACKEND_WAYLAND.equals(backend);
         }
 
+        // Runtime: the game's override, else the container's. gamescope is a Wayland client of our
+        // compositor and has nothing to draw on otherwise, so it pins the backend to Wayland.
+        String runtime = shortcut != null ? shortcut.getExtra(Container.EXTRA_RUNTIME, "") : "";
+        if (runtime.isEmpty()) runtime = container.getRuntime();
+        gamescopeMode = Container.RUNTIME_GAMESCOPE.equals(runtime);
+        if (gamescopeMode) {
+            waylandMode = true;
+            Log.i("XServerDisplayActivity", "runtime: gamescope (Linux), display server: Wayland");
+        }
+
         // In-game Friends tab (drawer): read the friends/chat opt-in once for this launch and start
         // watching for a live source. The RealSteam hint keeps the app-session source from flashing up
         // before maybeStageRealSteam() arms the plan (which confirms or withdraws it); disarmed in onDestroy.
@@ -2609,7 +2629,8 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // selected layer must ship winewayland.so AND its bundled Wayland Turnip, else the compositor
         // start, the registry driver write and the winex11.drv hide below would all run against a
         // layer that can't drive them. Fall back to X11 and say so.
-        if (waylandMode && !com.winlator.star.core.WineWaylandSupport.isWaylandCapable(wineInfo)) {
+        if (waylandMode && !gamescopeMode
+                && !com.winlator.star.core.WineWaylandSupport.isWaylandCapable(wineInfo)) {
             Log.w("XServerDisplayActivity", "wayland: layer " + wineVersion + " (" + wineInfo.path
                     + ") lacks winewayland.so and/or lib/libvulkan_freedreno_wayland.so; launching on X11");
             waylandMode = false;
@@ -6772,6 +6793,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // Abnormal teardown (no exit() worker ran): never leave the app's Steam session suspended.
         // Non-blocking — the reconnect is posted to the CM pump. No-op unless a real-Steam launch
         // suspended it this session.
+        linuxSessionWatchStop = true;
         releaseRealSteamSession("activity destroyed", 0L);
         clearOfflineSteamPresence("activity destroyed");
         // Hide the drawer's Friends tab source + leave any in-game chat thread (the full Friends
@@ -8537,6 +8559,304 @@ public class XServerDisplayActivity extends AppCompatActivity {
         return bmp;
     }
 
+    /**
+     * A gamescope session. proot runs the Linux runtime's session script, which starts gamescope as
+     * a Wayland client of the compositor this activity already brought up; gamescope then execs the
+     * script again inside itself for the program. Nothing of Wine is involved — no prefix, no
+     * wineserver, no dxwrapper — and the PulseAudio socket is the only imagefs service the guest
+     * reaches.
+     *
+     * <p>Ported from WinNative's gamescope runtime (GPL-3.0).
+     */
+    /**
+     * The Linux runtime's Steam client is a SECOND client on the same account, and Valve allows one:
+     * whichever logs in last wins and the other is told 'Session Replaced' and refuses to reconnect.
+     * The app logs in for its own store, so without this the app displaces the Linux client seconds
+     * after it signs in — the client sits on "logging in", then Steam exits, and gamescope's primary
+     * child dying takes the whole session down ("back to the games screen").
+     *
+     * <p>The Windows real-Steam path already does this through {@link #suspendAppSteamSessionForRealSteam()},
+     * but that is a no-op unless {@code maybeStageRealSteam()} armed a plan, and the gamescope branch
+     * returns long before any of that runs. Hold the session the same way and mark it with
+     * {@link #realSteamSessionHeld}, which is what {@link #releaseRealSteamSession} keys off — onDestroy
+     * already calls it ungated, so the app's own session comes back when the session ends.
+     */
+    /**
+     * Other apps on the device that embed their own Steam client. Valve allows one client per
+     * account, and one of these auto-reconnects the moment ours displaces it - so the Linux client
+     * is signed out 2-3 seconds after every login and sits on "Logging in..." with the downloads
+     * reporting no internet. Measured on a Pocket FIT: GameHub's SteamKit client logged on at the
+     * exact second of every one of nine kicks in a day. An app cannot force-stop another without
+     * root, so this names the culprit instead of leaving the user to guess.
+     */
+    private static final String[] COMPETING_STEAM_CLIENTS = {
+            "com.xiaoji.egggame",     // GameHub
+    };
+
+    /**
+     * Which of {@link #COMPETING_STEAM_CLIENTS} are installed. Installed, not running: since
+     * Android 7 {@code getRunningAppProcesses()} returns only the caller's own processes, so a
+     * process check can never see another app (tested - GameHub with two live processes went
+     * unnoticed). {@code getPackageInfo} is fine at targetSdk 28, which predates package-visibility
+     * filtering.
+     */
+    private java.util.List<String> installedCompetingSteamClients() {
+        java.util.List<String> out = new java.util.ArrayList<>();
+        for (String pkg : COMPETING_STEAM_CLIENTS) {
+            try { getPackageManager().getPackageInfo(pkg, 0); out.add(pkg); }
+            catch (Throwable ignore) {}
+        }
+        return out;
+    }
+
+    private static String competingClientName(String pkg) {
+        return "com.xiaoji.egggame".equals(pkg) ? "GameHub" : pkg;
+    }
+
+    private volatile boolean linuxSessionWatchStop = false;
+
+    /**
+     * Mirrors the session's "== STEP …" milestones onto the preloader while it is still up. A first
+     * run downloads the Steam client before anything can be drawn, which is a minute or two of black
+     * screen with no explanation - long enough that people close the app believing it hung, which is
+     * exactly what happened during testing. The session script already prints each milestone; this
+     * just puts the newest one where it can be seen. Best-effort: the log is the source of truth and
+     * nothing here affects the launch.
+     */
+    private void showLinuxFirstRunProgress(final File sessionLog) {
+        Thread t = new Thread(() -> {
+            long offset = 0;
+            String last = null;
+            long deadline = System.currentTimeMillis() + 10 * 60 * 1000L;
+            while (!linuxSessionWatchStop && System.currentTimeMillis() < deadline) {
+                try { Thread.sleep(1000); } catch (InterruptedException e) { return; }
+                if (!sessionLog.isFile()) continue;
+                long len = sessionLog.length();
+                if (len < offset) offset = 0;
+                if (len == offset) continue;
+                try (java.io.RandomAccessFile raf = new java.io.RandomAccessFile(sessionLog, "r")) {
+                    raf.seek(offset);
+                    byte[] buf = new byte[(int) Math.min(len - offset, 256 * 1024)];
+                    int got = raf.read(buf);
+                    offset = len;
+                    if (got <= 0) continue;
+                    for (String line : new String(buf, 0, got,
+                            java.nio.charset.StandardCharsets.UTF_8).split("\n")) {
+                        int at = line.indexOf("== STEP ");
+                        if (at < 0) continue;
+                        // drop the marker and its HH:MM:SS
+                        String msg = line.substring(at + 8).trim();
+                        int sp = msg.indexOf(' ');
+                        if (sp > 0) msg = msg.substring(sp + 1).trim();
+                        if (!msg.isEmpty()) last = msg;
+                    }
+                    if (last != null && preloaderDialog != null) preloaderDialog.stepOnUiThread(2, last);
+                } catch (Throwable ignore) {}
+            }
+        }, "LinuxFirstRunProgress");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    /**
+     * The check that actually works, because it reads the symptom rather than guessing at the
+     * cause: the runtime's Steam client writes {@code 'Session Replaced'} to its own connection log
+     * the moment another client takes the account, and that file is ours to read. Watch the bytes
+     * appended after the session starts for a few minutes and say so plainly the first time it
+     * happens - naming the installed app if there is one, and catching apps this code has never
+     * heard of otherwise. Off the launch path; stops with the activity.
+     */
+    private void watchLinuxSteamForSessionReplaced() {
+        final File log = new File(com.winlator.star.linux.LinuxRuntime.rootDir(this),
+                "root/.local/share/Steam/logs/connection_log.txt");
+        final long startLen = log.isFile() ? log.length() : 0L;
+        linuxSessionWatchStop = false;
+        Thread t = new Thread(() -> {
+            long offset = startLen;
+            long deadline = System.currentTimeMillis() + 4 * 60 * 1000L;
+            while (!linuxSessionWatchStop && System.currentTimeMillis() < deadline) {
+                try { Thread.sleep(5000); } catch (InterruptedException e) { return; }
+                if (!log.isFile()) continue;
+                long len = log.length();
+                if (len < offset) offset = 0;              // rotated
+                if (len == offset) continue;
+                try (java.io.RandomAccessFile raf = new java.io.RandomAccessFile(log, "r")) {
+                    raf.seek(offset);
+                    byte[] buf = new byte[(int) Math.min(len - offset, 512 * 1024)];
+                    int got = raf.read(buf);
+                    offset = len;
+                    if (got <= 0) continue;
+                    String chunk = new String(buf, 0, got, java.nio.charset.StandardCharsets.UTF_8);
+                    if (chunk.contains("Session Replaced")) {
+                        java.util.List<String> installed = installedCompetingSteamClients();
+                        String hint = installed.isEmpty()
+                                ? "another app on this device is signed into your Steam account. Close it and launch again."
+                                : "close " + competingClientName(installed.get(0)) + " - it is signed into your Steam account too - and launch again.";
+                        Log.w("BH_REALSTEAM", "Linux Steam client was signed out ('Session Replaced'); installed rivals: " + installed);
+                        runOnUiThread(() -> showToast(this, "Steam signed the Linux client out: " + hint));
+                        return;
+                    }
+                } catch (Throwable ignore) {}
+            }
+        }, "LinuxSteamSessionWatch");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    private void suspendAppSteamForLinuxSession() {
+        // Warn about the clients we cannot stop before holding the one we can. Installed is the
+        // most a normal app can know; the watcher below catches the actual sign-out.
+        java.util.List<String> rivals = installedCompetingSteamClients();
+        if (!rivals.isEmpty()) {
+            String who = competingClientName(rivals.get(0));
+            Log.w("BH_REALSTEAM", "competing Steam client installed: " + rivals);
+            runOnUiThread(() -> showToast(this, "If " + who + " is open, close it first - it signs "
+                    + "into your Steam account and will sign the Linux client out."));
+        }
+        watchLinuxSteamForSessionReplaced();
+        if (realSteamSessionHeld) return;
+        try {
+            SteamRepository.getInstance().suspendForRealSteam();
+            realSteamSessionHeld = true;
+            Log.i("BH_REALSTEAM", "app Steam session suspended for the Linux runtime's Steam client");
+        } catch (Throwable t) {
+            Log.w("BH_REALSTEAM", "could not suspend the app's Steam session for the Linux client — "
+                    + "it may be logged out with 'Session Replaced'", t);
+        }
+    }
+
+    private void setupLinuxSession(String rootPath) {
+        if (!com.winlator.star.linux.LinuxRuntime.isInstalled(this)) {
+            throw new IllegalStateException("The Linux runtime is not installed."
+                    + " Install it from Components before launching a gamescope session.");
+        }
+        try {
+            com.winlator.star.linux.LinuxRuntime.writeAccounts(this);
+        } catch (java.io.IOException e) {
+            throw new IllegalStateException(e);
+        }
+
+        List<String> session = linuxSessionArgs();
+        // Only the Steam mode signs in; a desktop session has no client and needs no hold. The
+        // desktop can of course start Steam by hand, but taking the app's store offline for every
+        // file-manager session would be a worse trade.
+        if (session.contains(com.winlator.star.linux.LinuxRuntime.MODE_STEAM)) {
+            suspendAppSteamForLinuxSession();
+        }
+        File runtimeDir = new File(getFilesDir(), ".wayland-rt");
+        runtimeDir.mkdirs();
+
+        environment = new XEnvironment(this, imageFs);
+
+        List<String> guest = new ArrayList<>();
+        guest.add("/usr/bin/env");
+        guest.add("-i");
+        guest.add("HOME=/root");
+        guest.add("USER=root");
+        guest.add("PATH=/usr/local/bin:/usr/bin:/bin");
+        guest.add("TERM=xterm-256color");
+        guest.add("LANG=C.UTF-8");
+        guest.add("XDG_RUNTIME_DIR=" + runtimeDir.getPath());
+        guest.add("XDG_SESSION_TYPE=wayland");
+        guest.add("WAYLAND_DISPLAY=wayland-0");
+        guest.add("GAMESCOPE_FORCE_GENERAL_QUEUE=1");
+        // The preload goes in the rootfs's /etc/ld.so.preload, not here: Steam rebuilds
+        // LD_PRELOAD for every game process and appends to its own overlay entry without a
+        // separator, which turns ours into one nonexistent path and drops it silently.
+        // Steam's CEF needs GL and the rootfs ships no native GL driver: route it through Zink.
+        guest.add("MESA_LOADER_DRIVER_OVERRIDE=zink");
+        guest.add("GALLIUM_DRIVER=zink");
+        guest.add("LIBGL_KOPPER_DRI2=true");
+        File icd = com.winlator.star.linux.LinuxRuntime.vulkanIcd(this);
+        if (icd != null) guest.add("VK_ICD_FILENAMES=" + icd.getPath());
+        if ("pulseaudio".equals(audioDriver)) {
+            guest.add("PULSE_SERVER=unix:" + rootPath + UnixSocketConfig.PULSE_SERVER_PATH);
+            environment.addComponent(new PulseAudioComponent(
+                    UnixSocketConfig.createSocket(rootPath, UnixSocketConfig.PULSE_SERVER_PATH)));
+        }
+        guest.add("BL_WIDTH=" + xServer.screenInfo.width);
+        guest.add("BL_HEIGHT=" + xServer.screenInfo.height);
+        guest.add("BL_FPS=" + (resolvedFpsLimiterEnabled() ? Math.max(0, resolvedFpsLimiterValue()) : 0));
+        // gamescope advertises this as the session's refresh rate, and a game reads it as the
+        // display's: without it gamescope falls back to 60, so a 120 Hz panel offers only 60 Hz in
+        // game settings and titles cap themselves there. The panel's highest mode is the honest
+        // answer, the same number the frame pacer uses as its ceiling.
+        int panelHz = Math.round(currentDisplayRefreshHz());
+        if (panelHz > 1) guest.add("BL_REFRESH=" + panelHz);
+        // Debug logging until the runtime is stable: every launch gets its own file under the
+        // public Downloads folder — the whole session (proot, gamescope, Steam stdout) goes in it,
+        // and the script copies Steam's own logs beside it at exit — so a user can hand over a
+        // folder without digging into app-private storage.
+        File logDir = com.winlator.star.linux.LinuxRuntime.debugLogDir();
+        logDir.mkdirs();
+        String stamp = new java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US)
+                .format(new java.util.Date());
+        File sessionLog = new File(logDir, "session-" + stamp + ".log");
+        guest.add("BL_LOG=" + sessionLog.getPath());
+        guest.add("BL_DEBUG_DIR=" + new File(logDir, "session-" + stamp).getPath());
+        Log.i("XServerDisplayActivity", "Linux session log: " + sessionLog.getPath());
+        showLinuxFirstRunProgress(sessionLog);
+        guest.add(com.winlator.star.linux.LinuxRuntime.SESSION_SCRIPT);
+        guest.addAll(session);
+
+        EnvVars hostEnv = new EnvVars();
+        hostEnv.put("PROOT_LOADER", com.winlator.star.linux.LinuxRuntime.prootLoader(this).getPath());
+        hostEnv.put("PROOT_TMP_DIR", getCacheDir().getPath());
+        // The runtime's proot links against a libtalloc that sits beside it. Android's linker does
+        // not search a plain executable's own directory, so it has to be named here or the process
+        // dies before it starts, with the reason only in `logcat -b crash`.
+        String prootLibs = com.winlator.star.linux.LinuxRuntime.prootLibraryPath(this);
+        if (!prootLibs.isEmpty()) hostEnv.put("LD_LIBRARY_PATH", prootLibs);
+
+        // The games this app already downloaded, handed to the Steam client as a library folder so
+        // the same install serves both launchers and nothing is fetched twice.
+        List<String> gameBinds = com.winlator.star.linux.LinuxSteamLibrary.prepare(
+                container, com.winlator.star.linux.LinuxRuntime.rootDir(this));
+        List<String> command = com.winlator.star.linux.LinuxRuntime.command(this, imageFs, runtimeDir,
+                android.os.Environment.getExternalStorageDirectory(), gameBinds, guest);
+        environment.addComponent(new com.winlator.star.linux.LinuxProgramLauncherComponent(
+                command, hostEnv, com.winlator.star.linux.LinuxRuntime.rootDir(this), (status) -> {
+                    Log.i("XServerDisplayActivity", "Linux session " + session + " ended: " + status);
+                    exit();
+                }));
+
+        preloaderDialog.step(4, "Launching Linux session…");
+        environment.startEnvironmentComponents();
+        preloaderDialog.enterGuest("Waiting for gamescope to render…");
+        runOnUiThread(this::startLaunchTimers);
+        // The same unconditional overlay clear the Wayland path uses: the first-frame hook may never
+        // fire for this client, and the guest must not stay hidden behind a stuck spinner.
+        new android.os.Handler(getMainLooper()).postDelayed(() -> {
+            if (!winStarted) { winStarted = true; cancelLaunchTimers(); }
+            preloaderDialog.closeOnUiThread();
+        }, 2000L);
+        winHandler.start();
+    }
+
+    /** What the session script runs: the desktop, a Linux program, or the native Steam client. */
+    private List<String> linuxSessionArgs() {
+        List<String> args = new ArrayList<>();
+        if (shortcut == null) {
+            args.add(com.winlator.star.linux.LinuxRuntime.MODE_DESKTOP);
+            return args;
+        }
+        String mode = shortcut.getExtra(com.winlator.star.linux.LinuxRuntime.EXTRA_LINUX_MODE, "");
+        if (com.winlator.star.linux.LinuxRuntime.MODE_STEAM.equals(mode)) {
+            args.add(com.winlator.star.linux.LinuxRuntime.MODE_STEAM);
+            String appId = shortcut.getExtra("app_id", "");
+            if (!appId.isEmpty()) args.add("steam://rungameid/" + appId);
+            return args;
+        }
+        String exe = shortcut.getExtra("custom_exe", "");
+        if (com.winlator.star.linux.LinuxRuntime.MODE_RUN.equals(mode) && !exe.isEmpty()) {
+            args.add(com.winlator.star.linux.LinuxRuntime.MODE_RUN);
+            args.add(exe);
+            return args;
+        }
+        args.add(com.winlator.star.linux.LinuxRuntime.MODE_DESKTOP);
+        return args;
+    }
+
     private void setupXEnvironment() throws PackageManager.NameNotFoundException {
 
         // Set environment variables
@@ -8668,6 +8988,12 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // (wrapperLogDir then points at the user's log dir, outside tmp) or on a WineD3D container (null).
         if (wrapperLogDir != null) wrapperLogDir.mkdirs();
 
+        // A gamescope session shares nothing below this point: no prefix, no wineserver, no
+        // dxwrapper, no guest launcher. proot and the session script are the whole of it.
+        if (gamescopeMode) {
+            setupLinuxSession(rootPath);
+            return;
+        }
 
         guestProgramLauncherComponent = new GuestProgramLauncherComponent(
                 contentsManager,
