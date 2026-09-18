@@ -25,6 +25,11 @@ TOOL = "bannerlator-proton-arm64"
 SOURCES = ("Proton Experimental (ARM64)", "Proton 11.0 (ARM64)")
 # Written by us; everything else in the depot is symlinked through.
 OWN_FILES = ("toolmanifest.vdf", "compatibilitytool.vdf")
+# The client assigns a Proton to a Windows title by itself, as a per-app CompatToolMapping entry at
+# priority 250 - which outranks the "0" default, so setting that default alone changes nothing. Every
+# Proton it can pick is one this runtime cannot start: the ARM64 ones want pressure-vessel (see
+# above) and the x86_64 ones want pressure-vessel and FEX on top. Ours is the only one that runs
+# here, so every Proton mapping is repointed at it. Tools that are not Proton are left alone.
 COMPAT_TOOL_VDF = """"compatibilitytools"
 {
 	"compat_tools"
@@ -121,9 +126,13 @@ def register_default(config_path):
         tokens[end:end] = ['"CompatToolMapping"', "{"] + entry + ["}"]
     else:
         mapping += steam + 1
-        if find_block(tokens[mapping + 1:], ["0"]) is not None:
-            return
-        tokens[mapping + 1:mapping + 1] = entry
+        # Repoint every per-app entry the client aimed at a Proton it cannot actually start.
+        for i in range(mapping, block_end(tokens, mapping)):
+            named = tokens[i + 1].strip('"').lower()
+            if tokens[i] == '"name"' and named.startswith("proton") and named != TOOL:
+                tokens[i + 1] = '"%s"' % TOOL
+        if find_block(tokens[mapping + 1:], ["0"]) is None:
+            tokens[mapping + 1:mapping + 1] = entry
     tmp = config_path + ".bannerlator"
     with open(tmp, "w", encoding="utf-8") as f:
         f.write(serialize(tokens))
