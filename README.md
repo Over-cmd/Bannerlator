@@ -79,7 +79,7 @@ Before any **stable release** is published, all changes are **manually debugged 
 |---|---|
 | **App label** | `Bannerlator Bionic` (standard) · `Bannerlator Bionic PuBG` (pubg) · `Bannerlator Bionic Ludashi` (ludashi) |
 | **Packages** | `com.winlator.banner` (standard) · `com.tencent.ig` (pubg) · `com.ludashi.benchmark` (ludashi) |
-| **Version** | Bannerlator **V 3.0.8** — built from Star **marcescence** (`versionName 3.0.8`, `versionCode 82`) |
+| **Version** | Bannerlator **V 3.1.2** — built from Star **marcescence** (`versionName 3.1.2`, `versionCode 86`) |
 | **Android SDK** | `compileSdk 34` · `targetSdk 28` · `minSdk 26` (Android 8.0+) |
 | **Lineage** | Winlator → cmod → Bionic Nightly → Star Bionic → **marcescence** → **Bannerlator** |
 
@@ -111,7 +111,7 @@ Every report gets its own **public discussion thread**. You can reply as the ori
 - [🤖 AI Disclaimer](#-ai-disclaimer)
 - [ℹ️ Information](#ℹ️-information)
 - [🐛 Report a Mali GPU Issue](#-report-a-mali-gpu-game-issue)
-- [🆕 What's New in 3.1.1](#-whats-new-in-311)
+- [🆕 What's New in 3.1.2](#-whats-new-in-312)
 - [🎞️ Frame Generation & Present Modes](#-frame-generation--present-modes)
 - [✨ Full Features](#-full-features)
 - [🎨 Adding your own ReShade effects](#-adding-your-own-reshade-effects)
@@ -124,7 +124,23 @@ Every report gets its own **public discussion thread**. You can reply as the ori
 
 ---
 
-## 🆕 What's New in 3.1.1
+## 🆕 What's New in 3.1.2
+
+**The Wayland update.** Bannerlator can now draw a game through its **own embedded Wayland compositor** instead of the Java X server — a second display backend, chosen per container. It does things X11 cannot: **HDR10**, **launching a game on your TV**, **zero-copy presentation**, **eight bundled game drivers** to pick from per game, real **mouse-look**, and frame generation in HDR.
+
+> 🧪 **Wayland is EXPERIMENTAL and is not a replacement for X11.** It is very new and it has bugs — some games run worse than on X11, some will not run at all. **X11 remains the default and stays fully supported**, and is still the right choice for anything you actually want to play. Wayland is **off unless you turn it on**, per container, and your existing containers are untouched.
+>
+> It only works on the new **versionCode 8 arm64ec Proton 11 layers** (the **(v8)** rows in the catalog) — not on the x86_64 (box64) layers and not on the Proton 10 layers, which stay on v7. It also needs an **Adreno** GPU, because the bundled drivers are Turnip; Mali, Xclipse and PowerVR phones stay on X11.
+
+- **🌊 Wayland display backend (experimental).** Turn it on per container. A game draws straight into Bannerlator's compositor, and you pick one of **eight bundled Wayland Turnip drivers** per game.
+- **🌈 HDR10 on HDR screens.** Your screen's real peak, frame-average and black level are described to Windows, so a game's own HDR option stops being greyed out.
+- **📺 Play on your TV.** A **TV** tab appears while an external screen is connected: launch the session straight onto the TV (in HDR when it supports it), with a companion screen on the handheld. Unplug and the game moves back and carries on.
+- **🎭 GPU name spoof on Wayland**, plus a DXVK memory cap and present-mode picker in the driver gear.
+- **⚡ Wayland performance, phase 1** — measured on an Adreno 750: **+9% Vulkan, +12% D3D12, +20% DirectDraw**, with higher 1% lows.
+- **📦 New versionCode 8 compatibility layers** — every Proton / GE-Proton **11.x** layer rebuilt with the Wayland driver and HDR10, plus **Proton-CachyOS** joining the catalog and x86_64 builds for GE 11.0-7, 11.0-7.1 and CachyOS. Proton 10.0-4 and GE 10.0-34 stay at v7.
+- **🎮 A physical controller stick can move the mouse** with the on-screen controls switched off.
+
+### 🆕 Earlier — 3.1.1 (the XMB update)
 
 **The XMB update.** The Games tab gets an **XMB view** — scroll through your games side to side, the way the PlayStation 3's menu works, and open every setting and tool for the game in focus right there, without pop-ups; built for a controller, in portrait and landscape. **LSFG Native** gets two experimental options from community contributor **clintOnSky** — a lower **capture resolution** that makes frame generation much lighter on weaker phones, and support for stock drivers that only report Vulkan 1.1 — and it starts faster when you turn it on. Entirely app-side — **no ImageFS reinstall**; install over 3.1.0 and everything carries over. Full notes: [`docs/releases/3.1.1.md`](docs/releases/3.1.1.md).
 
@@ -228,6 +244,12 @@ Both engines are what to reach for on a game you've capped: lock the game at **3
 
 Bannerlator handles the present mode for you. **Both native engines force FIFO** while they're generating — they queue the real and generated frames together and need FIFO to show them one per refresh; under Mailbox the display would keep only the newest and discard the rest. Your chosen mode is restored the moment frame generation turns off. While a native engine is generating it also switches the **FPS limiter on** and turns **Auto (match FPS)** on, which fits the screen to Max FPS × multiplier — the exact rate, or the closest one above it (turn Auto off and that game remembers). If Max FPS × multiplier is more than your screen can show, the side menu warns you and offers a one-tap fix. Both controls come back as you had them when frame generation stops. New to it? Read **[LSFG Native Made Simple](https://the412banner.github.io/Bannerlator/lsfg-native-guide.html)**. You can also switch modes live from the **Present Mode selector** in the in-game Graphics tab, and every mode is explained by a **"?"** button and in the in-app **"What is all this?"** glossary.
 
+### Should I switch my games to Wayland?
+
+**No — not the ones you care about.** Wayland is **experimental** and new. X11 is still the default, still fully supported, and still the right choice for playing. Wayland exists so you can *try* the things X11 cannot do — HDR10, playing on a TV, zero-copy presentation, picking a game driver per game — ideally on a spare container rather than the one with your save files.
+
+It also has hard requirements: a **versionCode 8 arm64ec Proton 11 layer** (the **(v8)** rows in the catalog) and an **Adreno** GPU. On anything else the option is greyed out and a launch falls back to X11 with a notice. If a game misbehaves on Wayland, switch that container back to X11 — one setting — and report it with the log from `Download/Wayland-logs/`.
+
 ### Why is my FPS reading different from another emulator?
 
 With frame generation on, two apps' FPS numbers can look very different — because they **count frames at different points in the pipeline**:
@@ -279,6 +301,8 @@ Everything Bannerlator offers, at a glance. No PC and no root required — it ru
 <summary><b>🖥️ Renderers</b></summary>
 
 - Multiple host renderers — **Vulkan**, **OpenGL**, **SurfaceFlinger**, and **VirGL**.
+- **Wayland display backend** *(experimental, new in 3.1.2)* — an alternative to the Java X server: the game draws into Bannerlator's own embedded **Wayland compositor**. Brings **HDR10**, **launching a game on an external screen / TV**, **zero-copy presentation**, real **mouse-look** and **eight bundled Wayland Turnip drivers** selectable per game. Chosen **per container**, off by default.
+  - > ⚠️ **Experimental, and not a replacement for X11.** Expect bugs; X11 stays the default and stays supported. Requires a **versionCode 8 arm64ec Proton 11 layer** (the **(v8)** catalog rows) and an **Adreno** GPU — Mali / Xclipse / PowerVR stay on X11.
 - **SurfaceFlinger renderer colour fix** — the SurfaceFlinger (ASurfaceRenderer) host renderer got a crash + colour-accuracy fix (red/blue channel swap corrected, GPU-side format converter, proper fencing), with a **"Correct SurfaceFlinger colours"** toggle available **per container and per game** (shown inline under the Renderer picker when SurfaceFlinger is selected, on by default). *(Ported from [GameNative](https://github.com/utkarshdalal/GameNative) #1620 / #1644.)*
 - > ℹ️ The **Vulkan host renderer** uses the rendering path from **[StevenMXZ](https://github.com/StevenMXZ/Winlator-Ludashi)** (Winlator-Ludashi); its `AHardwareBuffer` present path — what makes Vulkan / DXVK / VKD3D content actually display correctly — was ported from / cross-examined against **[GameNative](https://github.com/utkarshdalal/GameNative)**. See [Credits](#-credits).
 - **Native Rendering (Low-Latency Mode)** — low-latency direct-scanout presentation on **both the Vulkan *and* OpenGL renderers**, skipping the compositor blit to cut input lag (mutually exclusive with that renderer's post-processing effects / scaling, since it bypasses the compositor).
