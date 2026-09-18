@@ -8444,6 +8444,31 @@ public class XServerDisplayActivity extends AppCompatActivity {
      *
      * <p>Ported from WinNative's gamescope runtime (GPL-3.0).
      */
+    /**
+     * The Linux runtime's Steam client is a SECOND client on the same account, and Valve allows one:
+     * whichever logs in last wins and the other is told 'Session Replaced' and refuses to reconnect.
+     * The app logs in for its own store, so without this the app displaces the Linux client seconds
+     * after it signs in — the client sits on "logging in", then Steam exits, and gamescope's primary
+     * child dying takes the whole session down ("back to the games screen").
+     *
+     * <p>The Windows real-Steam path already does this through {@link #suspendAppSteamSessionForRealSteam()},
+     * but that is a no-op unless {@code maybeStageRealSteam()} armed a plan, and the gamescope branch
+     * returns long before any of that runs. Hold the session the same way and mark it with
+     * {@link #realSteamSessionHeld}, which is what {@link #releaseRealSteamSession} keys off — onDestroy
+     * already calls it ungated, so the app's own session comes back when the session ends.
+     */
+    private void suspendAppSteamForLinuxSession() {
+        if (realSteamSessionHeld) return;
+        try {
+            SteamRepository.getInstance().suspendForRealSteam();
+            realSteamSessionHeld = true;
+            Log.i("BH_REALSTEAM", "app Steam session suspended for the Linux runtime's Steam client");
+        } catch (Throwable t) {
+            Log.w("BH_REALSTEAM", "could not suspend the app's Steam session for the Linux client — "
+                    + "it may be logged out with 'Session Replaced'", t);
+        }
+    }
+
     private void setupLinuxSession(String rootPath) {
         if (!com.winlator.star.linux.LinuxRuntime.isInstalled(this)) {
             throw new IllegalStateException("The Linux runtime is not installed."
@@ -8456,6 +8481,12 @@ public class XServerDisplayActivity extends AppCompatActivity {
         }
 
         List<String> session = linuxSessionArgs();
+        // Only the Steam mode signs in; a desktop session has no client and needs no hold. The
+        // desktop can of course start Steam by hand, but taking the app's store offline for every
+        // file-manager session would be a worse trade.
+        if (session.contains(com.winlator.star.linux.LinuxRuntime.MODE_STEAM)) {
+            suspendAppSteamForLinuxSession();
+        }
         File runtimeDir = new File(getFilesDir(), ".wayland-rt");
         runtimeDir.mkdirs();
 

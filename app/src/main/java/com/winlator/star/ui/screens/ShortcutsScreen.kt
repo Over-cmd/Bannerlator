@@ -223,6 +223,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import com.winlator.star.container.Container
 import com.winlator.star.container.GameDetails
 import com.winlator.star.container.Shortcut
+import com.winlator.star.linux.LinuxShortcuts
 import com.winlator.star.reshade.ReshadeManager
 import com.winlator.star.contentdialog.GraphicsDriverConfigDialog
 import com.winlator.star.contents.AdrenotoolsManager
@@ -1127,6 +1128,7 @@ fun ShortcutsScreen(vm: ShortcutsViewModel = viewModel()) {
                                     showGog = remember(shortcut) { isGogShortcut(shortcut) },
                                     showAmazon = remember(shortcut) { isAmazonShortcut(shortcut) },
                                     showCustom = remember(shortcut) { isCustomOriginShortcut(shortcut) },
+                                    showLinux = remember(shortcut) { LinuxShortcuts.isLinuxEntry(shortcut) },
                                 )
                             },
                             sdBadge = { shortcut ->
@@ -5216,6 +5218,7 @@ private fun ShortcutItemLayoutL(
                     showGog = remember(shortcut) { isGogShortcut(shortcut) },
                     showAmazon = remember(shortcut) { isAmazonShortcut(shortcut) },
                     showCustom = remember(shortcut) { isCustomOriginShortcut(shortcut) },
+                                    showLinux = remember(shortcut) { LinuxShortcuts.isLinuxEntry(shortcut) },
                     modifier = Modifier.padding(start = 6.dp),
                 )
             }
@@ -5477,6 +5480,7 @@ private fun ShortcutGridItem(
             showGog = remember(shortcut) { isGogShortcut(shortcut) },
             showAmazon = remember(shortcut) { isAmazonShortcut(shortcut) },
             showCustom = remember(shortcut) { isCustomOriginShortcut(shortcut) },
+                                    showLinux = remember(shortcut) { LinuxShortcuts.isLinuxEntry(shortcut) },
             modifier = Modifier
                 .align(Alignment.TopStart)
                 .padding(6.dp),
@@ -9413,6 +9417,24 @@ private fun AmazonBadge(modifier: Modifier = Modifier) {
     }
 }
 
+/** The Linux runtime's own pill: these entries are not user-added games and are not from a store. */
+@Composable
+private fun LinuxBadge(modifier: Modifier = Modifier) {
+    Row(
+        modifier = modifier
+            .clip(RoundedCornerShape(4.dp))
+            .background(Color(0xFF5C4B8A)),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            "LINUX",
+            color = Color.White,
+            style = MaterialTheme.typography.labelSmall,
+            modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp),
+        )
+    }
+}
+
 /** Amazon-brand orange pill, sized identically to the EPIC/EOS/GOG/STEAM/CUSTOM pills. */
 @Composable
 private fun CustomBadge(modifier: Modifier = Modifier) {
@@ -9449,6 +9471,9 @@ private fun isGogShortcut(shortcut: Shortcut): Boolean =
  * is excluded, so store-library games never show the CUSTOM badge.
  */
 private fun isCustomOriginShortcut(shortcut: Shortcut): Boolean {
+    // The Linux runtime's own entries carry no store tag, so they would otherwise read as
+    // user-added games. They are neither: they get their own badge.
+    if (LinuxShortcuts.isLinuxEntry(shortcut)) return false
     val src = shortcut.getExtra("storeSource", "")
     if (src.isNotEmpty() && src != "custom") return false
     if (isSteamOriginShortcut(shortcut)) return false
@@ -9911,9 +9936,11 @@ private fun ShortcutBadgeOverlay(
     showAmazon: Boolean = false,
     showCustom: Boolean = false,
     showEa: Boolean = false,
+    showLinux: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
-    if (!showSteam && !showEpic && !showEos && !showGog && !showAmazon && !showCustom && !showEa) return
+    if (!showSteam && !showEpic && !showEos && !showGog && !showAmazon && !showCustom && !showEa
+        && !showLinux) return
     Row(modifier = modifier, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
         if (showSteam) SteamBadge()
         if (showEa) EaBadge()
@@ -9922,6 +9949,7 @@ private fun ShortcutBadgeOverlay(
         if (showGog) GogBadge()
         if (showAmazon) AmazonBadge()
         if (showCustom) CustomBadge()
+        if (showLinux) LinuxBadge()
     }
 }
 
