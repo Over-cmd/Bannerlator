@@ -8,6 +8,31 @@
 >
 > **Phases.** 1 a Linux ELF runs as our uid · 2 gamescope composites into our surface · 3 the GPU (glibc Turnip, KGSL presented as a DRM node) · 4 Steam · 5 the download/install product.
 
+### 2026-09-18 — the _GNU_SOURCE theory was wrong; proot is still broken
+
+> `9e2b2c44` defined `_GNU_SOURCE` and made implicit declarations an error, on the theory that
+> undeclared `process_vm_readv`/`process_vm_writev` were having their 64-bit returns truncated. The
+> build came out clean - no "call to undeclared" warnings at all - and **the packaged proot fails
+> exactly as before**. The commit is worth keeping, because those functions should be declared, but
+> it is not the fix and the log should not pretend otherwise.
+>
+> This was caught by testing the binary in isolation, pulled straight out of the APK and run through
+> the bridge, before installing anything. That is the right order and it is how it should be done
+> from now on: the previous round installed first and cost an hour of recovery.
+>
+> What is actually established. Bisection puts the defect in **our proot binary, not our loader**: a
+> working proot paired with our loader runs fine, while our proot fails with either loader, so the
+> 2,416-byte loader is correct and judging it by size was a mistake. A verbose run shows proot
+> resolving its bindings, the executable and argv correctly and failing only at the execve step where
+> it injects the loader into the traced process. Our binary is 126,696 bytes against a working
+> 214,416, and our source tree has no `extension/` directory where the upstream one does, so the
+> CMake build compiles a subset of proot's sources - worth checking whether something the Android
+> execve path needs simply is not built in.
+>
+> Two ways forward, neither chosen: work out what Termux patches into proot for Android and apply it
+> here, or ship a known-good proot build instead of ours. The second is faster but is a licensing and
+> provenance decision rather than a technical one.
+
 ### 2026-09-18 — the packaged proot is broken, and it blocks every fresh user
 
 > Installing the new APK on the test device stopped the runtime from starting at all: the session
