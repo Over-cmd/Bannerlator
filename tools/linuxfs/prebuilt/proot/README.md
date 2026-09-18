@@ -1,39 +1,33 @@
-# proot, prebuilt
+# proot, built from the Termux fork
 
 These are **Android/bionic** binaries. They do not run inside the Linux runtime — they are what
-*creates* it, so they execute on the Android side and are only carried in the rootfs tarball
-because that is a convenient way to deliver them.
+*creates* it, so they execute on the Android side and travel in the rootfs tarball only because that
+is how they reach a device without an app reinstall being able to replace them.
 
-    proot             PRoot 5.1.0, aarch64, bionic
+    proot             PRoot, aarch64, bionic — Termux fork v5.1.107.92
     loader            its freestanding loader (PROOT_LOADER)
-    libtalloc.so.2    proot links against it, so it travels with it
+    libtalloc.so.2    proot links against it; shipped under its SONAME, which is what the loader
+                      asks for. A file called libtalloc.so is one it will never find.
 
-## Why they are prebuilt rather than built here
+Built by `.github/workflows/build-proot.yml` from
+<https://github.com/termux/proot> `v5.1.107.92` with the NDK, against Termux's own talloc, with
+`RUNPATH $ORIGIN` so libtalloc is found beside proot. The copies here come from that workflow and
+are refreshed from its artifact; they are checked in so the rootfs build does not depend on a
+previous run.
 
-Our own build of proot (`app/src/main/cpp/proot`) produces a binary that cannot exec anything:
+## Why not `app/src/main/cpp/proot`
 
-    proot error: execve("/usr/bin/echo"): Bad address
-
-Bisected on device, the fault is in the binary and not the loader — our loader paired with a working
-proot runs fine. The clearest lead is that a working proot reports
-
-    built-in accelerators: process_vm = yes, seccomp_filter = yes
-
-and ours reports no accelerators at all, which matters because `process_vm` is how proot writes the
-loader into the traced process. Until that is understood, shipping a proot that works beats shipping
-one we built, and this directory is the honest way to say so.
+That tree is an old snapshot of upstream proot 5.1.0 and **cannot exec anything on a current
+Android**: `proot error: execve(...): Bad address`. Bisected on device, the fault is in the binary
+and not the loader — our loader paired with a working proot runs fine. Both report version "5.1.0",
+because the fork keeps upstream's base version string, which is exactly why the two were assumed to
+be the same code for far too long. The fork is thousands of lines ahead in the ptrace and exec core.
 
 ## Licence
 
-PRoot is **GPL-2.0-or-later** (`Copyright (C) 2015 STMicroelectronics`), which is compatible with
-this project's GPL-3.0. libtalloc is LGPL-3.0-or-later. Both are redistributed unmodified.
+PRoot is **GPL-2.0-or-later**, compatible with this project's GPL-3.0. libtalloc is
+LGPL-3.0-or-later. Corresponding source:
 
-Corresponding source:
-
-  * PRoot — https://github.com/proot-me/proot (v5.1.0), as packaged by Termux:
-    https://github.com/termux/termux-packages/tree/master/packages/proot
-  * talloc — https://gitlab.com/samba-team/samba/-/tree/master/lib/talloc, as packaged by Termux:
-    https://github.com/termux/termux-packages/tree/master/packages/libtalloc
-
-Replacing these with our own build is tracked as the open work; nothing else depends on them being
-prebuilt.
+  * <https://github.com/termux/proot> at tag `v5.1.107.92`
+  * talloc as packaged by Termux:
+    <https://github.com/termux/termux-packages/tree/master/packages/libtalloc>
