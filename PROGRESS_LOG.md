@@ -8,6 +8,30 @@
 >
 > **Phases.** 1 a Linux ELF runs as our uid · 2 gamescope composites into our surface · 3 the GPU (glibc Turnip, KGSL presented as a DRM node) · 4 Steam · 5 the download/install product.
 
+### 2026-09-18 — the packaged proot is broken, and it blocks every fresh user
+
+> Installing the new APK on the test device stopped the runtime from starting at all: the session
+> activity opened and exited within a second, no session log, nothing in logcat. The reason only
+> appears in the **crash buffer**, which is worth remembering for any future "it exits instantly":
+>
+> ```
+> CANNOT LINK EXECUTABLE ".../libproot-real.so": library "libtalloc.so.2" not found
+> ```
+>
+> Behind that is the real problem. **`build-proot.yml` produces a broken proot**: its freestanding
+> loader comes out at 2,416 bytes where a working one is 18,136. proot starts, prints its banner and
+> dies. Every session that has ever worked on this device worked because the device was running a
+> hand-patched proot taken from Termux, and installing an APK overwrites it. Both the new APK and the
+> older one it was rolled back to ship the same broken pair, so this is not a regression from this
+> branch - it has been true all along and was masked by the patch.
+>
+> **No shipped APK can start the Linux runtime.** That makes it the first thing to fix, ahead of
+> anything else on this track: r3 and the automatic Proton selection cannot reach a fresh user until
+> proot builds correctly. The device patch and the exact restore steps are written down in memory,
+> including the two details that are easy to miss - Termux's proot is dynamically linked against
+> libtalloc, and Android's linker will not search the app's own library directory for a plain
+> executable, so the wrapper has to export LD_LIBRARY_PATH.
+
 ### 2026-09-18 — r3 live, APK staged: the fresh-user path is complete
 
 > **`linuxfs-r3` is live and verified**: sha256 `38f116b4...`, 788,991,458 B, `linuxfs.json`
