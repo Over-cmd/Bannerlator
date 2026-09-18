@@ -8,6 +8,26 @@
 >
 > **Phases.** 1 a Linux ELF runs as our uid · 2 gamescope composites into our surface · 3 the GPU (glibc Turnip, KGSL presented as a DRM node) · 4 Steam · 5 the download/install product.
 
+### 2026-09-18 — four games playable, and what the screenshots prove
+
+> Brawlhalla, Stumble Guys, Half-Life and **Half-Life 2**, all through the native Linux Steam client.
+> HL2 is genuinely being played, not sitting on a menu: City 17, crowbar out, HEALTH 100 / SUIT 30,
+> Vulkan, GPU 62-71%.
+>
+> Two results worth more than the launches themselves. **Half-Life's server browser lists 153
+> internet servers with real latencies (29-144 ms)**, so networking works end to end through the
+> Linux client, proot and the `net` shim - these titles are multiplayer-capable, not just rendering.
+> And **Steam's in-game overlay works**, down to the official Half-Life 2 controller layout with a
+> full Xbox mapping, which means Steam Input is live too.
+>
+> Three rendering paths are now proven: DXVK (Brawlhalla, Stumble Guys), Wine WGL → Zink (Half-Life's
+> GoldSrc, which is OpenGL) and Vulkan (HL2).
+>
+> **One bug the screenshots exposed:** the perf HUD reads `0.0 fps / 1000.0ms` on every one of these
+> Source titles while GPU percentage and power draw move correctly - so the frame counter is not
+> hooking on this path, though it does for Brawlhalla. Cosmetic, but it makes the HUD useless for
+> exactly the games that just started working.
+
 ### 2026-09-18 — Half-Life launches: three games, three rendering paths
 
 > `hl.exe` at 348 MB resident, `[Gamescope WSI] Executable name: hl.exe`, swapchain 13.88 ms, HUD
