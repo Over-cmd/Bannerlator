@@ -287,7 +287,7 @@ static struct wl_event_source *g_render_idle, *g_frame_timer;
  * window) a fallback timer renders instead. */
 static int g_dirty;                         /* something changed since the last render */
 static int64_t g_last_vsync_ns;             /* last tick, 0 = none yet */
-static int64_t g_refresh_ns = 16666667;     /* screen refresh interval, from the ticks */
+static int64_t g_refresh_ns = 16666667;     /* measured tick interval (pacing only, never reported) */
 static struct wl_event_source *g_fallback_timer;
 static int g_fallback_armed;
 
@@ -807,13 +807,26 @@ static void feedback_discard_all(struct wl_list *list) {
     }
 }
 
+/* The current mode's refresh interval in ns, from the rate the app read off the display. */
+static uint32_t nominal_refresh_ns(void) {
+    int mhz = g_output_refresh_mhz;
+    if (mhz <= 0) mhz = 60000;
+    return (uint32_t)(1000000000000LL / (int64_t)mhz);
+}
+
 static void feedback_present_all(struct wl_list *list, int64_t t) {
     struct wl_resource *fb, *tmp;
     uint64_t sec = (uint64_t)(t / 1000000000LL);
     uint32_t nsec = (uint32_t)(t % 1000000000LL);
     wl_resource_for_each_safe(fb, tmp, list) {
+        /* The protocol's "refresh" is the NOMINAL interval of the current mode, a constant - not
+         * the interval this frame happened to take. Reporting the measured average instead makes a
+         * variable-refresh panel look like a mode change on every frame: gamescope re-derives its
+         * pacing each time ("Changed refresh to: 119.2 ... 121.4hz", 826 times in a minute on a
+         * Galaxy Z Fold, none on a fixed-refresh device). Report the panel's rate, which the app
+         * gives us and wl_output already advertises. */
         wp_presentation_feedback_send_presented(fb, (uint32_t)(sec >> 32), (uint32_t)sec, nsec,
-                                                (uint32_t)g_refresh_ns, 0, 0,
+                                                nominal_refresh_ns(), 0, 0,
                                                 WP_PRESENTATION_FEEDBACK_KIND_VSYNC);
         wl_resource_destroy(fb);
     }
