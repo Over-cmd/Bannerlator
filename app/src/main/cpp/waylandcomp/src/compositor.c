@@ -746,7 +746,11 @@ static void take_dmabuf(struct surface *s, struct dmabuf_buffer *b, struct wl_re
                                : "the compositor's driver could NOT import it (nothing can show it)");
         s->hdr_fmt_logged = b->format;
     }
-    if (s == g_hud_surface && (b->img || ahb_swapchain_has_ahb(b))) banner_on_game_frame();
+    /* Every buffer that reaches take_dmabuf is a presented GPU frame, so the HUD counts it.
+     * Asking whether the compositor could import it, as this used to, is a question about the
+     * copy path and not about whether a frame happened: a game whose buffers go straight to
+     * the display layer draws on screen while the counter sat at 0.0 fps and 1000.0 ms. */
+    if (s == g_hud_surface) banner_on_game_frame();
 }
 
 /* ---- hooks for ahb_swapchain.c (zero-copy layers) */
