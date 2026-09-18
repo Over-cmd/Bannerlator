@@ -29,6 +29,7 @@ import androidx.compose.ui.unit.dp
 import com.winlator.star.container.ContainerManager
 import com.winlator.star.linux.LinuxRuntime
 import com.winlator.star.linux.LinuxRuntimeInstaller
+import com.winlator.star.linux.LinuxRuntimeUpdate
 import com.winlator.star.linux.LinuxShortcuts
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -54,7 +55,9 @@ fun LinuxRuntimeTab() {
     var message by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(Unit) {
+        LinuxRuntimeUpdate.refreshInstalled(context)
         release = withContext(Dispatchers.IO) { LinuxRuntimeInstaller.fetchRelease() }
+        LinuxRuntimeUpdate.setAvailable(release)
         checking = false
     }
 
@@ -91,7 +94,9 @@ fun LinuxRuntimeTab() {
 
                 if (busy) {
                     Spacer(Modifier.height(4.dp))
-                    Text(stage, style = MaterialTheme.typography.labelSmall)
+                    // Same wording as the Games-tab card, from the same state.
+                    Text(LinuxRuntimeUpdate.line(LinuxRuntimeUpdate.state.value),
+                        style = MaterialTheme.typography.labelSmall)
                     if (percent in 0..100) {
                         LinearProgressIndicator(progress = { percent / 100f },
                             modifier = Modifier.fillMaxWidth())
@@ -113,10 +118,12 @@ fun LinuxRuntimeTab() {
                         onClick = {
                             val r = target ?: return@Button
                             busy = true; message = null; stage = "Starting…"; percent = -1
+                            LinuxRuntimeUpdate.begin()
                             scope.launch {
                                 val ok = withContext(Dispatchers.IO) {
                                     LinuxRuntimeInstaller.install(context, r) { s, p ->
                                         stage = s; percent = p
+                                        LinuxRuntimeUpdate.progress(s, p)
                                     }
                                 }
                                 if (ok) {
@@ -129,6 +136,7 @@ fun LinuxRuntimeTab() {
                                     message = "Install failed — the existing runtime was left alone."
                                 }
                                 busy = false
+                                LinuxRuntimeUpdate.finish(context)
                             }
                         }
                     ) { Text(if (installed == null) "Install" else "Update") }
@@ -170,9 +178,13 @@ fun LinuxRuntimeTab() {
 private fun addSteamEntry(context: android.content.Context) {
     runCatching {
         val manager = ContainerManager(context)
+        // Check EVERY container, not just the one we are about to write to. The choice below can
+        // land on a different container than last time - one got marked as a gamescope runtime, or
+        // the order changed - and an update then added a SECOND entry beside the one already there.
+        if (manager.containers.any { LinuxShortcuts.hasSteamShortcut(it) }) return
         val container = manager.containers.firstOrNull { it.isGamescopeRuntime }
             ?: manager.containers.firstOrNull() ?: return
-        if (!LinuxShortcuts.hasSteamShortcut(container)) LinuxShortcuts.createSteamShortcut(container, context)
+        LinuxShortcuts.createSteamShortcut(container, context)
     }
 }
 

@@ -87,9 +87,20 @@ public final class LinuxRuntimeInstaller {
     }
 
     /**
+     * The guest's home directory, carried across an update rather than replaced with the tarball's
+     * empty one. Steam installs itself here - the client, the signed-in account and every
+     * downloaded game - so replacing the rootfs wholesale used to delete all three and leave the
+     * user re-downloading Steam and signing in again, with their library gone.
+     */
+    private static final String USER_DATA = "root";
+
+    /**
      * Downloads {@code release} and replaces whatever is installed with it. Returns false and
      * leaves the existing runtime alone if the download or the checksum fails; the new rootfs is
      * only moved into place once it has been unpacked whole.
+     *
+     * <p>{@link #USER_DATA} survives the swap: the system is replaced, what the user put in it is
+     * not. An update therefore keeps Steam, the login and the installed games.
      */
     public static boolean install(Context context, Release release, ProgressListener listener) {
         File archive = new File(context.getCacheDir(), "linuxfs.tar.zst");
@@ -133,6 +144,24 @@ public final class LinuxRuntimeInstaller {
                 FileUtils.delete(staging);
                 return false;
             }
+
+            // Carry the user's home over before the new rootfs takes the name. A rename inside the
+            // same filesystem, so a 30 GB library costs nothing and cannot half-copy; the tarball's
+            // own empty /root is dropped first so the rename has somewhere to land. If this fails
+            // the update is abandoned and the previous runtime is put back untouched - shipping a
+            // working system with the user's games gone is the worse outcome.
+            File keptFrom = new File(old, USER_DATA);
+            if (keptFrom.isDirectory()) {
+                File keptTo = new File(staging, USER_DATA);
+                FileUtils.delete(keptTo);
+                if (!keptFrom.renameTo(keptTo)) {
+                    Log.w(TAG, "could not carry " + USER_DATA + " across the update; rolling back");
+                    FileUtils.delete(staging);
+                    old.renameTo(root);
+                    return false;
+                }
+            }
+
             if (!staging.renameTo(root)) {
                 if (old.isDirectory()) old.renameTo(root);
                 return false;

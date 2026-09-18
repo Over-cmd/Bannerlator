@@ -223,6 +223,8 @@ import androidx.compose.ui.text.input.KeyboardType
 import com.winlator.star.container.Container
 import com.winlator.star.container.GameDetails
 import com.winlator.star.container.Shortcut
+import com.winlator.star.linux.LinuxRuntimeInstaller
+import com.winlator.star.linux.LinuxRuntimeUpdate
 import com.winlator.star.linux.LinuxShortcuts
 import com.winlator.star.reshade.ReshadeManager
 import com.winlator.star.contentdialog.GraphicsDriverConfigDialog
@@ -5480,7 +5482,7 @@ private fun ShortcutGridItem(
             showGog = remember(shortcut) { isGogShortcut(shortcut) },
             showAmazon = remember(shortcut) { isAmazonShortcut(shortcut) },
             showCustom = remember(shortcut) { isCustomOriginShortcut(shortcut) },
-                                    showLinux = remember(shortcut) { LinuxShortcuts.isLinuxEntry(shortcut) },
+            showLinux = remember(shortcut) { LinuxShortcuts.isLinuxEntry(shortcut) },
             modifier = Modifier
                 .align(Alignment.TopStart)
                 .padding(6.dp),
@@ -5515,6 +5517,55 @@ private fun ShortcutGridItem(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
+                }
+                // The Linux entry is the runtime's own tile, so it carries the runtime's state:
+                // while an install runs, the same "Downloading 45% · about 2 min left" the Contents
+                // tab shows, from the same source; otherwise a chip when a newer build is waiting.
+                if (remember(shortcut) { LinuxShortcuts.isLinuxEntry(shortcut) }) {
+                    val rt by LinuxRuntimeUpdate.state.collectAsState()
+                    val linuxCtx = LocalContext.current
+                    val linuxScope = rememberCoroutineScope()
+                    // Ask the catalog once so the chip appears even when Contents was never opened.
+                    LaunchedEffect(Unit) {
+                        LinuxRuntimeUpdate.refreshInstalled(linuxCtx)
+                        if (rt.available == null) {
+                            val rel = withContext(Dispatchers.IO) { LinuxRuntimeInstaller.fetchRelease() }
+                            LinuxRuntimeUpdate.setAvailable(rel)
+                        }
+                    }
+                    if (rt.busy) {
+                        Spacer(Modifier.height(3.dp))
+                        Text(
+                            text = LinuxRuntimeUpdate.line(rt),
+                            fontSize = 10.sp,
+                            color = Color.White,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        LinearProgressIndicator(
+                            progress = { if (rt.percent in 0..100) rt.percent / 100f else 0f },
+                            modifier = Modifier.fillMaxWidth().height(3.dp).padding(top = 2.dp),
+                        )
+                    } else if (rt.updateAvailable) {
+                        Spacer(Modifier.height(3.dp))
+                        Row(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(MaterialTheme.colorScheme.primary)
+                                .clickable {
+                                    linuxScope.launch { LinuxRuntimeUpdate.runInstall(linuxCtx) }
+                                }
+                                .padding(horizontal = 6.dp, vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                text = "Update to ${rt.available}",
+                                fontSize = 10.sp,
+                                color = MaterialTheme.colorScheme.onPrimary,
+                                maxLines = 1,
+                            )
+                        }
+                    }
                 }
             }
         }
