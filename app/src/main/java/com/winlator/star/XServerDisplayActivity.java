@@ -8465,7 +8465,9 @@ public class XServerDisplayActivity extends AppCompatActivity {
         guest.add("XDG_SESSION_TYPE=wayland");
         guest.add("WAYLAND_DISPLAY=wayland-0");
         guest.add("GAMESCOPE_FORCE_GENERAL_QUEUE=1");
-        guest.add("LD_PRELOAD=/usr/local/lib/libblsession.so");
+        // The preload goes in the rootfs's /etc/ld.so.preload, not here: Steam rebuilds
+        // LD_PRELOAD for every game process and appends to its own overlay entry without a
+        // separator, which turns ours into one nonexistent path and drops it silently.
         // Steam's CEF needs GL and the rootfs ships no native GL driver: route it through Zink.
         guest.add("MESA_LOADER_DRIVER_OVERRIDE=zink");
         guest.add("GALLIUM_DRIVER=zink");

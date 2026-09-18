@@ -1,15 +1,44 @@
 #!/usr/bin/python3
-# Registers bannerlator-proton with the native Steam client: linked into compatibilitytools.d and
-# set as the default tool for Windows titles (CompatToolMapping "0" in config.vdf) when the user
-# has not chosen one. Run before the client starts; it rewrites config.vdf on exit.
+# Makes the ARM64 Proton the client already downloaded usable here, and sets it as the default tool
+# for Windows titles (CompatToolMapping "0" in config.vdf) when the user has not chosen one. Run
+# before the client starts; it rewrites config.vdf on exit.
 #
 #   bannerlator-steam-compat <steam root>
+#
+# Valve ships a native aarch64 Proton (arm64ec Wine with FEX as the x86 layer) as an ordinary depot,
+# which is exactly what this runtime wants. Its toolmanifest declares require_tool_appid 4185400 -
+# Steam Linux Runtime 4 for arm64 - so Steam stacks pressure-vessel underneath it, and
+# pressure-vessel needs unprivileged user namespaces, which an Android app does not get. Steam then
+# drops the launch on the floor: no window, no log, straight back to the library.
+#
+# So the depot is re-registered here as a compatibility tool of our own: every entry symlinked so
+# nothing is copied and Steam still updates the real depot, but with a toolmanifest that leaves out
+# require_tool_appid. Proton takes its base directory from dirname(sys.argv[0]) without resolving
+# it, so it reads files/ through those symlinks and runs directly on this rootfs.
 import os
 import re
+import shutil
 import sys
 
-TOOL = "bannerlator-proton"
-TOOL_DIR = "/usr/local/share/bannerlator/proton-tool"
+TOOL = "bannerlator-proton-arm64"
+# Newest first: whichever the client has downloaded is used.
+SOURCES = ("Proton Experimental (ARM64)", "Proton 11.0 (ARM64)")
+# Written by us; everything else in the depot is symlinked through.
+OWN_FILES = ("toolmanifest.vdf", "compatibilitytool.vdf")
+COMPAT_TOOL_VDF = """"compatibilitytools"
+{
+	"compat_tools"
+	{
+		"%s"
+		{
+			"install_path" "."
+			"display_name" "Proton (ARM64)"
+			"from_oslist" "windows"
+			"to_oslist" "linux"
+		}
+	}
+}
+"""
 TOKEN = re.compile(r'\s*(?:"((?:[^"\\]|\\.)*)"|([{}])|//[^\n]*)')
 
 
@@ -101,15 +130,52 @@ def register_default(config_path):
     os.replace(tmp, config_path)
 
 
+def find_source(steam_root):
+    """The ARM64 Proton depot the client has downloaded, or None."""
+    common = os.path.join(steam_root, "steamapps", "common")
+    for name in SOURCES:
+        depot = os.path.join(common, name)
+        # bin-arm64 is what makes it the native build rather than the x86_64 one.
+        if os.path.isdir(os.path.join(depot, "files", "bin-arm64")):
+            return depot
+    return None
+
+
+def build_tool(depot, tool_dir):
+    """Mirror the depot into tool_dir as symlinks, with our own manifests."""
+    # Rebuilt from scratch each run: the client updates the depot and entries come and go.
+    if os.path.islink(tool_dir):
+        os.unlink(tool_dir)
+    elif os.path.isdir(tool_dir):
+        shutil.rmtree(tool_dir)
+    os.makedirs(tool_dir)
+
+    for name in sorted(os.listdir(depot)):
+        if name not in OWN_FILES:
+            os.symlink(os.path.join(depot, name), os.path.join(tool_dir, name))
+
+    with open(os.path.join(depot, "toolmanifest.vdf"), encoding="utf-8", errors="replace") as f:
+        manifest = f.read()
+    # The one line that costs us the launch.
+    manifest = re.sub(r'(?m)^[ \t]*"require_tool_appid".*\n', "", manifest)
+    with open(os.path.join(tool_dir, "toolmanifest.vdf"), "w", encoding="utf-8") as f:
+        f.write(manifest)
+    with open(os.path.join(tool_dir, "compatibilitytool.vdf"), "w", encoding="utf-8") as f:
+        f.write(COMPAT_TOOL_VDF % TOOL)
+
+
 def main():
     steam_root = sys.argv[1]
+    depot = find_source(steam_root)
+    if depot is None:
+        # Nothing to register yet; the client installs the depot the first time a Windows game is
+        # set to run under Proton, and the next session picks it up.
+        print("bannerlator-steam-compat: no ARM64 Proton installed yet", file=sys.stderr)
+        return
     tools = os.path.join(steam_root, "compatibilitytools.d")
     os.makedirs(tools, exist_ok=True)
-    link = os.path.join(tools, TOOL)
-    if os.path.islink(link) and os.readlink(link) != TOOL_DIR:
-        os.unlink(link)
-    if not os.path.exists(link):
-        os.symlink(TOOL_DIR, link)
+    build_tool(depot, os.path.join(tools, TOOL))
+    print("bannerlator-steam-compat: registered %s from %s" % (TOOL, os.path.basename(depot)))
     config = os.path.join(steam_root, "config", "config.vdf")
     if os.path.isfile(config):
         register_default(config)
