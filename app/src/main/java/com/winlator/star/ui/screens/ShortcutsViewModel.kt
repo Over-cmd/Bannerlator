@@ -55,6 +55,7 @@ import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
 import java.util.Collections
+import com.winlator.star.linux.LinuxShortcuts
 
 enum class ShortcutSortOrder { NAME_ASC, NAME_DESC, CONTAINER }
 
@@ -187,11 +188,14 @@ class ShortcutsViewModel(app: Application) : AndroidViewModel(app) {
 
     val shortcuts: kotlinx.coroutines.flow.Flow<List<Shortcut>> =
         combine(_shortcuts, _sortOrder) { list, order ->
-            when (order) {
+            val sorted = when (order) {
                 ShortcutSortOrder.NAME_ASC   -> list.sortedBy { it.name.lowercase() }
                 ShortcutSortOrder.NAME_DESC  -> list.sortedByDescending { it.name.lowercase() }
                 ShortcutSortOrder.CONTAINER  -> list.sortedBy { (it.container?.name ?: "").lowercase() }
             }
+            // The Steam entry is a launcher for everything else, not one game among many, so it
+            // stays at the front of every view and sort order rather than being hunted for.
+            sorted.sortedBy { if (it.name == LinuxShortcuts.STEAM_NAME) 0 else 1 }
         }
 
     private val manager = ContainerManager(app)

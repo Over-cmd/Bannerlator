@@ -45,9 +45,9 @@ public final class LinuxShortcuts {
      * if the file could not be written.
      */
     /**
-     * The tile the Games tab shows for the entry. Written out of the app's own resources the first
-     * time the shortcut is created, because a cover art is read from a file path and there is no
-     * store page to pull artwork from for this one.
+     * The tile the Games tab shows for the entry: Steam's own capsule for the client (app 753),
+     * the same artwork the store serves for it. Written out of the app's resources the first time
+     * the shortcut is created, because a cover art is read from a file path.
      */
     private static File coverArtFile(Context context) {
         return new File(context.getFilesDir(), "app_data/cover_arts/" + STEAM_NAME + ".png");
@@ -62,7 +62,7 @@ public final class LinuxShortcuts {
             return "";
         }
         try (java.io.InputStream in = context.getResources().openRawResource(
-                     com.winlator.star.R.drawable.pad_steam);
+                     com.winlator.star.R.drawable.steam_tile);
              java.io.OutputStream os = new java.io.FileOutputStream(out)) {
             byte[] buf = new byte[8192];
             for (int n; (n = in.read(buf)) > 0; ) os.write(buf, 0, n);
