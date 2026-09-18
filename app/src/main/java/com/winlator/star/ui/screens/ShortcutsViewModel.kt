@@ -1156,7 +1156,7 @@ class ShortcutsViewModel(app: Application) : AndroidViewModel(app) {
         // filter out corrupted entries (matches original Fragment logic)
         val kept = raw.filter { it != null && it.file != null && it.file.name.isNotEmpty() }
         // Entries written before the Steam tile existed have no art; give them one on the way in.
-        kept.forEach { LinuxShortcuts.ensureArt(app, it) }
+        kept.forEach { LinuxShortcuts.ensureArt(getApplication(), it) }
         _shortcuts.value = kept
     }
 
