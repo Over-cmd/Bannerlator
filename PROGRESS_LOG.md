@@ -8,6 +8,42 @@
 >
 > **Phases.** 1 a Linux ELF runs as our uid · 2 gamescope composites into our surface · 3 the GPU (glibc Turnip, KGSL presented as a DRM node) · 4 Steam · 5 the download/install product.
 
+### 2026-09-18 — first game launch: Brawlhalla (`c3711182`)
+
+> **The x86-64 Windows build of Brawlhalla runs and presents** through the native Linux Steam
+> client: arm64ec Wine → FEX → DXVK → Turnip → gamescope's WSI layer → our Wayland compositor.
+> `Brawlhalla.exe` at 2.6 GB RSS, `[Gamescope WSI] Swapchain received new refresh cycle: 13.88ms`
+> (~72 fps presenting), and a clean shutdown afterwards — no crash signature.
+>
+> **The blocker was one line in a manifest.** Steam downloads a native aarch64 Proton as an ordinary
+> depot — `Proton Experimental (ARM64)` (4427310) and `Proton 11.0 (ARM64)` (4628740), both carrying
+> `files/bin-arm64/wine` — and both toolmanifests declare `require_tool_appid 4185400`, the Steam
+> Linux Runtime 4 for arm64. Steam therefore stacks **pressure-vessel** underneath, pressure-vessel
+> needs unprivileged **user namespaces**, and an Android app does not get them. Steam then dropped
+> the launch silently: no window, no log, straight back to the library. That silence is why no
+> compatibility tool ever appeared to run, and why the search through FEX rootfs and graphics
+> providers turned up nothing — nothing was being executed. ROCKNIX strips the same line.
+>
+> **`bannerlator-steam-compat` now re-registers Valve's own depot** as
+> `compatibilitytools.d/bannerlator-proton-arm64/`: every entry symlinked, so nothing is copied and
+> the client still updates the real depot, with our own `toolmanifest.vdf` minus
+> `require_tool_appid`. Proton takes its base directory from `dirname(sys.argv[0])` without
+> resolving it, so `files/` resolves back through the symlink. Zero extra download. The
+> FEX-under-Proton tool and `bannerlator-fex-rootfs` are gone — the ARM64 build drives the host's
+> Turnip directly and wants no graphics provider.
+>
+> **Two traps worth remembering.** Wine derives its server directory from `getuid()` and refuses any
+> prefix whose `st_uid` differs (`wine: '…/pfx' is not owned by you`); 547 paths inside `linuxfs`
+> had been left root-owned by debugging through the root bridge, so **nothing may be created in the
+> rootfs as root**. And an x86-64 prefix is wrong for arm64ec Wine, which wants
+> `files/share/default_pfx_arm64` — delete `compatdata/<appid>` and let it rebuild. Separately,
+> Steam rebuilds `LD_PRELOAD` for every game process and appended ours to its overlay entry without
+> a separator, so `libblsession.so` was silently dropped for everything it launched; the preload now
+> lives in the rootfs's `/etc/ld.so.preload`, which Steam cannot mangle.
+>
+> **Still open.** The 752 MB `linuxfs-r1.tar.zst` asset upload (`linuxfs.json` is live and points at
+> nothing), rootfs r2, a dedicated GameScope container, and the Runtime row in the container editor.
+
 ### What was checked before writing anything
 
 > - `targetSdkVersion 28` keeps us in `untrusted_app_27`, the last SELinux domain allowed to exec a file out of `files/`. **Raising it ends this approach.**
