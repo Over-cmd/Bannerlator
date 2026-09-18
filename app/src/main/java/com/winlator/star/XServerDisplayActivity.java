@@ -775,8 +775,16 @@ public class XServerDisplayActivity extends AppCompatActivity {
                     line = line.toLowerCase();
                     // The layer's Mesa EGL/Zink. "libegl.so.1" is Mesa's soname — Android's platform
                     // EGL is /system/lib64/libEGL.so (no ".1"), so this can't match the host's.
-                    if (line.indexOf("libegl.so.1") >= 0 || line.indexOf("libgallium") >= 0
-                            || line.indexOf("libwayland-egl.so") >= 0) { gl = true; break; }
+                    // In a gamescope session the Mesa GL stack is NOT evidence of a GL game: the
+                    // session script exports GALLIUM_DRIVER=zink and MESA_LOADER_DRIVER_OVERRIDE=zink
+                    // for everything in it (Steam's CEF needs GL and the rootfs ships no native GL
+                    // driver), so gamescope, Xwayland, Steam and its helpers all map libgallium -
+                    // eleven processes in one measured session - and a Proton game inherits the same
+                    // environment while rendering D3D11 through DXVK. Treat it the way the X11
+                    // resolver already treats opengl32: resident, and proof of nothing. Zink runs GL
+                    // on Vulkan here anyway, so the neutral "Vulkan" stays underlying-accurate.
+                    if (!gamescopeMode && (line.indexOf("libegl.so.1") >= 0 || line.indexOf("libgallium") >= 0
+                            || line.indexOf("libwayland-egl.so") >= 0)) { gl = true; break; }
                     if (line.indexOf("winevulkan.so") >= 0 || line.indexOf("winevulkan.dll") >= 0
                             || line.indexOf("vulkan-1.dll") >= 0) vulkan = true;
                 }
@@ -8482,6 +8490,12 @@ public class XServerDisplayActivity extends AppCompatActivity {
         guest.add("BL_WIDTH=" + xServer.screenInfo.width);
         guest.add("BL_HEIGHT=" + xServer.screenInfo.height);
         guest.add("BL_FPS=" + (resolvedFpsLimiterEnabled() ? Math.max(0, resolvedFpsLimiterValue()) : 0));
+        // gamescope advertises this as the session's refresh rate, and a game reads it as the
+        // display's: without it gamescope falls back to 60, so a 120 Hz panel offers only 60 Hz in
+        // game settings and titles cap themselves there. The panel's highest mode is the honest
+        // answer, the same number the frame pacer uses as its ceiling.
+        int panelHz = Math.round(currentDisplayRefreshHz());
+        if (panelHz > 1) guest.add("BL_REFRESH=" + panelHz);
         // Debug logging until the runtime is stable: every launch gets its own file under the
         // public Downloads folder — the whole session (proot, gamescope, Steam stdout) goes in it,
         // and the script copies Steam's own logs beside it at exit — so a user can hand over a
