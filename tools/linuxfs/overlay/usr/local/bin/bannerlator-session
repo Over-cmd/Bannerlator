@@ -87,12 +87,24 @@ case $mode in
     # screen. Removed once the runtime is stable.
     if [ -s "$HOME/.bl-autolaunch" ]; then
       _bl_app=$(cat "$HOME/.bl-autolaunch")
-      echo "== autolaunch steam://rungameid/$_bl_app"
-      set -- "$@" "steam://rungameid/$_bl_app"
+      # A bare app id runs the game; a full steam:// URL is passed through, which is how a
+      # validate or an install is driven without touching the screen.
+      case $_bl_app in
+        steam://*) _bl_url=$_bl_app ;;
+        *) _bl_url=steam://rungameid/$_bl_app ;;
+      esac
+      echo "== autolaunch $_bl_url"
+      set -- "$@" "$_bl_url"
     fi
     export STEAM_RUNTIME=1
     export LD_LIBRARY_PATH=$steam_root/steamrtarm64:$steam_root/steamrtarm64/panorama${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
     export SDL_VIDEO_X11_DGAMOUSE=0
+    # Native-Linux x86 games go through Valve's FEX compat tool, which runs FEX with FEX_PORTABLE=1
+    # - that makes FEX look for its config next to the binary, while the tool writes one into the
+    # app's compatdata instead. FEX therefore starts with no rootfs, every x86_64 library lookup
+    # falls through to the host, and the guest shell dies on libreadline before the game is reached.
+    # FEX_ROOTFS names it outright and is read whatever the config situation.
+    [ -d /usr/share/guestos/fex-mesa ] && export FEX_ROOTFS=/usr/share/guestos/fex-mesa
     # The client exits 42 when it has updated itself and wants a fresh start (steam.sh does this).
     while :; do
       "$steam_root/steamrtarm64/steam" -gamepadui -clientbeta publicbeta \
