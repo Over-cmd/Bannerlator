@@ -125,6 +125,18 @@ cp -a "$here/overlay/." rootfs/
 # in the process itself; see preload/*.c.
 mkdir -p rootfs/usr/local/lib
 aarch64-linux-gnu-gcc -shared -fPIC -O2 -Wall -pthread -o rootfs/usr/local/lib/libblsession.so "$here"/preload/*.c -ldl
+# Games that ship a native Linux x86 build run under FEX, and the aarch64 library above cannot be
+# loaded into an x86 process - so those get their own copies. Only the System V IPC shim is built
+# for them: Android kernels have no System V IPC, shmget/semget/msgget return ENOSYS, and Source's
+# tier0 gives up on that ("create pipe failed ... Function not implemented"). The other shims
+# answer host-side concerns that do not arise inside the emulated process.
+for guest in i686:-m32 x86_64:-m64; do
+  arch=${guest%%:*}
+  bits=${guest##*:}
+  out=rootfs/usr/local/lib/libblsysv-$arch.so
+  x86_64-linux-gnu-gcc "$bits" -shared -fPIC -O2 -Wall -pthread -o "$out" "$here"/preload/sysv.c -ldl
+  echo "  built $out"
+done
 mkdir -p rootfs/dev rootfs/proc rootfs/sys rootfs/tmp rootfs/root rootfs/run/user
 chmod 1777 rootfs/tmp
 # The dynamic loader takes its search path from here; ldconfig cannot run without the target CPU.
