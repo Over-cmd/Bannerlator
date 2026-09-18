@@ -8,6 +8,30 @@
 >
 > **Phases.** 1 a Linux ELF runs as our uid · 2 gamescope composites into our surface · 3 the GPU (glibc Turnip, KGSL presented as a DRM node) · 4 Steam · 5 the download/install product.
 
+### 2026-09-18 — r3 live, APK staged: the fresh-user path is complete
+
+> **`linuxfs-r3` is live and verified**: sha256 `38f116b4...`, 788,991,458 B, `linuxfs.json`
+> repointed at it, and the download URL returns 200 with a matching content-length. r3 is the first
+> runtime that selects the ARM64 Proton by itself, so a user no longer points each title at a
+> compatibility tool by hand.
+>
+> **The APK is built and staged** as `Bannerlator-3.1.2-linuxsteam-pubg.apk` (sha256 `a0187ec8...`,
+> versionCode 85, unchanged). It carries the frame-counter fix and the real
+> `-i Process.myUid()` proot invocation, which retires the hand-written `libproot.so` wrapper with a
+> hardcoded uid that had been sitting on the test device.
+>
+> That completes the path for someone starting from nothing: install the APK, install the Linux
+> Runtime from Contents, open Steam (Linux) from the Games tab, sign in, install a game, launch it.
+> **Neither artifact has been device-tested yet.** The two things to watch on the first run are the
+> frame counter reading real numbers on a Source title, and games starting without the Compatibility
+> box being touched. A game currently installed as a Linux build will re-download its Windows depot
+> once on that first session.
+>
+> The rootfs run that produced r3 reports as failed, and it is worth knowing why: the tarball built
+> and uploaded at step 6, and only the extra step that collects the guest shims failed afterwards,
+> because it looked for the rootfs in the workspace while the build script cds into RUNNER_TEMP. The
+> script now places those shims beside the tarball itself.
+
 ### 2026-09-18 — picking Proton automatically, the frame counter, and where VAC stands
 
 > **Users should not have to tick the Compatibility box per game.** The `"0"` mapping is the
