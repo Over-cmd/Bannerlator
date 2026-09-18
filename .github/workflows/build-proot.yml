@@ -52,15 +52,11 @@ jobs:
           curl -fsSL --retry 5 -o talloc.deb "https://packages.termux.dev/apt/termux-main/$DEB"
           ar x talloc.deb && tar -xf data.tar.*
           cd ..
-          # libandroid-shmem too: Termux builds proot with PROOT_WITH_LIBANDROID_SHMEM, which routes
-          # System V shared memory through it. Android has no System V IPC, and without this a GTK
-          # client inside the runtime aborts on the first icon it loads, taking the session with it.
-          mkdir -p shmem && cd shmem
-          SDEB=$(printf '%s\n' "$IDX" | awk '/^Package: libandroid-shmem$/{f=1} f&&/^Filename:/{print $2; exit}')
-          echo "shmem deb: $SDEB"
-          curl -fsSL --retry 5 -o shmem.deb "https://packages.termux.dev/apt/termux-main/$SDEB"
-          ar x shmem.deb && tar -xf data.tar.*
-          find . -name 'libandroid-shmem*' | head
+          # Deliberately NOT libandroid-shmem. PROOT_WITH_LIBANDROID_SHMEM sets
+          # shm_use_libandroid in sysvipc.c:166, which sends every shmget/shmat through
+          # libandroid-shmem's ashmem path instead of proot's own System V emulation - and that
+          # is what aborts a GTK client on the first icon it loads. The Termux binary that holds
+          # a session is built without it: its only NEEDED are libtalloc.so.2 and libc.so.
 
       - name: Build
         run: |
@@ -69,18 +65,15 @@ jobs:
           BIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
           TAL=$(cd "$(dirname "$(find talloc -name talloc.h | head -1)")" && pwd)
           TLIB=$(cd "$(dirname "$(find talloc -name 'libtalloc.so.2' | head -1)")" && pwd)
-          SLIB=$(cd "$(dirname "$(find shmem -name 'libandroid-shmem.so' | head -1)")" && pwd)
           # Ship it under its SONAME. Linking against a copy called libtalloc.so does not change
           # what gets recorded as NEEDED - the SONAME does - so a file called libtalloc.so is a
           # library the loader will never find: "library libtalloc.so.2 not found".
           mkdir -p out/arm64-v8a && cp "$TLIB/libtalloc.so.2" out/arm64-v8a/libtalloc.so.2
-          cp "$SLIB/libandroid-shmem.so" out/arm64-v8a/libandroid-shmem.so
           make -C proot-src/src -j"$(nproc)" \
             CC="$BIN/aarch64-linux-android26-clang" \
             STRIP="$BIN/llvm-strip" OBJCOPY="$BIN/llvm-objcopy" OBJDUMP="$BIN/llvm-objdump" \
             CPPFLAGS="-D_GNU_SOURCE -Wno-error=implicit-function-declaration -I. -I$TAL -DARG_MAX=131072 -DVERSION=\"${PROOT_VERSION}\"" \
-            LDFLAGS="-L$PWD/out/arm64-v8a -l:libtalloc.so.2 -l:libandroid-shmem.so -Wl,-z,noexecstack -Wl,-rpath,\$ORIGIN" \
-            PROOT_WITH_LIBANDROID_SHMEM=true \
+            LDFLAGS="-L$PWD/out/arm64-v8a -l:libtalloc.so.2 -Wl,-z,noexecstack -Wl,-rpath,\$ORIGIN" \
             PROOT_UNBUNDLE_LOADER=/nonexistent proot loader
           cp proot-src/src/proot out/arm64-v8a/libproot.so
           cp proot-src/src/loader/loader out/arm64-v8a/libproot-loader.so
