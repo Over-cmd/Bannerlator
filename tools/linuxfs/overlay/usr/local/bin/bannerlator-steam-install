@@ -49,3 +49,9 @@ ln -sfn "$steam_root" "$HOME/.steam/root"
 ln -sfn "$steam_root" "$HOME/.steam/steam"
 ln -sfn "$steam_root/steamrtarm64" "$HOME/.steam/bin64"
 ln -sfn "$steam_root/linuxarm64" "$HOME/.steam/sdk64"
+# The arm64 client runs every game through $HOME/.steam/sdkarm64/steam-launch-wrapper. Valve's
+# steam.sh has no arm64 branch to create it, and without it a launch dies in /bin/sh before Proton
+# is ever invoked - "No such file or directory", no Proton log, and the only other clue is an
+# unrelated-looking installscript assertion. Same target as sdk64; the client picks the name by
+# architecture.
+ln -sfn "$steam_root/linuxarm64" "$HOME/.steam/sdkarm64"

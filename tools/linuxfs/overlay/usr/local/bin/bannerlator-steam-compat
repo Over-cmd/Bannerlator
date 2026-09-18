@@ -21,6 +21,9 @@ import shutil
 import sys
 
 TOOL = "bannerlator-proton-arm64"
+# Valve's own ARM64 Proton, by the name the client registers it under. Used only to bootstrap a
+# fresh install: naming it is what makes the client offer it and fetch the depot.
+SEED_TOOL = "proton-experimental-arm64"
 # The extra Steam library the app mounts the installed games into (see bannerlator-steam-library).
 # installed_apps() scans it too; it lives only in the sibling script, so define it here as well.
 LIBRARY = "/mnt/bannerlator"
@@ -150,14 +153,16 @@ def installed_apps(steam_root):
     return sorted(apps, key=int)
 
 
-def register_default(config_path, apps=()):
+def register_default(config_path, apps=(), name=None):
+    """Writes the mapping. `name` defaults to our own tool; the first-run seed passes Valve's."""
+    tool = name or TOOL
     with open(config_path, encoding="utf-8", errors="replace") as f:
         tokens = tokenize(f.read())
     steam = find_block(tokens, ["InstallConfigStore", "Software", "Valve", "Steam"])
     if steam is None:
         return
     mapping = find_block(tokens[steam + 1:], ["CompatToolMapping"])
-    entry = ['"0"', "{", '"name"', '"%s"' % TOOL, '"config"', '""', '"priority"', '"75"', "}"]
+    entry = ['"0"', "{", '"name"', '"%s"' % tool, '"config"', '""', '"priority"', '"75"', "}"]
     if mapping is None:
         end = block_end(tokens, steam)
         tokens[end:end] = ['"CompatToolMapping"', "{"] + entry + ["}"]
@@ -166,8 +171,8 @@ def register_default(config_path, apps=()):
         # Repoint every per-app entry the client aimed at a Proton it cannot actually start.
         for i in range(mapping, block_end(tokens, mapping)):
             named = tokens[i + 1].strip('"').lower()
-            if tokens[i] == '"name"' and named.startswith("proton") and named != TOOL:
-                tokens[i + 1] = '"%s"' % TOOL
+            if tokens[i] == '"name"' and named.startswith("proton") and named != tool:
+                tokens[i + 1] = '"%s"' % tool
         if find_block(tokens[mapping + 1:], ["0"]) is None:
             tokens[mapping + 1:mapping + 1] = entry
         # The "0" default only decides how a title is installed, so it settles new downloads and
@@ -177,7 +182,7 @@ def register_default(config_path, apps=()):
             if find_block(tokens[mapping + 1:], [app]) is not None:
                 continue
             tokens[mapping + 1:mapping + 1] = [
-                '"%s"' % app, "{", '"name"', '"%s"' % TOOL, '"config"', '""', '"priority"', '"250"', "}"]
+                '"%s"' % app, "{", '"name"', '"%s"' % tool, '"config"', '""', '"priority"', '"250"', "}"]
     tmp = config_path + ".bannerlator"
     with open(tmp, "w", encoding="utf-8") as f:
         f.write(serialize(tokens))
@@ -222,8 +227,24 @@ def main():
     steam_root = sys.argv[1]
     depot = find_source(steam_root)
     if depot is None:
-        # Nothing to register yet; the client installs the depot the first time a Windows game is
-        # set to run under Proton, and the next session picks it up.
+        # Nothing of ours to register yet - but the client will not even OFFER an ARM64 Proton until
+        # something names one, so a new user has no way to ask for it. Point the default at Valve's
+        # own ARM64 Proton by name: the client then registers it, and downloads the depot the first
+        # time a Windows title launches. The next session finds that depot and replaces this with
+        # our own copy (register_default repoints any name starting with "proton"), which is the one
+        # that actually starts a game here.
+        config = os.path.join(steam_root, "config", "config.vdf")
+        if os.path.isfile(config):
+            seeded = SEED_TOOL
+            try:
+                text = open(config, encoding="utf-8", errors="replace").read()
+            except OSError:
+                text = ""
+            if seeded not in text and TOOL not in text:
+                register_default(config, (), name=seeded)
+                print("bannerlator-steam-compat: seeded the default to %s so the client offers and "
+                      "fetches it" % seeded, file=sys.stderr)
+                return
         print("bannerlator-steam-compat: no ARM64 Proton installed yet", file=sys.stderr)
         return
     tools = os.path.join(steam_root, "compatibilitytools.d")
