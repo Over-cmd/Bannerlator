@@ -38,11 +38,11 @@
 
 #define EXPORT __attribute__((visibility("default"))) extern "C"
 
-// bionic declares ioctl's request as int, glibc as unsigned long. This file is built twice: as
-// libfakeinput.so in the APK (NDK/bionic, preloaded into Wine) and as the glibc aarch64 build
-// shipped in the Linux runtime rootfs, where it is preloaded into the native Steam client so SDL
-// sees the on-screen pad as a real evdev device. Interposing a libc function with the wrong
-// signature is a hard compile error on glibc, so take the request type from the platform.
+// bionic declares ioctl's request as int, glibc as unsigned long.
+// This file is built twice: with the NDK for Wine, and against glibc for the Linux runtime.
+// The glibc copy is preloaded into the native Steam client, which is what makes SDL see the app's pad as a real evdev device.
+// Interposing a libc function with the wrong signature is a hard compile error on glibc.
+// So the request type comes from the platform.
 #if defined(__BIONIC__) || defined(__ANDROID__)
 typedef int fakeinput_ioctl_request_t;
 #else
@@ -54,14 +54,14 @@ static constexpr uint16_t GAMEPAD_PRODUCT_ID_BASE = 0x5678;
 static constexpr uint16_t GAMEPAD_VERSION = 0x0110;
 static constexpr const char *GAMEPAD_NAME_TEMPLATE = "Generic HID Gamepad %d";
 
-// SDL and Steam key their controller mapping database on a GUID built from bus+vendor+product, so
-// the generic identity above is in no database: a client has to guess the layout or ask the user to
-// configure the pad by hand. 045E:028E is the Xbox 360 pad, the most widely mapped GUID there is -
-// clients apply the standard layout with no configuration, and titles that hardcode Xbox glyphs
-// stop mislabelling buttons. Opt-in via FAKE_EVDEV_IDENTITY=xbox360 rather than a new default,
-// because the identity is what every already-working Windows title under Wine currently sees.
-// The Linux runtime session sets it; the Wine path keeps the generic identity until it is proven
-// on device.
+// SDL and Steam key their controller mapping database on a GUID built from bus+vendor+product.
+// The generic identity above is in no such database.
+// So a client has to guess the layout, or ask the user to configure the pad by hand.
+// 045E:028E is the Xbox 360 pad, the most widely mapped GUID there is.
+// Clients apply its standard layout with no configuration.
+// Titles that hardcode Xbox glyphs also stop mislabelling buttons.
+// This is opt-in rather than a new default, because the generic identity is what every already-working Windows title under Wine currently sees.
+// The Linux runtime session sets it, and the Wine path keeps the generic identity until it is proven on device.
 static constexpr uint16_t X360_VENDOR_ID = 0x045E;
 static constexpr uint16_t X360_PRODUCT_ID = 0x028E;
 static constexpr const char *X360_NAME_TEMPLATE = "Xbox 360 Controller (%d)";
@@ -905,8 +905,8 @@ EXPORT int ioctl(int fd, fakeinput_ioctl_request_t op, ...) {
     struct input_id id;
     memset(&id, 0, sizeof(id));
     id.bustype = 0x03;
-    // A real 360 pad reports the same vendor/product on every port; offsetting per slot would
-    // yield a GUID no mapping database knows, which is the whole problem being fixed here.
+    // A real 360 pad reports the same vendor/product on every port.
+    // Offsetting per slot would yield a GUID no mapping database knows, which is the whole problem being fixed here.
     id.vendor = xbox360_identity ? X360_VENDOR_ID
                                  : static_cast<uint16_t>(GAMEPAD_VENDOR_ID_BASE + event_number);
     id.product = xbox360_identity ? X360_PRODUCT_ID
