@@ -113,7 +113,38 @@ def serialize(tokens):
     return "\n".join(out) + "\n"
 
 
-def register_default(config_path):
+# Steam's own tools and runtimes live in steamapps beside the games; they are not titles and must
+# not be mapped to a compatibility tool.
+NOT_GAMES = frozenset((
+    "228980",    # Steamworks Common Redistributables
+    "1070560",   # Steam Linux Runtime 1.0 (scout)
+    "1391110",   # Steam Linux Runtime 2.0 (soldier)
+    "1493710",   # Proton Experimental
+    "3127680",   # FEX
+    "4183110",   # Steam Linux Runtime 4.0
+    "4185400",   # Steam Linux Runtime 4.0 - Arm64
+    "4427310",   # Proton Experimental (ARM64)
+    "4628740",   # Proton 11.0 (ARM64)
+))
+
+
+def installed_apps(steam_root):
+    """App ids of the titles the client has installed, tools and runtimes excluded."""
+    apps = set()
+    for library in (steam_root, LIBRARY):
+        steamapps = os.path.join(library, "steamapps")
+        try:
+            names = os.listdir(steamapps)
+        except OSError:
+            continue
+        for name in names:
+            m = re.fullmatch(r"appmanifest_(\d+)\.acf", name)
+            if m and m.group(1) not in NOT_GAMES:
+                apps.add(m.group(1))
+    return sorted(apps, key=int)
+
+
+def register_default(config_path, apps=()):
     with open(config_path, encoding="utf-8", errors="replace") as f:
         tokens = tokenize(f.read())
     steam = find_block(tokens, ["InstallConfigStore", "Software", "Valve", "Steam"])
@@ -133,6 +164,14 @@ def register_default(config_path):
                 tokens[i + 1] = '"%s"' % TOOL
         if find_block(tokens[mapping + 1:], ["0"]) is None:
             tokens[mapping + 1:mapping + 1] = entry
+        # The "0" default only decides how a title is installed, so it settles new downloads and
+        # leaves anything already installed as a Linux build running as one. An entry per installed
+        # app is what the client's own Compatibility checkbox writes, and is what makes it switch.
+        for app in apps:
+            if find_block(tokens[mapping + 1:], [app]) is not None:
+                continue
+            tokens[mapping + 1:mapping + 1] = [
+                '"%s"' % app, "{", '"name"', '"%s"' % TOOL, '"config"', '""', '"priority"', '"250"', "}"]
     tmp = config_path + ".bannerlator"
     with open(tmp, "w", encoding="utf-8") as f:
         f.write(serialize(tokens))
@@ -187,7 +226,9 @@ def main():
     print("bannerlator-steam-compat: registered %s from %s" % (TOOL, os.path.basename(depot)))
     config = os.path.join(steam_root, "config", "config.vdf")
     if os.path.isfile(config):
-        register_default(config)
+        apps = installed_apps(steam_root)
+        register_default(config, apps)
+        print("bannerlator-steam-compat: %d installed title(s) set to %s" % (len(apps), TOOL))
 
 
 if __name__ == "__main__":
