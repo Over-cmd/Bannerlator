@@ -35,11 +35,23 @@
 > Nothing passes `-insecure` - `localconfig.vdf` had no launch options at all - and Steam integration
 > is healthy: the game reports `CClientSteamContext logged on = 1`, with Proton's real
 > `steamclient.dll` and `steamclient64.dll` in the prefix. So VAC itself is declining. `-condebug` is
-> now set for the app, and the verdict will land in `cstrike/console.log` the moment a secure server
-> is joined, because VAC reports at connect and not at startup. The suspicion to test is that the
-> app's SteamLite path runs the *Windows* Steam client inside the same prefix, giving VAC's Windows
-> module a Windows client to handshake with, where here Steam is a Linux ARM process outside the
-> prefix reached over a socket.
+> now set for the app, and the log gave the verdict at connect: `Connecting to
+> 104.167.215.199:27015...` followed by `You are in insecure mode.  You must restart before you can
+> connect to secure servers.` "You must restart" means the session started insecure - VAC never
+> initialised at process start, before a server was ever chosen.
+>
+> Everything under our control is correct, so what is left is whether Valve's ARM Linux client can
+> hand a Proton game the Windows VAC module at all. That reads as a gap in the ARM client rather than
+> anything in this runtime, and it fits the app's SteamLite path working: that one runs the *Windows*
+> Steam client inside the same prefix, where a Windows VAC module loads natively, while here Steam is
+> an aarch64 Linux process outside it. Going further would mean reverse-engineering anti-cheat
+> plumbing, so this stops here; the answer is to offer both paths and send VAC-secured multiplayer to
+> SteamLite.
+>
+> The same log turned up something separate worth its own look: `Network: IP 127.0.0.1` - the game
+> enumerated only loopback as its local address. Not fatal, since the server browser works and it
+> reached the server, but that is the `net` preload's interface enumeration and it could bite real
+> multiplayer.
 
 ### 2026-09-18 — four games playable, and what the screenshots prove
 
