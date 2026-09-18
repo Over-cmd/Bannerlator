@@ -8,6 +8,29 @@
 >
 > **Phases.** 1 a Linux ELF runs as our uid · 2 gamescope composites into our surface · 3 the GPU (glibc Turnip, KGSL presented as a DRM node) · 4 Steam · 5 the download/install product.
 
+### 2026-09-18 — r4: the first runtime that installs without root
+
+> `linuxfs-r4` is live: sha256 `26cfa553...`, 789,167,503 B, catalog repointed, download URL
+> verified 200 with a matching content-length. Before publishing, the tarball was listed to confirm
+> it really carries `opt/android-host/{proot,loader,libtalloc.so.2}` with their exec bits.
+>
+> The proot in it is built by this project from the Termux fork `v5.1.107.92`. That closes a problem
+> that turned out to be older than this branch: the copy in the app comes from an old snapshot of
+> upstream proot 5.1.0 and cannot exec anything on a current Android, so **no released build has ever
+> been able to start the runtime** - every working install had been patched by hand. Two things had
+> to be true at once to see it. The workflow that builds the fork already existed and was already
+> right about the source, but it shipped talloc as `libtalloc.so` when the name recorded in NEEDED
+> comes from the SONAME, `libtalloc.so.2`; and nothing consumed its artifact, so the good binary was
+> built and discarded on every run while the apk compiled the dead tree.
+>
+> Carrying proot in the runtime rather than the apk also fixes the shape of the problem: it is no
+> longer the one binary an app update replaces, which is exactly how a working device was broken
+> earlier tonight.
+>
+> What this unblocks is the part that matters: a device nobody has touched can now install the
+> runtime and run it. That is the precondition for testing on a second device, which is the real
+> validation and has not happened yet.
+
 ### 2026-09-18 — the _GNU_SOURCE theory was wrong; proot is still broken
 
 > `9e2b2c44` defined `_GNU_SOURCE` and made implicit declarations an error, on the theory that
