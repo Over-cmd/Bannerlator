@@ -8457,7 +8457,46 @@ public class XServerDisplayActivity extends AppCompatActivity {
      * {@link #realSteamSessionHeld}, which is what {@link #releaseRealSteamSession} keys off — onDestroy
      * already calls it ungated, so the app's own session comes back when the session ends.
      */
+    /**
+     * Other apps on the device that embed their own Steam client. Valve allows one client per
+     * account, and one of these auto-reconnects the moment ours displaces it - so the Linux client
+     * is signed out 2-3 seconds after every login and sits on "Logging in..." with the downloads
+     * reporting no internet. Measured on a Pocket FIT: GameHub's SteamKit client logged on at the
+     * exact second of every one of nine kicks in a day. An app cannot force-stop another without
+     * root, so this names the culprit instead of leaving the user to guess.
+     */
+    private static final String[] COMPETING_STEAM_CLIENTS = {
+            "com.xiaoji.egggame",     // GameHub
+    };
+
+    /** Package names from {@link #COMPETING_STEAM_CLIENTS} that currently have a live process. */
+    private java.util.List<String> runningCompetingSteamClients() {
+        java.util.List<String> out = new java.util.ArrayList<>();
+        try {
+            android.app.ActivityManager am =
+                    (android.app.ActivityManager) getSystemService(ACTIVITY_SERVICE);
+            java.util.List<android.app.ActivityManager.RunningAppProcessInfo> procs =
+                    am == null ? null : am.getRunningAppProcesses();
+            if (procs == null) return out;
+            for (android.app.ActivityManager.RunningAppProcessInfo p : procs) {
+                for (String pkg : COMPETING_STEAM_CLIENTS) {
+                    if (p.processName != null && p.processName.startsWith(pkg) && !out.contains(pkg)) out.add(pkg);
+                }
+            }
+        } catch (Throwable ignore) {}
+        return out;
+    }
+
     private void suspendAppSteamForLinuxSession() {
+        // Warn about the clients we cannot stop before holding the one we can.
+        java.util.List<String> rivals = runningCompetingSteamClients();
+        if (!rivals.isEmpty()) {
+            String who = rivals.contains("com.xiaoji.egggame") ? "GameHub" : rivals.get(0);
+            Log.w("BH_REALSTEAM", "competing Steam client running: " + rivals
+                    + " - it will sign the Linux client out after every login");
+            runOnUiThread(() -> showToast(this, who + " is signed into Steam too and will keep "
+                    + "signing the Linux client out. Close " + who + " first."));
+        }
         if (realSteamSessionHeld) return;
         try {
             SteamRepository.getInstance().suspendForRealSteam();
