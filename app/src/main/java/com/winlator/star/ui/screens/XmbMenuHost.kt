@@ -385,6 +385,8 @@ internal fun XmbNestedLayer(
             val si = effectiveSel(m, rows)
             fun hOf(r: XmbRow, i: Int) = when {
                 r is XmbRow.Header -> 26f
+                // A cover tile is 2:3 and needs the row to grow with it.
+                r is XmbRow.Action && r.thumbnailLarge && r.thumbnail != null -> rowH + 48f
                 r is XmbRow.Info && r.value.isEmpty() && r.label.length > 34 -> rowH + 16f
                 i == si && r.sub() != null -> rowH + 14f
                 else -> rowH
@@ -497,9 +499,18 @@ private fun XmbRowView(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Box(Modifier.size(32.dp).clip(RoundedCornerShape(8.dp)), contentAlignment = Alignment.Center) {
-            val thumb = (row as? XmbRow.Action)?.thumbnail
-            if (thumb != null) Image(thumb, null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+        val action = row as? XmbRow.Action
+        val thumb = action?.thumbnail
+        // Cover art gets a portrait tile of its own; everything else keeps the 32dp icon slot.
+        val big = thumb != null && action?.thumbnailLarge == true
+        val slot = if (big) Modifier.size(width = 60.dp, height = 84.dp) else Modifier.size(32.dp)
+        Box(slot.clip(RoundedCornerShape(if (big) 6.dp else 8.dp)), contentAlignment = Alignment.Center) {
+            if (thumb != null) Image(
+                thumb, null,
+                // Fit, not Crop: a cover that is not exactly 2:3 should letterbox rather than lose its edges.
+                contentScale = if (big) ContentScale.Fit else ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+            )
             else row.iconOrNull()?.let {
                 Icon(it, null, modifier = Modifier.size(18.dp), tint = when {
                     selected -> Color.White
