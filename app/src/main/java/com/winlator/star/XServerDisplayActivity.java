@@ -8493,6 +8493,49 @@ public class XServerDisplayActivity extends AppCompatActivity {
     private volatile boolean linuxSessionWatchStop = false;
 
     /**
+     * Mirrors the session's "== STEP …" milestones onto the preloader while it is still up. A first
+     * run downloads the Steam client before anything can be drawn, which is a minute or two of black
+     * screen with no explanation - long enough that people close the app believing it hung, which is
+     * exactly what happened during testing. The session script already prints each milestone; this
+     * just puts the newest one where it can be seen. Best-effort: the log is the source of truth and
+     * nothing here affects the launch.
+     */
+    private void showLinuxFirstRunProgress(final File sessionLog) {
+        Thread t = new Thread(() -> {
+            long offset = 0;
+            String last = null;
+            long deadline = System.currentTimeMillis() + 10 * 60 * 1000L;
+            while (!linuxSessionWatchStop && System.currentTimeMillis() < deadline) {
+                try { Thread.sleep(1000); } catch (InterruptedException e) { return; }
+                if (!sessionLog.isFile()) continue;
+                long len = sessionLog.length();
+                if (len < offset) offset = 0;
+                if (len == offset) continue;
+                try (java.io.RandomAccessFile raf = new java.io.RandomAccessFile(sessionLog, "r")) {
+                    raf.seek(offset);
+                    byte[] buf = new byte[(int) Math.min(len - offset, 256 * 1024)];
+                    int got = raf.read(buf);
+                    offset = len;
+                    if (got <= 0) continue;
+                    for (String line : new String(buf, 0, got,
+                            java.nio.charset.StandardCharsets.UTF_8).split("\n")) {
+                        int at = line.indexOf("== STEP ");
+                        if (at < 0) continue;
+                        // drop the marker and its HH:MM:SS
+                        String msg = line.substring(at + 8).trim();
+                        int sp = msg.indexOf(' ');
+                        if (sp > 0) msg = msg.substring(sp + 1).trim();
+                        if (!msg.isEmpty()) last = msg;
+                    }
+                    if (last != null && preloaderDialog != null) preloaderDialog.stepOnUiThread(2, last);
+                } catch (Throwable ignore) {}
+            }
+        }, "LinuxFirstRunProgress");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    /**
      * The check that actually works, because it reads the symptom rather than guessing at the
      * cause: the runtime's Steam client writes {@code 'Session Replaced'} to its own connection log
      * the moment another client takes the account, and that file is ours to read. Watch the bytes
@@ -8629,6 +8672,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
         guest.add("BL_LOG=" + sessionLog.getPath());
         guest.add("BL_DEBUG_DIR=" + new File(logDir, "session-" + stamp).getPath());
         Log.i("XServerDisplayActivity", "Linux session log: " + sessionLog.getPath());
+        showLinuxFirstRunProgress(sessionLog);
         guest.add(com.winlator.star.linux.LinuxRuntime.SESSION_SCRIPT);
         guest.addAll(session);
 

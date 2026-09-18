@@ -527,6 +527,9 @@ fun ShortcutsScreen(vm: ShortcutsViewModel = viewModel()) {
                 return
             }
         }
+        // The Linux runtime's own entry is not a Windows game: SteamLite, Goldberg and "Raw .exe"
+        // all mean nothing for it, and the sheet was an extra tap on every single launch.
+        if (LinuxShortcuts.isLinuxEntry(shortcut)) { launchShortcutNow(activity, shortcut); return }
         val remembered = shortcut.getExtra("launchMode", "").isNotEmpty() &&
             shortcut.getExtra("launchModeRemembered", "") == "1"
         when {
