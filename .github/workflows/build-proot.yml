@@ -78,7 +78,7 @@ jobs:
           make -C proot-src/src -j"$(nproc)" \
             CC="$BIN/aarch64-linux-android26-clang" \
             STRIP="$BIN/llvm-strip" OBJCOPY="$BIN/llvm-objcopy" OBJDUMP="$BIN/llvm-objdump" \
-            CPPFLAGS="-D_GNU_SOURCE -Wimplicit-function-declaration -I. -I$TAL -DARG_MAX=131072 -DVERSION=\"${PROOT_VERSION}\"" \
+            CPPFLAGS="-D_GNU_SOURCE -Wno-error=implicit-function-declaration -I. -I$TAL -DARG_MAX=131072 -DVERSION=\"${PROOT_VERSION}\"" \
             LDFLAGS="-L$PWD/out/arm64-v8a -l:libtalloc.so.2 -l:libandroid-shmem.so -Wl,-z,noexecstack -Wl,-rpath,\$ORIGIN" \
             PROOT_WITH_LIBANDROID_SHMEM=true \
             PROOT_UNBUNDLE_LOADER=/nonexistent proot loader
