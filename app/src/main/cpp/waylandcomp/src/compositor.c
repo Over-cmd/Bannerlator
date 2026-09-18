@@ -219,7 +219,7 @@ static void on_client_created(struct wl_listener *l, void *data) {
 
 /* ------------------------------------------------------------------ surfaces */
 
-enum surface_role { ROLE_NONE, ROLE_TOPLEVEL, ROLE_SUBSURFACE, ROLE_DESKTOP };
+enum surface_role { ROLE_NONE, ROLE_TOPLEVEL, ROLE_SUBSURFACE, ROLE_DESKTOP, ROLE_CURSOR };
 
 struct surface {
     struct wl_resource *resource;
@@ -464,6 +464,64 @@ static struct seat_keyboard g_kbs[MAX_PTRS];
 static int g_nkbs;
 static struct seat_touch g_touches[MAX_PTRS];
 static int g_ntouches;
+
+/* ---- the guest's cursor (wl_pointer.set_cursor) ----------------------------------------------
+ * The compositor does not composite the cursor: under zero-copy the game's buffer goes straight to
+ * an Android layer and there is nothing to composite into, so a composited cursor would vanish
+ * exactly when the fast path is on. Instead the client's cursor surface is snapshotted here and the
+ * app draws it as its overlay - which sits above every present path. What this buys over guessing:
+ * the real cursor SHAPE, and an authoritative HIDE (a Wayland client hides the pointer by calling
+ * set_cursor with a NULL surface, which is what a mouse-look game does). */
+#define CURSOR_MAX_PX (128 * 128)
+static pthread_mutex_t g_cursor_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct surface *g_cursor_surface;     /* compositor thread only */
+static int g_cursor_hx, g_cursor_hy;         /* hotspot, surface-local */
+static uint32_t g_cursor_px[CURSOR_MAX_PX];  /* guarded by g_cursor_lock: ARGB8888 snapshot */
+static int g_cursor_w, g_cursor_h;           /* 0 = nothing to draw */
+static int g_cursor_hidden = 1;              /* the guest asked for no pointer */
+static int g_cursor_serial;                  /* bumped on every change; the app polls it */
+
+static void cursor_publish_hidden(void) {
+    pthread_mutex_lock(&g_cursor_lock);
+    if (!g_cursor_hidden) { g_cursor_hidden = 1; g_cursor_serial++; }
+    pthread_mutex_unlock(&g_cursor_lock);
+}
+
+/* Copy a committed cursor buffer out for the app. wl_shm only: Wine draws cursors in software. */
+static void cursor_publish_shm(struct wl_shm_buffer *shm, int hx, int hy) {
+    int32_t w = wl_shm_buffer_get_width(shm), h = wl_shm_buffer_get_height(shm);
+    int32_t stride = wl_shm_buffer_get_stride(shm);
+    if (w <= 0 || h <= 0 || w * h > CURSOR_MAX_PX) return;
+    wl_shm_buffer_begin_access(shm);
+    const unsigned char *src = (const unsigned char *)wl_shm_buffer_get_data(shm);
+    pthread_mutex_lock(&g_cursor_lock);
+    for (int y = 0; y < h; y++)
+        memcpy(&g_cursor_px[y * w], src + (size_t)y * stride, (size_t)w * 4);
+    g_cursor_w = w; g_cursor_h = h;
+    g_cursor_hx = hx; g_cursor_hy = hy;
+    g_cursor_hidden = 0;
+    g_cursor_serial++;
+    pthread_mutex_unlock(&g_cursor_lock);
+    wl_shm_buffer_end_access(shm);
+}
+
+/* Read by the app (UI thread). out = [serial, hidden, w, h, hotspotX, hotspotY, pixels...].
+ * Returns the number of ints written, or 0 if out is too small. */
+int banner_cursor_snapshot(int *out, int cap) {
+    int n = 0;
+    pthread_mutex_lock(&g_cursor_lock);
+    int need = 6 + (g_cursor_hidden ? 0 : g_cursor_w * g_cursor_h);
+    if (cap >= need) {
+        out[0] = g_cursor_serial; out[1] = g_cursor_hidden;
+        out[2] = g_cursor_w; out[3] = g_cursor_h;
+        out[4] = g_cursor_hx; out[5] = g_cursor_hy;
+        if (!g_cursor_hidden)
+            memcpy(out + 6, g_cursor_px, (size_t)g_cursor_w * g_cursor_h * 4);
+        n = need;
+    }
+    pthread_mutex_unlock(&g_cursor_lock);
+    return n;
+}
 /* Fingers currently down, so a move/up reaches the surface the finger went down on even if it
  * later slides outside it (Wayland requires the whole sequence to go to the same surface). */
 #define MAX_FINGERS 10
@@ -885,8 +943,13 @@ static void surface_commit(struct wl_client *c, struct wl_resource *r) {
         s->pending_buffer = NULL;
         s->pending_attach = 0;
 
-        if (s->role == ROLE_NONE) {
-            /* Cursor or role-less surface: never drawn (the app draws its own pointer). */
+        if (s->role == ROLE_CURSOR) {
+            /* The guest's pointer image. Copied out for the app's overlay (see cursor_publish_shm)
+             * rather than composited, so it survives the zero-copy and HDR layer paths. */
+            if (shm) cursor_publish_shm(shm, g_cursor_hx, g_cursor_hy);
+            if (buffer) wl_buffer_send_release(buffer);
+        } else if (s->role == ROLE_NONE) {
+            /* Role-less surface: never drawn. */
             if (buffer) wl_buffer_send_release(buffer);
         } else if (db) {
             take_dmabuf(s, db, buffer);
@@ -958,6 +1021,7 @@ static void surface_resource_destroy(struct wl_resource *r) {
     for (int i = 0; i < g_nptrs; i++) if (g_ptrs[i].focus == r) g_ptrs[i].focus = NULL;
     for (int i = 0; i < g_nkbs; i++) if (g_kbs[i].focus == r) g_kbs[i].focus = NULL;
     for (int i = 0; i < g_ntouches; i++) if (g_touches[i].focus == r) g_touches[i].focus = NULL;
+    if (g_cursor_surface && g_cursor_surface->resource == r) { g_cursor_surface = NULL; cursor_publish_hidden(); }
     for (int i = 0; i < MAX_FINGERS; i++)
         if (g_fingers[i].active && g_fingers[i].target && g_fingers[i].target->resource == r)
             g_fingers[i].active = 0;
@@ -2244,9 +2308,24 @@ static uint32_t now_ms(void) {
     return (uint32_t)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
 }
 
+/* wl_pointer.set_cursor: the client tells us its pointer image, or asks for none.
+ * A NULL surface means "no cursor" - what a game does for mouse-look - and is the authoritative
+ * signal the app never had before. The surface itself is snapshotted on its next commit. */
 static void pointer_set_cursor(struct wl_client *c, struct wl_resource *r, uint32_t serial,
                                struct wl_resource *surface, int32_t hx, int32_t hy) {
-    /* The app draws its own pointer; cursor surfaces stay role-less and aren't drawn. */
+    if (!surface) {
+        if (g_cursor_surface) g_cursor_surface->role = ROLE_NONE;
+        g_cursor_surface = NULL;
+        cursor_publish_hidden();
+        return;
+    }
+    struct surface *s = wl_resource_get_user_data(surface);
+    if (!s) return;
+    if (s->role != ROLE_NONE && s->role != ROLE_CURSOR) return;  /* already has another role */
+    s->role = ROLE_CURSOR;
+    g_cursor_surface = s;
+    g_cursor_hx = hx;
+    g_cursor_hy = hy;
 }
 static void pointer_release(struct wl_client *c, struct wl_resource *r) { wl_resource_destroy(r); }
 static const struct wl_pointer_interface pointer_impl = {

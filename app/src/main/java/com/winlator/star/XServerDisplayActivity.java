@@ -1486,6 +1486,41 @@ public class XServerDisplayActivity extends AppCompatActivity {
             waylandCursorView.setVisibility(View.GONE);
     };
 
+    // The guest's own pointer, from wl_pointer.set_cursor. Before this the app drew a fixed arrow and
+    // had no idea what the game wanted - X11 always knew, because its X server owns the cursor.
+    private final int[] waylandCursorBuf =
+            new int[com.winlator.star.wayland.WaylandCompositor.CURSOR_BUF_INTS];
+    private int waylandCursorSerial = -1;        // last snapshot applied
+    private boolean waylandGuestHidesCursor;     // the guest asked for NO pointer (mouse-look)
+    private int waylandCursorHotX, waylandCursorHotY;
+
+    /** Pull the guest's cursor if it changed. Cheap: usually just reads a serial. */
+    private void waylandSyncGuestCursor() {
+        if (waylandCursorView == null) return;
+        int n = com.winlator.star.wayland.WaylandCompositor.cursorSnapshot(waylandCursorBuf);
+        if (n < 6) return;
+        int serial = waylandCursorBuf[0];
+        // Serial 0 = the guest has not called set_cursor yet. That is NOT "hide": it just means we
+        // know nothing, so the idle/controller rules stay in charge and the fallback arrow is used.
+        if (serial == 0 || serial == waylandCursorSerial) return;
+        waylandCursorSerial = serial;
+        waylandGuestHidesCursor = waylandCursorBuf[1] != 0;
+        if (waylandGuestHidesCursor) return;
+        int w = waylandCursorBuf[2], h = waylandCursorBuf[3];
+        if (w <= 0 || h <= 0 || n < 6 + w * h) return;
+        waylandCursorHotX = waylandCursorBuf[4];
+        waylandCursorHotY = waylandCursorBuf[5];
+        try {
+            // wl_shm ARGB8888 is premultiplied; Android treats these ints as straight alpha. Hard-edged
+            // cursors are unaffected; only soft shadows would differ slightly.
+            android.graphics.Bitmap bmp = android.graphics.Bitmap.createBitmap(
+                    waylandCursorBuf, 6, w, w, h, android.graphics.Bitmap.Config.ARGB_8888);
+            waylandCursorView.setImageBitmap(bmp);
+        } catch (Exception e) {
+            Log.e("XServerDisplayActivity", "wayland: cursor bitmap failed", e);
+        }
+    }
+
     /** A controller just produced input: hide the pointer now and keep it hidden while it keeps coming. */
     public static void waylandNotePadInput() {
         waylandLastPadInputMs = android.os.SystemClock.uptimeMillis();
@@ -1497,10 +1532,13 @@ public class XServerDisplayActivity extends AppCompatActivity {
      */
     private void waylandCursorPoke() {
         if (waylandCursorView == null) return;
+        waylandSyncGuestCursor();
         waylandCursorIdle.removeCallbacks(waylandCursorHideRunnable);
         boolean padDriving =
                 android.os.SystemClock.uptimeMillis() - waylandLastPadInputMs < WAYLAND_CURSOR_PAD_MS;
-        if (padDriving || waylandPointerLocked) {
+        // The guest asking for no pointer is authoritative - it is what X11 always had and Wayland
+        // never did. The idle/controller rules below are only a fallback for when it wants one.
+        if (waylandGuestHidesCursor || padDriving || waylandPointerLocked) {
             if (waylandCursorView.getVisibility() != View.GONE)
                 waylandCursorView.setVisibility(View.GONE);
             return;
@@ -8176,8 +8214,8 @@ public class XServerDisplayActivity extends AppCompatActivity {
                     float[] pos = waylandSceneToView(x, y, vw, vh);
                     waylandCursorX = pos[0];
                     waylandCursorY = pos[1];
-                    waylandCursorView.setX(waylandCursorX);
-                    waylandCursorView.setY(waylandCursorY);
+                    waylandCursorView.setX(waylandCursorX - waylandCursorHotX);
+                    waylandCursorView.setY(waylandCursorY - waylandCursorHotY);
                     waylandCursorPoke();
                 });
             }
@@ -8470,8 +8508,8 @@ public class XServerDisplayActivity extends AppCompatActivity {
 
     private void updateWaylandCursor(int vw, int vh, int action) {
         if (waylandCursorView != null) {
-            waylandCursorView.setX(waylandCursorX);
-            waylandCursorView.setY(waylandCursorY);
+            waylandCursorView.setX(waylandCursorX - waylandCursorHotX);
+            waylandCursorView.setY(waylandCursorY - waylandCursorHotY);
             waylandCursorPoke();
         }
         int ox = (int) (waylandCursorX / vw * 1920f);
