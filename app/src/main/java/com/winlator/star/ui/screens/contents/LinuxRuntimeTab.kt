@@ -172,7 +172,7 @@ private fun addSteamEntry(context: android.content.Context) {
         val manager = ContainerManager(context)
         val container = manager.containers.firstOrNull { it.isGamescopeRuntime }
             ?: manager.containers.firstOrNull() ?: return
-        if (!LinuxShortcuts.hasSteamShortcut(container)) LinuxShortcuts.createSteamShortcut(container)
+        if (!LinuxShortcuts.hasSteamShortcut(container)) LinuxShortcuts.createSteamShortcut(container, context)
     }
 }
 

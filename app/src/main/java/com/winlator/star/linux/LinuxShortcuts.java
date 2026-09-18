@@ -1,5 +1,6 @@
 package com.winlator.star.linux;
 
+import android.content.Context;
 import android.util.Log;
 
 import com.winlator.star.container.Container;
@@ -43,7 +44,40 @@ public final class LinuxShortcuts {
      * Writes the Steam entry into {@code container}, replacing any earlier copy. Returns false only
      * if the file could not be written.
      */
+    /**
+     * The tile the Games tab shows for the entry. Written out of the app's own resources the first
+     * time the shortcut is created, because a cover art is read from a file path and there is no
+     * store page to pull artwork from for this one.
+     */
+    private static File coverArtFile(Context context) {
+        return new File(context.getFilesDir(), "app_data/cover_arts/" + STEAM_NAME + ".png");
+    }
+
+    private static String writeCoverArt(Context context) {
+        File out = coverArtFile(context);
+        if (out.isFile()) return out.getPath();
+        File dir = out.getParentFile();
+        if (dir != null && !dir.isDirectory() && !dir.mkdirs()) {
+            Log.w(TAG, "cannot create " + dir);
+            return "";
+        }
+        try (java.io.InputStream in = context.getResources().openRawResource(
+                     com.winlator.star.R.drawable.pad_steam);
+             java.io.OutputStream os = new java.io.FileOutputStream(out)) {
+            byte[] buf = new byte[8192];
+            for (int n; (n = in.read(buf)) > 0; ) os.write(buf, 0, n);
+        } catch (Exception e) {
+            Log.w(TAG, "could not write the tile for " + STEAM_NAME, e);
+            return "";
+        }
+        return out.getPath();
+    }
+
     public static boolean createSteamShortcut(Container container) {
+        return createSteamShortcut(container, null);
+    }
+
+    public static boolean createSteamShortcut(Container container, Context context) {
         File desktopDir = container.getDesktopDir();
         if (!desktopDir.isDirectory() && !desktopDir.mkdirs()) {
             Log.w(TAG, "cannot create " + desktopDir);
@@ -60,6 +94,10 @@ public final class LinuxShortcuts {
                 + LinuxRuntime.EXTRA_LINUX_MODE + "=" + LinuxRuntime.MODE_STEAM + "\n"
                 // gamescope is a Wayland client; the launch path would pin this anyway.
                 + "displayBackend=" + Container.DISPLAY_BACKEND_WAYLAND + "\n";
+        if (context != null) {
+            String cover = writeCoverArt(context);
+            if (!cover.isEmpty()) content += "customCoverArtPath=" + cover + "\n";
+        }
         boolean ok = FileUtils.writeString(steamShortcutFile(container), content);
         if (!ok) Log.w(TAG, "could not write " + steamShortcutFile(container));
         return ok;
