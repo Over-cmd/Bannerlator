@@ -133,10 +133,11 @@ aarch64-linux-gnu-gcc -shared -fPIC -O2 -Wall -pthread -o rootfs/usr/local/lib/l
 # Cross compilers rather than gcc-multilib: multilib conflicts with the aarch64 cross gcc this
 # build already needs, and apt refuses to install both.
 for guest in i686 x86_64; do
-  out=rootfs/usr/local/lib/libblsysv-$guest.so
+  # Not $out: that already holds the path of the tarball this script writes at the end.
+  shim=rootfs/usr/local/lib/libblsysv-$guest.so
   # The package is gcc-x86-64-linux-gnu but the binary it ships keeps the underscore.
-  "$guest-linux-gnu-gcc" -shared -fPIC -O2 -Wall -pthread -o "$out" "$here"/preload/sysv.c -ldl
-  echo "  built $out"
+  "$guest-linux-gnu-gcc" -shared -fPIC -O2 -Wall -pthread -o "$shim" "$here"/preload/sysv.c -ldl
+  echo "  built $shim"
 done
 mkdir -p rootfs/dev rootfs/proc rootfs/sys rootfs/tmp rootfs/root rootfs/run/user
 chmod 1777 rootfs/tmp
