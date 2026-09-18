@@ -1,6 +1,7 @@
 package com.winlator.star.linux;
 
 import android.content.Context;
+import android.graphics.BitmapFactory;
 import android.util.Log;
 
 import com.winlator.star.container.Container;
@@ -101,6 +102,33 @@ public final class LinuxShortcuts {
         boolean ok = FileUtils.writeString(steamShortcutFile(container), content);
         if (!ok) Log.w(TAG, "could not write " + steamShortcutFile(container));
         return ok;
+    }
+
+    /**
+     * True for any entry the Linux runtime owns, whatever it is called. Matching on the runtime
+     * extra rather than on {@link #STEAM_NAME} keeps entries written before the name settled -
+     * and any the user made by hand - working like the one this class writes today.
+     */
+    public static boolean isLinuxEntry(Shortcut shortcut) {
+        return shortcut != null
+                && Container.RUNTIME_GAMESCOPE.equals(shortcut.getExtra(Container.EXTRA_RUNTIME));
+    }
+
+    /**
+     * Gives a Linux entry the Steam tile if it has none yet. Entries written before the tile
+     * existed carry no {@code customCoverArtPath}, and {@link Shortcut}'s name-based fallback is a
+     * relative path that never resolves from an app process - so without this they keep the
+     * generic placeholder for good. The bitmap is decoded here too: the path alone would only
+     * show up on the load after next.
+     */
+    public static void ensureCoverArt(Context context, Shortcut shortcut) {
+        if (context == null || !isLinuxEntry(shortcut)) return;
+        String current = shortcut.getCustomCoverArtPath();
+        if (current != null && !current.isEmpty() && new File(current).isFile()) return;
+        String cover = writeCoverArt(context);
+        if (cover.isEmpty()) return;
+        shortcut.setCustomCoverArtPath(cover);
+        shortcut.setCoverArt(BitmapFactory.decodeFile(cover));
     }
 
     public static boolean removeSteamShortcut(Container container) {

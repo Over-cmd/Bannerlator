@@ -195,7 +195,7 @@ class ShortcutsViewModel(app: Application) : AndroidViewModel(app) {
             }
             // The Steam entry is a launcher for everything else, not one game among many, so it
             // stays at the front of every view and sort order rather than being hunted for.
-            sorted.sortedBy { if (it.name == LinuxShortcuts.STEAM_NAME) 0 else 1 }
+            sorted.sortedBy { if (LinuxShortcuts.isLinuxEntry(it)) 0 else 1 }
         }
 
     private val manager = ContainerManager(app)
@@ -1154,7 +1154,10 @@ class ShortcutsViewModel(app: Application) : AndroidViewModel(app) {
         manager.reloadContainers()
         val raw = manager.loadShortcuts()
         // filter out corrupted entries (matches original Fragment logic)
-        _shortcuts.value = raw.filter { it != null && it.file != null && it.file.name.isNotEmpty() }
+        val kept = raw.filter { it != null && it.file != null && it.file.name.isNotEmpty() }
+        // Entries written before the Steam tile existed have no art; give them one on the way in.
+        kept.forEach { LinuxShortcuts.ensureCoverArt(app, it) }
+        _shortcuts.value = kept
     }
 
     /** Replaces a shortcut in the live list, optionally applying a specific icon. */
