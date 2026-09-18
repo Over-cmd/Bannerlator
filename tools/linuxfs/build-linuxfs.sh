@@ -130,11 +130,12 @@ aarch64-linux-gnu-gcc -shared -fPIC -O2 -Wall -pthread -o rootfs/usr/local/lib/l
 # for them: Android kernels have no System V IPC, shmget/semget/msgget return ENOSYS, and Source's
 # tier0 gives up on that ("create pipe failed ... Function not implemented"). The other shims
 # answer host-side concerns that do not arise inside the emulated process.
-for guest in i686:-m32 x86_64:-m64; do
-  arch=${guest%%:*}
-  bits=${guest##*:}
-  out=rootfs/usr/local/lib/libblsysv-$arch.so
-  x86_64-linux-gnu-gcc "$bits" -shared -fPIC -O2 -Wall -pthread -o "$out" "$here"/preload/sysv.c -ldl
+# Cross compilers rather than gcc-multilib: multilib conflicts with the aarch64 cross gcc this
+# build already needs, and apt refuses to install both.
+for guest in i686 x86_64; do
+  out=rootfs/usr/local/lib/libblsysv-$guest.so
+  # The package is gcc-x86-64-linux-gnu but the binary it ships keeps the underscore.
+  "$guest-linux-gnu-gcc" -shared -fPIC -O2 -Wall -pthread -o "$out" "$here"/preload/sysv.c -ldl
   echo "  built $out"
 done
 mkdir -p rootfs/dev rootfs/proc rootfs/sys rootfs/tmp rootfs/root rootfs/run/user
