@@ -21,6 +21,9 @@ import shutil
 import sys
 
 TOOL = "bannerlator-proton-arm64"
+# The extra Steam library the app mounts the installed games into (see bannerlator-steam-library).
+# installed_apps() scans it too; it lives only in the sibling script, so define it here as well.
+LIBRARY = "/mnt/bannerlator"
 # The client lists its own "Proton Experimental (ARM64)" and "Proton 11.0 (ARM64)" in the same
 # Compatibility dropdown, and those are the two that cannot start a game here. Ours has to be
 # unmistakable at a glance, or a user picks a neighbour and gets a launch that fails silently.
