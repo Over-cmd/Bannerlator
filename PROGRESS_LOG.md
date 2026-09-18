@@ -8,6 +8,41 @@
 >
 > **Phases.** 1 a Linux ELF runs as our uid · 2 gamescope composites into our surface · 3 the GPU (glibc Turnip, KGSL presented as a DRM node) · 4 Steam · 5 the download/install product.
 
+### 2026-09-18 — r1 uploaded, r2 cut and live; native-Linux games root-caused
+
+> **The runtime is downloadable.** The missing 789,000,670 B asset is uploaded to the `linuxfs-r1`
+> release, which is deliberately left a **draft** — r1 predates the launch fixes and would install
+> fine and then launch nothing. **`linuxfs-r2` is the first public runtime**: built by CI from
+> `9dc41739`, the exact commit proven to launch Brawlhalla end to end, sha256 `5d32a176…`,
+> 788,990,267 B. `linuxfs.json` is repointed at it and the URL that used to 404 now returns 200 with
+> a matching content-length.
+>
+> **The registrar needed a second half.** The client writes its own **per-app** CompatToolMapping
+> entry at priority 250, which outranks the `"0"` default — so setting that default alone changed
+> nothing. Every Proton the client can pick is one this runtime cannot start, so every Proton
+> mapping is now repointed and non-Proton tools are left alone. Proven from a clean state:
+> `compatibilitytools.d` emptied, the client's own `config.vdf` restored, and the session registered
+> the tool by itself and launched the game.
+>
+> **Native-Linux x86 titles (Half-Life, CS:S, HL2) are a different wall, now understood.** They
+> never touch the Proton path. Valve's `fex-compat-tool` dies before doing anything because Steam
+> launches it with fd 1 and 2 closed, so `sys.stdout` is `None` and `os.dup(sys.stdout.fileno())`
+> raises. Past that, **FEX cannot present its rootfs here at all**: with `FEX_ROOTFS` absolute, with
+> `FEX_PORTABLE`, as a name under `~/.fex-emu/RootFS/`, and with nothing set, the result is
+> byte-identical — `libc.so.6: cannot open shared object file` — though the guest tree holds that
+> libc. FEX serves its rootfs through a mount namespace, which an Android app does not get; the same
+> class of wall as pressure-vessel. Windows games are untouched by this because arm64ec Wine runs
+> FEX as a DLL inside the Wine process and never needs a rootfs — which is exactly why Proton works
+> here and native Linux does not.
+>
+> FEX itself is healthy: `FEX /usr/bin/uname -m` prints `x86_64` once `LD_LIBRARY_PATH` names the
+> guest libraries directly. With Valve's scout `i386` tree supplying the 32-bit set the Arch guest
+> lacks, Half-Life run by hand from its own directory loads every library, starts its breakpad
+> handler and reaches `SteamAPI_Init`. Launched through Steam with the same path wired into the
+> compat tool the library failures are gone, but the game still exits without output. Not solved,
+> and the compat-tool patches live in Valve's depot, so shipping them needs the symlink mirror used
+> for Proton.
+
 ### 2026-09-18 — first game launch: Brawlhalla (`c3711182`)
 
 > **The x86-64 Windows build of Brawlhalla runs and presents** through the native Linux Steam
