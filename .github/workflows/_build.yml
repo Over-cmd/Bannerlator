@@ -241,6 +241,40 @@ jobs:
           || echo "::warning::the dxvk-nvapi $VER LICENSE differs from the copy committed in $D"
         echo "dxvk-nvapi $VER bundled:"; ls -l "$D"
 
+    # --- fake evdev for the Linux runtime session -------------------------------------------
+    # The same app/src/main/cpp/winlator/fakeinput.cpp that ships as libfakeinput.so in jniLibs
+    # (bionic, preloaded into Wine), built once more against glibc for the Linux runtime rootfs.
+    # The native Steam client has no Wine and no XInput, so a pad only reaches it as a real
+    # /dev/input/eventN — which is what this serves out of the app's fake-input rings. It goes in
+    # assets rather than the rootfs asset so an existing installed runtime picks it up on the next
+    # launch instead of waiting on a ~790MB runtime release. Built from source here, never
+    # committed, so it cannot drift from the bionic copy.
+    - name: Build libfakeinput.so for the Linux runtime (glibc aarch64)
+      run: |
+        set -euo pipefail
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq g++-aarch64-linux-gnu >/dev/null
+        D=app/src/main/assets/linuxfs
+        mkdir -p "$D"
+        # Statically linked C++ runtime: this is preloaded into every Steam process, and Steam ships
+        # its own libstdc++ while rewriting LD_LIBRARY_PATH. Pulling the system one in ahead of it is
+        # a version-conflict waiting to happen, and it also makes the library independent of what the
+        # rootfs carries. Costs ~1.4MB; only libc.so.6 is left as a dependency.
+        aarch64-linux-gnu-g++ -shared -fPIC -O2 -Wall -std=c++17 -static-libstdc++ -static-libgcc \
+          -o "$D/libfakeinput.so" app/src/main/cpp/winlator/fakeinput.cpp -ldl
+        aarch64-linux-gnu-strip --strip-unneeded "$D/libfakeinput.so"
+        aarch64-linux-gnu-readelf -d "$D/libfakeinput.so" | grep NEEDED
+        if aarch64-linux-gnu-readelf -d "$D/libfakeinput.so" | grep NEEDED | grep -qv "libc.so.6"; then
+          echo "::error::libfakeinput.so must depend on libc alone (see the static-link note above)"
+          exit 1
+        fi
+        # The interposers are the whole point: if any is missing the client sees no controller.
+        for sym in open openat ioctl read close poll ppoll select stat fstat access scandir; do
+          aarch64-linux-gnu-nm -D --defined-only "$D/libfakeinput.so" | grep -qw "$sym" \
+            || { echo "::error::libfakeinput.so does not export $sym"; exit 1; }
+        done
+        ls -l "$D/libfakeinput.so"
+
     - name: Cache LSFG native library
       id: cache-lsfg
       uses: actions/cache@v4

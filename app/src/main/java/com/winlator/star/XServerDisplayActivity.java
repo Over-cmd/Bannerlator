@@ -8677,6 +8677,47 @@ public class XServerDisplayActivity extends AppCompatActivity {
         File sessionLog = new File(logDir, "session-" + stamp + ".log");
         guest.add("BL_LOG=" + sessionLog.getPath());
         guest.add("BL_DEBUG_DIR=" + new File(logDir, "session-" + stamp).getPath());
+
+        // Controllers for a Linux session. WinHandler already publishes the on-screen and physical
+        // pads into the fake-input rings (setFakeInputPath, in onCreate) — what this session lacks
+        // is a reader, because there is no Wine here to preload the interposer into. The rootfs
+        // ships a glibc build of the same libfakeinput.so; hand it the rings and the Steam client
+        // enumerates a real /dev/input/eventN, so the pad works in Big Picture and in the games
+        // launched from it. Both paths are bound into the session at their own host paths
+        // (LinuxRuntime.command), so nothing here needs translating.
+        // xbox360: SDL and Steam key their mapping database on bus+vendor+product, so only a known
+        // identity gets the standard layout without the user configuring the pad by hand.
+        // The reader itself. Shipped as an asset rather than inside the runtime image so an already
+        // installed runtime gains it on the next launch instead of waiting on a new ~790MB release;
+        // a runtime built after this also carries its own copy, and either satisfies the session
+        // script's check. Copied unconditionally — an older copy left in place would be served in
+        // preference to this build's, which is exactly the trap the Wine path documents.
+        try {
+            File fakeInputLib = new File(com.winlator.star.linux.LinuxRuntime.rootDir(this),
+                    "usr/local/lib/libfakeinput.so");
+            //noinspection ResultOfMethodCallIgnored
+            fakeInputLib.getParentFile().mkdirs();
+            FileUtils.copy(this, "linuxfs/libfakeinput.so", fakeInputLib);
+            //noinspection ResultOfMethodCallIgnored
+            fakeInputLib.setExecutable(true, false);
+            Log.i("XServerDisplayActivity", "fake evdev reader staged: " + fakeInputLib.length() + " bytes");
+        } catch (Exception e) {
+            // Not fatal: the session still runs, the client just sees no controller.
+            Log.w("XServerDisplayActivity", "could not stage libfakeinput.so for the Linux session", e);
+        }
+
+        File fakeInputDir = new File(imageFs.getRootDir(), "dev/input");
+        fakeInputDir.mkdirs();
+        guest.add("FAKE_EVDEV_DIR=" + fakeInputDir.getPath());
+        String fakeInputRings =
+                com.winlator.star.inputcontrols.FakeInputWriter.getRingEnv(fakeInputDir);
+        if (fakeInputRings != null && !fakeInputRings.isEmpty()) {
+            guest.add("FAKE_EVDEV_MEMFD_PATHS=" + fakeInputRings);
+        }
+        guest.add("FAKE_EVDEV_IDENTITY=xbox360");
+        // Rumble comes back over an abstract socket. proot makes no network namespace, so the
+        // session shares the app's abstract namespace and WinHandler's listener is reachable.
+        guest.add("FAKE_EVDEV_VIBRATION=1");
         Log.i("XServerDisplayActivity", "Linux session log: " + sessionLog.getPath());
         showLinuxFirstRunProgress(sessionLog);
         guest.add(com.winlator.star.linux.LinuxRuntime.SESSION_SCRIPT);
@@ -9928,6 +9969,21 @@ public class XServerDisplayActivity extends AppCompatActivity {
             if (!controlsProfile.isEmpty()) {
                 ControlsProfile profile = inputControlsManager.getProfile(Integer.parseInt(controlsProfile));
                 if (profile != null) showInputControls(profile);
+            }
+
+            // A Linux session is controller-first: the Steam client IS the shell, and Big Picture has
+            // no keyboard/mouse affordance worth falling back to. So when no touch profile has been
+            // picked, seed the bundled "Virtual Gamepad" layout — it binds GAMEPAD_*, which is what
+            // reaches the fake-evdev rings the session reads (FAKE_EVDEV_* above), so the client sees
+            // it as a controller rather than as synthesised key presses. #338's rule still applies: a
+            // physical pad that is already connected owns the slot, so don't add a phantom one.
+            if (gamescopeMode && controlsProfile.isEmpty() && !hasConnectedGameController()) {
+                ControlsProfile linuxPad = findVirtualGamepadProfile();
+                if (linuxPad != null) {
+                    inputControlsView.setShowTouchscreenControls(true);
+                    userWantsControlsShown = true;
+                    showInputControls(linuxPad);
+                }
             }
 
             String controllerProfile = shortcut.getExtra("controllerProfile");
