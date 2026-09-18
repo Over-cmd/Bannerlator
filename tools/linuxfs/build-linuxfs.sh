@@ -139,6 +139,10 @@ for guest in i686 x86_64; do
   "$guest-linux-gnu-gcc" -shared -fPIC -O2 -Wall -pthread -o "$shim" "$here"/preload/sysv.c -ldl
   echo "  built $shim"
 done
+# Also beside the tarball, so a device test can take a few kilobytes instead of the whole rootfs.
+# This script has cd'd into the work dir, so only it knows where both of those actually are.
+mkdir -p "$(dirname "$out")/guest-shims"
+cp rootfs/usr/local/lib/libblsysv-*.so "$(dirname "$out")/guest-shims/"
 mkdir -p rootfs/dev rootfs/proc rootfs/sys rootfs/tmp rootfs/root rootfs/run/user
 chmod 1777 rootfs/tmp
 # The dynamic loader takes its search path from here; ldconfig cannot run without the target CPU.

@@ -86,10 +86,8 @@ jobs:
 
       # The guest System V IPC shims, on their own: they are a few kilobytes, and dropping them onto
       # a device for a test should not mean fetching the whole rootfs.
-      - name: Collect the guest shims
+      - name: Show the guest shims
         run: |
-          mkdir -p out/guest-shims
-          cp rootfs/usr/local/lib/libblsysv-*.so out/guest-shims/
           ls -l out/guest-shims/
           file out/guest-shims/* || true
 
