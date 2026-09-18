@@ -8,6 +8,39 @@
 >
 > **Phases.** 1 a Linux ELF runs as our uid · 2 gamescope composites into our surface · 3 the GPU (glibc Turnip, KGSL presented as a DRM node) · 4 Steam · 5 the download/install product.
 
+### 2026-09-18 — picking Proton automatically, the frame counter, and where VAC stands
+
+> **Users should not have to tick the Compatibility box per game.** The `"0"` mapping is the
+> client's "Steam Play for all other titles" and only decides how a title is *installed*, so it
+> settles new downloads and leaves anything already installed as a Linux build running as one -
+> which is exactly why Half-Life stayed on `hl_linux` until that box was ticked by hand. Ticking it
+> writes a per-app entry at priority 250, and that is what moves a title across. So the registrar now
+> writes one per installed title, skipping the client's own tools and runtimes by app id. The first
+> session after this costs a Windows-depot download for each game currently installed as Linux.
+>
+> **The frame counter was blind, not broken.** The HUD read `0.0 fps / 1000.0ms` on the Source titles
+> while GPU load and power draw moved correctly. `take_dmabuf` only ever receives GPU buffers, so
+> every buffer reaching it is a presented frame - but the counter also asked whether the compositor
+> had imported the buffer or whether it carried a gralloc handle. That is a question about the copy
+> path, not about whether a frame happened, and a game whose buffers go straight to the display layer
+> satisfies neither. The surface-binding code four lines above already had the right rule written
+> down. Needs an APK to verify on device.
+>
+> **A packaging bug of my own broke the rootfs build**: the guest-shim loop wrote each shim to `$out`,
+> which already held the path of the tarball the script produces, so the final `zstd -o "$out"` wrote
+> a 1.31 GiB archive into `libblsysv-x86_64.so` while tar was reading that directory. Both shims had
+> compiled correctly; only packaging was broken.
+>
+> **VAC is open and instrumented.** Counter-Strike: Source launches but drops to insecure mode.
+> Nothing passes `-insecure` - `localconfig.vdf` had no launch options at all - and Steam integration
+> is healthy: the game reports `CClientSteamContext logged on = 1`, with Proton's real
+> `steamclient.dll` and `steamclient64.dll` in the prefix. So VAC itself is declining. `-condebug` is
+> now set for the app, and the verdict will land in `cstrike/console.log` the moment a secure server
+> is joined, because VAC reports at connect and not at startup. The suspicion to test is that the
+> app's SteamLite path runs the *Windows* Steam client inside the same prefix, giving VAC's Windows
+> module a Windows client to handshake with, where here Steam is a Linux ARM process outside the
+> prefix reached over a socket.
+
 ### 2026-09-18 — four games playable, and what the screenshots prove
 
 > Brawlhalla, Stumble Guys, Half-Life and **Half-Life 2**, all through the native Linux Steam client.
