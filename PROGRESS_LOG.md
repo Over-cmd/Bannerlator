@@ -9193,3 +9193,33 @@ clean all along and the rewrite on 2026-09-19 changed nothing — 113 commits ab
 zero matches, identical tree. And the Pocket FIT is now confirmed in real use as well, not just
 by driven input: the built-in pad and the on-screen controls both work in the client on
 `ee8b7b19`. That leaves one open item, the Wine-path re-test after the interposer swap.
+
+### 2026-09-19 — a fresh client never listed Bannerlator Proton until restarted
+
+**What the user saw on the Fold.** After a fresh install of the client, Brawlhalla's Compatibility
+list held only Valve's two ARM64 entries; a download-then-launch failed; quitting and relaunching
+the client made "Bannerlator Proton (ARM64)" appear and the launch work.
+
+**Both halves proven.** Our tool was a symlink mirror of Valve's ARM64 Proton depot, so it could
+not exist before that depot was downloaded, and the client downloads it only as a dependency of
+its own chosen tool on a title's first launch — a launch that dies under the Steam Linux Runtime
+container. And a running client does not rescan `compatibilitytools.d`: on the FIT, with the
+client live, a probe tool dropped into that directory produced no log line in 45 seconds. So the
+watcher that registered ours seconds after the depot landed was invisible until the next start.
+On this device it only ever worked because the depot already existed when the registrar ran.
+
+**Fix, `0309ed5e`.** The tool is written at the start of every session with no depot required —
+its own manifests and a launcher that finds whichever ARM64 Proton depot the client has at launch
+time and runs its `proton` directly. Its manifest names that depot (appid 4427310) as the tool's
+dependency, so the client fetches it before a first launch the way its own entries pull in their
+runtime, but not the depot's own dependency on the arm64 Steam Linux Runtime. The default and
+every installed title map to ours from session one, and the session re-runs the registrar every
+fifteen seconds so a title installed later is remapped too. The session scripts now ship as app
+assets refreshed at every launch, alongside the preload libraries, which is how this reaches a
+runtime that is already installed.
+
+**Not settled.** Whether the client composes the depot's own runtime dependency onto our tool
+transitively. If it does, the launch is wrapped in the container's entry point and dies before our
+launcher runs; the compat log of the first launch will show a dependency on 4185400 or a
+`_v2-entry-point` command prefix, and the fallback is to drop the dependency line and keep the
+old seed as the download trigger.
