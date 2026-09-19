@@ -9513,3 +9513,16 @@ right to say so; Big Picture simply does not list them separately. Lossless Scal
 application rather than a game, so the client's game filters exclude it - it has never appeared
 there, including before any of today's work, so its absence is not a regression, and its manifest
 is now correct, which is what stopped it asking to download itself again.
+
+**Install dialog is right; the card's free space is not (2026-09-19).** The client offers exactly
+two locations - "Local Drive (/)" starred as the default and "Bannerlator (card)" - which is the
+behaviour the user asked for: the store's two places, internal preselected, no third location to
+fall into. But both rows read 279.64 GB free, and only internal has that: the card has 293 GB.
+
+The card library's root directory still lives in internal storage; only its `steamapps/common`
+and `steamapps/downloading` are bound to the card. Steam measures the library root, so it reports
+internal's free space for a library whose contents are on the card. Files still go to the right
+place - just the number is wrong. It matters once the two diverge, because Steam gates an install
+on that figure and could refuse a card install that would fit, or accept one that would not. The
+fix is to bind the library root itself to a folder on the card and layer `common` over it, which
+also moves the manifests the app writes onto the card. Not done yet.
