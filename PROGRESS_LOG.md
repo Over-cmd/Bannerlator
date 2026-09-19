@@ -9741,3 +9741,26 @@ the EA App. So the app side runs `NFS13.exe` and the known-good chain, while the
 off to the EA App bootstrapper, which nothing here has exercised. App side first. Still open and
 cosmetic: Half-Life 2's episodes appear in the store but not the client, adoption is not live
 during a session, and the on-screen pad has no Steam button.
+
+**EA Desktop works. Need for Speed Most Wanted runs from the Linux client (2026-09-19).** The
+heavy path nobody here had exercised turned out to work end to end. Steam does not launch the
+game's exe: the tracked process is `bannerlator-proton waitforexitandrun
+'steam2ea://launchgame/1262560?platform=steam&theme=nfsmw'`, EA's handoff URL. A fresh prefix was
+made for 1262560, our redist markers were seeded into it, and the app was mapped to
+`bannerlator-proton-arm64` at priority 250. EA Desktop then installed itself into that prefix -
+`EASteamLauncher`, `EASteamAuthHelper`, `EADesktop`, `EABackgroundService`, `EALocalHostSvc`,
+and a Visual C++ redistributable - registered the `steam2ea://` handler, drew its own onboarding
+screen at 101 fps, authenticated, and handed off to `NFS13.exe`.
+
+The game reached its title screen at 63 fps and then the full front end with the user's own online
+profile loaded - Online Speed Level 1, their gamertag, 15,780 SP - rendering at 48 fps with the
+GPU at 84%. An online EA profile means authentication and EA's servers both worked from inside
+the runtime.
+
+Two readings corrected along the way, both recorded because the reasoning was wrong rather than
+merely incomplete. `EAappInstaller_installScript.vdf` in the install was read as a sign Steam
+would install the EA App at launch; it only names a file to delete on uninstall. Then, seeing the
+`steam2ea://` URL, the prediction was that nothing would handle it and the launch would die - EA
+Desktop was already installing itself as that was being written. The `terminate called without an
+active exception` storm and the `KeyboardInterrupt` in Proton's `waitpid` were the shutdown, not a
+crash: they landed seconds after the last screenshot and the launch wrapper exited 0.
