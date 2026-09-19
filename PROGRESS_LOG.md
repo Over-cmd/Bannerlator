@@ -9223,3 +9223,41 @@ transitively. If it does, the launch is wrapped in the container's entry point a
 launcher runs; the compat log of the first launch will show a dependency on 4185400 or a
 `_v2-entry-point` command prefix, and the fallback is to drop the dependency line and keep the
 old seed as the download trigger.
+
+### 2026-09-19 — the rest of Max's session stack, and the two libraries meeting in the middle
+
+**Why now.** The Fold's Brawlhalla sat at "Loading Game Files 99%". Max's own words on it
+("I didn't have all the networking stuff set up for Gamescope like I did Proton") and his
+`f76a5c4a` describe it exactly: the sandbox refuses `getifaddrs`, `if_nameindex`, the
+hardware-address ioctl and every `/proc/net` table; Wine builds its adapter tables from those;
+Brawlhalla enumerates its adapters at the end of loading and never returns. This device never
+showed it because its sandbox is permissive — the same split as every other Fold-only failure
+tonight. His `a78c4601` is a second Brawlhalla killer: proot is a ptrace tracer, the client took
+the `TracerPid` for a debugger, closed descriptor 1 on every failed assert, and the game found
+its Steam socket dead at its first call.
+
+**Ported, `a49806e8` and `e92e37da`.** Into the app-shipped session shim: `netif.c`, `tracer.c`,
+`lock.c` (FUSE cannot lock; the client read ENOSYS as failure and walked downloads backwards),
+`opens.c` (O_NOATIME refused on shared storage; the client called the file corrupt),
+`inputudev.c` (the pads described to Wine's HID bus, for controllers inside games), and
+`connect()` keeping EINPROGRESS. Into the session: the log rolls at 8 MB; shared
+redistributables are marked as already run so their x86 installers never start under emulation;
+the ARM64 Proton depot is asked for on the command line the first time a client lacks it, which
+replaces the dependency declaration in the morning's registrar — a dependency composes its own
+dependencies, and that depot's is the runtime container that cannot exist here; the launcher
+drops the overlay library, which stood in front of `/dev/input` reads and left a pad that never
+reported; what a game leaves under gamescope's reaper is killed when the client exits. In the
+app: a component publishes the device's active link to `etc/bannerlator-net` and follows it
+while the session runs, with a stable locally administered MAC seeded from the device id; the
+`/dev/shm` stand-in is emptied before a session; the client's games get the container's FEX
+preset instead of FEX's bare defaults; manifests are reconciled by build id so a title the
+client updated is adopted rather than reverted; and every game the client installed for itself
+gets a Games-tab entry that launches through it.
+
+**Left out, deliberately.** His proot change (we ship Termux's proot, not that tree), the
+storage-move UI, the compositor blend and the Turnip timestamp change — none bear on the client.
+
+**Process note.** Two editing passes aborted on a mis-typed anchor and the surrounding shell
+went on to commit and push regardless, which produced one build with the pieces present but
+not wired (cancelled, `a49806e8`). The final state was proved by counting the wired call sites
+and balancing braces, not by exit codes. Not yet run on a device.
