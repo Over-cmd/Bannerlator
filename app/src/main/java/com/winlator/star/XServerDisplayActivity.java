@@ -12023,12 +12023,35 @@ public class XServerDisplayActivity extends AppCompatActivity {
                     || kc == KeyEvent.KEYCODE_VOLUME_MUTE || kc == KeyEvent.KEYCODE_BUTTON_MODE;
             if (!systemKey) {
                 int evdev = androidKeyToEvdev(kc);
+                // A soft keyboard's symbol keys are not in that table and carry no scan code, so
+                // they used to reach the session as nothing at all - an EA sign-in took an address
+                // without its @ and rejected it. The character the key stands for is known, so
+                // work back from that instead: which key carries it, and whether Shift is what
+                // puts it there.
+                int shiftEvdev = 0;
+                if (evdev <= 0) {
+                    int ch = event.getUnicodeChar();
+                    if (ch > 0) {
+                        int plain = unshiftedChar(ch);
+                        int typed = plain != 0 ? plain : ch;
+                        int code = androidKeyToEvdev(keycodeForChar(typed));
+                        if (code > 0) {
+                            evdev = code;
+                            if (plain != 0) shiftEvdev = 42;   // KEY_LEFTSHIFT
+                        }
+                    }
+                }
                 if (evdev <= 0 && event.getScanCode() > 0) evdev = event.getScanCode();
                 if (evdev > 0) {
-                    if (event.getAction() == KeyEvent.ACTION_DOWN)
+                    if (event.getAction() == KeyEvent.ACTION_DOWN) {
+                        if (shiftEvdev != 0)
+                            com.winlator.star.wayland.WaylandCompositor.nativeSendKey(shiftEvdev, 1);
                         com.winlator.star.wayland.WaylandCompositor.nativeSendKey(evdev, 1);
-                    else if (event.getAction() == KeyEvent.ACTION_UP)
+                    } else if (event.getAction() == KeyEvent.ACTION_UP) {
                         com.winlator.star.wayland.WaylandCompositor.nativeSendKey(evdev, 0);
+                        if (shiftEvdev != 0)
+                            com.winlator.star.wayland.WaylandCompositor.nativeSendKey(shiftEvdev, 0);
+                    }
                     return true;
                 }
             }
@@ -12058,6 +12081,43 @@ public class XServerDisplayActivity extends AppCompatActivity {
 
     /** Map an Android KeyEvent keyCode to a Linux evdev keycode (for wl_keyboard in wayland mode).
      *  Returns -1 if unmapped (caller falls back to KeyEvent.getScanCode() for HW keyboards). */
+    /**
+     * The character a key carries when Shift is not held, for a character that needs it - so '@'
+     * gives '2' and 'A' gives 'a'. Returns 0 when the character is typed without Shift, which is
+     * also the answer for anything this layout does not place on a key.
+     */
+    private static int unshiftedChar(int ch) {
+        if (ch >= 'A' && ch <= 'Z') return Character.toLowerCase(ch);
+        int at = SHIFTED_CHARS.indexOf(ch);
+        return at >= 0 ? PLAIN_CHARS.charAt(at) : 0;
+    }
+
+    // Index-aligned: the symbol, and the key it shares with Shift held. US layout, which is what
+    // the session's keymap is.
+    private static final String SHIFTED_CHARS = "!@#$%^&*()_+{}|:\"<>?~";
+    private static final String PLAIN_CHARS   = "1234567890-=[]\\;',./`";
+
+    /** The Android key code that carries an unshifted character, or 0 when nothing does. */
+    private static int keycodeForChar(int ch) {
+        if (ch >= 'a' && ch <= 'z') return KeyEvent.KEYCODE_A + (ch - 'a');
+        if (ch >= '0' && ch <= '9') return KeyEvent.KEYCODE_0 + (ch - '0');
+        switch (ch) {
+            case '-':  return KeyEvent.KEYCODE_MINUS;
+            case '=':  return KeyEvent.KEYCODE_EQUALS;
+            case '[':  return KeyEvent.KEYCODE_LEFT_BRACKET;
+            case ']':  return KeyEvent.KEYCODE_RIGHT_BRACKET;
+            case '\\': return KeyEvent.KEYCODE_BACKSLASH;
+            case ';':  return KeyEvent.KEYCODE_SEMICOLON;
+            case '\'': return KeyEvent.KEYCODE_APOSTROPHE;
+            case ',':  return KeyEvent.KEYCODE_COMMA;
+            case '.':  return KeyEvent.KEYCODE_PERIOD;
+            case '/':  return KeyEvent.KEYCODE_SLASH;
+            case '`':  return KeyEvent.KEYCODE_GRAVE;
+            case ' ':  return KeyEvent.KEYCODE_SPACE;
+            default:   return 0;
+        }
+    }
+
     private static int androidKeyToEvdev(int kc) {
         switch (kc) {
             // Letters (evdev order is NOT alphabetical)

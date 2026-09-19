@@ -9798,3 +9798,25 @@ Most Wanted escaped only because its prefix was built in an earlier session and 
 one. The seeder now runs every five seconds alongside the registrar's own refresh, because it is
 racing the gap between the client creating a prefix and running that title's install scripts; it
 stamps each prefix it covers and skips it afterwards, so the extra passes cost almost nothing.
+
+**A soft keyboard could not type any shifted symbol into a session (2026-09-19).** An EA sign-in
+inside Need for Speed Payback took the user's address without its `@` and rejected it. The Wayland
+key path maps an Android key code to an evdev one through a table that holds letters, digits and
+plain punctuation, and falls back to the hardware scan code; a soft keyboard's symbol keys are in
+neither, so `@`, and every other shifted character, reached the session as nothing at all.
+
+Rather than adding twenty more key codes, the character itself is now the way in: work out which
+key carries it and whether Shift is what puts it there, then hold Shift around the key. `@` is
+Shift and `2`, `A` is Shift and `a`, and the same for `! # $ % ^ & * ( ) _ + { } | : " < > ? ~`
+and every capital. Two index-aligned tables hold the pairing, verified to line up.
+
+Worth separating from that: the user's actual complaint was that no keyboard appears by itself.
+Steam's own on-screen keyboard is for Steam's own fields, and an EA activation window is a Wine
+window it knows nothing about, so none is offered and the app's manual keyboard is the only way
+in - which is where the missing `@` then bit. Steam's keyboard can still be summoned over a game
+with the Steam button and X, now that the Steam button reaches the client.
+
+Also learned: Payback does NOT take the `steam2ea://` road Most Wanted did. It reached its own
+bundled `Core/ActivationUI.exe` Qt window instead, which is what memory recorded for it on the
+app side - so the two EA titles tested take different routes, and Most Wanted's EA Desktop path
+is not the only one.
