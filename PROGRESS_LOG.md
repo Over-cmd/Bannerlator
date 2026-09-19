@@ -9408,3 +9408,10 @@ longer computes a result and drops it - each of those keys is offered to the bin
 pad, then the keyboard, and is still kept from Android. `prevButtonStates` was already 12 wide.
 The compositing half was already right: gamescope runs with `-e` and the client with `-gamepadui`.
 NOT device-proven: whether the client opens its menu over a Proton game once it sees the press.
+
+**DEVICE-PROVEN 2026-09-19 (FIT, `428fac48`): the Steam button opens the client's in-game menu
+over FlatOut.** User: "works". That closes the chain in full - the unified libraries present the
+app's games to the client, our ARM64 Proton launches a Windows title, and the client draws its
+menu over it. Still to prove: a download to the card from inside the client, the retired-library
+cleanup on the Fold, store-side launch/Verify of a client-installed game, and the Fold's on-screen
+controls, which have no Steam-button element yet.
