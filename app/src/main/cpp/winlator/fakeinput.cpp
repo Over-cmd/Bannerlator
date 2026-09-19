@@ -69,7 +69,6 @@ static constexpr const char *STEAM_VIRTUAL_NAME_TEMPLATE = "Microsoft X-Box 360 
 static constexpr uint16_t X360_VENDOR_ID = 0x045E;
 static constexpr uint16_t X360_PRODUCT_ID = 0x028E;
 static constexpr const char *X360_NAME_TEMPLATE = "Xbox 360 Controller (%d)";
-static bool xbox360_identity = false;
 static constexpr const char *GAMEPAD_PHYS_TEMPLATE = "usb-fakeinput/input%d";
 static constexpr const char *GAMEPAD_UNIQ_TEMPLATE = "0000000000%02d";
 static constexpr uint8_t GAMEPAD_AXIS_COUNT = 8;
@@ -161,15 +160,76 @@ static const uint16_t kSnapshotButtons[10] = {
     BTN_A,  BTN_B,      BTN_X,     BTN_Y,      BTN_TL,
     BTN_TR, BTN_SELECT, BTN_START, BTN_THUMBL, BTN_THUMBR};
 
-static std::unordered_map<int, std::shared_ptr<FakeController>> controller_map;
-static std::unordered_map<int, std::string> ring_paths;
-static std::recursive_mutex controller_mutex;
-static bool ring_paths_loaded = false;
-static const char *hook_dir = nullptr;
-static const char *udev_data_dir = nullptr;
-static bool vibration_enabled = true;
+// An LD_PRELOAD interposer is called outside its own lifetime. The loader initialises libraries
+// in dependency order, and the hooks below belong to whichever library gets there first: on the
+// Linux runtime, libpython's initialiser runs before ours and calls close() and read(), so a hook
+// fires before this library has been initialised at all. A file-scope std::unordered_map or
+// std::recursive_mutex has no object yet at that moment - touching one is undefined behaviour,
+// and in practice the process dies before main(). The same window reopens at exit, after static
+// destructors have run. (Proton is a Python script, so this killed every game launched from the
+// native Steam client, and the compatibility-tool registrar with it.)
+//
+// So everything with a constructor lives behind an accessor that builds it on first use and
+// never destroys it. The leak is deliberate and bounded: one map or mutex for the process.
+namespace Logger {
+void init();
+}
 
-static std::unordered_map<int, struct ff_effect> ff_effects;
+static void controller_fork_prepare();
+static void controller_fork_parent();
+static void controller_fork_child();
+
+struct FakeConfig {
+  const char *hook_dir;
+  const char *udev_data_dir;
+  bool vibration_enabled;
+  bool xbox360_identity;
+};
+
+static FakeConfig &config() {
+  static FakeConfig *cfg = [] {
+    auto *c = new FakeConfig();
+    const char *dir = getenv("FAKE_EVDEV_DIR");
+    c->hook_dir = dir ? dir : "/data/data/com.termux/files/home/fake-input";
+    c->udev_data_dir = getenv("FAKE_UDEV_DATA_DIR");
+    c->vibration_enabled =
+        getenv("FAKE_EVDEV_VIBRATION") && atoi(getenv("FAKE_EVDEV_VIBRATION"));
+    const char *identity = getenv("FAKE_EVDEV_IDENTITY");
+    c->xbox360_identity = identity && !strcmp(identity, "xbox360");
+    pthread_atfork(controller_fork_prepare, controller_fork_parent,
+                   controller_fork_child);
+    Logger::init();
+    return c;
+  }();
+  return *cfg;
+}
+
+static std::recursive_mutex &controller_mutex() {
+  static auto *mutex = new std::recursive_mutex();
+  return *mutex;
+}
+
+static std::unordered_map<int, std::shared_ptr<FakeController>> &controller_map() {
+  static auto *map = new std::unordered_map<int, std::shared_ptr<FakeController>>();
+  return *map;
+}
+
+static std::unordered_map<int, std::string> &ring_paths() {
+  static auto *map = new std::unordered_map<int, std::string>();
+  return *map;
+}
+
+static std::unordered_map<int, struct ff_effect> &ff_effects() {
+  static auto *map = new std::unordered_map<int, struct ff_effect>();
+  return *map;
+}
+
+static const char *fake_hook_dir() { return config().hook_dir; }
+static const char *fake_udev_data_dir() { return config().udev_data_dir; }
+static bool fake_vibration_enabled() { return config().vibration_enabled; }
+static bool fake_xbox360_identity() { return config().xbox360_identity; }
+
+static bool ring_paths_loaded = false;
 static int next_ff_id = 0;
 
 // fork() carries over only the calling thread, so a lock another thread was holding at that
@@ -183,15 +243,15 @@ static int next_ff_id = 0;
 // records the owning thread, the child's one thread has a new id, and unlocking one it does not
 // own is refused, which would leave the lock held for good. It gets a fresh mutex instead, which
 // is sound precisely because the fork was taken with the lock held.
-static void controller_fork_prepare() { controller_mutex.lock(); }
-static void controller_fork_parent() { controller_mutex.unlock(); }
+static void controller_fork_prepare() { controller_mutex().lock(); }
+static void controller_fork_parent() { controller_mutex().unlock(); }
 
 static void controller_fork_child() {
   pthread_mutexattr_t attr;
 
   pthread_mutexattr_init(&attr);
   pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
-  pthread_mutex_init(controller_mutex.native_handle(), &attr);
+  pthread_mutex_init(controller_mutex().native_handle(), &attr);
   pthread_mutexattr_destroy(&attr);
 }
 
@@ -216,29 +276,21 @@ void log(const char *message, ...) {
 } // namespace Logger
 
 __attribute__((constructor)) static void library_init() {
-  if (!hook_dir)
-    hook_dir = getenv("FAKE_EVDEV_DIR")
-                   ? getenv("FAKE_EVDEV_DIR")
-                   : "/data/data/com.termux/files/home/fake-input";
-  udev_data_dir = getenv("FAKE_UDEV_DATA_DIR");
-  vibration_enabled =
-      getenv("FAKE_EVDEV_VIBRATION") && atoi(getenv("FAKE_EVDEV_VIBRATION"));
-  const char *identity = getenv("FAKE_EVDEV_IDENTITY");
-  xbox360_identity = identity && !strcmp(identity, "xbox360");
-
-  pthread_atfork(controller_fork_prepare, controller_fork_parent,
-                 controller_fork_child);
-
-  Logger::init();
+  // Warming the lazily built state, not owning it: when the loader runs this before anything
+  // calls a hook - the ordinary case - the first hook finds everything already there. Nothing
+  // below depends on it having run, which is the whole point.
+  config();
+  controller_mutex();
+  controller_map();
 }
 
 __attribute__((visibility("hidden"))) static void
 send_vibration(int strong, int weak, uint16_t duration_ms, uint16_t slot) {
-  if (!vibration_enabled)
+  if (!fake_vibration_enabled())
     return;
 
   // Rumble is best effort. A full Android listener backlog must never park
-  // winebus (or every input hook through controller_mutex), and a closing
+  // winebus (or every input hook through controller_mutex()), and a closing
   // listener must not terminate the guest with SIGPIPE.
   int sock = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
   if (sock < 0)
@@ -271,8 +323,8 @@ check_ff_event(const struct input_event *ev, uint16_t slot) {
 
   int id = ev->code;
   if (ev->value > 0) {
-    auto it = ff_effects.find(id);
-    if (it == ff_effects.end())
+    auto it = ff_effects().find(id);
+    if (it == ff_effects().end())
       return;
 
     uint16_t duration = it->second.replay.length;
@@ -292,7 +344,7 @@ __attribute__((visibility("hidden"))) char *
 from_real_to_fake_path(const char *pathname) {
   const char *event = strrchr(pathname, '/') + 1;
   char *fake_path = nullptr;
-  if (asprintf(&fake_path, "%s/%s", hook_dir, event) < 0)
+  if (asprintf(&fake_path, "%s/%s", fake_hook_dir(), event) < 0)
     fake_path = nullptr;
   return fake_path;
 }
@@ -309,7 +361,7 @@ is_fake_input_node_path(const char *pathname) {
 
 __attribute__((visibility("hidden"))) static bool
 is_fake_udev_data_path(const char *pathname) {
-  return pathname && udev_data_dir && *udev_data_dir &&
+  return pathname && fake_udev_data_dir() && *fake_udev_data_dir() &&
          !strncmp(pathname, "/run/udev/data/c13:", 19);
 }
 
@@ -317,7 +369,7 @@ __attribute__((visibility("hidden"))) char *
 from_real_to_fake_udev_data_path(const char *pathname) {
   const char *name = strrchr(pathname, '/') + 1;
   char *fake_path = nullptr;
-  if (asprintf(&fake_path, "%s/%s", udev_data_dir, name) < 0)
+  if (asprintf(&fake_path, "%s/%s", fake_udev_data_dir(), name) < 0)
     fake_path = nullptr;
   return fake_path;
 }
@@ -354,7 +406,7 @@ get_fake_input_rdev(const char *event) {
 }
 
 __attribute__((visibility("hidden"))) static void load_ring_paths() {
-  std::lock_guard<std::recursive_mutex> guard(controller_mutex);
+  std::lock_guard<std::recursive_mutex> guard(controller_mutex());
   if (ring_paths_loaded)
     return;
 
@@ -378,7 +430,7 @@ __attribute__((visibility("hidden"))) static void load_ring_paths() {
     int slot = atoi(token);
     const char *path = equals + 1;
     if (slot >= 0 && *path)
-      ring_paths[slot] = path;
+      ring_paths()[slot] = path;
   }
 
   free(copy);
@@ -387,10 +439,10 @@ __attribute__((visibility("hidden"))) static void load_ring_paths() {
 
 __attribute__((visibility("hidden"))) static std::string
 get_ring_path_for_slot(int slot) {
-  std::lock_guard<std::recursive_mutex> guard(controller_mutex);
+  std::lock_guard<std::recursive_mutex> guard(controller_mutex());
   load_ring_paths();
-  auto it = ring_paths.find(slot);
-  return it == ring_paths.end() ? std::string() : it->second;
+  auto it = ring_paths().find(slot);
+  return it == ring_paths().end() ? std::string() : it->second;
 }
 
 __attribute__((visibility("hidden"))) static uint64_t
@@ -524,8 +576,8 @@ open_fake_input_ring(const char *event, int flags) {
   if (read_snapshot(ring, snap) && snap.generation == controller->generation)
     capture_keyframe(*controller, snap);
   {
-    std::lock_guard<std::recursive_mutex> guard(controller_mutex);
-    controller_map[fd] = controller;
+    std::lock_guard<std::recursive_mutex> guard(controller_mutex());
+    controller_map()[fd] = controller;
   }
 
   Logger::log("Adding ring-backed controller, fd %d event %s slot %d\n", fd,
@@ -584,18 +636,18 @@ copy_slot_ioctl_string(int op, void *argp, const char *format, int event_number)
 }
 
 __attribute__((visibility("hidden"))) static bool is_fake_input_fd(int fd) {
-  std::lock_guard<std::recursive_mutex> guard(controller_mutex);
-  return controller_map.find(fd) != controller_map.end();
+  std::lock_guard<std::recursive_mutex> guard(controller_mutex());
+  return controller_map().find(fd) != controller_map().end();
 }
 
 __attribute__((visibility("hidden"))) static bool fake_fd_is_stale(int fd) {
-  std::lock_guard<std::recursive_mutex> guard(controller_mutex);
-  auto controller = controller_map.find(fd);
-  return controller != controller_map.end() &&
+  std::lock_guard<std::recursive_mutex> guard(controller_mutex());
+  auto controller = controller_map().find(fd);
+  return controller != controller_map().end() &&
          ring_generation(controller->second->ring) != controller->second->generation;
 }
 
-// Caller holds controller_mutex.
+// Caller holds controller_mutex().
 static bool fake_has_unread_data(const FakeController &fake) {
   if (ring_generation(fake.ring) != fake.generation)
     return false;
@@ -612,13 +664,13 @@ static bool fake_has_unread_data(const FakeController &fake) {
 }
 
 static bool fake_fd_has_unread_data(int fd) {
-  std::lock_guard<std::recursive_mutex> guard(controller_mutex);
-  auto it = controller_map.find(fd);
-  return it != controller_map.end() && fake_has_unread_data(*it->second);
+  std::lock_guard<std::recursive_mutex> guard(controller_mutex());
+  auto it = controller_map().find(fd);
+  return it != controller_map().end() && fake_has_unread_data(*it->second);
 }
 
 static short fake_poll_revents(const std::shared_ptr<FakeController> &fake, short events) {
-  std::lock_guard<std::recursive_mutex> guard(controller_mutex);
+  std::lock_guard<std::recursive_mutex> guard(controller_mutex());
   if (fake->closed) return POLLNVAL;
   if (ring_generation(fake->ring) != fake->generation) return POLLHUP;
   short ready = events & (POLLOUT | POLLWRNORM);
@@ -697,7 +749,7 @@ EXPORT int open(const char *pathname, int flags, ...) {
       }
       pathname = fake_path;
     } else if (!strcmp(pathname, "/dev/input")) {
-      pathname = hook_dir;
+      pathname = fake_hook_dir();
     }
   }
 
@@ -760,7 +812,7 @@ EXPORT int openat(int dirfd, const char *pathname, int flags, ...) {
       }
       pathname = fake_path;
     } else if (!strcmp(pathname, "/dev/input")) {
-      pathname = hook_dir;
+      pathname = fake_hook_dir();
     }
   }
 
@@ -798,7 +850,7 @@ EXPORT int stat(const char *pathname, struct stat *statbuf) {
       }
       pathname = fake_path;
     } else if (!strcmp(pathname, "/dev/input")) {
-      pathname = hook_dir;
+      pathname = fake_hook_dir();
     }
   }
 
@@ -820,9 +872,9 @@ EXPORT int fstat(int fd, struct stat *buf) {
 
   int ret = my_fstat(fd, buf);
 
-  std::lock_guard<std::recursive_mutex> guard(controller_mutex);
-  auto controller = controller_map.find(fd);
-  if (ret == 0 && controller != controller_map.end()) {
+  std::lock_guard<std::recursive_mutex> guard(controller_mutex());
+  auto controller = controller_map().find(fd);
+  if (ret == 0 && controller != controller_map().end()) {
     buf->st_mode = (buf->st_mode & ~S_IFMT) | S_IFCHR;
     buf->st_rdev = get_fake_input_rdev(controller->second->event);
   }
@@ -850,7 +902,7 @@ EXPORT int access(const char *pathname, int mode) {
       }
       pathname = fake_path;
     } else if (!strcmp(pathname, "/dev/input")) {
-      pathname = hook_dir;
+      pathname = fake_hook_dir();
     }
   }
 
@@ -880,7 +932,7 @@ EXPORT int faccessat(int dirfd, const char *pathname, int mode, int flags) {
       }
       pathname = fake_path;
     } else if (!strcmp(pathname, "/dev/input")) {
-      pathname = hook_dir;
+      pathname = fake_hook_dir();
     }
   }
 
@@ -898,9 +950,9 @@ EXPORT int scandir(const char *dirp, struct dirent ***namelist,
 
   if (dirp) {
     if (!strcmp(dirp, "/dev/input")) {
-      dirp = hook_dir;
-    } else if (udev_data_dir && !strcmp(dirp, "/run/udev/data")) {
-      dirp = udev_data_dir;
+      dirp = fake_hook_dir();
+    } else if (fake_udev_data_dir() && !strcmp(dirp, "/run/udev/data")) {
+      dirp = fake_udev_data_dir();
     }
   }
 
@@ -920,7 +972,7 @@ EXPORT int inotify_add_watch(int fd, const char *pathname, uint32_t mask) {
       }
       pathname = fake_path;
     } else if (!strcmp(pathname, "/dev/input")) {
-      pathname = hook_dir;
+      pathname = fake_hook_dir();
     }
   }
 
@@ -974,10 +1026,10 @@ EXPORT int ioctl(int fd, ioctl_request_t op, ...) {
 
   // The lock must not be held across the passthrough: binder's transport is a
   // blocking ioctl(BINDER_WRITE_READ), so a parked binder pool thread would own
-  // controller_mutex for as long as it waits and deadlock every other ioctl.
-  std::unique_lock<std::recursive_mutex> guard(controller_mutex);
-  auto controller = controller_map.find(fd);
-  if (controller == controller_map.end()) {
+  // controller_mutex() for as long as it waits and deadlock every other ioctl.
+  std::unique_lock<std::recursive_mutex> guard(controller_mutex());
+  auto controller = controller_map().find(fd);
+  if (controller == controller_map().end()) {
     guard.unlock();
     return syscall(SYS_ioctl, fd, op, argp);
   }
@@ -1000,7 +1052,7 @@ EXPORT int ioctl(int fd, ioctl_request_t op, ...) {
     if (presents_steam_virtual()) {
       id.vendor = STEAM_VIRTUAL_VENDOR_ID;
       id.product = STEAM_VIRTUAL_PRODUCT_ID;
-    } else if (xbox360_identity) {
+    } else if (fake_xbox360_identity()) {
       id.vendor = X360_VENDOR_ID;
       id.product = X360_PRODUCT_ID;
     } else {
@@ -1014,7 +1066,7 @@ EXPORT int ioctl(int fd, ioctl_request_t op, ...) {
     Logger::log("Hooking ioctl EVIOCGNAME for event %s\n", event);
     copy_slot_ioctl_string(op, argp,
                            presents_steam_virtual() ? STEAM_VIRTUAL_NAME_TEMPLATE
-                           : (xbox360_identity ? X360_NAME_TEMPLATE : GAMEPAD_NAME_TEMPLATE),
+                           : (fake_xbox360_identity() ? X360_NAME_TEMPLATE : GAMEPAD_NAME_TEMPLATE),
                            event_number);
     return 0;
   } else if (type == 0x45 && number == 0x7) {
@@ -1081,7 +1133,7 @@ EXPORT int ioctl(int fd, ioctl_request_t op, ...) {
     struct ff_effect *effect = static_cast<struct ff_effect *>(argp);
     if (effect->id == -1)
       effect->id = next_ff_id++;
-    ff_effects[effect->id] = *effect;
+    ff_effects()[effect->id] = *effect;
 
     uint16_t duration = effect->replay.length;
     uint16_t slot = static_cast<uint16_t>(event_number);
@@ -1095,7 +1147,7 @@ EXPORT int ioctl(int fd, ioctl_request_t op, ...) {
     return 0;
   } else if (type == 0x45 && number == 0x81) {
     int id = (intptr_t)argp;
-    ff_effects.erase(id);
+    ff_effects().erase(id);
     return 0;
   } else if (type == 0x45 && number == 0x84) {
     int max_effects = 16;
@@ -1147,7 +1199,7 @@ EXPORT int ioctl(int fd, ioctl_request_t op, ...) {
     Logger::log("Hooking ioctl JSIOCGNAME(len) for event %s\n", event);
     copy_slot_ioctl_string(op, argp,
                            presents_steam_virtual() ? STEAM_VIRTUAL_NAME_TEMPLATE
-                           : (xbox360_identity ? X360_NAME_TEMPLATE : GAMEPAD_NAME_TEMPLATE),
+                           : (fake_xbox360_identity() ? X360_NAME_TEMPLATE : GAMEPAD_NAME_TEMPLATE),
                            event_number);
     return 0;
   } else {
@@ -1160,13 +1212,13 @@ EXPORT int ioctl(int fd, ioctl_request_t op, ...) {
 EXPORT int close(int fd) {
   static auto my_close = reinterpret_cast<decltype(&::close)>(dlsym(RTLD_NEXT, "close"));
 
-  std::unique_lock<std::recursive_mutex> guard(controller_mutex);
-  auto controller = controller_map.find(fd);
-  if (controller != controller_map.end()) {
+  std::unique_lock<std::recursive_mutex> guard(controller_mutex());
+  auto controller = controller_map().find(fd);
+  if (controller != controller_map().end()) {
     Logger::log("Removing controller, fd %d event %s\n", controller->first,
                 controller->second->event ? controller->second->event : "(unknown)");
     controller->second->closed = true;
-    controller_map.erase(fd);
+    controller_map().erase(fd);
   }
   guard.unlock();
 
@@ -1174,9 +1226,9 @@ EXPORT int close(int fd) {
 }
 
 EXPORT ssize_t read(int fd, void *buf, size_t count) {
-  std::unique_lock<std::recursive_mutex> guard(controller_mutex);
-  auto controller = controller_map.find(fd);
-  if (controller == controller_map.end()) {
+  std::unique_lock<std::recursive_mutex> guard(controller_mutex());
+  auto controller = controller_map().find(fd);
+  if (controller == controller_map().end()) {
     guard.unlock();
     return syscall(SYS_read, fd, buf, count);
   }
@@ -1272,9 +1324,9 @@ EXPORT ssize_t read(int fd, void *buf, size_t count) {
 EXPORT ssize_t write(int fd, const void *buf, size_t count) {
   static auto my_write = reinterpret_cast<decltype(&::write)>(dlsym(RTLD_NEXT, "write"));
 
-  std::unique_lock<std::recursive_mutex> guard(controller_mutex);
-  auto controller = controller_map.find(fd);
-  if (controller != controller_map.end()) {
+  std::unique_lock<std::recursive_mutex> guard(controller_mutex());
+  auto controller = controller_map().find(fd);
+  if (controller != controller_map().end()) {
     if (fake_fd_is_stale(fd)) {
       errno = ENODEV;
       return -1;
@@ -1294,9 +1346,9 @@ EXPORT ssize_t write(int fd, const void *buf, size_t count) {
 }
 
 EXPORT ssize_t writev(int fd, const struct iovec *iov, int iovcnt) {
-  std::unique_lock<std::recursive_mutex> guard(controller_mutex);
-  auto controller = controller_map.find(fd);
-  if (controller != controller_map.end()) {
+  std::unique_lock<std::recursive_mutex> guard(controller_mutex());
+  auto controller = controller_map().find(fd);
+  if (controller != controller_map().end()) {
     if (fake_fd_is_stale(fd)) {
       errno = ENODEV;
       return -1;
@@ -1328,11 +1380,11 @@ static int poll_fake(struct pollfd *fds, nfds_t nfds, int timeout,
   real_fds.reserve(nfds);
   std::vector<std::shared_ptr<FakeController>> fake_fds(nfds);
   {
-    std::lock_guard<std::recursive_mutex> guard(controller_mutex);
+    std::lock_guard<std::recursive_mutex> guard(controller_mutex());
     for (nfds_t i = 0; i < nfds; i++) {
       real_fds.push_back(fds[i]);
-      auto it = controller_map.find(fds[i].fd);
-      if (it != controller_map.end()) {
+      auto it = controller_map().find(fds[i].fd);
+      if (it != controller_map().end()) {
         fake_fds[i] = it->second;
         has_fake_fds = true;
         real_fds[i].fd = -1;

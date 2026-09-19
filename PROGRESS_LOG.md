@@ -9357,3 +9357,24 @@ prefixes stay internal where symlinks and locks work. (4) A game the client unin
 not installed in the store's database, but only when its library is present — a missing card
 proves nothing. Run 35426952192 cancelled; rebuilt on the commit below. Needs device proof: card
 download in the client, retired-library cleanup on the Fold, store launch of an adopted game.
+
+**FlatOut would not launch: the input interposer killed Proton (2026-09-19).** The client mapped
+6220 to our ARM64 Proton correctly, spawned `reaper` → `proton waitforexitandrun FlatOut.exe`,
+and the process was gone in the same second with `exit code -1`; the session log also carried a
+`Segmentation fault  bannerlator-steam-compat` every 15 s from the refresh loop. Both are one
+fault. Proton is a Python script and the registrar is a Python script, and **`libfakeinput.so`
+segfaults glibc Python the moment it is preloaded** - proven on the FIT with the rootfs loader,
+no Steam involved: `bash` under the preload runs, `python3.14 -S -c 'print(1)'` dies rc=139.
+`LD_DEBUG=files` gives the mechanism: for bash the loader prints `calling init: libfakeinput.so`
+before transferring control, for Python the init list ends at `libpython3.14.so.1.0` - libpython's
+own initialiser runs first and calls `close()`/`read()`, which land in our hooks, which take
+`controller_mutex` and look in `controller_map` **before either object has been constructed**.
+`LD_DEBUG=symbols` confirms it: the last symbol bound is the `_Hashtable<...FakeController...>::find`.
+`python -I` survives because its startup takes a different path to the first hooked call.
+
+The fix (ours, not from Max - his version and ours before it share the pattern): nothing with a
+constructor stays at file scope. `controller_mutex`, `controller_map`, `ring_paths`, `ff_effects`
+and the env-derived config are accessors that build on first use and never destroy, which also
+closes the mirror-image window after static destructors at exit. `library_init` now only warms
+them. Host syntax check clean. NOT yet device-proven: the game still has to run under FEX once
+Proton starts.
