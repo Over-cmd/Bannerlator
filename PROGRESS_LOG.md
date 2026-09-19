@@ -9662,3 +9662,10 @@ should, and the stamp sat after that skip, so anything adopted by an earlier run
 stamped however many sessions ran. The same shortcut would have kept a stale stamp on a game the
 client updated. The stamp is taken before the row is considered now, on every pass, so it follows
 the manifest rather than the adoption.
+
+**Confirmed by hand (2026-09-19).** Writing `public|23973718` into Portal 2's install dir - the
+same fifteen bytes the app writes for its own downloads - removed the update prompt and the game
+launched. The shortcut was never involved: the check reads the game's folder, not the shortcut,
+so recreating it would have cost the user their settings and changed nothing. Need for Speed,
+adopted after the fix, was stamped automatically with `public|10351185`. The marker had to be
+chowned to the app; a root-written one would not have been readable.
