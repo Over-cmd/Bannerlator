@@ -8683,6 +8683,19 @@ public class XServerDisplayActivity extends AppCompatActivity {
         guest.add("BL_LOG=" + sessionLog.getPath());
         guest.add("BL_DEBUG_DIR=" + new File(logDir, "session-" + stamp).getPath());
 
+        // One switch for the whole controller feature, not just the preload.
+        // The first version gated LD_PRELOAD alone, which left the SDL hints in place: the client
+        // still went scanning /dev/input/js* with no interposer there to answer, which on a sandboxed
+        // device means poking at nodes it cannot open. That is not a baseline, it is a third
+        // configuration, and it made an A/B on the failing device prove nothing.
+        // With this file present the session is exactly what it was before any controller work.
+        File noFakeInput = new File(android.os.Environment.getExternalStorageDirectory(),
+                "Download/bannerlator-no-fake-input");
+        boolean fakeInputEnabled = !noFakeInput.exists();
+        if (!fakeInputEnabled) {
+            Log.w("XServerDisplayActivity", "controller support disabled by " + noFakeInput);
+        }
+
         // Controllers for a Linux session.
         // WinHandler already publishes the on-screen and physical pads into the fake-input rings (setFakeInputPath, in onCreate).
         // What this session lacks is a reader, because there is no Wine here to preload the interposer into.
@@ -8724,70 +8737,60 @@ public class XServerDisplayActivity extends AppCompatActivity {
         }
 
         File fakeInputDir = new File(imageFs.getRootDir(), "dev/input");
-        //noinspection ResultOfMethodCallIgnored
-        fakeInputDir.mkdirs();
-        // The node files have to exist before the client scans, or there is no controller.
-        // open("/dev/input/<node>") only reaches the ring when FAKE_EVDEV_DIR holds a file of that name.
-        // The interposer rewrites the path rather than falling back, so a missing node is ENOENT.
-        // onCreate deletes event0..3, and the Wine launcher is what normally recreates event0.
-        // Writers make their own node when a slot is claimed, long after the client has scanned.
-        // js0 is the one the Steam client finds, and it was the whole reason no pad ever appeared.
-        // Its SDL enumerates js* nodes and ignores event* entirely, then reads evdev from what it found.
-        // So js0 is what it opens, and what it reads there is input_event structs, not the old js protocol.
-        // event0 is kept beside it for anything that scans evdev directly, and SDL's own filter skips it.
-        String[] fakeInputNodes = {"js0", "event0"};
-        for (String node : fakeInputNodes) {
-            File fakeInputNode = new File(fakeInputDir, node);
-            try {
-                if (!fakeInputNode.exists() && !fakeInputNode.createNewFile()) {
-                    Log.e("XServerDisplayActivity", "could not create " + fakeInputNode
-                            + " — the client will see no controller");
+        if (fakeInputEnabled) {
+            //noinspection ResultOfMethodCallIgnored
+            fakeInputDir.mkdirs();
+            // The node files have to exist before the client scans, or there is no controller.
+            // open("/dev/input/<node>") only reaches the ring when FAKE_EVDEV_DIR holds a file of that name.
+            // The interposer rewrites the path rather than falling back, so a missing node is ENOENT.
+            // onCreate deletes event0..3, and the Wine launcher is what normally recreates event0.
+            // Writers make their own node when a slot is claimed, long after the client has scanned.
+            // js0 is the one the Steam client finds, and it was the whole reason no pad ever appeared.
+            // Its SDL enumerates js* nodes and ignores event* entirely, then reads evdev from what it found.
+            // So js0 is what it opens, and what it reads there is input_event structs, not the old js protocol.
+            // event0 is kept beside it for anything that scans evdev directly, and SDL's own filter skips it.
+            String[] fakeInputNodes = {"js0", "event0"};
+            for (String node : fakeInputNodes) {
+                File fakeInputNode = new File(fakeInputDir, node);
+                try {
+                    if (!fakeInputNode.exists() && !fakeInputNode.createNewFile()) {
+                        Log.e("XServerDisplayActivity", "could not create " + fakeInputNode
+                                + " — the client will see no controller");
+                    }
+                } catch (IOException e) {
+                    Log.e("XServerDisplayActivity", "could not create " + fakeInputNode, e);
                 }
-            } catch (IOException e) {
-                Log.e("XServerDisplayActivity", "could not create " + fakeInputNode, e);
             }
-        }
-        Log.i("XServerDisplayActivity", "fake evdev nodes: "
-                + java.util.Arrays.toString(fakeInputDir.list()));
-        guest.add("FAKE_EVDEV_DIR=" + fakeInputDir.getPath());
-        String fakeInputRings =
-                com.winlator.star.inputcontrols.FakeInputWriter.getRingEnv(fakeInputDir);
-        if (fakeInputRings != null && !fakeInputRings.isEmpty()) {
-            guest.add("FAKE_EVDEV_MEMFD_PATHS=" + fakeInputRings);
-        }
-        guest.add("FAKE_EVDEV_IDENTITY=xbox360");
-        // Rumble comes back over an abstract socket.
-        // proot makes no network namespace, so the session shares the app's abstract namespace and WinHandler's listener is reachable.
-        guest.add("FAKE_EVDEV_VIBRATION=1");
-        // Preloading is done here rather than in bannerlator-session, because that script ships inside
-        // the rootfs image and an already installed runtime would never receive the new copy.
-        // Setting it here covers every installed runtime on the next launch.
-        // The cost is that the whole session gets the interposer rather than the Steam client alone.
-        // That is the same bargain /etc/ld.so.preload already makes for libblsession.so.
-        // Everything the interposer does not recognise falls straight through to libc via RTLD_NEXT.
-        // Escape hatch, because this preload is the one change here that reaches every process in the
-        // session rather than just the client. On one device it coincided with socket() returning
-        // ENOSYS, Xwayland failing wl_client_create and the whole session dying, while the identical
-        // build was fine on another. Dropping a file named bannerlator-no-fake-input in Download
-        // turns it off without a rebuild, so the two halves can actually be compared on the device
-        // that shows the fault. Controllers stop working when it is off; nothing else should change.
-        File noPreload = new File(android.os.Environment.getExternalStorageDirectory(),
-                "Download/bannerlator-no-fake-input");
-        if (noPreload.exists()) {
-            Log.w("XServerDisplayActivity", "fake evdev preload disabled by " + noPreload);
-        } else {
+            Log.i("XServerDisplayActivity", "fake evdev nodes: "
+                    + java.util.Arrays.toString(fakeInputDir.list()));
+            guest.add("FAKE_EVDEV_DIR=" + fakeInputDir.getPath());
+            String fakeInputRings =
+                    com.winlator.star.inputcontrols.FakeInputWriter.getRingEnv(fakeInputDir);
+            if (fakeInputRings != null && !fakeInputRings.isEmpty()) {
+                guest.add("FAKE_EVDEV_MEMFD_PATHS=" + fakeInputRings);
+            }
+            guest.add("FAKE_EVDEV_IDENTITY=xbox360");
+            // Rumble comes back over an abstract socket.
+            // proot makes no network namespace, so the session shares the app's abstract namespace and WinHandler's listener is reachable.
+            guest.add("FAKE_EVDEV_VIBRATION=1");
+            // Preloading is done here rather than in bannerlator-session, because that script ships inside
+            // the rootfs image and an already installed runtime would never receive the new copy.
+            // Setting it here covers every installed runtime on the next launch.
+            // The cost is that the whole session gets the interposer rather than the Steam client alone.
+            // That is the same bargain /etc/ld.so.preload already makes for libblsession.so.
+            // Everything the interposer does not recognise falls straight through to libc via RTLD_NEXT.
             guest.add("LD_PRELOAD=/usr/local/lib/libfakeinput.so");
+            // This is what makes the client look for js* nodes instead of enumerating through udev.
+            // udev enumerates from /sys/class/input, where the synthetic pad has no entry and never will.
+            // The hint names were read out of the strings in the runtime's own libSDL3.so.0.
+            // SDL3 spells it SDL_JOYSTICK_LINUX_CLASSIC; SDL2 spelled it SDL_LINUX_JOYSTICK_CLASSIC.
+            // Both are set, because games launched from the client bring their own SDL of either generation.
+            // Disabling udev outright was tried and is NOT needed: with js0 present the classic hint alone
+            // finds the pad, verified against that same library on device. Leaving udev alone keeps the
+            // client's own controller discovery working exactly as it did before.
+            guest.add("SDL_JOYSTICK_LINUX_CLASSIC=1");
+            guest.add("SDL_LINUX_JOYSTICK_CLASSIC=1");
         }
-        // This is what makes the client look for js* nodes instead of enumerating through udev.
-        // udev enumerates from /sys/class/input, where the synthetic pad has no entry and never will.
-        // The hint names were read out of the strings in the runtime's own libSDL3.so.0.
-        // SDL3 spells it SDL_JOYSTICK_LINUX_CLASSIC; SDL2 spelled it SDL_LINUX_JOYSTICK_CLASSIC.
-        // Both are set, because games launched from the client bring their own SDL of either generation.
-        // Disabling udev outright was tried and is NOT needed: with js0 present the classic hint alone
-        // finds the pad, verified against that same library on device. Leaving udev alone keeps the
-        // client's own controller discovery working exactly as it did before.
-        guest.add("SDL_JOYSTICK_LINUX_CLASSIC=1");
-        guest.add("SDL_LINUX_JOYSTICK_CLASSIC=1");
         Log.i("XServerDisplayActivity", "Linux session log: " + sessionLog.getPath());
         showLinuxFirstRunProgress(sessionLog);
         guest.add(com.winlator.star.linux.LinuxRuntime.SESSION_SCRIPT);
@@ -8813,7 +8816,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
             sb.append("shortcut controlsProfile: ")
               .append(shortcut != null ? shortcut.getExtra("controlsProfile", "(none)") : "(no shortcut)")
               .append('\n');
-            sb.append("preload disabled by file: ").append(noPreload.exists()).append('\n');
+            sb.append("controller support enabled: ").append(fakeInputEnabled).append('\n');
             for (String e : guest) {
                 if (e.startsWith("FAKE_EVDEV") || e.startsWith("LD_PRELOAD")
                         || e.startsWith("SDL_JOYSTICK") || e.startsWith("SDL_LINUX")) {
