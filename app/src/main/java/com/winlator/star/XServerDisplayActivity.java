@@ -8704,37 +8704,41 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // Both paths below are bound into the session at their own host paths (LinuxRuntime.command), so nothing here needs translating.
         // xbox360: SDL and Steam key their mapping database on bus+vendor+product.
         // Only a known identity gets the standard layout without the user configuring the pad by hand.
-        // The reader itself.
-        // It ships as an asset rather than inside the runtime image, so an already installed runtime gains it on the next launch.
-        // That avoids making this wait on a new ~790MB runtime release.
-        // A runtime built after this carries its own copy too, and either one satisfies the session script's check.
-        // The copy is unconditional: an older copy left in place would be served in preference to this build's.
-        // That is exactly the trap the Wine path documents.
-        try {
-            File fakeInputLib = new File(com.winlator.star.linux.LinuxRuntime.rootDir(this),
-                    "usr/local/lib/libfakeinput.so");
-            //noinspection ResultOfMethodCallIgnored
-            fakeInputLib.getParentFile().mkdirs();
-            // FileUtils.copy swallows IOException.
-            // A missing or truncated asset would leave either nothing, or last launch's copy, with no complaint.
-            // So check the result: this is the difference between "the client has no controller" and a silent no-op.
-            // The session log is where that gets diagnosed.
-            long before = fakeInputLib.isFile() ? fakeInputLib.length() : -1;
-            FileUtils.copy(this, "linuxfs/libfakeinput.so", fakeInputLib);
-            //noinspection ResultOfMethodCallIgnored
-            fakeInputLib.setExecutable(true, false);
-            long staged = fakeInputLib.isFile() ? fakeInputLib.length() : -1;
-            if (staged <= 0) {
-                Log.e("XServerDisplayActivity", "fake evdev reader NOT staged (asset missing?) — "
-                        + "the Steam client will see no controller");
-            } else {
-                Log.i("XServerDisplayActivity", "fake evdev reader staged: " + staged + " bytes"
-                        + (before == staged ? " (unchanged)" : " (was " + before + ")"));
+        // The session's preload libraries, refreshed from the app's own copies at every launch.
+        // /etc/ld.so.preload in the runtime names libblsession.so, so it is loaded into every process
+        // the session runs and has to match the build that starts it; a runtime installed earlier
+        // carries an older copy, and the device has no way to replace it from outside the app.
+        // That is how a fix inside it reaches an installed runtime with no runtime re-host.
+        // libfakeinput.so is the controller reader, staged the same way.
+        // Each lands through a rename, so a library another session still has mapped keeps the file it opened.
+        // (Shape follows WinNative's syncPreloadLibraries.)
+        String[] sessionLibs = {"libblsession.so", "libfakeinput.so"};
+        StringBuilder stagedReport = new StringBuilder();
+        for (String name : sessionLibs) {
+            File libDir = new File(com.winlator.star.linux.LinuxRuntime.rootDir(this), "usr/local/lib");
+            File target = new File(libDir, name);
+            File staged = new File(libDir, name + ".staged");
+            boolean installed = false;
+            try {
+                //noinspection ResultOfMethodCallIgnored
+                libDir.mkdirs();
+                try (java.io.InputStream in = getAssets().open("linuxfs/" + name);
+                     java.io.OutputStream out = new java.io.FileOutputStream(staged)) {
+                    byte[] buffer = new byte[1 << 16];
+                    for (int read = in.read(buffer); read > 0; read = in.read(buffer)) out.write(buffer, 0, read);
+                }
+                installed = staged.setExecutable(true, false) && staged.renameTo(target);
+            } catch (Exception e) {
+                Log.w("XServerDisplayActivity", "could not stage " + name + " for the Linux session", e);
+            } finally {
+                //noinspection ResultOfMethodCallIgnored
+                if (!installed) staged.delete();
             }
-        } catch (Exception e) {
-            // Not fatal: the session still runs, the client just sees no controller.
-            Log.w("XServerDisplayActivity", "could not stage libfakeinput.so for the Linux session", e);
+            long size = target.isFile() ? target.length() : -1;
+            stagedReport.append(name).append('=').append(installed ? size : -1).append(' ');
+            if (!installed) Log.e("XServerDisplayActivity", name + " NOT staged (asset missing?)");
         }
+        Log.i("XServerDisplayActivity", "session libraries staged: " + stagedReport.toString().trim());
 
         File fakeInputDir = new File(imageFs.getRootDir(), "dev/input");
         if (fakeInputEnabled) {
@@ -8813,11 +8817,8 @@ public class XServerDisplayActivity extends AppCompatActivity {
         try {
             File diag = new File(logDir, "fake-input-" + stamp + ".txt");
             StringBuilder sb = new StringBuilder();
-            File lib = new File(com.winlator.star.linux.LinuxRuntime.rootDir(this),
-                    "usr/local/lib/libfakeinput.so");
-            sb.append("reader: ").append(lib.getPath())
-              .append(lib.isFile() ? " size=" + lib.length() : " MISSING")
-              .append(" executable=").append(lib.canExecute()).append('\n');
+            sb.append("session libraries staged (name=bytes, -1 = failed): ")
+              .append(stagedReport.toString().trim()).append('\n');
             sb.append("nodes: ").append(java.util.Arrays.toString(fakeInputDir.list())).append('\n');
             File rings = new File(fakeInputDir.getParentFile(), "fakeinput-rings");
             sb.append("rings: ").append(java.util.Arrays.toString(rings.list())).append('\n');

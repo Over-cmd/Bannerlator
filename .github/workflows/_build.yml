@@ -281,6 +281,19 @@ jobs:
             || { echo "::error::libfakeinput.so does not export $sym"; exit 1; }
         done
         ls -l "$D/libfakeinput.so"
+        # The session shim as well, from the same sources the rootfs builds it from. It is what
+        # /etc/ld.so.preload names in every runtime since r5, so refreshing it from the app is how a
+        # fix inside it reaches a runtime that is already installed - the netlink stand-in in
+        # udevmon.c is exactly that, and the device that needs it cannot take a new runtime image.
+        sudo apt-get install -y -qq gcc-aarch64-linux-gnu >/dev/null
+        aarch64-linux-gnu-gcc -shared -fPIC -O2 -Wall -pthread \
+          -o "$D/libblsession.so" tools/linuxfs/preload/*.c -ldl
+        aarch64-linux-gnu-strip --strip-unneeded "$D/libblsession.so"
+        for sym in socket bind getsockname setsockopt; do
+          aarch64-linux-gnu-nm -D --defined-only "$D/libblsession.so" | awk '{print $NF}' | grep -qx "$sym" \
+            || { echo "::error::libblsession.so does not export $sym"; exit 1; }
+        done
+        ls -l "$D/libblsession.so"
 
     - name: Cache LSFG native library
       id: cache-lsfg

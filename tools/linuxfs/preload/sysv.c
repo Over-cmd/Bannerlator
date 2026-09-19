@@ -395,3 +395,17 @@ int shmctl(int shmid, int cmd, struct shmid_ds *buf) {
     default: errno = EINVAL; return -1;
     }
 }
+
+/*
+ * fork() carries over only the calling thread, so a lock another thread was holding at that
+ * instant stays held in the child by a thread that is not there to release it. Taking it before
+ * the fork makes the copy consistent; the parent then unlocks it and the child, whose one thread
+ * never locked it, gets a fresh one. (WinNative 79aa7f68.)
+ */
+static void sysv_lock_before_fork(void) { pthread_mutex_lock(&g_lock); }
+static void sysv_unlock_after_fork(void) { pthread_mutex_unlock(&g_lock); }
+static void sysv_reset_after_fork(void) { pthread_mutex_init(&g_lock, NULL); }
+
+__attribute__((constructor)) static void install_sysv_fork_handlers(void) {
+  pthread_atfork(sysv_lock_before_fork, sysv_unlock_after_fork, sysv_reset_after_fork);
+}
