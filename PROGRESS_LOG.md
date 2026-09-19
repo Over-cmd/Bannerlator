@@ -9536,3 +9536,15 @@ keeps whatever label it was given then, which is why this device still showed "B
 (card)". Unit-tested against a sample `libraryfolders.vdf`. Whether the client honours a label on
 its own library the way it does on an added one is unproven; the card row already proves labels
 are used for added libraries.
+
+**Half the labelling worked, and the half that did not explained itself (2026-09-19).** The
+session applied both names - the log carries `labelled /root/.local/share/Steam 'Internal
+Storage'` and `labelled /mnt/bannerlator-sd 'SD Card'` - and the install dialog now reads
+"Internal Storage" with the star on it. The card row still said "Bannerlator (card)".
+
+A library carries its own `libraryfolder.vdf` beside its steamapps folder, and the client takes
+the label from there back into `libraryfolders.vdf`, so editing the list alone is undone. The
+card's marker still held the name it was first registered with; the client's own library has no
+marker at all, which is exactly why that one kept the new name. Both files are now written.
+The prediction going in was the opposite - that the client's own library would be the stubborn
+one - and the card row was what made the real mechanism visible.
