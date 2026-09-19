@@ -9654,3 +9654,11 @@ rather than from the live catalogue - Steam records what it installed, and on a 
 is deliberately not the newest build, so looking the answer up would record a lie. The format
 stays in `SteamGameUpdater` behind a new `recordKnownBuild`. This affects every game downloaded
 in the client, so it would have met the user on their first EA title too.
+
+**The stamp reached the new game and not the old one (2026-09-19).** After the fix, Need for
+Speed - adopted on that same pass - carried `public|10351185`, matching its manifest exactly,
+while Portal 2 still had no marker at all. Adoption skips a game whose row already says what it
+should, and the stamp sat after that skip, so anything adopted by an earlier run would never be
+stamped however many sessions ran. The same shortcut would have kept a stale stamp on a game the
+client updated. The stamp is taken before the row is considered now, on every pass, so it follows
+the manifest rather than the adoption.

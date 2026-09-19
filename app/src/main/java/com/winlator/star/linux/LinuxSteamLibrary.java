@@ -381,6 +381,13 @@ public final class LinuxSteamLibrary {
                     File folder = new File(lib[1], dir.group(1));
                     if (!folder.isDirectory()) continue;
                     com.winlator.star.store.SteamDatabase.GameRow row = db.getGame(appId);
+                    // The build stamp is kept in step with the manifest on every pass, before the
+                    // row is considered. A game adopted by an earlier run needs nothing recorded
+                    // and would skip out below without ever being stamped, and a game the client
+                    // has since updated carries a new build the app has not been told about -
+                    // both end as an update offered for a copy that is current.
+                    com.winlator.star.store.SteamGameUpdater.recordKnownBuild(
+                            folder, branchOf(text), buildIdOf(text));
                     if (row != null && row.isInstalled && folder.getPath().equals(row.installDir)) continue;
                     String name = nm.find() ? nm.group(1) : dir.group(1);
                     if (row == null) db.upsertGame(appId, name, "", 0L, "", "game", "", 0, "");
@@ -391,13 +398,6 @@ public final class LinuxSteamLibrary {
                     // nothing said why.
                     long size = sizeOnDisk(text);
                     db.markInstalled(appId, folder.getPath(), size > 0 ? size : folderSize(folder));
-                    // The app decides whether a game needs updating by reading the build it
-                    // stamped into the install when it downloaded it. The client stamps nothing,
-                    // so an adopted game reads as build 0 and every launch offers an update for a
-                    // copy that is current. The client's own manifest says which build it
-                    // installed, and on which branch, so record that.
-                    com.winlator.star.store.SteamGameUpdater.recordKnownBuild(
-                            folder, branchOf(text), buildIdOf(text));
                     Log.i(TAG, "adopted " + name + " (" + appId + ") installed by the Linux client at " + folder);
                     adopted++;
                 } catch (Throwable t) {
