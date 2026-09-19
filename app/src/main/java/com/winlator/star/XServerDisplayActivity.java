@@ -8790,6 +8790,16 @@ public class XServerDisplayActivity extends AppCompatActivity {
             // client's own controller discovery working exactly as it did before.
             guest.add("SDL_JOYSTICK_LINUX_CLASSIC=1");
             guest.add("SDL_LINUX_JOYSTICK_CLASSIC=1");
+            // The interposer can narrate every hook the client hits: the open of js0, each ioctl it
+            // asks, the keyframe when reads begin. That goes to stderr, which the session log
+            // captures, so on a device we cannot reach it is the only direct evidence of whether the
+            // client ever touched our pad. A file switch rather than always-on, because it is chatty.
+            File traceSwitch = new File(android.os.Environment.getExternalStorageDirectory(),
+                    "Download/bannerlator-fake-input-log");
+            if (traceSwitch.exists()) {
+                guest.add("FAKE_EVDEV_LOG=1");
+                Log.i("XServerDisplayActivity", "fake evdev tracing enabled by " + traceSwitch);
+            }
         }
         Log.i("XServerDisplayActivity", "Linux session log: " + sessionLog.getPath());
         showLinuxFirstRunProgress(sessionLog);
@@ -8847,6 +8857,30 @@ public class XServerDisplayActivity extends AppCompatActivity {
         environment.addComponent(new com.winlator.star.linux.LinuxProgramLauncherComponent(
                 command, hostEnv, com.winlator.star.linux.LinuxRuntime.rootDir(this), (status) -> {
                     Log.i("XServerDisplayActivity", "Linux session " + session + " ended: " + status);
+                    // How many events the app pushed into slot 0 over the whole session. Zero means no
+                    // input ever left the app, which separates "the pad wrote nothing" from "the
+                    // client read nothing" - the two look identical from the outside.
+                    try {
+                        File ring0 = new File(fakeInputDir.getParentFile(), "fakeinput-rings/ring0");
+                        long writes = -1;
+                        if (ring0.isFile()) {
+                            try (java.io.RandomAccessFile raf = new java.io.RandomAccessFile(ring0, "r")) {
+                                raf.seek(16);
+                                byte[] b = new byte[8];
+                                raf.readFully(b);
+                                writes = java.nio.ByteBuffer.wrap(b)
+                                        .order(java.nio.ByteOrder.LITTLE_ENDIAN).getLong();
+                            }
+                        }
+                        File diag = new File(logDir, "fake-input-" + stamp + ".txt");
+                        java.nio.file.Files.write(diag.toPath(),
+                                ("session ended: " + status + "\nring0 events written by the app: "
+                                        + writes + "\n").getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                                java.nio.file.StandardOpenOption.APPEND,
+                                java.nio.file.StandardOpenOption.CREATE);
+                    } catch (Exception e) {
+                        Log.w("XServerDisplayActivity", "could not record ring stats", e);
+                    }
                     exit();
                 }));
 
