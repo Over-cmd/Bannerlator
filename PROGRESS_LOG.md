@@ -9053,3 +9053,31 @@ real `/dev/input`. Next: add `js0`, hook `opendir`/`readdir`, re-run `sdlprobe`.
 real `/dev/input` — so the Pocket FIT *is* a valid test platform once the preload is active, and
 permissive versus enforcing stops mattering. hidraw is not masked, which is exactly how the real G8+
 still reached SDL3.
+
+**Solved, on this device, without Steam or a controller.** A path-tracing preload alongside the
+interposer showed the client's SDL doing `opendir(/sys/class/input/)`, then
+`scandir(/dev/input)` returning **one** entry, then `open(/dev/input/js0)`. **It enumerates `js*`
+nodes and ignores `event*` entirely.** With only `event0` present it found nothing — that, not udev
+and not the hint spelling, is why no pad ever appeared. With `js0` there, SDL reports
+`Xbox 360 Controller`, applies its own mapping
+(`03005e615e0400008e02000010010000,...,a:b0,...,leftx:a0,...`) with no configuration, and a BTN_A
+plus ABS_X written straight into the ring with `dd` read back through SDL's gamepad API as
+`pad:SOUTH=1 pad:LEFTX=-20000`. That mapping arriving for free is the xbox360 identity earning its
+keep.
+
+**And a translation written on a wrong inference, thrown away on evidence.** `js*` nodes speak the
+old joystick protocol, so I taught the interposer to convert. It made things worse: SDL's read buffer
+is 768 bytes, exactly 32 `input_event`s, so it wants evdev structs even from a js node. Two
+`js_event`s are 16 bytes against one `input_event`'s 24, so every read became a short read SDL threw
+away — `read(fd=10) = 16` and `SOUTH` stayed 0. Reverted, and the pre-translation library produced the
+result above on the first run. Serving evdev on a `js*` node looks wrong and is what this consumer
+wants; there is a note in the file now so it is not re-added.
+
+**Working configuration.** Node `js0`, with `event0` kept beside it for anything scanning evdev
+directly — SDL's own filter skips it, so no duplicate pad — plus `SDL_JOYSTICK_DISABLE_UDEV=1`,
+`SDL_JOYSTICK_LINUX_CLASSIC=1` and `FAKE_EVDEV_IDENTITY=xbox360`. Stale `js*` nodes are cleared at
+launch with `event*`, so a Linux session cannot leave a phantom pad behind for a Wine session.
+
+**Still unproven:** all of the above is the interposer and SDL in isolation. Nothing has yet run in a
+real session, where the writer is `WinHandler` rather than `dd`, and where gamescope and the client
+are in the picture. Build `35410420407` (`596f8991`) is the first with the node.
