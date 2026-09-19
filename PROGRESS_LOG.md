@@ -9842,3 +9842,14 @@ Shift in the event's meta state and sends no Shift key of its own, so this side 
 hardware keyboard sends its own, and a second would release the modifier while the key is still
 physically held. So Shift is now synthesised whenever the character needs it and the event came
 from a virtual device, whether or not the key code was already known.
+
+**Need for Speed Payback runs from the Linux client (2026-09-19).** Second EA title, second route:
+`link2ea://` to `Link2EA.exe` to EA Desktop and `ActivationUI.exe`, then the game. It reached its
+loading art, its title screen, and Steam's in-game menu opens over it, so the Steam button works
+there too. The sign-in that blocked it went through once the keyboard could type an `@` and a
+capital, which makes both keyboard fixes proven in use rather than just in theory.
+
+Noted for when it is played: Steam's own database says this title has no controller support, so
+Steam Input is off and the game is left to read the pad itself. Ours presents as an Xbox 360 pad
+and may well be read, but if it is not, the Enable Steam Input button on that same screen is the
+answer.
