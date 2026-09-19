@@ -9692,3 +9692,14 @@ the live Wine process does not carry. The ring header layout is byte-identical b
 versions, ExternalController's 825-line diff was line endings around a five-line change, and the
 branch is level with main. So the specific mechanism is NOT proven - the separation is right on
 its own terms, and restores a known-good file to the path that regressed.
+
+**Confirmed: the split restored Wine's controllers (2026-09-19, `28922e7c`).** Insane 2 has its
+pad back. So the shared interposer was the cause after all - the uncertainty recorded above was
+honest at the time, and the separation is what proved it. Verified in the shipped APK rather than
+trusted from the build: the Wine copy is 930,632 bytes with no Steam-virtual code in it, the
+client's is 1,426,720 bytes and keeps it.
+
+Still unknown, and now deliberately unimportant: which specific change in the client's version
+broke a Windows game. It stays in `fakeinput_steam.cpp`, where the client wants it and where no
+Wine game can reach it. Worth a sanity check that the client's own controllers still behave, since
+that side kept the code it had rather than changing.
