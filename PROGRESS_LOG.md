@@ -9636,3 +9636,8 @@ space, manifests carry real depot data, and the FEX preset reaches a session for
 Nothing on `feat/linux-gamescope-runtime` is merged to main. Open and cosmetic: Half-Life 2's
 three episodes appear in the store but not the client, and a client download is only taken into
 the store when a session starts or ends rather than while it runs.
+
+**And it plays from the app side (2026-09-19).** Portal 2, downloaded by the Linux Steam client,
+launches through the app's own chain. That is the half of the round trip worth having: the store
+row proved the app had been told about the game, this proves the files themselves are shared -
+one install, either launcher, no copy.
