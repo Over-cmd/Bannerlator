@@ -9,7 +9,9 @@ import os
 import re
 import sys
 
-LIBRARIES = (("/mnt/bannerlator", "Bannerlator"), ("/mnt/bannerlator-sd", "Bannerlator (card)"))
+# The client's own library is internal storage (its steamapps/common is bound to the app's root);
+# the card is the one extra library folder.
+LIBRARIES = (("/mnt/bannerlator-sd", "Bannerlator (card)"),)
 
 
 def register(steam_root, library, label):

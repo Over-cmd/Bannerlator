@@ -8881,14 +8881,11 @@ public class XServerDisplayActivity extends AppCompatActivity {
 
         List<String> gameBinds = com.winlator.star.linux.LinuxSteamLibrary.prepare(
                 this, containerManager.getContainers(), com.winlator.star.linux.LinuxRuntime.rootDir(this));
-        // The other direction. A game the client installed into one of the app's libraries is
-        // recorded in the store's database, so the store shows it and the app can launch it; a
-        // game in the client's own private library only gets a Games-tab entry that launches
-        // through the client, because those files live where the app cannot run them.
+        // The other direction. The client's main library is internal storage and its second is the
+        // card, so a game it installs lands where the app would have put it and is recorded in the
+        // store's database as installed there: the store shows it, the app can launch it.
         com.winlator.star.linux.LinuxSteamLibrary.adoptClientInstalls(
                 this, com.winlator.star.linux.LinuxRuntime.rootDir(this));
-        com.winlator.star.linux.LinuxSteamLibrary.syncClientGames(
-                container, com.winlator.star.linux.LinuxRuntime.rootDir(this));
         // Apps may not list /dev/input; the fake evdev nodes the input rings back stand in for it.
         gameBinds = new ArrayList<>(gameBinds);
         if (fakeInputEnabled) gameBinds.add(fakeInputDir.getPath() + ":/dev/input");

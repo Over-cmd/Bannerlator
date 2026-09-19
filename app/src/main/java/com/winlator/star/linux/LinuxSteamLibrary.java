@@ -62,8 +62,13 @@ public final class LinuxSteamLibrary {
      * the proot bind specs ({@code host:guest}) that put each game in place. Worker thread: this
      * reads and copies files.
      */
+    /** The client's own library, as the session sees it: its steamapps/common is internal storage. */
+    public static final String GUEST_STEAM_ROOT = "/root/.local/share/Steam";
     /** The client's second library: the card the app installs to, when there is one. */
     public static final String GUEST_ROOT_SD = "/mnt/bannerlator-sd";
+    /** The client's tools live in its main library too; they are never games. */
+    private static final Set<Integer> NOT_GAMES = new HashSet<>(java.util.Arrays.asList(
+            228980, 1493710, 3127680, 4183110, 4427310, 4185400));
 
     /**
      * The app's game folders, presented to the Linux client as its own library folders.
@@ -106,8 +111,14 @@ public final class LinuxSteamLibrary {
 
         File internalRoot = new File(context.getFilesDir(), "imagefs/steam_games");
         File cardRoot = cardRoot(context);
+        // Main = internal storage, like the app. The client's own steamapps/common is bound over
+        // with the app's internal root, so its default install location IS the app's, and there is
+        // no private folder for an absent-minded install to fall into. Anything the client had
+        // already put in that folder is moved into internal storage first - a rename on the same
+        // filesystem - so the bind hides nothing.
+        migratePrivateLibrary(rootfs, internalRoot);
         int total = 0;
-        total += presentRoot(internalRoot, GUEST_ROOT, rootfs, recorded, names, depotToApp, prefixManifests, binds);
+        total += presentRoot(internalRoot, GUEST_STEAM_ROOT, rootfs, recorded, names, depotToApp, prefixManifests, binds);
         if (cardRoot != null) {
             total += presentRoot(cardRoot, GUEST_ROOT_SD, rootfs, recorded, names, depotToApp, prefixManifests, binds);
         }
@@ -164,15 +175,44 @@ public final class LinuxSteamLibrary {
         }
         // A manifest the client wrote for a game it installed here is the client's to keep; only
         // the ones written for the app's games and now absent are removed.
+        // Only a manifest written for one of the app's own titles, whose folder has since gone, is
+        // removed. Everything else in here is the client's - its tools, a download in progress, a
+        // game it installed itself - and is left exactly as it is.
         File[] stale = steamapps.listFiles((d, name) -> MANIFEST.matcher(name).matches());
         if (stale != null) {
             for (File file : stale) {
                 if (kept.contains(file.getName())) continue;
+                Matcher id = MANIFEST.matcher(file.getName());
+                if (!id.matches() || !recorded.containsKey(Integer.parseInt(id.group(1)))) continue;
                 String installDir = installDirOfManifest(file);
                 if (installDir == null || !new File(root, installDir).isDirectory()) file.delete();
             }
         }
         return count;
+    }
+
+    /**
+     * Moves what the client had installed into its own steamapps/common into internal storage, once,
+     * before that folder is bound over. Same filesystem, so each move is a rename; a name already
+     * present in internal storage is left where it is and reported, rather than merged or replaced.
+     */
+    private static void migratePrivateLibrary(File rootfs, File internalRoot) {
+        File common = new File(rootfs, GUEST_STEAM_ROOT.substring(1) + "/steamapps/common");
+        File[] entries = common.listFiles();
+        if (entries == null || entries.length == 0) return;
+        if (!internalRoot.isDirectory() && !internalRoot.mkdirs()) return;
+        for (File entry : entries) {
+            File target = new File(internalRoot, entry.getName());
+            if (target.exists()) {
+                Log.w(TAG, entry.getName() + " exists in both the client's folder and internal storage; leaving the client's copy where it is");
+                continue;
+            }
+            if (entry.renameTo(target)) {
+                Log.i(TAG, "moved " + entry.getName() + " from the client's folder into internal storage");
+            } else {
+                Log.w(TAG, "could not move " + entry + " into internal storage");
+            }
+        }
     }
 
     private static boolean isUnder(File dir, File root) {
@@ -243,8 +283,8 @@ public final class LinuxSteamLibrary {
         File internalRoot = new File(context.getFilesDir(), "imagefs/steam_games");
         File cardRoot = cardRoot(context);
         String[][] libraries = cardRoot != null
-                ? new String[][] {{GUEST_ROOT, internalRoot.getPath()}, {GUEST_ROOT_SD, cardRoot.getPath()}}
-                : new String[][] {{GUEST_ROOT, internalRoot.getPath()}};
+                ? new String[][] {{GUEST_STEAM_ROOT, internalRoot.getPath()}, {GUEST_ROOT_SD, cardRoot.getPath()}}
+                : new String[][] {{GUEST_STEAM_ROOT, internalRoot.getPath()}};
         for (String[] lib : libraries) {
             File steamapps = new File(rootfs, lib[0].substring(1) + "/steamapps");
             File[] manifests = steamapps.listFiles((d, name) -> MANIFEST.matcher(name).matches());
@@ -254,8 +294,14 @@ public final class LinuxSteamLibrary {
                     Matcher id = MANIFEST.matcher(manifest.getName());
                     if (!id.matches()) continue;
                     int appId = Integer.parseInt(id.group(1));
+                    if (NOT_GAMES.contains(appId)) continue;
                     String text = manifest.isFile() ? FileUtils.readString(manifest) : null;
                     if (text == null) continue;
+                    Matcher nmCheck = NAME.matcher(text);
+                    if (nmCheck.find()) {
+                        String n = nmCheck.group(1);
+                        if (n.startsWith("Proton") || n.startsWith("Steam Linux Runtime") || n.startsWith("Steamworks") || n.equals("FEX")) continue;
+                    }
                     Matcher st = STATE.matcher(text);
                     if (st.find() && !"4".equals(st.group(1))) continue;   // still downloading
                     Matcher dir = INSTALLDIR.matcher(text);
