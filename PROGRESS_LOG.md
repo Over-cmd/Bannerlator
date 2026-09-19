@@ -9167,3 +9167,11 @@ re-tested since the interposer swap. Every commit from 2026-09-18 carries an att
 that the repo rule forbids; the branch is unmerged, and rewriting those messages is offered and
 waiting on a yes. Not started: the on-screen segfault seen once on the Fold, if it survives the
 port at all — its timing suggested it was the same assert, not the overlay.
+
+**2026-09-19, confirmed on the Fold.** With `ee8b7b19` (standard flavour, r9, SELinux enforcing)
+both the on-screen controls and the GameSir G8+ work in the native Steam client. That closes the
+gap that ran all night: the client stayed alive because the session shim now answers udev's
+netlink socket instead of letting SDL's HID init fail until the client asserts, and the pad
+reached it through the rings bound in as `/dev/input`. Not yet re-run on the Pocket FIT — the
+install there did not take (package still the previous build), and the ported test is staged
+to run the moment it does.
