@@ -9272,3 +9272,10 @@ from the first that has it complete, offers only complete installs (StateFlags 4
 still downloading would hand the client half a game), and reconciles the client's manifest back
 into the container that owns the title. The `e92e37da` build staged minutes earlier was withdrawn
 before it was installed.
+
+**And a second gap behind it.** The store leaves only a link under the prefix's
+`steamapps/common`, pointing at wherever it put the files — the app's own storage, or a card the
+user chose (on this device, Brawlhalla lives on a removable card at `/storage/7B7F-E3AA/…`). The
+sync bound the link itself, and a card is not among the trees bound into the runtime, so inside the
+client the link resolved to nothing: through the runtime's own proot, binding the link showed an
+empty folder and binding the resolved path showed all 580 files. `d71739fe` binds the real folder.
