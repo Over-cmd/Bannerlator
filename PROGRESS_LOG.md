@@ -9291,3 +9291,14 @@ is; and a folder the database does not know still counts if it identifies itself
 database. The one thing that cannot be skipped is the manifest: the client will not treat a bare
 folder as a game, so each gets the manifest the app already wrote where one exists, or one
 written from its row. Nothing is copied; the client reads the same files Steam delivered.
+
+**`9ce0cf67` failed session setup on the first launch here** — "Attempt to get length of null
+array" while building the environment. The trace pointed at the folder-identity fallback:
+`FileUtils.readString` throws on a file that is not there rather than returning null, and the
+fallback read `steam_appid.txt` from every folder under the store's roots, so the first folder
+that had never been launched — the user's fresh FlatOut download — ended the setup. `15952f1a`
+checks each file exists before reading it and skips one bad folder instead of losing the
+session. The staged `9ce0cf67` build was withdrawn. The unified-library design the user approved
+— the app's two roots registered as the client's own library folders, so client downloads land
+where the app's would and are adopted into the store's database — is the next change, on top of
+this fix.
