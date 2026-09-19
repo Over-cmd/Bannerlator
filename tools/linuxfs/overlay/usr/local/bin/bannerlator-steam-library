@@ -9,56 +9,58 @@ import os
 import re
 import sys
 
-LIBRARY = "/mnt/bannerlator"
+LIBRARIES = (("/mnt/bannerlator", "Bannerlator"), ("/mnt/bannerlator-sd", "Bannerlator (card)"))
 
 
-def main():
-    steam_root = sys.argv[1]
-    steamapps = os.path.join(LIBRARY, "steamapps")
+def register(steam_root, library, label):
+    """Adds one library folder to the client's list; the client then offers it as an install
+    location as well as reading the games already in it. Registered even when empty: a new user
+    should be able to install straight into it."""
+    steamapps = os.path.join(library, "steamapps")
     if not os.path.isdir(steamapps):
-        return
+        return 0
     apps = sorted(
         int(m.group(1))
         for m in (re.fullmatch(r"appmanifest_(\d+)\.acf", n) for n in os.listdir(steamapps))
         if m
     )
-    if not apps:
-        return
-
-    # Every library folder carries this marker; the client refuses the folder without it.
-    marker = os.path.join(LIBRARY, "libraryfolder.vdf")
+    marker = os.path.join(library, "libraryfolder.vdf")
     if not os.path.isfile(marker):
         with open(marker, "w", encoding="utf-8") as f:
-            f.write('"libraryfolder"\n{\n\t"contentid"\t\t"%d"\n\t"label"\t\t"Bannerlator"\n}\n'
-                    % int.from_bytes(os.urandom(8), "little"))
-
-    # The client reads steamapps/libraryfolders.vdf at startup and rewrites config/ from it.
+            f.write('"libraryfolder"\n{\n\t"contentid"\t\t"%d"\n\t"label"\t\t"%s"\n}\n'
+                    % (int.from_bytes(os.urandom(8), "little"), label))
     steamapps_dir = os.path.join(steam_root, "steamapps")
     path = os.path.join(steamapps_dir, "libraryfolders.vdf")
     text = ""
     if os.path.isfile(path):
         with open(path, encoding="utf-8", errors="replace") as f:
             text = f.read()
-    if re.search(r'"path"\s+"%s"' % re.escape(LIBRARY), text):
-        return  # already registered
-
+    if re.search(r'"path"\s+"%s"' % re.escape(library), text):
+        return len(apps)
     indexes = [int(i) for i in re.findall(r'^\t"(\d+)"\s*$', text, re.M)]
     if not text.strip():
         text = ('"libraryfolders"\n{\n\t"0"\n\t{\n\t\t"path"\t\t"%s"\n\t\t"label"\t\t""\n\t}\n}\n'
                 % steam_root)
         indexes = [0]
-    entry = ['\t"%d"' % (max(indexes) + 1), "\t{", '\t\t"path"\t\t"%s"' % LIBRARY,
-             '\t\t"label"\t\t"Bannerlator"', '\t\t"apps"', "\t\t{"]
+    entry = ['\t"%d"' % (max(indexes) + 1), "\t{", '\t\t"path"\t\t"%s"' % library,
+             '\t\t"label"\t\t"%s"' % label, '\t\t"apps"', "\t\t{"]
     entry += ['\t\t\t"%d"\t\t"0"' % app for app in apps]
     entry += ["\t\t}", "\t}"]
     closing = text.rstrip().rfind("}")
     if closing < 0:
-        return
+        return len(apps)
     text = text[:closing] + "\n".join(entry) + "\n" + text[closing:]
     os.makedirs(steamapps_dir, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         f.write(text)
-    print("bannerlator-steam-library: registered %d game(s) from %s" % (len(apps), LIBRARY))
+    print("bannerlator-steam-library: registered %s with %d game(s)" % (library, len(apps)))
+    return len(apps)
+
+
+def main():
+    steam_root = sys.argv[1]
+    for library, label in LIBRARIES:
+        register(steam_root, library, label)
 
 
 if __name__ == "__main__":

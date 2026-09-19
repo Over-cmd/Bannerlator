@@ -62,35 +62,33 @@ public final class LinuxSteamLibrary {
      * the proot bind specs ({@code host:guest}) that put each game in place. Worker thread: this
      * reads and copies files.
      */
+    /** The client's second library: the card the app installs to, when there is one. */
+    public static final String GUEST_ROOT_SD = "/mnt/bannerlator-sd";
+
     /**
-     * The app's installed Steam games, presented to the Linux client as one library folder.
+     * The app's game folders, presented to the Linux client as its own library folders.
      *
-     * The store's database is the source of truth: one row per game with the folder it was
-     * actually installed to, kept current when a game is moved between the app's storage and a
-     * card. The links the store leaves under a container's prefix are copies of that and go stale
-     * on a move, which is why they are not followed here. A folder the database does not know is
-     * still taken if it identifies itself: the Steam API layer leaves steam_appid.txt in a folder
-     * that has been launched, and the downloader's journal names the depots it installed, which the
-     * database maps back to an app.
+     * The store installs a game to one of two roots - the app's own steam_games, or
+     * bannerlator/steam_games on the card the user chose - and each root is bound in whole as the
+     * common/ folder of a Steam library the client sees. So a game the app installed simply appears
+     * in the client, a game the client installs into either library lands exactly where the app
+     * would have put it, and nothing is ever copied: the client reads the files Steam delivered.
      *
-     * A container's prefix manifest is still preferred as the manifest handed to the client when
-     * one exists, because it carries the build the app installed; otherwise one is written from
-     * the row. Builds are reconciled both ways with the prefix manifest that owns the title.
+     * A Steam library is a folder with steamapps/common beneath it and a manifest per game in
+     * steamapps, and the client will not treat a bare folder as a game. The manifests live on the
+     * runtime side of each library. For a game the store's database knows, the manifest the app
+     * wrote into a container's prefix is preferred, because it carries the build the app installed,
+     * and builds are reconciled both ways with it; a folder the database does not know still counts
+     * when it identifies itself, and gets a manifest written from what is known.
      */
     public static List<String> prepare(android.content.Context context, List<Container> containers, File rootfs) {
         List<String> binds = new ArrayList<>();
-        File steamapps = new File(rootfs, GUEST_ROOT.substring(1) + "/steamapps");
-        File common = new File(steamapps, "common");
-        if (!common.isDirectory() && !common.mkdirs()) {
-            Log.w(TAG, "cannot create " + common);
-            return binds;
-        }
-        Set<String> kept = new HashSet<>();
         java.util.Map<String, File> prefixManifests = prefixManifests(containers);
 
-        // 1. What the database says is installed.
+        // The database's view: app id -> folder, and depot -> app for the journal fallback.
         java.util.Map<Integer, String> depotToApp = new java.util.HashMap<>();
-        Set<Integer> known = new HashSet<>();
+        java.util.Map<Integer, File> recorded = new java.util.HashMap<>();
+        java.util.Map<Integer, String> names = new java.util.HashMap<>();
         try {
             for (com.winlator.star.store.SteamDatabase.GameRow row
                     : com.winlator.star.store.SteamDatabase.getInstance(context).getInstalledGames()) {
@@ -99,43 +97,196 @@ public final class LinuxSteamLibrary {
                         try { depotToApp.put(Integer.parseInt(d.trim()), String.valueOf(row.appId)); } catch (NumberFormatException ignored) {}
                     }
                 }
-                File dir = installDirOf(context, row);
-                if (!dir.isDirectory()) {
-                    Log.w(TAG, row.name + " (" + row.appId + ") is recorded at " + dir + " but the folder is missing");
-                    continue;
-                }
-                known.add(row.appId);
-                expose(String.valueOf(row.appId), row.name, dir, steamapps, common, kept, binds, prefixManifests);
+                recorded.put(row.appId, installDirOf(context, row));
+                names.put(row.appId, row.name);
             }
         } catch (Throwable t) {
             Log.w(TAG, "installed games unavailable from the database", t);
         }
 
-        // 2. Folders that identify themselves and that the database missed.
-        for (File root : storeRoots(context)) {
-            File[] dirs = root.listFiles(File::isDirectory);
-            if (dirs == null) continue;
+        File internalRoot = new File(context.getFilesDir(), "imagefs/steam_games");
+        File cardRoot = cardRoot(context);
+        int total = 0;
+        total += presentRoot(internalRoot, GUEST_ROOT, rootfs, recorded, names, depotToApp, prefixManifests, binds);
+        if (cardRoot != null) {
+            total += presentRoot(cardRoot, GUEST_ROOT_SD, rootfs, recorded, names, depotToApp, prefixManifests, binds);
+        }
+        Log.i(TAG, "presented " + total + " installed game(s) to the Steam client in "
+                + (cardRoot != null ? "two libraries" : "one library"));
+        return binds;
+    }
+
+    /**
+     * One root as one library: bind it whole as the library's common/, and write a manifest for
+     * every game folder in it. Returns how many games the client will see there.
+     */
+    private static int presentRoot(File root, String guestLibrary, File rootfs,
+                                   java.util.Map<Integer, File> recorded, java.util.Map<Integer, String> names,
+                                   java.util.Map<Integer, String> depotToApp,
+                                   java.util.Map<String, File> prefixManifests, List<String> binds) {
+        if (!root.isDirectory() && !root.mkdirs()) return 0;
+        File steamapps = new File(rootfs, guestLibrary.substring(1) + "/steamapps");
+        File common = new File(steamapps, "common");
+        if (!common.isDirectory() && !common.mkdirs()) {
+            Log.w(TAG, "cannot create " + common);
+            return 0;
+        }
+        String realRoot;
+        try {
+            realRoot = root.getCanonicalPath();
+        } catch (java.io.IOException e) {
+            Log.w(TAG, "cannot resolve " + root, e);
+            return 0;
+        }
+        binds.add(realRoot + ":" + guestLibrary + "/steamapps/common");
+
+        Set<String> kept = new HashSet<>();
+        int count = 0;
+        // Games the database records in this root.
+        for (java.util.Map.Entry<Integer, File> e : recorded.entrySet()) {
+            File dir = e.getValue();
+            if (!dir.isDirectory() || !isUnder(dir, root)) continue;
+            if (writeManifest(String.valueOf(e.getKey()), names.get(e.getKey()), dir, steamapps, kept, prefixManifests)) count++;
+        }
+        // Folders in this root that identify themselves and that the database missed.
+        File[] dirs = root.listFiles(File::isDirectory);
+        if (dirs != null) {
             for (File dir : dirs) {
-                // One unreadable folder must never cost the whole session.
                 try {
                     String appId = appIdOfFolder(dir, depotToApp);
-                    if (appId == null || known.contains(Integer.parseInt(appId))) continue;
+                    if (appId == null || recorded.containsKey(Integer.parseInt(appId))) continue;
                     Log.i(TAG, dir.getName() + " identifies itself as " + appId + " without a database row");
-                    expose(appId, dir.getName(), dir, steamapps, common, kept, binds, prefixManifests);
+                    if (writeManifest(appId, dir.getName(), dir, steamapps, kept, prefixManifests)) count++;
                 } catch (Throwable t) {
                     Log.w(TAG, "skipping " + dir, t);
                 }
             }
         }
-
-        File[] stale = steamapps.listFiles((dir, name) -> MANIFEST.matcher(name).matches());
+        // A manifest the client wrote for a game it installed here is the client's to keep; only
+        // the ones written for the app's games and now absent are removed.
+        File[] stale = steamapps.listFiles((d, name) -> MANIFEST.matcher(name).matches());
         if (stale != null) {
             for (File file : stale) {
-                if (!kept.contains(file.getName())) file.delete();
+                if (kept.contains(file.getName())) continue;
+                String installDir = installDirOfManifest(file);
+                if (installDir == null || !new File(root, installDir).isDirectory()) file.delete();
             }
         }
-        Log.i(TAG, "exposed " + binds.size() + " installed game(s) to the Steam client");
-        return binds;
+        return count;
+    }
+
+    private static boolean isUnder(File dir, File root) {
+        try {
+            return dir.getCanonicalPath().startsWith(root.getCanonicalPath() + File.separator);
+        } catch (java.io.IOException e) {
+            return false;
+        }
+    }
+
+    private static String installDirOfManifest(File manifest) {
+        String text = manifest.isFile() ? FileUtils.readString(manifest) : null;
+        if (text == null) return null;
+        Matcher m = INSTALLDIR.matcher(text);
+        return m.find() ? m.group(1) : null;
+    }
+
+    /** The card the store installs to, when one is chosen and mounted. */
+    private static File cardRoot(android.content.Context context) {
+        try {
+            com.winlator.star.store.SteamSdInstall.SdTarget sd = com.winlator.star.store.SteamSdInstall.INSTANCE.detect(context);
+            if (sd != null && sd.getSteamGamesBase().isDirectory()) return sd.getSteamGamesBase();
+        } catch (Throwable t) {
+            Log.w(TAG, "card detection failed", t);
+        }
+        return null;
+    }
+
+    /** The manifest the client needs for one game folder, reconciled with the app's when it has one. */
+    private static boolean writeManifest(String appId, String name, File dir, File steamapps, Set<String> kept,
+                                         java.util.Map<String, File> prefixManifests) {
+        String manifestName = "appmanifest_" + appId + ".acf";
+        if (kept.contains(manifestName)) return false;
+        String installDir = dir.getName();
+        File runtimeManifest = new File(steamapps, manifestName);
+        File prefixManifest = prefixManifests.get(manifestName);
+        if (prefixManifest != null) {
+            long runtimeBuild = buildId(runtimeManifest), appBuild = buildId(prefixManifest);
+            if (runtimeBuild > appBuild) {
+                if (!FileUtils.copy(runtimeManifest, prefixManifest)) Log.w(TAG, "could not adopt " + runtimeManifest);
+            } else if (runtimeBuild == 0L || appBuild > runtimeBuild) {
+                if (!FileUtils.copy(prefixManifest, runtimeManifest)) return false;
+            }
+        } else if (!runtimeManifest.isFile()) {
+            com.winlator.star.store.RealSteamLauncher.writeAppManifest(
+                    runtimeManifest, Integer.parseInt(appId), name != null ? name : installDir, installDir, 0L);
+        }
+        kept.add(manifestName);
+        return true;
+    }
+
+    /**
+     * The other direction: a game the client installed into one of the app's libraries is recorded
+     * in the store's database as installed at that folder, so the store shows it, the app can launch
+     * it, and it is treated like any other install from then on. Run when a session starts and again
+     * when it ends. The client's own private library is not adopted: those files live inside the
+     * runtime, where the app cannot launch them.
+     */
+    public static int adoptClientInstalls(android.content.Context context, File rootfs) {
+        int adopted = 0;
+        com.winlator.star.store.SteamDatabase db;
+        try {
+            db = com.winlator.star.store.SteamDatabase.getInstance(context);
+        } catch (Throwable t) {
+            Log.w(TAG, "database unavailable", t);
+            return 0;
+        }
+        File internalRoot = new File(context.getFilesDir(), "imagefs/steam_games");
+        File cardRoot = cardRoot(context);
+        String[][] libraries = cardRoot != null
+                ? new String[][] {{GUEST_ROOT, internalRoot.getPath()}, {GUEST_ROOT_SD, cardRoot.getPath()}}
+                : new String[][] {{GUEST_ROOT, internalRoot.getPath()}};
+        for (String[] lib : libraries) {
+            File steamapps = new File(rootfs, lib[0].substring(1) + "/steamapps");
+            File[] manifests = steamapps.listFiles((d, name) -> MANIFEST.matcher(name).matches());
+            if (manifests == null) continue;
+            for (File manifest : manifests) {
+                try {
+                    Matcher id = MANIFEST.matcher(manifest.getName());
+                    if (!id.matches()) continue;
+                    int appId = Integer.parseInt(id.group(1));
+                    String text = manifest.isFile() ? FileUtils.readString(manifest) : null;
+                    if (text == null) continue;
+                    Matcher st = STATE.matcher(text);
+                    if (st.find() && !"4".equals(st.group(1))) continue;   // still downloading
+                    Matcher dir = INSTALLDIR.matcher(text);
+                    Matcher nm = NAME.matcher(text);
+                    if (!dir.find()) continue;
+                    File folder = new File(lib[1], dir.group(1));
+                    if (!folder.isDirectory()) continue;
+                    com.winlator.star.store.SteamDatabase.GameRow row = db.getGame(appId);
+                    if (row != null && row.isInstalled && folder.getPath().equals(row.installDir)) continue;
+                    String name = nm.find() ? nm.group(1) : dir.group(1);
+                    if (row == null) db.upsertGame(appId, name, "", 0L, "", "game", "", 0, "");
+                    db.markInstalled(appId, folder.getPath(), folderSize(folder));
+                    Log.i(TAG, "adopted " + name + " (" + appId + ") installed by the Linux client at " + folder);
+                    adopted++;
+                } catch (Throwable t) {
+                    Log.w(TAG, "could not adopt " + manifest, t);
+                }
+            }
+        }
+        return adopted;
+    }
+
+    private static final Pattern STATE =
+            Pattern.compile("^\\s*\"StateFlags\"\\s*\"(\\d+)\"", Pattern.MULTILINE);
+
+    private static long folderSize(File dir) {
+        long total = 0;
+        File[] files = dir.listFiles();
+        if (files == null) return 0;
+        for (File f : files) total += f.isDirectory() ? folderSize(f) : f.length();
+        return total;
     }
 
     /** The launching container alone; kept for callers that have no context. */
@@ -194,38 +345,6 @@ public final class LinuxSteamLibrary {
             for (File m : manifests) found.putIfAbsent(m.getName(), m);
         }
         return found;
-    }
-
-    private static void expose(String appId, String name, File dir, File steamapps, File common,
-                               Set<String> kept, List<String> binds, java.util.Map<String, File> prefixManifests) {
-        String manifestName = "appmanifest_" + appId + ".acf";
-        if (kept.contains(manifestName)) return;
-        String realDir;
-        try {
-            realDir = dir.getCanonicalPath();
-        } catch (java.io.IOException e) {
-            Log.w(TAG, "cannot resolve " + dir, e);
-            return;
-        }
-        String installDir = dir.getName();
-        File runtimeManifest = new File(steamapps, manifestName);
-        File prefixManifest = prefixManifests.get(manifestName);
-        if (prefixManifest != null) {
-            // Both sides update titles: adopt the client's build into the app's copy when it is
-            // newer, and replace the client's only when the app holds the newer build.
-            long runtimeBuild = buildId(runtimeManifest), appBuild = buildId(prefixManifest);
-            if (runtimeBuild > appBuild) {
-                if (!FileUtils.copy(runtimeManifest, prefixManifest)) Log.w(TAG, "could not adopt " + runtimeManifest);
-            } else if (runtimeBuild == 0L || appBuild > runtimeBuild) {
-                if (!FileUtils.copy(prefixManifest, runtimeManifest)) return;
-            }
-        } else if (!runtimeManifest.isFile()) {
-            com.winlator.star.store.RealSteamLauncher.writeAppManifest(
-                    runtimeManifest, Integer.parseInt(appId), name, installDir, 0L);
-        }
-        kept.add(manifestName);
-        new File(common, installDir).mkdirs();
-        binds.add(realDir + ":" + GUEST_ROOT + "/steamapps/common/" + installDir);
     }
 
     /**

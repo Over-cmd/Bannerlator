@@ -8881,8 +8881,12 @@ public class XServerDisplayActivity extends AppCompatActivity {
 
         List<String> gameBinds = com.winlator.star.linux.LinuxSteamLibrary.prepare(
                 this, containerManager.getContainers(), com.winlator.star.linux.LinuxRuntime.rootDir(this));
-        // The other direction: games the client installed for itself get Games-tab entries that
-        // launch through it, so the two libraries meet in the middle.
+        // The other direction. A game the client installed into one of the app's libraries is
+        // recorded in the store's database, so the store shows it and the app can launch it; a
+        // game in the client's own private library only gets a Games-tab entry that launches
+        // through the client, because those files live where the app cannot run them.
+        com.winlator.star.linux.LinuxSteamLibrary.adoptClientInstalls(
+                this, com.winlator.star.linux.LinuxRuntime.rootDir(this));
         com.winlator.star.linux.LinuxSteamLibrary.syncClientGames(
                 container, com.winlator.star.linux.LinuxRuntime.rootDir(this));
         // Apps may not list /dev/input; the fake evdev nodes the input rings back stand in for it.
@@ -8900,6 +8904,13 @@ public class XServerDisplayActivity extends AppCompatActivity {
         environment.addComponent(new com.winlator.star.linux.LinuxProgramLauncherComponent(
                 command, hostEnv, com.winlator.star.linux.LinuxRuntime.rootDir(this), (status) -> {
                     Log.i("XServerDisplayActivity", "Linux session " + session + " ended: " + status);
+                    // Whatever the client installed during the session is the app's now.
+                    try {
+                        com.winlator.star.linux.LinuxSteamLibrary.adoptClientInstalls(
+                                XServerDisplayActivity.this, com.winlator.star.linux.LinuxRuntime.rootDir(XServerDisplayActivity.this));
+                    } catch (Throwable t) {
+                        Log.w("XServerDisplayActivity", "could not adopt the client's installs", t);
+                    }
                     // How many events the app pushed into slot 0 over the whole session. Zero means no
                     // input ever left the app, which separates "the pad wrote nothing" from "the
                     // client read nothing" - the two look identical from the outside.
