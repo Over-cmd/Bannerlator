@@ -9703,3 +9703,8 @@ Still unknown, and now deliberately unimportant: which specific change in the cl
 broke a Windows game. It stays in `fakeinput_steam.cpp`, where the client wants it and where no
 Wine game can reach it. Worth a sanity check that the client's own controllers still behave, since
 that side kept the code it had rather than changing.
+
+**Both devices clear on `28922e7c` (2026-09-19).** The FIT has its pad back in Insane 2 and still
+has it in the Linux client; the Fold - the device the client's controller problems started on -
+is fine too. The split holds on the flavour that device runs, and nothing the client kept has
+regressed on it.
