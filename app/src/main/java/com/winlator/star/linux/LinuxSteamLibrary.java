@@ -129,9 +129,20 @@ public final class LinuxSteamLibrary {
             } else if (runtimeBuild == 0L || appBuild > runtimeBuild) {
                 if (!FileUtils.copy(manifest, runtimeManifest)) continue;
             }
+            // The prefix entry is a link to wherever the store put the files - the app's own
+            // storage or a card the user chose. A card is not one of the trees bound into the
+            // runtime, so binding the link itself hands the client a folder that resolves to
+            // nothing inside. The real folder is bound instead, wherever it is.
+            String realDir;
+            try {
+                realDir = gameDir.getCanonicalPath();
+            } catch (java.io.IOException e) {
+                Log.w(TAG, "cannot resolve " + gameDir, e);
+                continue;
+            }
             kept.add(manifest.getName());
             new File(common, installDir).mkdirs();
-            binds.add(gameDir.getPath() + ":" + GUEST_ROOT + "/steamapps/common/" + installDir);
+            binds.add(realDir + ":" + GUEST_ROOT + "/steamapps/common/" + installDir);
         }
     }
 
