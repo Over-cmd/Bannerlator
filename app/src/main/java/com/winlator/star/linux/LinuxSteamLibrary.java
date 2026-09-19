@@ -92,6 +92,9 @@ public final class LinuxSteamLibrary {
         java.util.Map<Integer, String> depotToApp = new java.util.HashMap<>();
         java.util.Map<Integer, File> recorded = new java.util.HashMap<>();
         java.util.Map<Integer, String> names = new java.util.HashMap<>();
+        java.util.Map<Integer, Long> sizes = new java.util.HashMap<>();
+        java.util.Map<Integer, java.util.List<com.winlator.star.store.SteamDatabase.DepotManifestRow>> depots =
+                new java.util.HashMap<>();
         try {
             for (com.winlator.star.store.SteamDatabase.GameRow row
                     : com.winlator.star.store.SteamDatabase.getInstance(context).getInstalledGames()) {
@@ -102,6 +105,13 @@ public final class LinuxSteamLibrary {
                 }
                 recorded.put(row.appId, installDirOf(context, row));
                 names.put(row.appId, row.name);
+                sizes.put(row.appId, row.sizeBytes);
+                try {
+                    depots.put(row.appId,
+                            com.winlator.star.store.SteamDatabase.getInstance(context).getDepotManifests(row.appId));
+                } catch (Throwable t) {
+                    Log.w(TAG, "no depot manifests for " + row.appId, t);
+                }
             }
         } catch (Throwable t) {
             Log.w(TAG, "installed games unavailable from the database", t);
@@ -117,9 +127,9 @@ public final class LinuxSteamLibrary {
         migratePrivateLibrary(rootfs, internalRoot);
         retireOldLibrary(rootfs);
         int total = 0;
-        total += presentRoot(internalRoot, GUEST_STEAM_ROOT, rootfs, recorded, names, depotToApp, prefixManifests, binds);
+        total += presentRoot(internalRoot, GUEST_STEAM_ROOT, rootfs, recorded, names, sizes, depots, depotToApp, prefixManifests, binds);
         if (cardRoot != null) {
-            total += presentRoot(cardRoot, GUEST_ROOT_SD, rootfs, recorded, names, depotToApp, prefixManifests, binds);
+            total += presentRoot(cardRoot, GUEST_ROOT_SD, rootfs, recorded, names, sizes, depots, depotToApp, prefixManifests, binds);
             // Steam downloads into <library>/steamapps/downloading and renames the finished game
             // into common/. Both must be on the card for that rename to be a rename; the prefixes
             // (compatdata) stay in the runtime root, where symlinks and locks work.
@@ -140,6 +150,8 @@ public final class LinuxSteamLibrary {
      */
     private static int presentRoot(File root, String guestLibrary, File rootfs,
                                    java.util.Map<Integer, File> recorded, java.util.Map<Integer, String> names,
+                                   java.util.Map<Integer, Long> sizes,
+                                   java.util.Map<Integer, java.util.List<com.winlator.star.store.SteamDatabase.DepotManifestRow>> depots,
                                    java.util.Map<Integer, String> depotToApp,
                                    java.util.Map<String, File> prefixManifests, List<String> binds) {
         if (!root.isDirectory() && !root.mkdirs()) return 0;
@@ -164,7 +176,8 @@ public final class LinuxSteamLibrary {
         for (java.util.Map.Entry<Integer, File> e : recorded.entrySet()) {
             File dir = e.getValue();
             if (!dir.isDirectory() || !isUnder(dir, root)) continue;
-            if (writeManifest(String.valueOf(e.getKey()), names.get(e.getKey()), dir, steamapps, kept, prefixManifests)) count++;
+            if (writeManifest(String.valueOf(e.getKey()), names.get(e.getKey()), dir, steamapps, kept, prefixManifests,
+                    depots.get(e.getKey()), sizes.get(e.getKey()))) count++;
         }
         // Folders in this root that identify themselves and that the database missed.
         File[] dirs = root.listFiles(File::isDirectory);
@@ -174,7 +187,8 @@ public final class LinuxSteamLibrary {
                     String appId = appIdOfFolder(dir, depotToApp);
                     if (appId == null || recorded.containsKey(Integer.parseInt(appId))) continue;
                     Log.i(TAG, dir.getName() + " identifies itself as " + appId + " without a database row");
-                    if (writeManifest(appId, dir.getName(), dir, steamapps, kept, prefixManifests)) count++;
+                    if (writeManifest(appId, dir.getName(), dir, steamapps, kept, prefixManifests,
+                            depots.get(Integer.parseInt(appId)), sizes.get(Integer.parseInt(appId)))) count++;
                 } catch (Throwable t) {
                     Log.w(TAG, "skipping " + dir, t);
                 }
@@ -288,7 +302,9 @@ public final class LinuxSteamLibrary {
 
     /** The manifest the client needs for one game folder, reconciled with the app's when it has one. */
     private static boolean writeManifest(String appId, String name, File dir, File steamapps, Set<String> kept,
-                                         java.util.Map<String, File> prefixManifests) {
+                                         java.util.Map<String, File> prefixManifests,
+                                         java.util.List<com.winlator.star.store.SteamDatabase.DepotManifestRow> depots,
+                                         Long sizeBytes) {
         String manifestName = "appmanifest_" + appId + ".acf";
         if (kept.contains(manifestName)) return false;
         String installDir = dir.getName();
@@ -301,9 +317,19 @@ public final class LinuxSteamLibrary {
             } else if (runtimeBuild == 0L || appBuild > runtimeBuild) {
                 if (!FileUtils.copy(prefixManifest, runtimeManifest)) return false;
             }
-        } else if (!runtimeManifest.isFile()) {
-            com.winlator.star.store.RealSteamLauncher.writeAppManifest(
-                    runtimeManifest, Integer.parseInt(appId), name != null ? name : installDir, installDir, 0L);
+        } else if (!runtimeManifest.isFile() || lacksDepots(runtimeManifest)) {
+            // A manifest that names no depots tells the client the game is installed without saying
+            // which files are there or which build they came from, and the only safe reading of that
+            // is "verify everything, then fetch what is missing" - Left 4 Dead 2 sat re-verifying
+            // 13 GB that was already on the card, and Lossless Scaling queued its whole download
+            // beside 177 MB of its own files. The app knows better: it recorded every depot it
+            // installed and the manifest it installed them from. So write that.
+            if (!writeManifestWithDepots(runtimeManifest, appId, name != null ? name : installDir,
+                    installDir, depots, sizeBytes)) {
+                if (runtimeManifest.isFile()) return true;   // leave what is already there
+                com.winlator.star.store.RealSteamLauncher.writeAppManifest(
+                        runtimeManifest, Integer.parseInt(appId), name != null ? name : installDir, installDir, 0L);
+            }
         }
         kept.add(manifestName);
         return true;
@@ -451,6 +477,63 @@ public final class LinuxSteamLibrary {
             for (File volume : volumes) roots.add(new File(volume, "bannerlator/steam_games"));
         }
         return roots;
+    }
+
+    /** An existing manifest whose InstalledDepots block is empty: installed, but contents unknown. */
+    private static boolean lacksDepots(File manifest) {
+        if (!manifest.isFile()) return false;
+        String text = FileUtils.readString(manifest);
+        return text != null && EMPTY_DEPOTS.matcher(text).find();
+    }
+
+    private static final Pattern EMPTY_DEPOTS =
+            Pattern.compile("\"InstalledDepots\"\\s*\\{\\s*\\}");
+
+    /**
+     * The manifest a game deserves when the app installed it: every depot with the manifest id it
+     * came from, so the client can see it already holds that build and asks for nothing. Without
+     * the depots there is nothing worth writing, so this reports failure and the caller keeps
+     * whatever was there.
+     */
+    private static boolean writeManifestWithDepots(File acf, String appId, String name, String installDir,
+                                                   java.util.List<com.winlator.star.store.SteamDatabase.DepotManifestRow> depots,
+                                                   Long sizeBytes) {
+        if (depots == null || depots.isEmpty()) return false;
+        StringBuilder sb = new StringBuilder();
+        long total = 0L;
+        for (com.winlator.star.store.SteamDatabase.DepotManifestRow d : depots) {
+            if (d.manifestId == 0L) continue;
+            long size = d.realSizeBytes > 0 ? d.realSizeBytes : d.sizeBytes;
+            total += size;
+            sb.append("\t\t\"").append(d.depotId).append("\"\n\t\t{\n")
+              .append("\t\t\t\"manifest\"\t\t\"").append(d.manifestId).append("\"\n")
+              .append("\t\t\t\"size\"\t\t\"").append(size).append("\"\n")
+              .append("\t\t}\n");
+        }
+        if (sb.length() == 0) return false;
+        // Steam's own manifests carry the depot total here - FlatOut's, written by the app's
+        // downloader, matches its single depot to the byte - so prefer that over the store's
+        // catalogue estimate, which is a different number for the same game.
+        long onDisk = total > 0 ? total : (sizeBytes != null ? sizeBytes : 0L);
+        String text = "\"AppState\"\n{\n"
+                + "\t\"appid\"\t\t\"" + appId + "\"\n"
+                + "\t\"universe\"\t\t\"1\"\n"
+                + "\t\"name\"\t\t\"" + vdf(name) + "\"\n"
+                + "\t\"StateFlags\"\t\t\"4\"\n"
+                + "\t\"installdir\"\t\t\"" + vdf(installDir) + "\"\n"
+                + "\t\"SizeOnDisk\"\t\t\"" + onDisk + "\"\n"
+                + "\t\"LastOwner\"\t\t\"0\"\n"
+                + "\t\"InstalledDepots\"\n\t{\n" + sb + "\t}\n"
+                + "\t\"UserConfig\"\n\t{\n\t\t\"language\"\t\t\"english\"\n\t}\n"
+                + "\t\"MountedConfig\"\n\t{\n\t\t\"language\"\t\t\"english\"\n\t}\n"
+                + "}\n";
+        if (!FileUtils.writeString(acf, text)) return false;
+        Log.i(TAG, "wrote " + name + " (" + appId + ") with " + depots.size() + " depot(s), " + onDisk + " bytes");
+        return true;
+    }
+
+    private static String vdf(String s) {
+        return s == null ? "" : s.replace("\\", "\\\\").replace("\"", "\\\"");
     }
 
     /** steam_appid.txt from a launch, else the downloader's journal mapped through the database. */

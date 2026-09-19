@@ -9447,3 +9447,21 @@ Side effect worth a decision: the Half-Life 2 episodes (340/380/420) were adopte
 manifests carry bit 4 and their `installdir` is the Half-Life 2 folder, which is present, so they
 are installed by every test we have - but the client's own Installed filter does not list them,
 so the store now shows three entries the client does not. Correct by the data, noisy in the UI.
+
+**Skeleton manifests made the client re-fetch games it already had (2026-09-19).** Left 4 Dead 2
+sat re-verifying 13.4 GB on the card with 2h23m to run, restarting the loop each time it was
+suspended, and Lossless Scaling had queued its whole 54.5 MB download beside 177 MB of its own
+files. Same cause for both: where the app had no manifest of its own to hand over, we synthesised
+one through `RealSteamLauncher.writeAppManifest`, which writes `InstalledDepots { }` empty with
+`SizeOnDisk 0` and `buildid 0`. That tells the client the game is installed without saying which
+files or which build, and the only safe reading of that is to verify everything and fetch what is
+missing. FlatOut, whose manifest the app's own downloader wrote, has a real depot list and has
+never misbehaved.
+
+The app already knows the answer: `depot_manifests` holds every depot with the manifest id it was
+installed from - L4D2's 551 and 552 sum to ~15 GB against 13.4 GB on the card. `writeManifest`
+now fills a manifest from that table, and also repairs one already on disk whose `InstalledDepots`
+is empty, which is what L4D2 and Lossless Scaling both need since their stubs already exist. With
+no depots recorded there is nothing better to write, so the old skeleton stays rather than
+replacing something with nothing. `SizeOnDisk` is the depot total, matching what Steam writes
+itself. NOT yet proven: whether the client accepts the repaired manifest and stops verifying.
