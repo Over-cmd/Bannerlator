@@ -57,3 +57,5 @@ ln -sfn "$steam_root/linuxarm64" "$HOME/.steam/sdk64"
 # unrelated-looking installscript assertion. Same target as sdk64; the client picks the name by
 # architecture.
 ln -sfn "$steam_root/linuxarm64" "$HOME/.steam/sdkarm64"
+ln -sfn "$steam_root/steamrtarm64" "$HOME/.steam/binarm64"
+ln -sfn "$steam_root/linux32" "$HOME/.steam/sdk32"

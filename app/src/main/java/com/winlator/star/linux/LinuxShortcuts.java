@@ -104,6 +104,32 @@ public final class LinuxShortcuts {
         return createSteamShortcut(container, null);
     }
 
+    /**
+     * One entry per game the Linux client installed for itself. Same runtime and mode as the
+     * client's own entry, plus the app id, which the session hands to the client as a rungameid
+     * URL. Idempotent: an entry that already exists is left exactly as the user has it.
+     */
+    public static boolean createClientGameShortcut(Container container, String appId, String title) {
+        File desktopDir = container.getDesktopDir();
+        if (!desktopDir.isDirectory() && !desktopDir.mkdirs()) return false;
+        String safe = title.replaceAll("[\\\\/:*?\"<>|]", "").trim();
+        if (safe.isEmpty()) safe = "App " + appId;
+        File file = new File(desktopDir, safe + " (Linux).desktop");
+        if (file.isFile()) return false;
+        String content = "[Desktop Entry]\n"
+                + "Name=" + safe + "\n"
+                + "Icon=" + ICON_NAME + "\n"
+                + "Exec=" + STEAM_EXEC + "\n"
+                + "Type=Application\n"
+                + "StartupWMClass=gamescope\n\n"
+                + "[Extra Data]\n"
+                + Container.EXTRA_RUNTIME + "=" + Container.RUNTIME_GAMESCOPE + "\n"
+                + LinuxRuntime.EXTRA_LINUX_MODE + "=" + LinuxRuntime.MODE_STEAM + "\n"
+                + "app_id=" + appId + "\n"
+                + "displayBackend=wayland\n";
+        return FileUtils.writeString(file, content);
+    }
+
     public static boolean createSteamShortcut(Container container, Context context) {
         File desktopDir = container.getDesktopDir();
         if (!desktopDir.isDirectory() && !desktopDir.mkdirs()) {

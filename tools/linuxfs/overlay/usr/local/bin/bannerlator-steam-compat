@@ -25,11 +25,11 @@ TOOL = "bannerlator-proton-arm64"
 # fresh install: naming it is what makes the client offer it and fetch the depot.
 SEED_TOOL = "proton-experimental-arm64"
 # The ARM64 Proton depot the client downloads for itself, as a compatibility-tool appid.
-# Naming it as this tool's dependency makes the client fetch it before the first launch of a
-# Windows title, the same way its own Proton entries pull in their runtime - so a new client
-# never has to launch once, fail, and be restarted before the right Proton exists.
-# What is NOT inherited is the depot's own dependency on 4185400, the arm64 Steam Linux Runtime,
-# whose container needs user namespaces Android does not give: our manifest names the depot alone.
+# The session asks the client to install it on the command line the first time (steam://install),
+# so a new client has it before a Windows title is first launched. It is deliberately NOT named as
+# this tool's dependency: a dependency is composed with its own dependencies, and this depot
+# requires 4185400, the arm64 Steam Linux Runtime, whose container needs user namespaces Android
+# does not give - the launch would be wrapped in it and die before this tool ever ran.
 PROTON_ARM64_APPID = "4427310"
 LAUNCHER = "bannerlator-proton"
 # The extra Steam library the app mounts the installed games into (see bannerlator-steam-library).
@@ -65,11 +65,10 @@ TOOL_MANIFEST_VDF = """"manifest"
 {
 	"version" "2"
 	"commandline" "/%s %%verb%%"
-	"require_tool_appid" "%s"
 	"use_sessions" "1"
 	"compatmanager_layer_name" "proton"
 }
-""" % (LAUNCHER, PROTON_ARM64_APPID)
+""" % LAUNCHER
 
 # Resolves the depot at launch time, so the tool can be registered before the depot exists and
 # survives the client updating or replacing it. Proton takes its base directory from
@@ -79,6 +78,18 @@ LAUNCHER_SH = """#!/bin/bash
 # Steam Linux Runtime container its own manifest asks for (no user namespaces on Android).
 verb=$1; shift
 steam_root=${STEAM_COMPAT_CLIENT_INSTALL_PATH:-${XDG_DATA_HOME:-$HOME/.local/share}/Steam}
+# The client preloads its overlay library into every game. In a gamescope session the overlay is
+# the client's own window, so the library draws nothing - but it stands in front of open() and
+# read() on /dev/input, lets Wine open the session's pad and answers every read of it with nothing:
+# a controller that never reports, and Wine's HID thread spinning a core on it. Dropped here;
+# anything else in LD_PRELOAD is kept.
+kept=
+IFS=': '
+for lib in ${LD_PRELOAD:-}; do
+  case $lib in */gameoverlayrenderer.so) ;; *) kept=${kept:+$kept:}$lib ;; esac
+done
+unset IFS
+if [ -n "$kept" ]; then export LD_PRELOAD="$kept"; else unset LD_PRELOAD; fi
 for name in %s; do
   depot="$steam_root/steamapps/common/$name"
   if [ -d "$depot/files/bin-arm64" ] && [ -x "$depot/proton" ]; then
@@ -262,7 +273,7 @@ def main():
     depot = find_source(steam_root)
     print("bannerlator-steam-compat: registered %s (%s)" % (
         TOOL, "depot %s present" % os.path.basename(depot) if depot else
-        "no ARM64 Proton depot yet; the client fetches it as this tool's dependency"))
+        "no ARM64 Proton depot yet; the session asks the client to fetch it"))
     config = os.path.join(steam_root, "config", "config.vdf")
     if os.path.isfile(config):
         apps = installed_apps(steam_root)
