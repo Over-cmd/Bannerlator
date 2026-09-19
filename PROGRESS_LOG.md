@@ -9669,3 +9669,26 @@ launched. The shortcut was never involved: the check reads the game's folder, no
 so recreating it would have cost the user their settings and changed nothing. Need for Speed,
 adopted after the fix, was stamped automatically with `public|10351185`. The marker had to be
 chowned to the app; a root-written one would not have been readable.
+
+**The Steam client's interposer was also every Wine game's interposer (2026-09-19).** The user's
+controller stopped working in Insane 2, and asked the right question: why was Max's work not kept
+to the Linux client in the first place. It was not, and it should have been. One source file,
+`winlator/fakeinput.cpp`, is compiled twice - against bionic for Wine, against glibc for the
+client - so taking his version wholesale put every change written for the Steam client into every
+Windows game. Re-testing the Wine path after that swap was on the list from the morning and never
+happened.
+
+Split now. `winlator/fakeinput.cpp` is restored to the version that shipped before the swap and
+remains the bionic build preloaded into Wine; `winlator/fakeinput_steam.cpp` carries Max's version
+plus today's work on it, and only the two glibc builds point at it. Both compile clean. The Java
+writer publishes the Steam button in snapshot bit 10, which the restored reader simply ignores -
+it loops over ten buttons - so the ring's layout is unchanged for Wine.
+
+What the evidence did and did not show: the app side is healthy - ring 0 carried a live write
+sequence and a published snapshot - but no process in the Wine prefix holds an fd on a ring,
+which is what an opened fake device looks like, so nothing there had a controller open. Identity
+and the trigger remap were ruled out directly: both are gated on FAKE_EVDEV_STEAM_VIRTUAL, which
+the live Wine process does not carry. The ring header layout is byte-identical between the two
+versions, ExternalController's 825-line diff was line endings around a five-line change, and the
+branch is level with main. So the specific mechanism is NOT proven - the separation is right on
+its own terms, and restores a known-good file to the path that regressed.

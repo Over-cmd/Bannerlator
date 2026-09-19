@@ -161,14 +161,17 @@ done
 # in the process itself; see preload/*.c.
 mkdir -p rootfs/usr/local/lib
 aarch64-linux-gnu-gcc -shared -fPIC -O2 -Wall -pthread -o rootfs/usr/local/lib/libblsession.so "$here"/preload/*.c -ldl
-# The same fake-evdev interposer the app preloads into Wine, built here against glibc for the
-# session. The app's on-screen and physical pads are published as shared-memory rings (see
+# The Steam client's own copy of the fake-evdev interposer, built against glibc for the session.
+# Deliberately a SEPARATE source from the one preloaded into Wine: what this needs - a virtual
+# gamepad identity, the triggers where an X-Box pad keeps them, a Steam button - is what the
+# client wants and not what a Windows game does, and sharing one file meant every change made for
+# the client landed in every Wine game too. The app's on-screen and physical pads are published as shared-memory rings (see
 # FakeInputWriter); this serves them to a client as a real /dev/input/eventN, which is how the
 # native Steam client gets a controller at all - it has no Wine and no XInput to read. Preloaded
 # only on the client, by bannerlator-session, not from ld.so.preload: every interposed call here
 # sits on open/read/poll/select, and nothing else in the session needs a gamepad.
 aarch64-linux-gnu-g++ -shared -fPIC -O2 -Wall -Wno-attributes -Wno-nonnull-compare -pthread -std=c++17 -static-libstdc++ -static-libgcc \
-  -o rootfs/usr/local/lib/libfakeinput.so "$here/../../app/src/main/cpp/winlator/fakeinput.cpp" -ldl
+  -o rootfs/usr/local/lib/libfakeinput.so "$here/../../app/src/main/cpp/winlator/fakeinput_steam.cpp" -ldl
 aarch64-linux-gnu-readelf -d rootfs/usr/local/lib/libfakeinput.so | grep NEEDED
 # Games that ship a native Linux x86 build run under FEX, and the aarch64 library above cannot be
 # loaded into an x86 process - so those get their own copies. Only the System V IPC shim is built
