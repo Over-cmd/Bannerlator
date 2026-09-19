@@ -10083,7 +10083,14 @@ public class XServerDisplayActivity extends AppCompatActivity {
             // It binds GAMEPAD_*, which is what reaches the fake-evdev rings the session reads (FAKE_EVDEV_* above).
             // The client then sees a controller rather than synthesised key presses.
             // #338's rule still applies: a physical pad that is already connected owns the slot, so don't add a phantom one.
-            if (gamescopeMode && controlsProfile.isEmpty() && !hasConnectedGameController()) {
+            // Same switch as the session's controller wiring: seeding the overlay is part of that
+            // feature, and a baseline that still seeds it is not a baseline. It is read again here
+            // because this runs in a different part of the launch.
+            boolean controllersEnabled = !new File(
+                    android.os.Environment.getExternalStorageDirectory(),
+                    "Download/bannerlator-no-fake-input").exists();
+            if (controllersEnabled && gamescopeMode && controlsProfile.isEmpty()
+                    && !hasConnectedGameController()) {
                 ControlsProfile linuxPad = findVirtualGamepadProfile();
                 if (linuxPad != null) {
                     inputControlsView.setShowTouchscreenControls(true);
