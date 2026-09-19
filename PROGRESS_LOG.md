@@ -9641,3 +9641,16 @@ the store when a session starts or ends rather than while it runs.
 launches through the app's own chain. That is the half of the round trip worth having: the store
 row proved the app had been told about the game, this proves the files themselves are shared -
 one install, either launcher, no copy.
+
+**An adopted game offered an update it did not need (2026-09-19).** Portal 2 launched from the
+app side but asked to update first, twenty minutes after the client downloaded it. The app decides
+that by reading a marker it writes into the install dir when it downloads a game - `<branch>|<buildId>`
+in `.bannerlator_build` - and compares it with the live build. The Linux client naturally writes
+no such marker, so `readInstalledBuild` returned 0 and `SteamGameUpdater.computeStatus` fell to
+its else branch: anything is newer than nothing. The game was current at build 23973718.
+
+Adoption now stamps the marker, taking the build and the branch from the client's own manifest
+rather than from the live catalogue - Steam records what it installed, and on a beta branch that
+is deliberately not the newest build, so looking the answer up would record a lie. The format
+stays in `SteamGameUpdater` behind a new `recordKnownBuild`. This affects every game downloaded
+in the client, so it would have met the user on their first EA title too.

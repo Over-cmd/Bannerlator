@@ -391,6 +391,13 @@ public final class LinuxSteamLibrary {
                     // nothing said why.
                     long size = sizeOnDisk(text);
                     db.markInstalled(appId, folder.getPath(), size > 0 ? size : folderSize(folder));
+                    // The app decides whether a game needs updating by reading the build it
+                    // stamped into the install when it downloaded it. The client stamps nothing,
+                    // so an adopted game reads as build 0 and every launch offers an update for a
+                    // copy that is current. The client's own manifest says which build it
+                    // installed, and on which branch, so record that.
+                    com.winlator.star.store.SteamGameUpdater.recordKnownBuild(
+                            folder, branchOf(text), buildIdOf(text));
                     Log.i(TAG, "adopted " + name + " (" + appId + ") installed by the Linux client at " + folder);
                     adopted++;
                 } catch (Throwable t) {
@@ -403,6 +410,26 @@ public final class LinuxSteamLibrary {
         Log.i(TAG, "adoption pass: " + adopted + " game(s) taken into the store");
         return adopted;
     }
+
+    /** The build the manifest records, or 0 when it does not say. */
+    private static long buildIdOf(String manifest) {
+        Matcher m = BUILD_ID.matcher(manifest);
+        if (!m.find()) return 0L;
+        try {
+            return Long.parseLong(m.group(1));
+        } catch (NumberFormatException e) {
+            return 0L;
+        }
+    }
+
+    /** The branch the install came from. Absent means the default one, which the app calls public. */
+    private static String branchOf(String manifest) {
+        Matcher m = BETA_KEY.matcher(manifest);
+        return m.find() && !m.group(1).trim().isEmpty() ? m.group(1).trim() : "public";
+    }
+
+    private static final Pattern BETA_KEY =
+            Pattern.compile("^\\s*\"betakey\"\\s*\"([^\"]*)\"", Pattern.MULTILINE);
 
     /** What the manifest says the install occupies, or 0 when it does not say. */
     private static long sizeOnDisk(String manifest) {
