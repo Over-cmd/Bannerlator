@@ -139,7 +139,8 @@ case $mode in
     if [ -n "${FAKE_EVDEV_DIR:-}" ] && [ -f /usr/local/lib/libfakeinput.so ] \
        && [ -z "$_bl_evdev_preloaded" ]; then
       export LD_PRELOAD=/usr/local/lib/libfakeinput.so${LD_PRELOAD:+:$LD_PRELOAD}
-      export SDL_LINUX_JOYSTICK_CLASSIC=1
+      export SDL_JOYSTICK_DISABLE_UDEV=1
+      export SDL_JOYSTICK_LINUX_CLASSIC=1 SDL_LINUX_JOYSTICK_CLASSIC=1
       echo "== fake evdev: $(ls "$FAKE_EVDEV_DIR" 2>/dev/null | tr '\n' ' ')id=${FAKE_EVDEV_IDENTITY:-generic}"
     fi
     # Native-Linux x86 games go through Valve's FEX compat tool, which runs FEX with FEX_PORTABLE=1

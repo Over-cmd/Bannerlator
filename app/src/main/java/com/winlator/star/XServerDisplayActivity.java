@@ -8755,9 +8755,15 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // That is the same bargain /etc/ld.so.preload already makes for libblsession.so.
         // Everything the interposer does not recognise falls straight through to libc via RTLD_NEXT.
         guest.add("LD_PRELOAD=/usr/local/lib/libfakeinput.so");
-        // SDL prefers udev whenever it can initialise it, and udev finds nothing here.
-        // The interposer fakes /dev/input and udev's own records, but not /sys/class/input.
-        // This is SDL's documented switch back to scanning /dev/input, which is the path the interposer answers.
+        // The client ships SDL3, which dlopens libudev and prefers udev enumeration.
+        // udev enumerates from /sys/class/input, and our synthetic pad has no entry there at all.
+        // It is not enough to fake /dev/input: udev would list the real devices and then fail to open them.
+        // So udev is switched off outright and SDL is put on its classic /dev/input scan.
+        // The hint names were checked against the strings in the runtime's own libSDL3.so.0.
+        // SDL3 spells it SDL_JOYSTICK_LINUX_CLASSIC; SDL2 spelled it SDL_LINUX_JOYSTICK_CLASSIC.
+        // Both are set, because games launched from the client bring their own SDL of either generation.
+        guest.add("SDL_JOYSTICK_DISABLE_UDEV=1");
+        guest.add("SDL_JOYSTICK_LINUX_CLASSIC=1");
         guest.add("SDL_LINUX_JOYSTICK_CLASSIC=1");
         Log.i("XServerDisplayActivity", "Linux session log: " + sessionLog.getPath());
         showLinuxFirstRunProgress(sessionLog);
