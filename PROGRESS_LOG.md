@@ -9548,3 +9548,16 @@ card's marker still held the name it was first registered with; the client's own
 marker at all, which is exactly why that one kept the new name. Both files are now written.
 The prediction going in was the opposite - that the client's own library would be the stubborn
 one - and the card row was what made the real mechanism visible.
+
+**Both libraries now named, device-proven (2026-09-19, `dd270900`).** The card's marker reads
+"SD Card", the list agrees, and the client did not put the old name back:
+`/root/.local/share/Steam` is "Internal Storage" and `/mnt/bannerlator-sd` is "SD Card". Writing
+the label in both files is what it took. The install dialog no longer asks the user to guess
+which of the two places is the phone.
+
+State of the Linux client at the end of the day: FlatOut runs through Proton, the Steam button
+opens the client's in-game menu, library sync holds in all four directions, games install to the
+app's own two folders with internal as the default, and manifests carry real depot data so the
+client stops re-fetching what is already on disk. Two known issues remain, both understood and
+neither blocking: the card library reports internal's free space, and Half-Life 2's three
+episodes appear in the store but not in the client. Nothing on this branch is merged to main.
