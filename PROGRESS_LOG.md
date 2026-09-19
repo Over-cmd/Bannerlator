@@ -9185,3 +9185,11 @@ opening and probing the pads. Driven from the ring, the D-pad navigated and A op
 the bottom bar switched to `STORE PAGE / CLOSE`. Both devices now work on the same build. The
 one leftover was cosmetic: the diagnostics file's variable filter did not print
 `SDL_HIDAPI_JOYSTICK_DISABLE_UDEV`, which was nonetheless set; fixed.
+
+**Two corrections to the open items above.** The attribution trailers never reached the repo:
+a global `commit-msg` hook (`core.hooksPath` in the Termux git config, dated June) deletes any
+`Co-Authored-By` line naming Claude and any line carrying the anthropic address, so the branch was
+clean all along and the rewrite on 2026-09-19 changed nothing — 113 commits above `origin/main`,
+zero matches, identical tree. And the Pocket FIT is now confirmed in real use as well, not just
+by driven input: the built-in pad and the on-screen controls both work in the client on
+`ee8b7b19`. That leaves one open item, the Wine-path re-test after the interposer swap.
