@@ -9378,3 +9378,12 @@ and the env-derived config are accessors that build on first use and never destr
 closes the mirror-image window after static destructors at exit. `library_init` now only warms
 them. Host syntax check clean. NOT yet device-proven: the game still has to run under FEX once
 Proton starts.
+
+**Fix proven on the FIT before install (`2afae914`, run 35428880736 green, staged
+`Bannerlator-pyfix-2afae914-pubg.apk` sha `ae50423ea3cba7f3…`).** Old interposer vs new, same
+loader, same rootfs python: old `rc=139` on both `python -S -c print` and a normal import set,
+new `rc=0` on both. `bash` still fine, both shims together fine, and the interposer still serves
+its nodes (`/dev/input` lists event0..event5 under the preload). The registrar - the script that
+was segfaulting every fifteen seconds - now runs to completion: "default and 9 installed title(s)
+set to bannerlator-proton-arm64". The launch chain is therefore unblocked; whether FlatOut then
+runs under FEX is the next unknown and is not proven by any of this.
