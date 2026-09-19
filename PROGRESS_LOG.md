@@ -9175,3 +9175,13 @@ netlink socket instead of letting SDL's HID init fail until the client asserts, 
 reached it through the rings bound in as `/dev/input`. Not yet re-run on the Pocket FIT — the
 install there did not take (package still the previous build), and the ported test is staged
 to run the moment it does.
+
+**2026-09-19, confirmed on the Pocket FIT as well.** `ee8b7b19` installed (hash `37a89dcb…`
+verified first), Steam launched with the trace on and GameHub stopped: both libraries staged
+(26,928 and 1,434,960 bytes), `ld.so.preload` naming both, nodes `event0..3` and no `js0`, zero
+socket or memfd ENOSYS, Steam alive with no `LD_PRELOAD` in its environment and all three SDL
+hints present, holding the rings with no hidraw descriptors; 137 interposer trace lines of it
+opening and probing the pads. Driven from the ring, the D-pad navigated and A opened an item —
+the bottom bar switched to `STORE PAGE / CLOSE`. Both devices now work on the same build. The
+one leftover was cosmetic: the diagnostics file's variable filter did not print
+`SDL_HIDAPI_JOYSTICK_DISABLE_UDEV`, which was nonetheless set; fixed.

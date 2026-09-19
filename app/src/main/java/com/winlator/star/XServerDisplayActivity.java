@@ -8828,7 +8828,8 @@ public class XServerDisplayActivity extends AppCompatActivity {
             sb.append("ld.so.preload: ").append(preloadList.replace("\n", " ").trim()).append('\n');
             for (String e : guest) {
                 if (e.startsWith("FAKE_EVDEV") || e.startsWith("LD_PRELOAD")
-                        || e.startsWith("SDL_JOYSTICK") || e.startsWith("SDL_LINUX")) {
+                        || e.startsWith("SDL_JOYSTICK") || e.startsWith("SDL_HIDAPI")
+                        || e.startsWith("SDL_LINUX")) {
                     sb.append("env: ").append(e).append('\n');
                 }
             }
