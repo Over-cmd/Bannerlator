@@ -48,7 +48,7 @@ block=$(find "$redist" -name installscript.vdf -print0 2>/dev/null | sort -z | x
 stamp=$(printf '%s' "$block" | cksum)
 
 for reg in "$steam_root"/steamapps/compatdata/*/pfx/system.reg \
-           /mnt/bannerlator/steamapps/compatdata/*/pfx/system.reg; do
+           /mnt/bannerlator-sd/steamapps/compatdata/*/pfx/system.reg; do
   [ -f "$reg" ] || continue
   seeded=$(dirname "$reg")/.bannerlator-redists
   [ "$(cat "$seeded" 2>/dev/null)" = "$stamp" ] && continue

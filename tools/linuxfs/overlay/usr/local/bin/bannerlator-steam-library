@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-# Registers the games Bannerlator downloaded (bound at /mnt/bannerlator) as a library folder of the
+# Registers the card the app installs to (bound at /mnt/bannerlator-sd) as a library folder of the
 # native Steam client, so they show as installed there instead of being downloaded a second time.
 #
 #   bannerlator-steam-library <steam root>

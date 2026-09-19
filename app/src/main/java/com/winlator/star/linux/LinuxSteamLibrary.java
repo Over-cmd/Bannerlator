@@ -28,9 +28,7 @@ import java.util.regex.Pattern;
 public final class LinuxSteamLibrary {
     private static final String TAG = "LinuxSteamLibrary";
 
-    /** Where the library appears inside the runtime. */
-    public static final String GUEST_ROOT = "/mnt/bannerlator";
-
+    
     private static final Pattern MANIFEST = Pattern.compile("appmanifest_(\\d+)\\.acf");
     /** {@code "installdir"  "Half-Life 2"} — the folder the game lives in under common/. */
     private static final Pattern INSTALLDIR =

@@ -34,7 +34,7 @@ PROTON_ARM64_APPID = "4427310"
 LAUNCHER = "bannerlator-proton"
 # The extra Steam library the app mounts the installed games into (see bannerlator-steam-library).
 # installed_apps() scans it too; it lives only in the sibling script, so define it here as well.
-LIBRARY = "/mnt/bannerlator"
+LIBRARY = "/mnt/bannerlator"  # the card library is LIBRARY + "-sd"; internal storage is steam_root itself
 # The client lists its own "Proton Experimental (ARM64)" and "Proton 11.0 (ARM64)" in the same
 # Compatibility dropdown, and those are the two that cannot start a game here. Ours has to be
 # unmistakable at a glance, or a user picks a neighbour and gets a launch that fails silently.
