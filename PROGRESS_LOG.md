@@ -9495,3 +9495,8 @@ from 273 GB to 286 GB. The first attempt was cut off partway - a delete that siz
 FUSE layer outlives the bridge connection - so it was re-run detached and polled to completion.
 The store's database still records 550 as installed; `releaseClientUninstalls` corrects that on
 the next session, which is the path worth watching when the user next launches.
+
+Cleared the card's `steam_downloading/550` as well: 7.9 GB of Left 4 Dead 2's partial fetch.
+That also answers the open question about that install - Steam held nearly eight gigabytes of
+download scratch for it, so it genuinely was mid-fetch and was right to keep asking for files.
+Card free space 273 GB -> 293 GB, both card folders now empty.
