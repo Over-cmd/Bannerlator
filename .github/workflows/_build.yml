@@ -294,6 +294,11 @@ jobs:
             || { echo "::error::libblsession.so does not export $sym"; exit 1; }
         done
         ls -l "$D/libblsession.so"
+        # The session's scripts too, so a fix in one reaches an installed runtime the same way.
+        for script in tools/linuxfs/overlay/usr/local/bin/bannerlator-*; do
+          install -Dm644 "$script" "$D/usr/local/bin/$(basename "$script")"
+        done
+        ls -l "$D/usr/local/bin/"
 
     - name: Cache LSFG native library
       id: cache-lsfg

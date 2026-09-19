@@ -24,6 +24,14 @@ TOOL = "bannerlator-proton-arm64"
 # Valve's own ARM64 Proton, by the name the client registers it under. Used only to bootstrap a
 # fresh install: naming it is what makes the client offer it and fetch the depot.
 SEED_TOOL = "proton-experimental-arm64"
+# The ARM64 Proton depot the client downloads for itself, as a compatibility-tool appid.
+# Naming it as this tool's dependency makes the client fetch it before the first launch of a
+# Windows title, the same way its own Proton entries pull in their runtime - so a new client
+# never has to launch once, fail, and be restarted before the right Proton exists.
+# What is NOT inherited is the depot's own dependency on 4185400, the arm64 Steam Linux Runtime,
+# whose container needs user namespaces Android does not give: our manifest names the depot alone.
+PROTON_ARM64_APPID = "4427310"
+LAUNCHER = "bannerlator-proton"
 # The extra Steam library the app mounts the installed games into (see bannerlator-steam-library).
 # installed_apps() scans it too; it lives only in the sibling script, so define it here as well.
 LIBRARY = "/mnt/bannerlator"
@@ -33,7 +41,7 @@ LIBRARY = "/mnt/bannerlator"
 # Newest first: whichever the client has downloaded is used.
 SOURCES = ("Proton Experimental (ARM64)", "Proton 11.0 (ARM64)")
 # Written by us; everything else in the depot is symlinked through.
-OWN_FILES = ("toolmanifest.vdf", "compatibilitytool.vdf")
+OWN_FILES = ("toolmanifest.vdf", "compatibilitytool.vdf", "bannerlator-proton")
 # The client assigns a Proton to a Windows title by itself, as a per-app CompatToolMapping entry at
 # priority 250 - which outranks the "0" default, so setting that default alone changes nothing. Every
 # Proton it can pick is one this runtime cannot start: the ARM64 ones want pressure-vessel (see
@@ -53,6 +61,34 @@ COMPAT_TOOL_VDF = """"compatibilitytools"
 	}
 }
 """
+TOOL_MANIFEST_VDF = """"manifest"
+{
+	"version" "2"
+	"commandline" "/%s %%verb%%"
+	"require_tool_appid" "%s"
+	"use_sessions" "1"
+	"compatmanager_layer_name" "proton"
+}
+""" % (LAUNCHER, PROTON_ARM64_APPID)
+
+# Resolves the depot at launch time, so the tool can be registered before the depot exists and
+# survives the client updating or replacing it. Proton takes its base directory from
+# dirname(sys.argv[0]) without resolving it, so it is run from the depot itself.
+LAUNCHER_SH = """#!/bin/bash
+# Bannerlator Proton (ARM64): runs the ARM64 Proton the Steam client downloaded, without the
+# Steam Linux Runtime container its own manifest asks for (no user namespaces on Android).
+verb=$1; shift
+steam_root=${STEAM_COMPAT_CLIENT_INSTALL_PATH:-${XDG_DATA_HOME:-$HOME/.local/share}/Steam}
+for name in %s; do
+  depot="$steam_root/steamapps/common/$name"
+  if [ -d "$depot/files/bin-arm64" ] && [ -x "$depot/proton" ]; then
+    exec "$depot/proton" "$verb" "$@"
+  fi
+done
+echo "bannerlator-proton: no ARM64 Proton depot yet - the client downloads one as this tool's dependency; retry the launch once it has" >&2
+exit 1
+""" % " ".join('"%s"' % n for n in SOURCES)
+
 TOKEN = re.compile(r'\s*(?:"((?:[^"\\]|\\.)*)"|([{}])|//[^\n]*)')
 
 
@@ -200,62 +236,38 @@ def find_source(steam_root):
     return None
 
 
-def build_tool(depot, tool_dir):
-    """Mirror the depot into tool_dir as symlinks, with our own manifests."""
-    # Rebuilt from scratch each run: the client updates the depot and entries come and go.
+def build_tool(tool_dir):
+    """Our own manifests and the launcher. The depot is found at launch time, not here."""
     if os.path.islink(tool_dir):
         os.unlink(tool_dir)
     elif os.path.isdir(tool_dir):
+        # Earlier versions mirrored the depot in here as symlinks; start clean.
         shutil.rmtree(tool_dir)
     os.makedirs(tool_dir)
-
-    for name in sorted(os.listdir(depot)):
-        if name not in OWN_FILES:
-            os.symlink(os.path.join(depot, name), os.path.join(tool_dir, name))
-
-    with open(os.path.join(depot, "toolmanifest.vdf"), encoding="utf-8", errors="replace") as f:
-        manifest = f.read()
-    # The one line that costs us the launch.
-    manifest = re.sub(r'(?m)^[ \t]*"require_tool_appid".*\n', "", manifest)
     with open(os.path.join(tool_dir, "toolmanifest.vdf"), "w", encoding="utf-8") as f:
-        f.write(manifest)
+        f.write(TOOL_MANIFEST_VDF)
     with open(os.path.join(tool_dir, "compatibilitytool.vdf"), "w", encoding="utf-8") as f:
         f.write(COMPAT_TOOL_VDF % TOOL)
+    launcher = os.path.join(tool_dir, LAUNCHER)
+    with open(launcher, "w", encoding="utf-8") as f:
+        f.write(LAUNCHER_SH)
+    os.chmod(launcher, 0o755)
 
 
 def main():
     steam_root = sys.argv[1]
-    depot = find_source(steam_root)
-    if depot is None:
-        # Nothing of ours to register yet - but the client will not even OFFER an ARM64 Proton until
-        # something names one, so a new user has no way to ask for it. Point the default at Valve's
-        # own ARM64 Proton by name: the client then registers it, and downloads the depot the first
-        # time a Windows title launches. The next session finds that depot and replaces this with
-        # our own copy (register_default repoints any name starting with "proton"), which is the one
-        # that actually starts a game here.
-        config = os.path.join(steam_root, "config", "config.vdf")
-        if os.path.isfile(config):
-            seeded = SEED_TOOL
-            try:
-                text = open(config, encoding="utf-8", errors="replace").read()
-            except OSError:
-                text = ""
-            if seeded not in text and TOOL not in text:
-                register_default(config, (), name=seeded)
-                print("bannerlator-steam-compat: seeded the default to %s so the client offers and "
-                      "fetches it" % seeded, file=sys.stderr)
-                return
-        print("bannerlator-steam-compat: no ARM64 Proton installed yet", file=sys.stderr)
-        return
     tools = os.path.join(steam_root, "compatibilitytools.d")
     os.makedirs(tools, exist_ok=True)
-    build_tool(depot, os.path.join(tools, TOOL))
-    print("bannerlator-steam-compat: registered %s from %s" % (TOOL, os.path.basename(depot)))
+    build_tool(os.path.join(tools, TOOL))
+    depot = find_source(steam_root)
+    print("bannerlator-steam-compat: registered %s (%s)" % (
+        TOOL, "depot %s present" % os.path.basename(depot) if depot else
+        "no ARM64 Proton depot yet; the client fetches it as this tool's dependency"))
     config = os.path.join(steam_root, "config", "config.vdf")
     if os.path.isfile(config):
         apps = installed_apps(steam_root)
         register_default(config, apps)
-        print("bannerlator-steam-compat: %d installed title(s) set to %s" % (len(apps), TOOL))
+        print("bannerlator-steam-compat: default and %d installed title(s) set to %s" % (len(apps), TOOL))
 
 
 if __name__ == "__main__":

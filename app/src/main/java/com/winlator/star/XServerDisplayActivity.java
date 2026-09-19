@@ -8712,17 +8712,27 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // libfakeinput.so is the controller reader, staged the same way.
         // Each lands through a rename, so a library another session still has mapped keeps the file it opened.
         // (Shape follows WinNative's syncPreloadLibraries.)
-        String[] sessionLibs = {"libblsession.so", "libfakeinput.so"};
+        // asset path under linuxfs/ -> path under the runtime root; the scripts ride along with the
+        // libraries so a registrar fix reaches a runtime that is already installed.
+        String[][] sessionFiles = {
+                {"libblsession.so", "usr/local/lib/libblsession.so"},
+                {"libfakeinput.so", "usr/local/lib/libfakeinput.so"},
+                {"usr/local/bin/bannerlator-session", "usr/local/bin/bannerlator-session"},
+                {"usr/local/bin/bannerlator-steam-compat", "usr/local/bin/bannerlator-steam-compat"},
+                {"usr/local/bin/bannerlator-steam-install", "usr/local/bin/bannerlator-steam-install"},
+                {"usr/local/bin/bannerlator-steam-library", "usr/local/bin/bannerlator-steam-library"},
+        };
         StringBuilder stagedReport = new StringBuilder();
-        for (String name : sessionLibs) {
-            File libDir = new File(com.winlator.star.linux.LinuxRuntime.rootDir(this), "usr/local/lib");
+        for (String[] entry : sessionFiles) {
+            String asset = entry[0], name = new File(entry[1]).getName();
+            File libDir = new File(com.winlator.star.linux.LinuxRuntime.rootDir(this), entry[1]).getParentFile();
             File target = new File(libDir, name);
             File staged = new File(libDir, name + ".staged");
             boolean installed = false;
             try {
                 //noinspection ResultOfMethodCallIgnored
                 libDir.mkdirs();
-                try (java.io.InputStream in = getAssets().open("linuxfs/" + name);
+                try (java.io.InputStream in = getAssets().open("linuxfs/" + asset);
                      java.io.OutputStream out = new java.io.FileOutputStream(staged)) {
                     byte[] buffer = new byte[1 << 16];
                     for (int read = in.read(buffer); read > 0; read = in.read(buffer)) out.write(buffer, 0, read);

@@ -151,6 +151,12 @@ done
 ls -l rootfs/usr/lib/libnettle.so.8 rootfs/usr/lib/libtheoradec.so.1 rootfs/usr/lib/libvpx.so.9
 
 cp -a "$here/overlay/." rootfs/
+# The app carries the same scripts and refreshes them into an installed rootfs at every session
+# start, so a build and the rootfs it boots never disagree about them (the rootfs cannot be
+# written from outside the app, and the device may never take a new runtime image).
+for script in "$here"/overlay/usr/local/bin/bannerlator-*; do
+  install -Dm644 "$script" "$here/../../app/src/main/assets/linuxfs/usr/local/bin/$(basename "$script")"
+done
 # Preloaded into every session process: what the kernel or the app sandbox withholds, answered
 # in the process itself; see preload/*.c.
 mkdir -p rootfs/usr/local/lib

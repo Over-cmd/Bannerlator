@@ -96,21 +96,15 @@ case $mode in
     bannerlator-steam-library "$steam_root" || true
     step "setting up the ARM64 Proton compatibility tool"
     bannerlator-steam-compat "$steam_root" || true
-    # The client downloads the ARM64 Proton the first time a Windows title launches - after the
-    # registrar has already run and found nothing. Without this the user has to quit and relaunch
-    # before any game can start, which is the one step nobody would guess. Watch for the depot and
-    # register it the moment it lands; the registrar is idempotent, so a repeat costs nothing.
+    # The tool is registered before the client starts and finds the depot at launch time, so
+    # nothing here waits for a download. What can still change under a running client is which
+    # titles are installed: a title installed this session gets the client's own per-app Proton
+    # choice, which it cannot start. Refresh the per-app entries every so often; the registrar is
+    # idempotent, so a repeat costs nothing.
     (
       for _ in $(seq 1 240); do
         sleep 15
-        for d in "Proton Experimental (ARM64)" "Proton 11.0 (ARM64)"; do
-          if [ -d "$steam_root/steamapps/common/$d/files/bin-arm64" ] \
-             && [ ! -d "$steam_root/compatibilitytools.d/bannerlator-proton-arm64" ]; then
-            step "ARM64 Proton finished downloading - registering it now, no restart needed"
-            bannerlator-steam-compat "$steam_root" || true
-            exit 0
-          fi
-        done
+        bannerlator-steam-compat "$steam_root" >/dev/null 2>&1 || true
       done
     ) &
     # Debug aid while the runtime is being brought up: an app id dropped in ~/.bl-autolaunch is
