@@ -9621,3 +9621,18 @@ Also worth recording: reopening the app does not adopt anything. Adoption runs o
 start and end only, so a game downloaded in the client stays invisible to the store until a
 session runs. Launching the client again is enough, because the start-of-session pass is not
 racing a teardown.
+
+**Round trip closed (`37d4f62a`, device-proven 2026-09-19).** Portal 2 is in the store's database
+as installed at `imagefs/steam_games/Portal 2`, the library shows nine, and the pass logged
+`adopted Portal 2 (620)` followed by `adoption pass: 1 game(s) taken into the store` one
+millisecond apart - the same work that previously outlived the process, now that the size is read
+from the manifest instead of counted. A game downloaded in the Linux client lands in internal
+storage, is taken into the store, and is playable from either side.
+
+Where the Linux client stands at the end of the day, all device-proven on the Pocket FIT: FlatOut
+runs through ARM64 Proton, the Steam button opens the client's in-game menu, library sync holds
+in all four directions, the install dialog names its two places and reports each one's real free
+space, manifests carry real depot data, and the FEX preset reaches a session for the first time.
+Nothing on `feat/linux-gamescope-runtime` is merged to main. Open and cosmetic: Half-Life 2's
+three episodes appear in the store but not the client, and a client download is only taken into
+the store when a session starts or ends rather than while it runs.
