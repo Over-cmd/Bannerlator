@@ -9279,3 +9279,15 @@ user chose (on this device, Brawlhalla lives on a removable card at `/storage/7B
 sync bound the link itself, and a card is not among the trees bound into the runtime, so inside the
 client the link resolved to nothing: through the runtime's own proot, binding the link showed an
 empty folder and binding the resolved path showed all 580 files. `d71739fe` binds the real folder.
+
+**The user was right to push on this.** "Why read containers and not the original folders?"
+The library sync had been built on the links the store leaves under each container's prefix,
+and two rounds of patching — scanning every container, then chasing links that had gone stale
+after a game was moved to a card — were symptoms of the wrong shape. `9ce0cf67` replaces it:
+the store's database is the source of truth, one row per game with the folder it actually lives
+in, kept current on a move; the original folder is what gets bound into the client, wherever it
+is; and a folder the database does not know still counts if it identifies itself, by the
+`steam_appid.txt` a launch leaves behind or by the downloader's journal mapped back through the
+database. The one thing that cannot be skipped is the manifest: the client will not treat a bare
+folder as a game, so each gets the manifest the app already wrote where one exists, or one
+written from its row. Nothing is copied; the client reads the same files Steam delivered.
