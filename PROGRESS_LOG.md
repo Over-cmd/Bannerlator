@@ -9831,3 +9831,14 @@ Payback's route is its own: `link2ea://` rather than Most Wanted's `steam2ea://`
 `Link2EA.exe`, which then brings up EA Desktop and `ActivationUI.exe` beside the game. So the two
 EA titles differ in entry point but both end at EA Desktop - the earlier note that Payback skipped
 EA Desktop entirely was drawn from a run where the chain had already wedged, and is wrong.
+
+**Capitals still came out lowercase, and the first fix was why (2026-09-19).** `@` worked but a
+capital `I` did not. The fallback that rescued the symbols only ran when the key code was missing
+from the table, and a capital uses a key that is in it - `KEYCODE_I` resolves, so the fallback was
+never reached and the key went out without a modifier.
+
+The distinction that matters is not which key it is but where Shift lives. A soft keyboard reports
+Shift in the event's meta state and sends no Shift key of its own, so this side has to make one; a
+hardware keyboard sends its own, and a second would release the modifier while the key is still
+physically held. So Shift is now synthesised whenever the character needs it and the event came
+from a virtual device, whether or not the key code was already known.

@@ -12023,24 +12023,24 @@ public class XServerDisplayActivity extends AppCompatActivity {
                     || kc == KeyEvent.KEYCODE_VOLUME_MUTE || kc == KeyEvent.KEYCODE_BUTTON_MODE;
             if (!systemKey) {
                 int evdev = androidKeyToEvdev(kc);
-                // A soft keyboard's symbol keys are not in that table and carry no scan code, so
-                // they used to reach the session as nothing at all - an EA sign-in took an address
-                // without its @ and rejected it. The character the key stands for is known, so
-                // work back from that instead: which key carries it, and whether Shift is what
-                // puts it there.
-                int shiftEvdev = 0;
-                if (evdev <= 0) {
-                    int ch = event.getUnicodeChar();
-                    if (ch > 0) {
-                        int plain = unshiftedChar(ch);
-                        int typed = plain != 0 ? plain : ch;
-                        int code = androidKeyToEvdev(keycodeForChar(typed));
-                        if (code > 0) {
-                            evdev = code;
-                            if (plain != 0) shiftEvdev = 42;   // KEY_LEFTSHIFT
-                        }
-                    }
+                // What the key stands for, and the key it would sit on without Shift - non-zero
+                // only for a character Shift puts there, which is every capital and the symbol row.
+                int ch = event.getUnicodeChar();
+                int plain = ch > 0 ? unshiftedChar(ch) : 0;
+                // A soft keyboard's symbol keys are in neither the table above nor a scan code, so
+                // they reached the session as nothing at all and an EA sign-in took an address
+                // without its @. Work back from the character instead: which key carries it.
+                if (evdev <= 0 && ch > 0) {
+                    int code = androidKeyToEvdev(keycodeForChar(plain != 0 ? plain : ch));
+                    if (code > 0) evdev = code;
                 }
+                // And the modifier has to be made here rather than passed on. A soft keyboard
+                // reports Shift in the event's meta state and sends no Shift key of its own, so a
+                // capital arrives as a key this side already knows - which is why the fallback
+                // above never saw it, and why every capital came out lowercase. A hardware
+                // keyboard does send its own Shift, and giving it a second one would release the
+                // modifier while the key is still physically held.
+                int shiftEvdev = (evdev > 0 && plain != 0 && event.getDeviceId() <= 0) ? 42 : 0;
                 if (evdev <= 0 && event.getScanCode() > 0) evdev = event.getScanCode();
                 if (evdev > 0) {
                     if (event.getAction() == KeyEvent.ACTION_DOWN) {
