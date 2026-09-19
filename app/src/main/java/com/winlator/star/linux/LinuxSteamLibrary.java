@@ -195,9 +195,7 @@ public final class LinuxSteamLibrary {
                 // A download in progress has no folder yet and is not fully installed; a game
                 // whose folder was removed - by the store or by hand - is.
                 String text = file.isFile() ? FileUtils.readString(file) : null;
-                Matcher st = text != null ? STATE.matcher(text) : null;
-                boolean installed = st == null || !st.find() || "4".equals(st.group(1));
-                if (installed) file.delete();
+                if (isInstalled(text)) file.delete();
             }
         }
         return count;
@@ -350,8 +348,7 @@ public final class LinuxSteamLibrary {
                         String n = nmCheck.group(1);
                         if (n.startsWith("Proton") || n.startsWith("Steam Linux Runtime") || n.startsWith("Steamworks") || n.equals("FEX")) continue;
                     }
-                    Matcher st = STATE.matcher(text);
-                    if (st.find() && !"4".equals(st.group(1))) continue;   // still downloading
+                    if (!isInstalled(text)) continue;   // not on disk yet
                     Matcher dir = INSTALLDIR.matcher(text);
                     Matcher nm = NAME.matcher(text);
                     if (!dir.find()) continue;
@@ -370,6 +367,28 @@ public final class LinuxSteamLibrary {
             }
         }
         return adopted;
+    }
+
+    /**
+     * Whether a manifest describes a game whose files are on disk. StateFlags is a bit field, not
+     * a value: 4 means fully installed, and a game can carry it alongside 2 (an update is
+     * available) or 512 (an update is paused) and still be installed and playable - Left 4 Dead 2
+     * sat at 6 and Team Fortress 2 at 516 on the test device. Comparing the whole field to "4"
+     * therefore missed games that were simply a version behind. A manifest with no StateFlags at
+     * all is treated as installed, which is how the app's own manifests read before the client
+     * has touched them; one that is being removed (2048) is not.
+     */
+    private static boolean isInstalled(String manifest) {
+        if (manifest == null) return false;
+        Matcher st = STATE.matcher(manifest);
+        if (!st.find()) return true;
+        int flags;
+        try {
+            flags = Integer.parseInt(st.group(1));
+        } catch (NumberFormatException e) {
+            return true;
+        }
+        return (flags & 4) != 0 && (flags & 2048) == 0;
     }
 
     private static final Pattern STATE =

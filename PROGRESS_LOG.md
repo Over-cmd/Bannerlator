@@ -9415,3 +9415,22 @@ app's games to the client, our ARM64 Proton launches a Windows title, and the cl
 menu over it. Still to prove: a download to the card from inside the client, the retired-library
 cleanup on the Fold, store-side launch/Verify of a client-installed game, and the Fold's on-screen
 controls, which have no Steam-button element yet.
+
+**Two-way visibility read off the device, and a StateFlags bug it exposed (2026-09-19).** The
+app's seven installed titles are all present to the client: Brawlhalla, FlatOut, Half-Life,
+Half-Life 2, Lossless Scaling and Stumble Guys in the main library, Team Fortress 2 in the card
+library, which `libraryfolders.vdf` lists as `/mnt/bannerlator-sd` with apps 440 and 550. The
+reverse direction is live too - Left 4 Dead 2 was installed by the client onto the card and
+appears there - but it is **not** in the store's database, and that is our bug, not a delay.
+`StateFlags` is a bit field and adoption compared the whole field to "4". L4D2 reads 6 (installed
++ update available) and TF2 reads 516 (installed + update paused), so a game that is fully on
+disk but a version behind was read as "still downloading" and never adopted. Replaced both
+equality tests with `isInstalled()`: bit 4 set, bit 2048 (being removed) clear, and a manifest
+with no StateFlags still counts, which is how the app's own manifests read.
+
+**Brawlhalla now exists twice** - `imagefs/steam_games/Brawlhalla` and the card's copy, ~1.5 GB
+duplicated, with a manifest in each library. `migratePrivateLibrary` only checks the destination
+root for a name collision, and the app's copy was on the card, so the client's private copy moved
+in beside it instead of being recognised as the same game. Flagged to the user rather than
+deleted; the collision check should consult the database's install dir for the app id, not just
+the destination folder.
