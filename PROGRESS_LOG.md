@@ -9820,3 +9820,14 @@ Also learned: Payback does NOT take the `steam2ea://` road Most Wanted did. It r
 bundled `Core/ActivationUI.exe` Qt window instead, which is what memory recorded for it on the
 app side - so the two EA titles tested take different routes, and Most Wanted's EA Desktop path
 is not the only one.
+
+**Both fixes proven on device (2026-09-19, `31834421`).** The redist seeder covering a prefix
+created mid-session took Payback from six minutes wedged on "Running install script" to seven
+seconds from Play to EA's handler, and about thirty to the game process - the install scripts were
+skipped outright. And the sign-in field now reads the user's whole address, `@` included, where
+before it silently dropped every shifted character.
+
+Payback's route is its own: `link2ea://` rather than Most Wanted's `steam2ea://`, handled by
+`Link2EA.exe`, which then brings up EA Desktop and `ActivationUI.exe` beside the game. So the two
+EA titles differ in entry point but both end at EA Desktop - the earlier note that Payback skipped
+EA Desktop entirely was drawn from a run where the chain had already wedged, and is wrong.
