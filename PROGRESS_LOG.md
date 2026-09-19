@@ -9332,3 +9332,13 @@ library and are never adopted as games; the app deletes only manifests it wrote 
 Games-tab `syncClientGames` path is gone — a client install is adopted into the store's database.
 Dispatching `build-artifacts.yml` on `67bb8249` + the log commit; crash-fix `15952f1a` remains
 staged and untested on device.
+
+**Saves and Steam Cloud, checked against the change (2026-09-19).** Nothing that holds a save
+moves. Client-side saves live under the library's `steamapps/compatdata/<appid>/pfx` and the
+client's `userdata/`, both in the runtime root — the bind covers only `common/`, and Steam Cloud
+in the client is keyed by appid, not by folder. App-side saves live in each container's Wine
+prefix and sync through `SteamCloudSaveManager`; the change never touches a container. The one
+leftover was `bannerlator-seed-redists`, still seeding the retired `/mnt/bannerlator` library's
+prefixes — now `/mnt/bannerlator-sd`; the dead `GUEST_ROOT` constant is gone (`2b1f3163`). The
+`cc237b45` run was cancelled and `build-artifacts.yml` re-dispatched on `2b1f3163`
+(run 35426952192, headSha verified).
