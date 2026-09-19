@@ -9764,3 +9764,21 @@ would install the EA App at launch; it only names a file to delete on uninstall.
 Desktop was already installing itself as that was being written. The `terminate called without an
 active exception` storm and the `KeyboardInterrupt` in Proton's `waitpid` were the shutdown, not a
 crash: they landed seconds after the last screenshot and the launch wrapper exited 0.
+
+**Queued for testing after Most Wanted (2026-09-19).** Grand Theft Auto V Enhanced (3240220) is
+installed in internal storage at build 25261616, and Need for Speed Payback (1262580) has finished
+its 21.9 GB download. Neither is in the store's database yet: adoption runs when a Linux session
+starts or ends, and none has since they arrived, so they will be taken in on the next launch.
+
+These are two different third-party chains, not two of the same. Payback is a second reading of
+the EA route Most Wanted just proved - and a useful one, because on the app side Payback activates
+through its own bundled `Core/ActivationUI.exe` rather than EA Desktop, so the client is likely to
+take it down the `steam2ea://` road instead and show whether Most Wanted was representative or
+lucky. GTA V Enhanced is a different vendor entirely: Rockstar's launcher and Social Club, which
+nothing here has ever exercised, on a title far larger and more modern than anything tested so
+far.
+
+Each game builds its own prefix, so EA Desktop will install itself again for Payback rather than
+reusing Most Wanted's - only 1262560 carries it today. First launches will be slow for that
+reason, which is worth knowing before mistaking it for a hang: Most Wanted took about two and a
+half minutes from Play to its title screen.
