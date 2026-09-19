@@ -9487,3 +9487,11 @@ override that. The case that proves the fix is Lossless Scaling, which the app d
 Also adopted this session: Half-Life 2's episodes (340/380/420), all pointing at the Half-Life 2
 folder they share. Correct by every test we have, but the client does not list them, so the store
 now shows three entries the client does not.
+
+**Card cleared for the user's clean slate (2026-09-19).** Left 4 Dead 2 (~12.9 GB) and the
+2 MB Apex Legends stub removed from `/storage/<card>/bannerlator/steam_games`, along with the
+client's stale `appmanifest_550`. The card library now holds no manifests at all. Free space went
+from 273 GB to 286 GB. The first attempt was cut off partway - a delete that size over the card's
+FUSE layer outlives the bridge connection - so it was re-run detached and polled to completion.
+The store's database still records 550 as installed; `releaseClientUninstalls` corrects that on
+the next session, which is the path worth watching when the user next launches.
