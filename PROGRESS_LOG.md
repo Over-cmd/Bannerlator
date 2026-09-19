@@ -9853,3 +9853,21 @@ Noted for when it is played: Steam's own database says this title has no control
 Steam Input is off and the game is left to read the pad itself. Ours presents as an Xbox 360 pad
 and may well be read, but if it is not, the Enable Steam Input button on that same screen is the
 answer.
+
+**GTA V Enhanced reaches its loading screen under BattlEye, and the session was killed by
+watching it (2026-09-19).** The whole Rockstar chain worked: `PlayGTAV.exe` to the Rockstar
+launcher, which installed itself, pulled in Social Club and its redistributables, updated itself,
+connected to Rockstar's services and signed in, then started `GTA5_Enhanced.exe` alongside
+`GTA5_Enhanced_BE.exe`. The game took its own rendering surface and drew its loading bar to about
+three quarters. BattlEye did not refuse it.
+
+It then stopped, and not because of anticheat: every process was dropped at 23:49:42, the moment
+the user backgrounded the app to read this session's messages. The Linux session cannot survive
+the app losing foreground when the terminal and the app share a device, which is a hazard already
+recorded here. The narration of each monitor event is what invited the switch - the watching
+killed the thing being watched. Nothing about the launch was rejected; it was interrupted.
+
+Also hit on the way: the Rockstar launcher runs its own `vc_redist.x86.exe`, which wedged in
+`pipe_read` exactly as Steam's copies do. The seeder cannot help there - it marks Steam's shared
+redistributables, and this one is Rockstar's. It cleared, though whether the TERM sent to it
+landed or it finished by itself is not known: the bridge dropped before the result came back.
