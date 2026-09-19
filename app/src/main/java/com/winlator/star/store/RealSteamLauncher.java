@@ -732,7 +732,7 @@ public final class RealSteamLauncher {
      * even before the agent's own richer {@code stage_app_manifest} overwrites it at startup. Field
      * shapes + VDF escaping mirror agent-src/main.cpp:252-420 so the two never disagree.
      */
-    private static void writeAppManifest(File acf, int appId, String displayName,
+    public static void writeAppManifest(File acf, int appId, String displayName,
                                          String canonicalName, long steamId64) {
         String name = (displayName != null && !displayName.isEmpty()) ? displayName : canonicalName;
         String nameEsc = vdfEscape(name);

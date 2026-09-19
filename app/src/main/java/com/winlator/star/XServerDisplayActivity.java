@@ -8880,7 +8880,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
         }
 
         List<String> gameBinds = com.winlator.star.linux.LinuxSteamLibrary.prepare(
-                containerManager.getContainers(), com.winlator.star.linux.LinuxRuntime.rootDir(this));
+                this, containerManager.getContainers(), com.winlator.star.linux.LinuxRuntime.rootDir(this));
         // The other direction: games the client installed for itself get Games-tab entries that
         // launch through it, so the two libraries meet in the middle.
         com.winlator.star.linux.LinuxSteamLibrary.syncClientGames(

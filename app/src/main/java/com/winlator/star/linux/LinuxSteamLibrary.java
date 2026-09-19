@@ -62,23 +62,23 @@ public final class LinuxSteamLibrary {
      * the proot bind specs ({@code host:guest}) that put each game in place. Worker thread: this
      * reads and copies files.
      */
-    /** The launching container alone; kept for callers that have no manager. */
-    public static List<String> prepare(Container container, File rootfs) {
-        List<Container> one = new ArrayList<>();
-        if (container != null) one.add(container);
-        return prepare(one, rootfs);
-    }
-
     /**
-     * Every container's installs, not just the launching one's. The app's store installs into
-     * whichever container the user chose for a title, and the Linux client's own entry lives in a
-     * container of its own with no store installs at all - so reading only that one presented the
-     * client with an empty library on a device holding twenty installed games across three others.
-     * A title installed in more than one container is taken from the first that has it complete.
+     * The app's installed Steam games, presented to the Linux client as one library folder.
+     *
+     * The store's database is the source of truth: one row per game with the folder it was
+     * actually installed to, kept current when a game is moved between the app's storage and a
+     * card. The links the store leaves under a container's prefix are copies of that and go stale
+     * on a move, which is why they are not followed here. A folder the database does not know is
+     * still taken if it identifies itself: the Steam API layer leaves steam_appid.txt in a folder
+     * that has been launched, and the downloader's journal names the depots it installed, which the
+     * database maps back to an app.
+     *
+     * A container's prefix manifest is still preferred as the manifest handed to the client when
+     * one exists, because it carries the build the app installed; otherwise one is written from
+     * the row. Builds are reconciled both ways with the prefix manifest that owns the title.
      */
-    public static List<String> prepare(List<Container> containers, File rootfs) {
+    public static List<String> prepare(android.content.Context context, List<Container> containers, File rootfs) {
         List<String> binds = new ArrayList<>();
-        if (containers == null || containers.isEmpty()) return binds;
         File steamapps = new File(rootfs, GUEST_ROOT.substring(1) + "/steamapps");
         File common = new File(steamapps, "common");
         if (!common.isDirectory() && !common.mkdirs()) {
@@ -86,9 +86,43 @@ public final class LinuxSteamLibrary {
             return binds;
         }
         Set<String> kept = new HashSet<>();
-        for (Container container : containers) {
-            prepareContainer(container, steamapps, common, kept, binds);
+        java.util.Map<String, File> prefixManifests = prefixManifests(containers);
+
+        // 1. What the database says is installed.
+        java.util.Map<Integer, String> depotToApp = new java.util.HashMap<>();
+        Set<Integer> known = new HashSet<>();
+        try {
+            for (com.winlator.star.store.SteamDatabase.GameRow row
+                    : com.winlator.star.store.SteamDatabase.getInstance(context).getInstalledGames()) {
+                if (row.depotIds != null) {
+                    for (String d : row.depotIds.split(",")) {
+                        try { depotToApp.put(Integer.parseInt(d.trim()), String.valueOf(row.appId)); } catch (NumberFormatException ignored) {}
+                    }
+                }
+                File dir = installDirOf(context, row);
+                if (!dir.isDirectory()) {
+                    Log.w(TAG, row.name + " (" + row.appId + ") is recorded at " + dir + " but the folder is missing");
+                    continue;
+                }
+                known.add(row.appId);
+                expose(String.valueOf(row.appId), row.name, dir, steamapps, common, kept, binds, prefixManifests);
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "installed games unavailable from the database", t);
         }
+
+        // 2. Folders that identify themselves and that the database missed.
+        for (File root : storeRoots(context)) {
+            File[] dirs = root.listFiles(File::isDirectory);
+            if (dirs == null) continue;
+            for (File dir : dirs) {
+                String appId = appIdOfFolder(dir, depotToApp);
+                if (appId == null || known.contains(Integer.parseInt(appId))) continue;
+                Log.i(TAG, dir.getName() + " identifies itself as " + appId + " without a database row");
+                expose(appId, dir.getName(), dir, steamapps, common, kept, binds, prefixManifests);
+            }
+        }
+
         File[] stale = steamapps.listFiles((dir, name) -> MANIFEST.matcher(name).matches());
         if (stale != null) {
             for (File file : stale) {
@@ -99,85 +133,90 @@ public final class LinuxSteamLibrary {
         return binds;
     }
 
-    /**
-     * The store's install roots: the app's own, and a bannerlator/steam_games folder on every
-     * mounted volume, which is where the storage picker puts a card.
-     */
-    private static File findMovedGame(File source, String installDir) {
+    /** The launching container alone; kept for callers that have no context. */
+    public static List<String> prepare(Container container, File rootfs) {
+        return new ArrayList<>();
+    }
+
+    /** Same rule the updater uses: the recorded folder, else the app's own storage by name. */
+    private static File installDirOf(android.content.Context context,
+                                     com.winlator.star.store.SteamDatabase.GameRow row) {
+        if (row.installDir != null && !row.installDir.isEmpty()) return new File(row.installDir);
+        return new File(new File(context.getFilesDir(), "imagefs/steam_games"), safeName(row.name));
+    }
+
+    private static String safeName(String name) {
+        String safe = name == null ? "" : name.replaceAll("[/\\\\:*?\"<>|]", "_").trim();
+        return safe.isEmpty() ? "game" : safe;
+    }
+
+    /** The app's own steam_games and bannerlator/steam_games on every mounted volume. */
+    private static List<File> storeRoots(android.content.Context context) {
         List<File> roots = new ArrayList<>();
-        // <imagefs>/steam_games sits four levels above <prefix>/steamapps: .wine/drive_c/Program Files (x86)/Steam/steamapps
-        File prefixRoot = source;
-        for (int i = 0; i < 5 && prefixRoot != null; i++) prefixRoot = prefixRoot.getParentFile();
-        File home = prefixRoot != null ? prefixRoot.getParentFile() : null;       // imagefs/home/xuser-N -> imagefs/home
-        File imagefs = home != null ? home.getParentFile() : null;                // imagefs
-        if (imagefs != null) roots.add(new File(imagefs, "steam_games"));
-        File storage = new File("/storage");
-        File[] volumes = storage.listFiles();
+        roots.add(new File(context.getFilesDir(), "imagefs/steam_games"));
+        File[] volumes = new File("/storage").listFiles();
         if (volumes != null) {
-            for (File volume : volumes) {
-                roots.add(new File(volume, "bannerlator/steam_games"));
-            }
+            for (File volume : volumes) roots.add(new File(volume, "bannerlator/steam_games"));
         }
-        for (File root : roots) {
-            File candidate = new File(root, installDir);
-            if (candidate.isDirectory()) return candidate;
+        return roots;
+    }
+
+    /** steam_appid.txt from a launch, else the downloader's journal mapped through the database. */
+    private static String appIdOfFolder(File dir, java.util.Map<Integer, String> depotToApp) {
+        String text = FileUtils.readString(new File(dir, "steam_appid.txt"));
+        if (text != null && text.trim().matches("\\d+")) return text.trim();
+        String journal = FileUtils.readString(new File(dir, ".bl_depot/depot.config"));
+        if (journal == null) return null;
+        Matcher m = Pattern.compile("\"(\\d+)\"\\s*:").matcher(journal);
+        while (m.find()) {
+            String app = depotToApp.get(Integer.parseInt(m.group(1)));
+            if (app != null) return app;
         }
         return null;
     }
 
-    private static final Pattern STATE =
-            Pattern.compile("^\\s*\"StateFlags\"\\s*\"(\\d+)\"", Pattern.MULTILINE);
-
-    private static void prepareContainer(Container container, File steamapps, File common,
-                                         Set<String> kept, List<String> binds) {
-        if (container == null) return;
-        File source = prefixSteamApps(container);
-        File[] manifests = source.listFiles((dir, name) -> MANIFEST.matcher(name).matches());
-        if (manifests == null) return;
-        for (File manifest : manifests) {
-            if (kept.contains(manifest.getName())) continue;
-            String text = FileUtils.readString(manifest);
-            if (text == null) continue;
-            // Only a complete install: the store writes StateFlags 4 for one; 6 and 1026 are
-            // still downloading or waiting on an update, and a bind of those would offer the
-            // client half a game.
-            Matcher st = STATE.matcher(text);
-            if (st.find() && !"4".equals(st.group(1))) continue;
-            Matcher m = INSTALLDIR.matcher(text);
-            if (!m.find()) continue;
-            String installDir = m.group(1);
-            File gameDir = new File(source, "common/" + installDir);
-            if (!gameDir.isDirectory()) {
-                // The prefix link is stale: the store moved the game between storages and did not
-                // repoint it. The folder keeps its name wherever it went, so look for it under the
-                // store's roots before giving up. Only a dangling link is recovered this way; a
-                // link that resolves is trusted as it stands.
-                gameDir = findMovedGame(source, installDir);
-                if (gameDir == null) continue;
-                Log.i(TAG, installDir + ": prefix link is stale, found at " + gameDir);
-            }
-            File runtimeManifest = new File(steamapps, manifest.getName());
-            long runtimeBuild = buildId(runtimeManifest), appBuild = buildId(manifest);
-            if (runtimeBuild > appBuild) {
-                if (!FileUtils.copy(runtimeManifest, manifest)) Log.w(TAG, "could not adopt " + runtimeManifest);
-            } else if (runtimeBuild == 0L || appBuild > runtimeBuild) {
-                if (!FileUtils.copy(manifest, runtimeManifest)) continue;
-            }
-            // The prefix entry is a link to wherever the store put the files - the app's own
-            // storage or a card the user chose. A card is not one of the trees bound into the
-            // runtime, so binding the link itself hands the client a folder that resolves to
-            // nothing inside. The real folder is bound instead, wherever it is.
-            String realDir;
-            try {
-                realDir = gameDir.getCanonicalPath();
-            } catch (java.io.IOException e) {
-                Log.w(TAG, "cannot resolve " + gameDir, e);
-                continue;
-            }
-            kept.add(manifest.getName());
-            new File(common, installDir).mkdirs();
-            binds.add(realDir + ":" + GUEST_ROOT + "/steamapps/common/" + installDir);
+    /** Every container's prefix manifests by file name; the first container that has one wins. */
+    private static java.util.Map<String, File> prefixManifests(List<Container> containers) {
+        java.util.Map<String, File> found = new java.util.HashMap<>();
+        if (containers == null) return found;
+        for (Container container : containers) {
+            File[] manifests = prefixSteamApps(container).listFiles((dir, name) -> MANIFEST.matcher(name).matches());
+            if (manifests == null) continue;
+            for (File m : manifests) found.putIfAbsent(m.getName(), m);
         }
+        return found;
+    }
+
+    private static void expose(String appId, String name, File dir, File steamapps, File common,
+                               Set<String> kept, List<String> binds, java.util.Map<String, File> prefixManifests) {
+        String manifestName = "appmanifest_" + appId + ".acf";
+        if (kept.contains(manifestName)) return;
+        String realDir;
+        try {
+            realDir = dir.getCanonicalPath();
+        } catch (java.io.IOException e) {
+            Log.w(TAG, "cannot resolve " + dir, e);
+            return;
+        }
+        String installDir = dir.getName();
+        File runtimeManifest = new File(steamapps, manifestName);
+        File prefixManifest = prefixManifests.get(manifestName);
+        if (prefixManifest != null) {
+            // Both sides update titles: adopt the client's build into the app's copy when it is
+            // newer, and replace the client's only when the app holds the newer build.
+            long runtimeBuild = buildId(runtimeManifest), appBuild = buildId(prefixManifest);
+            if (runtimeBuild > appBuild) {
+                if (!FileUtils.copy(runtimeManifest, prefixManifest)) Log.w(TAG, "could not adopt " + runtimeManifest);
+            } else if (runtimeBuild == 0L || appBuild > runtimeBuild) {
+                if (!FileUtils.copy(prefixManifest, runtimeManifest)) return;
+            }
+        } else if (!runtimeManifest.isFile()) {
+            com.winlator.star.store.RealSteamLauncher.writeAppManifest(
+                    runtimeManifest, Integer.parseInt(appId), name, installDir, 0L);
+        }
+        kept.add(manifestName);
+        new File(common, installDir).mkdirs();
+        binds.add(realDir + ":" + GUEST_ROOT + "/steamapps/common/" + installDir);
     }
 
     /**
