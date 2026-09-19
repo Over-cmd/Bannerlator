@@ -8721,7 +8721,12 @@ public class XServerDisplayActivity extends AppCompatActivity {
                 {"usr/local/bin/bannerlator-steam-compat", "usr/local/bin/bannerlator-steam-compat"},
                 {"usr/local/bin/bannerlator-steam-install", "usr/local/bin/bannerlator-steam-install"},
                 {"usr/local/bin/bannerlator-steam-library", "usr/local/bin/bannerlator-steam-library"},
+                {"usr/local/bin/bannerlator-seed-redists", "usr/local/bin/bannerlator-seed-redists"},
         };
+        // Android has no /dev/shm; a directory under the cache stands in for it, and unlike the real
+        // thing it keeps whatever a session leaves. The client abandons some fifty megabytes of
+        // streams each run; one runtime reached 22 GB. Cleared before a session starts.
+        FileUtils.clear(new File(getCacheDir(), "shm"));
         StringBuilder stagedReport = new StringBuilder();
         for (String[] entry : sessionFiles) {
             String asset = entry[0], name = new File(entry[1]).getName();
@@ -8860,13 +8865,38 @@ public class XServerDisplayActivity extends AppCompatActivity {
 
         // The games this app already downloaded, handed to the Steam client as a library folder so
         // the same install serves both launchers and nothing is fetched twice.
+        // The games the client starts run under FEX, which a Wine session configures from the
+        // container's preset. Nothing did so here, so anything the client launched ran on FEX's
+        // bare defaults - no store ordering - and a multithreaded x86 title can sit at its loading
+        // screen for good waiting on a store it never sees. The user's own variables are merged
+        // over the preset, so an explicit one still wins. (WinNative ec98f03c.)
+        {
+            String fexPreset = shortcut != null
+                    ? shortcut.getExtra("fexcorePreset", container.getFEXCorePreset())
+                    : container.getFEXCorePreset();
+            EnvVars sessionEnv = com.winlator.star.fexcore.FEXCorePresetManager.getEnvVars(this, fexPreset);
+            sessionEnv.putAll(effectiveUserEnv());
+            for (String entry : sessionEnv.toStringArray()) guest.add(entry);
+        }
+
         List<String> gameBinds = com.winlator.star.linux.LinuxSteamLibrary.prepare(
+                container, com.winlator.star.linux.LinuxRuntime.rootDir(this));
+        // The other direction: games the client installed for itself get Games-tab entries that
+        // launch through it, so the two libraries meet in the middle.
+        com.winlator.star.linux.LinuxSteamLibrary.syncClientGames(
                 container, com.winlator.star.linux.LinuxRuntime.rootDir(this));
         // Apps may not list /dev/input; the fake evdev nodes the input rings back stand in for it.
         gameBinds = new ArrayList<>(gameBinds);
         if (fakeInputEnabled) gameBinds.add(fakeInputDir.getPath() + ":/dev/input");
         List<String> command = com.winlator.star.linux.LinuxRuntime.command(this, imageFs, runtimeDir,
                 android.os.Environment.getExternalStorageDirectory(), gameBinds, guest);
+        // The device's network link, for the runtime's processes: written before the session so
+        // its first process already sees it, then kept current while it runs.
+        com.winlator.star.linux.LinuxNetworkLinkComponent networkLink =
+                new com.winlator.star.linux.LinuxNetworkLinkComponent(
+                        this, com.winlator.star.linux.LinuxRuntime.rootDir(this));
+        networkLink.publish();
+        environment.addComponent(networkLink);
         environment.addComponent(new com.winlator.star.linux.LinuxProgramLauncherComponent(
                 command, hostEnv, com.winlator.star.linux.LinuxRuntime.rootDir(this), (status) -> {
                     Log.i("XServerDisplayActivity", "Linux session " + session + " ended: " + status);
