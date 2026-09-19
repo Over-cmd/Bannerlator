@@ -11,7 +11,10 @@ import sys
 
 # The client's own library is internal storage (its steamapps/common is bound to the app's root);
 # the card is the one extra library folder.
-LIBRARIES = (("/mnt/bannerlator-sd", "Bannerlator (card)"),)
+LIBRARIES = (("/mnt/bannerlator-sd", "SD Card"),)
+# The client calls its own library "Local Drive (/)", which says nothing about where that is.
+# It is the phone's internal storage, so say so.
+MAIN_LABEL = "Internal Storage"
 
 
 def register(steam_root, library, label):
@@ -92,12 +95,50 @@ def forget(steam_root, library):
         print("bannerlator-steam-library: forgot %s" % library)
 
 
+def relabel(steam_root, target, label):
+    """Names a library for what it is. The client writes its own entry with an empty label and
+    falls back to showing the mount point - "Local Drive (/)" - so the install dialog gives no
+    clue which of the two places is the phone and which is the card. A library registered on an
+    earlier run keeps whatever label it was given then, so both are named here every time.""" 
+    path = os.path.join(steam_root, "steamapps", "libraryfolders.vdf")
+    if not os.path.isfile(path):
+        return
+    with open(path, encoding="utf-8", errors="replace") as f:
+        lines = f.read().split("\n")
+    out, depth, block, changed = [], 0, None, False
+    for line in lines:
+        if depth == 1 and re.fullmatch(r'\t"\d+"', line):
+            block = [line]
+            continue
+        if block is not None:
+            block.append(line)
+            depth += line.count("{") - line.count("}")
+            if depth == 1:
+                text = "\n".join(block)
+                if re.search(r'"path"\s+"%s"' % re.escape(target), text):
+                    new = re.sub(r'("label"\s+")[^"]*(")', r"\g<1>%s\g<2>" % label, text, count=1)
+                    if new != text:
+                        changed = True
+                        text = new
+                out.extend(text.split("\n"))
+                block = None
+            continue
+        depth += line.count("{") - line.count("}")
+        out.append(line)
+    if changed:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\n".join(out))
+        print("bannerlator-steam-library: labelled %s %r" % (target, label))
+
+
 def main():
     steam_root = sys.argv[1]
     for library in RETIRED:
         forget(steam_root, library)
+    relabel(steam_root, steam_root, MAIN_LABEL)
     for library, label in LIBRARIES:
         register(steam_root, library, label)
+        relabel(steam_root, library, label)
 
 
 if __name__ == "__main__":

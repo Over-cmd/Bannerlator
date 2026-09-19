@@ -9526,3 +9526,13 @@ place - just the number is wrong. It matters once the two diverge, because Steam
 on that figure and could refuse a card install that would fit, or accept one that would not. The
 fix is to bind the library root itself to a folder on the card and layer `common` over it, which
 also moves the manifests the app writes onto the card. Not done yet.
+
+**Naming the two install locations (2026-09-19).** The user could not tell from the install
+dialog which row was the phone and which was the card, and they were right: the client writes its
+own library entry with an empty label and falls back to showing the mount point, so the default
+read "Local Drive (/)". Both libraries are now labelled every session - "Internal Storage" and
+"SD Card" - rather than only at first registration, since a library registered on an earlier run
+keeps whatever label it was given then, which is why this device still showed "Bannerlator
+(card)". Unit-tested against a sample `libraryfolders.vdf`. Whether the client honours a label on
+its own library the way it does on an added one is unproven; the card row already proves labels
+are used for added libraries.
