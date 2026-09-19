@@ -9261,3 +9261,14 @@ storage-move UI, the compositor blend and the Turnip timestamp change — none b
 went on to commit and push regardless, which produced one build with the pieces present but
 not wired (cancelled, `a49806e8`). The final state was proved by counting the wired call sites
 and balancing braces, not by exit codes. Not yet run on a device.
+
+**Caught before the first two-way test.** The user began downloading a title through the app's
+store to see it appear in the Linux client. On this device the store's games live in containers
+3, 6 and 7 — twenty installed titles — while the Linux client's entry is in container 8, whose
+prefix holds no store installs at all, and the library sync read only the launching container.
+The client would have been shown nothing, and the test would have failed for a reason unrelated
+to any of tonight's work. `77d947b7` scans every container, takes a title present in more than one
+from the first that has it complete, offers only complete installs (StateFlags 4 — a bind of one
+still downloading would hand the client half a game), and reconciles the client's manifest back
+into the container that owns the title. The `e92e37da` build staged minutes earlier was withdrawn
+before it was installed.
