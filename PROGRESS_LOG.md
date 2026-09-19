@@ -9125,3 +9125,22 @@ how a fix like `udevmon.c` reaches a runtime that is already installed.
 identity, Z/RZ — and re-apply the opt-in Xbox 360 identity and the static C++ runtime on top.
 (4) `FAKE_EVDEV_STEAM_VIRTUAL=1` for games. Each stage verified on the FIT bench and in a real
 session before it goes near the Fold.
+
+**Ported, all four stages, in `15aeade5` and `ee8b7b19`.** The session shim gained Max's
+`udevmon.c` (the netlink stand-in) and fork handlers on its locks, and is now built into the APK
+and staged into the runtime at every launch, so the Fold gets it on r9 with no runtime re-host.
+The interposer is Max's file whole — locking, fork handlers, `shared_ptr` table, the Steam
+virtual identity, Z/RZ triggers — with the opt-in Xbox 360 identity re-applied on top. The
+ring directory is bound in as `/dev/input`; `LD_PRELOAD` is gone from the session environment
+and both shims are named in `/etc/ld.so.preload`, which the app writes by rename each launch;
+`FAKE_EVDEV_STEAM_VIRTUAL=1` and Max's three SDL hints are set; the `js0` node and the
+classic-scan hints are removed. Bench first, with the runtime's own proot on the FIT: with the
+rings bound as `/dev/input`, `event0` alone and no hints at all finds the pad; adding the
+classic hint without `js0` finds nothing, which is why the two had to go together and why they
+are both gone now.
+
+**Scope worth knowing.** `fakeinput.cpp` is one file built twice — bionic for Wine, glibc for
+the Linux runtime — so the hardening (locks, fork safety, the safer device table) is now live
+for Windows games as well. That is the code WinNative has shipped for Windows games since
+mid-September, and its behaviour toward Wine is unchanged because everything new is gated on
+variables only the Linux session sets. It has not been re-tested under Wine tonight.
