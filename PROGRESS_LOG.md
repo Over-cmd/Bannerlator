@@ -9081,3 +9081,47 @@ launch with `event*`, so a Linux session cannot leave a phantom pad behind for a
 **Still unproven:** all of the above is the interposer and SDL in isolation. Nothing has yet run in a
 real session, where the writer is `WinHandler` rather than `dd`, and where gamescope and the client
 are in the picture. Build `35410420407` (`596f8991`) is the first with the node.
+
+### 2026-09-19 — Max's fork explains the Fold: two session-killers and the games step
+
+**Where the work lives.** Not in `WinNative-Emu/WinNative` — the `feature/wayland-gamescope`
+branch is on Max's personal fork, `maxjivi05/WinNative`. Searching the org repo found nothing,
+which was the wrong conclusion drawn from the wrong place.
+
+**What was on the Fold, in his commit messages.** `7d41c135` (Sep 18): the sandbox denies the
+`NETLINK_KOBJECT_UEVENT` socket, so libudev cannot create a monitor, `SDL_hid_init()` fails, and
+the Steam client retries it hundreds of times a second until its main loop stalls and it asserts
+out. That is the Fold's `socket(): Function not implemented` storm, the `wl_client_create failed`
+that follows on a stale errno, and the `rc=1` / `rc=139` a second after login. The Pocket FIT is
+permissive, gets its netlink socket, and never sees any of it — which is the whole FIT/Fold split
+of the last six hours. His answer is `preload/udevmon.c`: one end of a datagram socketpair stands
+in for the netlink socket, its peer held open, `bind`/`getsockname`/`setsockopt` answered, the real
+socket tried first. `79aa7f68`: Steam forks while other threads are inside the interposer's hooks,
+the child inherits a held mutex and blocks on its first `open()`, the client's watchdog fires
+(`BMainLoop appears to have stalled > 15 seconds`) and gamescope is torn down about two minutes
+in — fixed with `pthread_atfork` handlers on every lock the preloads take.
+
+**The "spoof to a specific device" he mentioned.** `29d93f13`: Steam Input claims the pad, lists
+its id in `SDL_GAMECONTROLLER_IGNORE_DEVICES`, and its overlay refuses the game's `open()` with
+ENODEV; the game is meant to get Steam's uinput virtual pad, which cannot exist on Android. So
+under `FAKE_EVDEV_STEAM_VIRTUAL=1` the fake pad answers as that virtual pad — `28de:11ff`,
+"Microsoft X-Box 360 pad N" — for every process except the client. `f1f34cd7` moves the triggers
+to `ABS_Z`/`ABS_RZ` under that identity, because Wine places axes by advertised order.
+
+**Two design points where his is right and mine is not.** He binds the ring directory *as*
+`/dev/input` in proot, so unhooked `opendir`/`readdir` simply see it; I rewrite paths inside the
+interposer and hook only `scandir`, which is the whole reason the `js0` node was needed. And his
+comment on the launch: the Steam client rebuilds `LD_PRELOAD` for every process it starts and
+appends its overlay without a separator, silently dropping whatever was there. So the
+`LD_PRELOAD` I put in the guest environment reaches the client — the FIT proved it held the ring —
+and is lost for every game the client launches. He names both shims in `/etc/ld.so.preload`
+instead, ships them as app assets, and syncs them into the runtime at every launch, which is also
+how a fix like `udevmon.c` reaches a runtime that is already installed.
+
+**Port plan, in order.** (1) `udevmon.c` and the atfork handlers into our preload set, and ship
+`libblsession.so` as an app asset synced at launch — the Fold's crash, with no runtime re-host.
+(2) Bind the rings as `/dev/input`, move both shims to `ld.so.preload`, drop the env `LD_PRELOAD`.
+(3) Take his `fakeinput.cpp` — mutex, atfork, `shared_ptr` map, `ioctl_request_t`, the virtual
+identity, Z/RZ — and re-apply the opt-in Xbox 360 identity and the static C++ runtime on top.
+(4) `FAKE_EVDEV_STEAM_VIRTUAL=1` for games. Each stage verified on the FIT bench and in a real
+session before it goes near the Fold.
