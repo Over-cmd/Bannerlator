@@ -9782,3 +9782,19 @@ Each game builds its own prefix, so EA Desktop will install itself again for Pay
 reusing Most Wanted's - only 1262560 carries it today. First launches will be slow for that
 reason, which is worth knowing before mistaking it for a hang: Most Wanted took about two and a
 half minutes from Play to its title screen.
+
+**The redist seeder never covered a prefix created mid-session, and that is a hang not a delay
+(2026-09-19).** Need for Speed Payback sat on "Running install script" with `vcredist_x86.exe`
+blocked in `pipe_read` - no disk reads, a tenth of a second of CPU across six, nothing written
+anywhere in the prefix for three minutes, and a five-minute watch that saw no process change at
+all. That is precisely the failure `bannerlator-seed-redists` was written to prevent, and its own
+header describes it: the x86 bundle's main thread exits while a helper stays blocked on a pipe it
+also holds the write end of, so the process never reaps and the client waits for ever.
+
+The seeder marks the shared redistributables as already run in every prefix that exists, and it
+ran once at session start. A game's prefix is not created until the client launches it, so a title
+played for the first time in a session was never covered and its install scripts ran for real.
+Most Wanted escaped only because its prefix was built in an earlier session and seeded in this
+one. The seeder now runs every five seconds alongside the registrar's own refresh, because it is
+racing the gap between the client creating a prefix and running that title's install scripts; it
+stamps each prefix it covers and skips it afterwards, so the extra passes cost almost nothing.

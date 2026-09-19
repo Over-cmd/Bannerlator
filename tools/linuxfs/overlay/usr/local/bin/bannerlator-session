@@ -136,10 +136,27 @@ case $mode in
     # titles are installed: a title installed this session gets the client's own per-app Proton
     # choice, which it cannot start. Refresh the per-app entries every so often; the registrar is
     # idempotent, so a repeat costs nothing.
+    # The seeder has the same problem and a worse consequence. It marks the shared redistributables
+    # as already run in each prefix that exists, and a game's prefix is not created until the
+    # client launches it - so a title played for the first time this session was never covered, and
+    # its install scripts run for real. That is exactly the hang the seeder exists to prevent: Need
+    # for Speed Payback sat on "Running install script" with vcredist_x86.exe blocked in pipe_read,
+    # holding both ends of a pipe nobody would write to, while the client waited for it to exit.
+    # Seeding again on the same beat covers a prefix the moment it appears.
+    # The seeder runs on a shorter beat than the registrar because it is racing something. The
+    # client creates a prefix when it launches a title and runs that title's install scripts
+    # moments later, so the seeder has only that gap to mark the redistributables as already run.
+    # It stamps each prefix it has covered and skips it thereafter, so the extra passes cost
+    # almost nothing.
     (
-      for _ in $(seq 1 240); do
-        sleep 15
-        bannerlator-steam-compat "$steam_root" >/dev/null 2>&1 || true
+      beat=0
+      for _ in $(seq 1 720); do
+        sleep 5
+        bannerlator-seed-redists "$steam_root" >/dev/null 2>&1 || true
+        beat=$((beat + 1))
+        if [ "$((beat % 3))" -eq 0 ]; then
+          bannerlator-steam-compat "$steam_root" >/dev/null 2>&1 || true
+        fi
       done
     ) &
     # Debug aid while the runtime is being brought up: an app id dropped in ~/.bl-autolaunch is
