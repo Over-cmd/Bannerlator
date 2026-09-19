@@ -9601,3 +9601,23 @@ them - and `BL_LIBRARY_SPACE=/mnt/bannerlator-sd`, and the app logs `session env
 variable(s) placed before the script`. The FEX count was zero on every build before this one, so
 the preset is configuring a Linux session for the first time. The free-space figure should follow,
 since the hook was already proven to redirect correctly once the variable is set.
+
+**Portal 2 downloaded correctly and then went missing from the store (2026-09-19).** It landed
+where it should - `imagefs/steam_games/Portal 2`, 12,218 MB, internal, nothing on the card - and
+Steam wrote it a proper manifest: StateFlags 4, `SizeOnDisk` 12,788,841,660, buildid 23973718,
+three real depots. Nothing there needed today's manifest repair, which is the point: a game the
+client downloads describes itself correctly.
+
+The store never recorded it. The session-end callback did run - `Linux session [steam] ended:
+137` - and threw nothing, but nothing was adopted and the app process that logged it was gone
+afterwards. Adoption takes the install size by walking the folder, and Portal 2 was the only game
+with a stale row, so it was the only one to reach that walk: twelve gigabytes of files, measured
+synchronously while the activity was being torn down, and the process did not survive it. The
+manifest states the size, so it is read from there now and the walk is only a fallback. The pass
+also logs its result even when it adopts nothing, because a pass that ran and found nothing looked
+exactly like one that never finished - which is what cost the time here.
+
+Also worth recording: reopening the app does not adopt anything. Adoption runs on Linux session
+start and end only, so a game downloaded in the client stays invisible to the store until a
+session runs. Launching the client again is enough, because the start-of-session pass is not
+racing a teardown.

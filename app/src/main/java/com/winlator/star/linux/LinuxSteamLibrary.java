@@ -384,7 +384,13 @@ public final class LinuxSteamLibrary {
                     if (row != null && row.isInstalled && folder.getPath().equals(row.installDir)) continue;
                     String name = nm.find() ? nm.group(1) : dir.group(1);
                     if (row == null) db.upsertGame(appId, name, "", 0L, "", "game", "", 0, "");
-                    db.markInstalled(appId, folder.getPath(), folderSize(folder));
+                    // The manifest states the size, so take it from there. Measuring the
+                    // folder means walking every file in it, and this pass runs as the session
+                    // ends, while the activity is being torn down: Portal 2's twelve gigabytes
+                    // took longer than the process survived, so the game was never recorded and
+                    // nothing said why.
+                    long size = sizeOnDisk(text);
+                    db.markInstalled(appId, folder.getPath(), size > 0 ? size : folderSize(folder));
                     Log.i(TAG, "adopted " + name + " (" + appId + ") installed by the Linux client at " + folder);
                     adopted++;
                 } catch (Throwable t) {
@@ -392,8 +398,25 @@ public final class LinuxSteamLibrary {
                 }
             }
         }
+        // Logged even when nothing was adopted, because a pass that runs and finds nothing looked
+        // exactly like a pass that never finished.
+        Log.i(TAG, "adoption pass: " + adopted + " game(s) taken into the store");
         return adopted;
     }
+
+    /** What the manifest says the install occupies, or 0 when it does not say. */
+    private static long sizeOnDisk(String manifest) {
+        Matcher m = SIZE_ON_DISK.matcher(manifest);
+        if (!m.find()) return 0L;
+        try {
+            return Long.parseLong(m.group(1));
+        } catch (NumberFormatException e) {
+            return 0L;
+        }
+    }
+
+    private static final Pattern SIZE_ON_DISK =
+            Pattern.compile("^\\s*\"SizeOnDisk\"\\s*\"(\\d+)\"", Pattern.MULTILINE);
 
     /**
      * Whether a manifest describes a game whose files are on disk. StateFlags is a bit field, not
