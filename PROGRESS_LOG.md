@@ -9342,3 +9342,18 @@ leftover was `bannerlator-seed-redists`, still seeding the retired `/mnt/bannerl
 prefixes — now `/mnt/bannerlator-sd`; the dead `GUEST_ROOT` constant is gone (`2b1f3163`). The
 `cc237b45` run was cancelled and `build-artifacts.yml` re-dispatched on `2b1f3163`
 (run 35426952192, headSha verified).
+
+**"Anything missing?" audit of the unified libraries — four gaps closed (2026-09-19).**
+(1) Every device that ran an earlier build has `/mnt/bannerlator` registered in the client's
+`libraryfolders.vdf`; it is not bound any more, so the client would keep offering a location
+that is not there. `bannerlator-steam-library` now removes that entry (block-wise edit, unit-tested
+on a sample), and the app's `retireOldLibrary` moves the prefixes/shader caches games made in that
+library into the main one (rename, same fs) and deletes the rest. (2) A game uninstalled from the
+store kept its client manifest; now any fully-installed manifest whose folder is gone is removed,
+tools excluded, downloads in progress kept. (3) The card library downloaded into the runtime root
+(internal) and then had to cross filesystems into the card: `<card>/bannerlator/steam_downloading`
+is now bound as that library's `steamapps/downloading`, so finishing a download is a rename;
+prefixes stay internal where symlinks and locks work. (4) A game the client uninstalls is marked
+not installed in the store's database, but only when its library is present — a missing card
+proves nothing. Run 35426952192 cancelled; rebuilt on the commit below. Needs device proof: card
+download in the client, retired-library cleanup on the Fold, store launch of an adopted game.

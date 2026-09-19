@@ -59,8 +59,43 @@ def register(steam_root, library, label):
     return len(apps)
 
 
+RETIRED = ("/mnt/bannerlator",)
+
+
+def forget(steam_root, library):
+    """Removes a library folder earlier builds registered and this one no longer binds, so the
+    client does not keep offering a location that is not there."""
+    path = os.path.join(steam_root, "steamapps", "libraryfolders.vdf")
+    if not os.path.isfile(path):
+        return
+    with open(path, encoding="utf-8", errors="replace") as f:
+        lines = f.read().split("\n")
+    out, block, depth = [], None, 0
+    for line in lines:
+        if depth == 1 and re.fullmatch(r'\t"\d+"', line):
+            block = [line]
+            continue
+        if block is not None:
+            block.append(line)
+            depth += line.count("{") - line.count("}")
+            if depth == 1:
+                if not re.search(r'"path"\s+"%s"' % re.escape(library), "\n".join(block)):
+                    out.extend(block)
+                block = None
+            continue
+        depth += line.count("{") - line.count("}")
+        out.append(line)
+    text = "\n".join(out)
+    if text != "\n".join(lines):
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+        print("bannerlator-steam-library: forgot %s" % library)
+
+
 def main():
     steam_root = sys.argv[1]
+    for library in RETIRED:
+        forget(steam_root, library)
     for library, label in LIBRARIES:
         register(steam_root, library, label)
 

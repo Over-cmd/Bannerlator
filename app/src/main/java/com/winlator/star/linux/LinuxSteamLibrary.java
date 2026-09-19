@@ -115,10 +115,19 @@ public final class LinuxSteamLibrary {
         // already put in that folder is moved into internal storage first - a rename on the same
         // filesystem - so the bind hides nothing.
         migratePrivateLibrary(rootfs, internalRoot);
+        retireOldLibrary(rootfs);
         int total = 0;
         total += presentRoot(internalRoot, GUEST_STEAM_ROOT, rootfs, recorded, names, depotToApp, prefixManifests, binds);
         if (cardRoot != null) {
             total += presentRoot(cardRoot, GUEST_ROOT_SD, rootfs, recorded, names, depotToApp, prefixManifests, binds);
+            // Steam downloads into <library>/steamapps/downloading and renames the finished game
+            // into common/. Both must be on the card for that rename to be a rename; the prefixes
+            // (compatdata) stay in the runtime root, where symlinks and locks work.
+            File downloading = new File(cardRoot.getParentFile(), "steam_downloading");
+            File mountPoint = new File(rootfs, GUEST_ROOT_SD.substring(1) + "/steamapps/downloading");
+            if ((downloading.isDirectory() || downloading.mkdirs()) && (mountPoint.isDirectory() || mountPoint.mkdirs())) {
+                binds.add(downloading.getPath() + ":" + GUEST_ROOT_SD + "/steamapps/downloading");
+            }
         }
         Log.i(TAG, "presented " + total + " installed game(s) to the Steam client in "
                 + (cardRoot != null ? "two libraries" : "one library"));
@@ -173,17 +182,22 @@ public final class LinuxSteamLibrary {
         }
         // A manifest the client wrote for a game it installed here is the client's to keep; only
         // the ones written for the app's games and now absent are removed.
-        // Only a manifest written for one of the app's own titles, whose folder has since gone, is
-        // removed. Everything else in here is the client's - its tools, a download in progress, a
-        // game it installed itself - and is left exactly as it is.
+        // A manifest for a game whose folder is gone is removed, whoever wrote it. The client's
+        // tools and any download in progress are left exactly as they are.
         File[] stale = steamapps.listFiles((d, name) -> MANIFEST.matcher(name).matches());
         if (stale != null) {
             for (File file : stale) {
                 if (kept.contains(file.getName())) continue;
                 Matcher id = MANIFEST.matcher(file.getName());
-                if (!id.matches() || !recorded.containsKey(Integer.parseInt(id.group(1)))) continue;
+                if (!id.matches() || NOT_GAMES.contains(Integer.parseInt(id.group(1)))) continue;
                 String installDir = installDirOfManifest(file);
-                if (installDir == null || !new File(root, installDir).isDirectory()) file.delete();
+                if (installDir != null && new File(root, installDir).isDirectory()) continue;
+                // A download in progress has no folder yet and is not fully installed; a game
+                // whose folder was removed - by the store or by hand - is.
+                String text = file.isFile() ? FileUtils.readString(file) : null;
+                Matcher st = text != null ? STATE.matcher(text) : null;
+                boolean installed = st == null || !st.find() || "4".equals(st.group(1));
+                if (installed) file.delete();
             }
         }
         return count;
@@ -211,6 +225,41 @@ public final class LinuxSteamLibrary {
                 Log.w(TAG, "could not move " + entry + " into internal storage");
             }
         }
+    }
+
+    /**
+     * Earlier builds gave the client a third library at /mnt/bannerlator for the app's games. That
+     * folder is not bound any more; the prefixes and shader caches games made there are moved into
+     * the main library, where the client now looks for them, and the rest - manifests this app
+     * wrote and an empty mount point - is removed.
+     */
+    private static void retireOldLibrary(File rootfs) {
+        File old = new File(rootfs, "mnt/bannerlator/steamapps");
+        if (!old.isDirectory()) return;
+        File main = new File(rootfs, GUEST_STEAM_ROOT.substring(1) + "/steamapps");
+        for (String kind : new String[] {"compatdata", "shadercache"}) {
+            File[] entries = new File(old, kind).listFiles();
+            if (entries == null) continue;
+            File into = new File(main, kind);
+            if (!into.isDirectory() && !into.mkdirs()) continue;
+            for (File entry : entries) {
+                File target = new File(into, entry.getName());
+                if (target.exists()) continue;
+                if (entry.renameTo(target)) Log.i(TAG, "moved " + kind + "/" + entry.getName() + " into the main library");
+            }
+        }
+        File[] left = old.listFiles();
+        boolean empty = true;
+        if (left != null) {
+            for (File f : left) {
+                if (f.isFile() && MANIFEST.matcher(f.getName()).matches()) f.delete();
+                else if (f.isDirectory() && (f.getName().equals("common") || f.getName().equals("compatdata")
+                        || f.getName().equals("shadercache") || f.getName().equals("downloading") || f.getName().equals("temp"))) {
+                    if (!FileUtils.delete(f)) empty = false;
+                } else empty = false;
+            }
+        }
+        if (empty) { old.delete(); old.getParentFile().delete(); }
     }
 
     private static boolean isUnder(File dir, File root) {
@@ -271,6 +320,7 @@ public final class LinuxSteamLibrary {
      */
     public static int adoptClientInstalls(android.content.Context context, File rootfs) {
         int adopted = 0;
+        releaseClientUninstalls(context);
         com.winlator.star.store.SteamDatabase db;
         try {
             db = com.winlator.star.store.SteamDatabase.getInstance(context);
@@ -324,6 +374,29 @@ public final class LinuxSteamLibrary {
 
     private static final Pattern STATE =
             Pattern.compile("^\\s*\"StateFlags\"\\s*\"(\\d+)\"", Pattern.MULTILINE);
+
+    /**
+     * The store records a game as installed until told otherwise. When the client removes one
+     * from a library the app can see right now, the record follows; a library that is not
+     * present - the card is out - proves nothing and is left alone.
+     */
+    private static void releaseClientUninstalls(android.content.Context context) {
+        try {
+            com.winlator.star.store.SteamDatabase db = com.winlator.star.store.SteamDatabase.getInstance(context);
+            File internalRoot = new File(context.getFilesDir(), "imagefs/steam_games");
+            File cardRoot = cardRoot(context);
+            for (com.winlator.star.store.SteamDatabase.GameRow row : db.getInstalledGames()) {
+                File dir = installDirOf(context, row);
+                if (dir == null || dir.isDirectory()) continue;
+                boolean visible = isUnder(dir, internalRoot) || (cardRoot != null && isUnder(dir, cardRoot));
+                if (!visible) continue;
+                db.markUninstalled(row.appId);
+                Log.i(TAG, row.name + " (" + row.appId + ") is gone from " + dir + "; no longer installed");
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "could not reconcile removed games", t);
+        }
+    }
 
     private static long folderSize(File dir) {
         long total = 0;
