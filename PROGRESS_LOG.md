@@ -9434,3 +9434,16 @@ root for a name collision, and the app's copy was on the card, so the client's p
 in beside it instead of being recognised as the same game. Flagged to the user rather than
 deleted; the collision check should consult the database's install dir for the app id, not just
 the destination folder.
+
+**Delete-reflection test passed on `f9dae5c2` (FIT, 2026-09-19).** The user removed Brawlhalla and
+Team Fortress 2 from the store - both Brawlhalla copies went, so the duplicate resolved itself -
+and relaunched the client. Both stale manifests were cleaned: the card library now holds only
+`appmanifest_550`. On the build before this one Team Fortress 2 would have survived, because the
+sweep compared its StateFlags (516) to "4"; the bit test removes it. The reverse direction landed
+in the same pass - Left 4 Dead 2, installed by the client onto the card at StateFlags 38, is now
+`is_installed` in the store's database.
+
+Side effect worth a decision: the Half-Life 2 episodes (340/380/420) were adopted too. Their
+manifests carry bit 4 and their `installdir` is the Half-Life 2 folder, which is present, so they
+are installed by every test we have - but the client's own Installed filter does not list them,
+so the store now shows three entries the client does not. Correct by the data, noisy in the UI.
