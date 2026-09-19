@@ -9317,3 +9317,18 @@ private library keeps only its Games-tab entry, because the app cannot run files
 inside the runtime. Pushed but deliberately not built yet, so the crash fix before it can be
 tested on its own; the next dispatch carries both. One caveat stands: the client's default
 install location is still its own library unless the user picks ours in the install dialog.
+
+**Main library = internal storage (`67bb8249`), on top of the held unified change.** The user's
+call: "main will always be internal storage by default like the app side." The client always has
+a main library it installs to by default and cannot remove, so instead of adding a third
+`/mnt/bannerlator` folder beside it, its own `steamapps/common` is bound over with the app's
+internal `steam_games`; the card is the one extra library. The install dialog now offers exactly
+the store's two locations with internal storage preselected, and there is no private folder for
+a forgotten choice to land in. Whatever the client had already installed into its own folder
+(Brawlhalla on the Fold) is renamed into internal storage once, before the bind — same
+filesystem, no copy; a name present in both is left in place and logged. The client's tools
+(228980/1493710/3127680/4183110/4427310/4185400, Proton/SLR/Steamworks/FEX by name) share that
+library and are never adopted as games; the app deletes only manifests it wrote itself. The
+Games-tab `syncClientGames` path is gone — a client install is adopted into the store's database.
+Dispatching `build-artifacts.yml` on `67bb8249` + the log commit; crash-fix `15952f1a` remains
+staged and untested on device.
