@@ -8766,14 +8766,14 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // That is the same bargain /etc/ld.so.preload already makes for libblsession.so.
         // Everything the interposer does not recognise falls straight through to libc via RTLD_NEXT.
         guest.add("LD_PRELOAD=/usr/local/lib/libfakeinput.so");
-        // The client ships SDL3, which dlopens libudev and prefers udev enumeration.
-        // udev enumerates from /sys/class/input, and our synthetic pad has no entry there at all.
-        // It is not enough to fake /dev/input: udev would list the real devices and then fail to open them.
-        // So udev is switched off outright and SDL is put on its classic /dev/input scan.
-        // The hint names were checked against the strings in the runtime's own libSDL3.so.0.
+        // This is what makes the client look for js* nodes instead of enumerating through udev.
+        // udev enumerates from /sys/class/input, where the synthetic pad has no entry and never will.
+        // The hint names were read out of the strings in the runtime's own libSDL3.so.0.
         // SDL3 spells it SDL_JOYSTICK_LINUX_CLASSIC; SDL2 spelled it SDL_LINUX_JOYSTICK_CLASSIC.
         // Both are set, because games launched from the client bring their own SDL of either generation.
-        guest.add("SDL_JOYSTICK_DISABLE_UDEV=1");
+        // Disabling udev outright was tried and is NOT needed: with js0 present the classic hint alone
+        // finds the pad, verified against that same library on device. Leaving udev alone keeps the
+        // client's own controller discovery working exactly as it did before.
         guest.add("SDL_JOYSTICK_LINUX_CLASSIC=1");
         guest.add("SDL_LINUX_JOYSTICK_CLASSIC=1");
         Log.i("XServerDisplayActivity", "Linux session log: " + sessionLog.getPath());
