@@ -9500,3 +9500,16 @@ Cleared the card's `steam_downloading/550` as well: 7.9 GB of Left 4 Dead 2's pa
 That also answers the open question about that install - Steam held nearly eight gigabytes of
 download scratch for it, so it genuinely was mid-fetch and was right to keep asking for files.
 Card free space 273 GB -> 293 GB, both card folders now empty.
+
+**The last untested direction is proven (2026-09-19, `fbf5d4fb`).** With Left 4 Dead 2's files
+deleted, the session logged `Left 4 Dead 2 (550) is gone from ...; no longer installed` and the
+store's row flipped to not-installed without being asked. All four directions now hold on device:
+the app's installs reach the client, the client's installs reach the store, an app-side delete
+cleans the client's manifest, and files vanishing clears the store's record.
+
+The client now lists four and the store eight, and the whole difference is accounted for. The
+three Half-Life 2 episodes share the Half-Life 2 folder, so they are installed and the store is
+right to say so; Big Picture simply does not list them separately. Lossless Scaling is an
+application rather than a game, so the client's game filters exclude it - it has never appeared
+there, including before any of today's work, so its absence is not a regression, and its manifest
+is now correct, which is what stopped it asking to download itself again.
