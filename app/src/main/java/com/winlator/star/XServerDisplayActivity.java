@@ -8719,7 +8719,25 @@ public class XServerDisplayActivity extends AppCompatActivity {
         }
 
         File fakeInputDir = new File(imageFs.getRootDir(), "dev/input");
+        //noinspection ResultOfMethodCallIgnored
         fakeInputDir.mkdirs();
+        // The node file has to exist before the client scans, or there is no controller.
+        // open("/dev/input/event0") only reaches the ring when FAKE_EVDEV_DIR holds a file of that name.
+        // Otherwise the interposer falls through to the real kernel node, which the sandbox denies.
+        // onCreate deletes event0..3, and the Wine launcher is what normally recreates event0.
+        // Writers make their own node when a slot is claimed, which is long after the client has scanned.
+        // One node only: each extra file is another pad the client would list.
+        File fakeInputNode = new File(fakeInputDir, "event0");
+        try {
+            if (!fakeInputNode.exists() && !fakeInputNode.createNewFile()) {
+                Log.e("XServerDisplayActivity", "could not create " + fakeInputNode
+                        + " — the client will see no controller");
+            }
+        } catch (IOException e) {
+            Log.e("XServerDisplayActivity", "could not create " + fakeInputNode, e);
+        }
+        Log.i("XServerDisplayActivity", "fake evdev nodes: "
+                + java.util.Arrays.toString(fakeInputDir.list()));
         guest.add("FAKE_EVDEV_DIR=" + fakeInputDir.getPath());
         String fakeInputRings =
                 com.winlator.star.inputcontrols.FakeInputWriter.getRingEnv(fakeInputDir);
