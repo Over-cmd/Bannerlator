@@ -9144,3 +9144,26 @@ the Linux runtime — so the hardening (locks, fork safety, the safer device tab
 for Windows games as well. That is the code WinNative has shipped for Windows games since
 mid-September, and its behaviour toward Wine is unchanged because everything new is gated on
 variables only the Linux session sets. It has not been re-tested under Wine tonight.
+
+**Where this stands, for whoever resumes.** Test build `ee8b7b19` (run 35420566622), building at
+the time of writing; nothing in it has run on a device yet. On the Pocket FIT — r8 and then r9 —
+the pre-port chain was proven end to end: the client held our ring with no hidraw descriptors,
+identified the pad as an Xbox 360 controller, rendered Xbox prompts, and navigated Big Picture
+from injected input and then from real on-screen touches. The Fold never got that far because
+its sandbox denies udev's netlink socket, which is what the port fixes. The Fold protocol is:
+the **standard** artifact, GameHub force-stopped first (it takes the Steam login within seconds
+and has done so twice tonight), GameSir connected, optionally an empty
+`Download/bannerlator-fake-input-log` for the interposer trace, then zip
+`/sdcard/Download/Bannerlator-LinuxSteam/` and read `fake-input-<stamp>.txt` before anything
+else: it lists both staged libraries, the `ld.so.preload` contents, the nodes and rings, whether
+a pad was connected, every variable handed to the session, and — appended when the session ends
+— how many events the app wrote into the ring. `Download/bannerlator-no-fake-input` turns the
+whole feature off for a true baseline.
+
+**Still open.** The device test itself. One run on the FIT under r9 produced the same ENOSYS
+storm once and never again, which may be the same netlink denial under seccomp rather than
+SELinux and should be re-checked with the stand-in in place. The Wine path has not been
+re-tested since the interposer swap. Every commit from 2026-09-18 carries an attribution trailer
+that the repo rule forbids; the branch is unmerged, and rewriting those messages is offered and
+waiting on a yes. Not started: the on-screen segfault seen once on the Fold, if it survives the
+port at all — its timing suggested it was the same assert, not the overlay.
