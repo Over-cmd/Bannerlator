@@ -9465,3 +9465,25 @@ is empty, which is what L4D2 and Lossless Scaling both need since their stubs al
 no depots recorded there is nothing better to write, so the old skeleton stays rather than
 replacing something with nothing. `SizeOnDisk` is the depot total, matching what Steam writes
 itself. NOT yet proven: whether the client accepts the repaired manifest and stops verifying.
+
+**Depot-aware manifests on device (`fbf5d4fb`): fixed for Lossless Scaling, inconclusive for
+Left 4 Dead 2 (2026-09-19).** Lossless Scaling now reads `StateFlags 4` with a real depot and
+manifest id, and Steam has since rewritten it itself - pruning to the one depot that applies and
+setting `SizeOnDisk` to that depot's size - which is what accepting an install looks like. Its
+phantom download is gone.
+
+Left 4 Dead 2 did not settle, and the session logged no `wrote ... depot(s)` line for it. The
+regex and the data both check out: the current manifest matches the empty-depot pattern and the
+database holds both depots, so a repair would fire now. The likeliest reading is that at session
+setup the manifest still carried the depots Steam wrote during its earlier verification, so
+nothing looked broken, and Steam emptied them again at 13:38 when it re-queued the update - the
+file's mtime is after session start and the content log shows Update Queued/Running from then.
+
+Worth saying plainly: this install is a poor test. Steam has flagged FilesMissing on it, there is
+no `.bl_depot` journal, so the app never downloaded it, and the folder is ~500 MB short of the
+depot total. Steam wanting to repair it may simply be correct, and no manifest we write should
+override that. The case that proves the fix is Lossless Scaling, which the app did install.
+
+Also adopted this session: Half-Life 2's episodes (340/380/420), all pointing at the Half-Life 2
+folder they share. Correct by every test we have, but the client does not list them, so the store
+now shows three entries the client does not.
