@@ -62,36 +62,66 @@ public final class LinuxSteamLibrary {
      * the proot bind specs ({@code host:guest}) that put each game in place. Worker thread: this
      * reads and copies files.
      */
+    /** The launching container alone; kept for callers that have no manager. */
     public static List<String> prepare(Container container, File rootfs) {
+        List<Container> one = new ArrayList<>();
+        if (container != null) one.add(container);
+        return prepare(one, rootfs);
+    }
+
+    /**
+     * Every container's installs, not just the launching one's. The app's store installs into
+     * whichever container the user chose for a title, and the Linux client's own entry lives in a
+     * container of its own with no store installs at all - so reading only that one presented the
+     * client with an empty library on a device holding twenty installed games across three others.
+     * A title installed in more than one container is taken from the first that has it complete.
+     */
+    public static List<String> prepare(List<Container> containers, File rootfs) {
         List<String> binds = new ArrayList<>();
-        if (container == null) return binds;
-
-        File source = prefixSteamApps(container);
-        File[] manifests = source.listFiles((dir, name) -> MANIFEST.matcher(name).matches());
-        if (manifests == null || manifests.length == 0) return binds;
-
+        if (containers == null || containers.isEmpty()) return binds;
         File steamapps = new File(rootfs, GUEST_ROOT.substring(1) + "/steamapps");
         File common = new File(steamapps, "common");
         if (!common.isDirectory() && !common.mkdirs()) {
             Log.w(TAG, "cannot create " + common);
             return binds;
         }
-
         Set<String> kept = new HashSet<>();
+        for (Container container : containers) {
+            prepareContainer(container, steamapps, common, kept, binds);
+        }
+        File[] stale = steamapps.listFiles((dir, name) -> MANIFEST.matcher(name).matches());
+        if (stale != null) {
+            for (File file : stale) {
+                if (!kept.contains(file.getName())) file.delete();
+            }
+        }
+        Log.i(TAG, "exposed " + binds.size() + " installed game(s) to the Steam client");
+        return binds;
+    }
+
+    private static final Pattern STATE =
+            Pattern.compile("^\\s*\"StateFlags\"\\s*\"(\\d+)\"", Pattern.MULTILINE);
+
+    private static void prepareContainer(Container container, File steamapps, File common,
+                                         Set<String> kept, List<String> binds) {
+        if (container == null) return;
+        File source = prefixSteamApps(container);
+        File[] manifests = source.listFiles((dir, name) -> MANIFEST.matcher(name).matches());
+        if (manifests == null) return;
         for (File manifest : manifests) {
+            if (kept.contains(manifest.getName())) continue;
             String text = FileUtils.readString(manifest);
             if (text == null) continue;
+            // Only a complete install: the store writes StateFlags 4 for one; 6 and 1026 are
+            // still downloading or waiting on an update, and a bind of those would offer the
+            // client half a game.
+            Matcher st = STATE.matcher(text);
+            if (st.find() && !"4".equals(st.group(1))) continue;
             Matcher m = INSTALLDIR.matcher(text);
             if (!m.find()) continue;
             String installDir = m.group(1);
             File gameDir = new File(source, "common/" + installDir);
-            // A manifest whose game folder is gone would show in Steam as installed and fail to
-            // launch, which is worse than not showing it at all.
             if (!gameDir.isDirectory()) continue;
-
-            // Both sides update titles, so the manifest is reconciled rather than rewritten.
-            // A build the client installed is adopted into the app's copy, and the app's copy only
-            // replaces the client's when the app holds the newer build. (WinNative ffd622df.)
             File runtimeManifest = new File(steamapps, manifest.getName());
             long runtimeBuild = buildId(runtimeManifest), appBuild = buildId(manifest);
             if (runtimeBuild > appBuild) {
@@ -103,16 +133,6 @@ public final class LinuxSteamLibrary {
             new File(common, installDir).mkdirs();
             binds.add(gameDir.getPath() + ":" + GUEST_ROOT + "/steamapps/common/" + installDir);
         }
-
-        // Drop manifests for games that have since been uninstalled or moved.
-        File[] stale = steamapps.listFiles((dir, name) -> MANIFEST.matcher(name).matches());
-        if (stale != null) {
-            for (File file : stale) {
-                if (!kept.contains(file.getName())) file.delete();
-            }
-        }
-        Log.i(TAG, "exposed " + binds.size() + " installed game(s) to the Steam client");
-        return binds;
     }
 
     /**
