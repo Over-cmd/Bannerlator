@@ -9594,3 +9594,10 @@ makes the store-ordering it configures dead the whole time, the thing meant to s
 multithreaded x86 title sitting at its loading screen. Both are now collected and inserted in
 front of the script. Worth watching after this lands: client-launched games get the FEX preset
 applied for the first time, so their behaviour can change.
+
+**Both now reach the session (`98d38931`, device-proven 2026-09-19).** A live Steam process
+carries six FEX variables - `FEX_TSOENABLED`, `FEX_MULTIBLOCK`, `FEX_X87REDUCEDPRECISION` among
+them - and `BL_LIBRARY_SPACE=/mnt/bannerlator-sd`, and the app logs `session env: 17 late
+variable(s) placed before the script`. The FEX count was zero on every build before this one, so
+the preset is configuring a Linux session for the first time. The free-space figure should follow,
+since the hook was already proven to redirect correctly once the variable is set.
