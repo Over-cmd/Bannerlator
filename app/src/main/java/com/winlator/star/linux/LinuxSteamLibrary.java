@@ -99,6 +99,32 @@ public final class LinuxSteamLibrary {
         return binds;
     }
 
+    /**
+     * The store's install roots: the app's own, and a bannerlator/steam_games folder on every
+     * mounted volume, which is where the storage picker puts a card.
+     */
+    private static File findMovedGame(File source, String installDir) {
+        List<File> roots = new ArrayList<>();
+        // <imagefs>/steam_games sits four levels above <prefix>/steamapps: .wine/drive_c/Program Files (x86)/Steam/steamapps
+        File prefixRoot = source;
+        for (int i = 0; i < 5 && prefixRoot != null; i++) prefixRoot = prefixRoot.getParentFile();
+        File home = prefixRoot != null ? prefixRoot.getParentFile() : null;       // imagefs/home/xuser-N -> imagefs/home
+        File imagefs = home != null ? home.getParentFile() : null;                // imagefs
+        if (imagefs != null) roots.add(new File(imagefs, "steam_games"));
+        File storage = new File("/storage");
+        File[] volumes = storage.listFiles();
+        if (volumes != null) {
+            for (File volume : volumes) {
+                roots.add(new File(volume, "bannerlator/steam_games"));
+            }
+        }
+        for (File root : roots) {
+            File candidate = new File(root, installDir);
+            if (candidate.isDirectory()) return candidate;
+        }
+        return null;
+    }
+
     private static final Pattern STATE =
             Pattern.compile("^\\s*\"StateFlags\"\\s*\"(\\d+)\"", Pattern.MULTILINE);
 
@@ -121,7 +147,15 @@ public final class LinuxSteamLibrary {
             if (!m.find()) continue;
             String installDir = m.group(1);
             File gameDir = new File(source, "common/" + installDir);
-            if (!gameDir.isDirectory()) continue;
+            if (!gameDir.isDirectory()) {
+                // The prefix link is stale: the store moved the game between storages and did not
+                // repoint it. The folder keeps its name wherever it went, so look for it under the
+                // store's roots before giving up. Only a dangling link is recovered this way; a
+                // link that resolves is trusted as it stands.
+                gameDir = findMovedGame(source, installDir);
+                if (gameDir == null) continue;
+                Log.i(TAG, installDir + ": prefix link is stale, found at " + gameDir);
+            }
             File runtimeManifest = new File(steamapps, manifest.getName());
             long runtimeBuild = buildId(runtimeManifest), appBuild = buildId(manifest);
             if (runtimeBuild > appBuild) {
