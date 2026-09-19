@@ -12011,10 +12011,18 @@ public class XServerDisplayActivity extends AppCompatActivity {
             return super.dispatchKeyEvent(event);
         }
 
-        // Handle the PlayStation or Xbox Home button to open the drawer
+        // The Home / Steam / Select buttons are kept away from Android's own handling, but they
+        // still have to arrive somewhere: in a Linux session the Steam button is how the client
+        // opens its in-game menu, and it only gets there as part of the pad state the client
+        // reads. So each is offered to the profile bindings, then to the pad, then to the
+        // keyboard, instead of the result being computed and dropped.
         if (event.getAction() == KeyEvent.ACTION_DOWN) {
-            if (event.getKeyCode() == KeyEvent.KEYCODE_BUTTON_MODE || event.getKeyCode() == KeyEvent.KEYCODE_HOME || event.getKeyCode() == KeyEvent.KEYCODE_BUTTON_SELECT) {
-                boolean handled = inputControlsView.onKeyEvent(event) || (winHandler != null && winHandler.onKeyEvent(event)) && (xServer != null && xServer.keyboard.onKeyEvent(event));
+            int homeKc = event.getKeyCode();
+            if (homeKc == KeyEvent.KEYCODE_BUTTON_MODE || homeKc == KeyEvent.KEYCODE_HOME
+                    || homeKc == KeyEvent.KEYCODE_BUTTON_SELECT) {
+                boolean handled = inputControlsView != null && inputControlsView.onKeyEvent(event);
+                if (!handled && winHandler != null) handled = winHandler.onKeyEvent(event);
+                if (!handled && xServer != null) xServer.keyboard.onKeyEvent(event);
                 return true;
             }
         }

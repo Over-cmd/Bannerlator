@@ -87,7 +87,7 @@ public final class SteamControllerBackend {
         void onSteamPadDisconnected(ExternalController pad);
 
         /** pad.state changed (extra buttons mapped to gamepad buttons already merged in). guideDown is
-         *  the Steam button, which GamepadState has no bit for; quickAccessDown is the physical "…"
+         *  the Steam button, also carried in pad.state as IDX_BUTTON_MODE; quickAccessDown is the physical "…"
          *  button (for the controller test). pressedKeyCodes are the held buttons as Android keycodes,
          *  for the profile bindings. */
         void onSteamPadState(ExternalController pad, boolean guideDown, boolean quickAccessDown, int[] pressedKeyCodes);
@@ -417,6 +417,7 @@ public final class SteamControllerBackend {
             s.setPressed(ExternalController.IDX_BUTTON_R3, bit(effective, B_RSTICK));
             s.setPressed(ExternalController.IDX_BUTTON_L2, s.triggerL >= TRIGGER_FULL);
             s.setPressed(ExternalController.IDX_BUTTON_R2, s.triggerR >= TRIGGER_FULL);
+            s.setPressed(ExternalController.IDX_BUTTON_MODE, bit(effective, B_GUIDE));
             s.dpad[0] = bit(effective, B_DPAD_UP);
             s.dpad[1] = bit(effective, B_DPAD_RIGHT);
             s.dpad[2] = bit(effective, B_DPAD_DOWN);

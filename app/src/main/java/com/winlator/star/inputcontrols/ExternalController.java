@@ -25,6 +25,9 @@ public class ExternalController {
     public static final byte IDX_BUTTON_R3 = 9;
     public static final byte IDX_BUTTON_L2 = 10;
     public static final byte IDX_BUTTON_R2 = 11;
+    /** The Steam / Guide / Home button. Last, because 0-9 are the snapshot layout the fake-evdev
+     *  ring publishes and 10-11 are the triggers-as-buttons that are sent as axes instead. */
+    public static final byte IDX_BUTTON_MODE = 12;
     private String name;
     private String id;
     private int deviceId = -1;
@@ -402,6 +405,8 @@ public class ExternalController {
                 return IDX_BUTTON_L2;
             case KeyEvent.KEYCODE_BUTTON_R2:
                 return IDX_BUTTON_R2;
+            case KeyEvent.KEYCODE_BUTTON_MODE:
+                return IDX_BUTTON_MODE;
             default:
                 return -1;
         }

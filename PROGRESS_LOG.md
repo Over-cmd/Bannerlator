@@ -9387,3 +9387,24 @@ its nodes (`/dev/input` lists event0..event5 under the preload). The registrar -
 was segfaulting every fifteen seconds - now runs to completion: "default and 9 installed title(s)
 set to bannerlator-proton-arm64". The launch chain is therefore unblocked; whether FlatOut then
 runs under FEX is the next unknown and is not proven by any of this.
+
+**The Steam button was never wired into a Linux session (2026-09-19).** FlatOut runs on
+`2afae914`; the Home/Guide button does not open the client's in-game menu. Not a regression -
+the press never left the app. Three links were missing and the evidence is unambiguous at each:
+`ExternalController.getButtonIdxByKeyCode(KEYCODE_BUTTON_MODE)` returned -1, so
+`updateStateFromKeyEvent` returned false and `WinHandler.onKeyEvent` never called
+`sendGamepadState`; `GamepadState` had no bit for it and said so in a comment;
+`FakeInputWriter.BUTTON_MAP` held ten buttons with no `BTN_MODE`, and `fakeinput.cpp` said
+"e.g. BTN_MODE, which the writer never presses". The session's `fake-input-*.txt` confirms it:
+zero code-316 events all session. Meanwhile Steam is ready for it - the mapping it wrote for our
+pad is `...back:b6,guide:b8,start:b7...` and the interposer already advertises `BTN_MODE` in the
+key bits at exactly the position SDL reads as b8.
+
+Wired end to end: `IDX_BUTTON_MODE = 12` (10 and 11 are the triggers-as-buttons) mapped from
+`KEYCODE_BUTTON_MODE`; snapshot bit 10 in both `FakeInputWriter.BUTTON_MAP` and the interposer's
+`kSnapshotButtons` (hardcoded `i < 10` loops replaced by `kSnapshotButtonCount`); the Steam
+Controller backend sets the same bit from its `B_GUIDE`; and the activity's Home/Select block no
+longer computes a result and drops it - each of those keys is offered to the bindings, then the
+pad, then the keyboard, and is still kept from Android. `prevButtonStates` was already 12 wide.
+The compositing half was already right: gamescope runs with `-e` and the client with `-gamepadui`.
+NOT device-proven: whether the client opens its menu over a Proton game once it sees the press.

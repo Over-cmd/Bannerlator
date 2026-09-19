@@ -156,9 +156,14 @@ static constexpr size_t kNeutralEventCount =
 static const uint16_t kSnapshotAxisCodes[8] = {
     ABS_X, ABS_Y, ABS_RX, ABS_RY, ABS_GAS, ABS_BRAKE, ABS_HAT0X, ABS_HAT0Y};
 // Bit i of FakeInputRingHeader::snapshot_buttons maps to this button code.
-static const uint16_t kSnapshotButtons[10] = {
-    BTN_A,  BTN_B,      BTN_X,     BTN_Y,      BTN_TL,
-    BTN_TR, BTN_SELECT, BTN_START, BTN_THUMBL, BTN_THUMBR};
+static const uint16_t kSnapshotButtons[11] = {
+    BTN_A,      BTN_B,      BTN_X,     BTN_Y,      BTN_TL,    BTN_TR,
+    BTN_SELECT, BTN_START,  BTN_THUMBL, BTN_THUMBR,
+    // Bit 10 is the Steam button: the client's in-game menu is bound to it, and SDL reports it
+    // as button 8 from this position in the key bits.
+    BTN_MODE};
+static constexpr size_t kSnapshotButtonCount =
+    sizeof(kSnapshotButtons) / sizeof(kSnapshotButtons[0]);
 
 // An LD_PRELOAD interposer is called outside its own lifetime. The loader initialises libraries
 // in dependency order, and the hooks below belong to whichever library gets there first: on the
@@ -516,10 +521,10 @@ capture_keyframe(FakeController &fake, const SnapshotState &snap) {
 __attribute__((visibility("hidden"))) static int32_t
 keyframe_value(const FakeController &fake, uint16_t type, uint16_t code) {
   if (type == EV_KEY) {
-    for (int i = 0; i < 10; i++)
+    for (size_t i = 0; i < kSnapshotButtonCount; i++)
       if (kSnapshotButtons[i] == code)
         return (fake.keyframe_buttons >> i) & 1u;
-    return 0; // e.g. BTN_MODE, which the writer never presses
+    return 0; // a code the snapshot word does not carry
   }
   if (type == EV_ABS) {
     for (int i = 0; i < 8; i++)
@@ -1084,7 +1089,7 @@ EXPORT int ioctl(int fd, ioctl_request_t op, ...) {
     SnapshotState snap;
     if (!wait_snapshot(controller->second, guard, snap)) return -1;
     unsigned char bitmask[(KEY_MAX + 8) / 8] = {};
-    for (int i = 0; i < 10; ++i) {
+    for (size_t i = 0; i < kSnapshotButtonCount; ++i) {
       if (snap.buttons & (1u << i))
         bitmask[kSnapshotButtons[i] / 8] |= 1u << (kSnapshotButtons[i] % 8);
     }
