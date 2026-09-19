@@ -8982,3 +8982,74 @@ Not yet: Steamworks Shared 228980 download; auto-resume without the "Finish" tap
 - 🔖🌊 2026-09-14 03:10 — **ROLLBACK CHECKPOINT written (user ask): [[project_bannerlator_wayland_checkpoint_20260914_pre6]]**. Restore point = main **`8fc2f5ce`** / branch `feat/wayland-phase2` **`0a52cd7a`** (code `7caa8e98`) / proton-wine **`33d96b02`** / Turnip **`05dcce18`** / wcp **v7** `436edf62d00bef2f…` (`Proton-11.0-2.1-arm64ec-7`) / APK `48377d135e542464…` = `3.1.2-wayland-pre6` installed / container 7 on layer 7 (layer 6 still installed for a one-line revert) / share folder = pre6 APK + v7 wcp + README / Desktop = the user's six shortcuts (Wizardry carries `envVars=GALLIUM_THREAD=0`, backup `/sdcard/Download/wayland-backup/wizardry.desktop.bak`). Deck on Pages is one cut stale (says pre-release 5) — refresh at the next approved public cut. Known issues carried forward: silent GL-game death (gallium threaded context), two-layer CLIENT composition until the game layer is rebuilt, the shortcut-vs-container `matchRefreshRate` resolution bug, AIO sweep unproven on v7 (harness), SELinux-enforcing devices unproven for the new EGL DRM path.
 - ✅🌊 2026-09-14 05:40 — **Phase 5 merged (`f2adbaeb`, from `feat/wayland-phase5` code `217efe9e`, CI 34825893993 green, pubg `207154ce…` installed on the device).** No wcp change (layer stays `-7`), **no release** (user's gate). (a) **OpenGL safe mode PROVEN as an A/B/A on one shortcut with no hand-typed env var**: ON (default) → `wayland: OpenGL safe mode on - exporting GALLIUM_THREAD=0` + `302 frames on screen (30.2 fps) | 300 GPU frames` for 90 s; OFF from the drawer (writes `waylandGlSafeMode=0` to the **same owner the resolver reads**, so the toggle can never be inert — the `matchRefreshRate` bug is not reproduced) → `05:26:10.832 presenting GPU frames` → `05:26:11.141 program disconnected` = **309 ms, one frame**; ON again → 30 fps steady. (b) **HDR reporting PROVEN**: first line of every session log — `HDR capability of "Built-in Screen" (display 0, Android API 34): formats none | luminance max 500 nits… | HDR/SDR headroom not available -- SDR only: an HDR layer here would be tone-mapped and dropped to GPU composition`; Task Manager CONTAINER shows `HDR  none · panel 500 nits`. (d) HL2 zero-copy unchanged (seven windows of `600 frames | 600 GPU frames | 600 zero-copy frames`). ⚠️ **(c) display-layer composition recovery is CODE-ONLY, UNPROVEN**: the game+overlay pair never came up (fullscreen HL2 minimises itself when Wine's Task Manager takes guest focus → `window moved to -32000,-32000` → `layers hidden`; the windowed retry hung). `DEVICE/CLIENT`, the recovery log line and the return to `DEVICE/DEVICE` are all unobserved — re-test recipe is in the branch's log. Also unproven: the HDR re-read when a display is attached (nothing plugged in), effects applied live, and an X11 regression launch. 📌 **Wizardry's `envVars=GALLIUM_THREAD=0` is now redundant AND harmful** — the launch path leaves an explicit user value alone, so while that line is on the shortcut the in-game safe-mode toggle cannot turn it off for that game. Remove it when the device is free (user was driving). Device left on the phase-5 build, NOT the released pre6; share folder still holds pre6.
 - ✅🌊 2026-09-14 07:05 — **Overlay layer now GATED on the display's transform+scale; merged (`3320b192`, code `5334b3d3`, CI 34834608772 green, pubg `5be0ea93…` installed).** The phase-4 premise was wrong and is corrected in `sc_layer.h`: a second display layer flips the frame to `DEVICE/CLIENT` **for the rest of the session** on this panel, and rebuilding the game layer does NOT bring it back (reproduced 3×, also at +8/+16/+24 s, and after dropping the layer path entirely; the earlier "HOME+resume fixes it" reading was wrong because HOME+resume re-creates the app's whole window and SurfaceView, `VRI[XServerDisplayActivity]#0` → `#4`). Control: the drawer alone does not cause it. **Gate (prediction, not measure-then-back-out — the composition type is not readable by an app: it lives in the Composer HAL, `ASurfaceTransactionStats` carries only latch time + fences, and the `dumpsys` copy needs `android.permission.DUMP` and would arrive a frame late):** rotation from `VkSurfaceCapabilitiesKHR::currentTransform` (`vkp_surface_rotation_degrees()`, so it follows panel install orientation + session orientation on any device, no allowlist) and scale from the game layer's own src→dst rects, decided in `render_scene()` **before** the game is committed to a layer (deciding inside `sc_layer_present_overlay()` showed/hid the game layer every frame). Proven: `overlay layer declined: this display rotates every layer 90° and the game layer is scaled 1280x720 -> 1920x1080 …` + `zero-copy paused: … whole scene on the copy path`; composer dump shows **no AHardwareBuffer layers**, `SurfaceView … z=0 DEVICE/DEVICE t=90`; picture identical, no black frame; fps not worse (30.5/27.6/30.6/30.8/30.5 with the window up vs 30.5/30.8 on the two-layer path); closing the window → `zero-copy resumed: the game is back on its own display layer`, `267 layer frames`, still `DEVICE/DEVICE`. **The session never leaves DEVICE/DEVICE now**, where before it lost it permanently. Regressions: layer path with no window above `300 frames | 300 GPU | 300 layer frames` `DEVICE/DEVICE`; effects live `13 passes` keeping the layer; X11 untouched (no safe-mode/overlay lines, no session log, Insane 2 `D3D9 · DXVK · 202.4 fps · X11`). The fresh-SurfaceControl swap stays for displays where the overlay IS raised. ⏳ Still code-only: the HDR re-read when a display is attached (nothing can be plugged into USB-C; a simulated display was correctly de-duplicated because the game stayed on the built-in panel).
+
+### 2026-09-18 — controllers for the Steam client: the reader works, the client's SDL3 is the wall
+
+**What the user reported.** The Steam client had no gamepad at all. Neither the on-screen controls
+nor a physical GameSir G8+ over Bluetooth reached it.
+
+**One cause for both.** `WinHandler.sendGamepadState()` never went through Wine: it writes the pad
+state into shared-memory rings, and `libfakeinput.so` turns those into a real `/dev/input/eventN`.
+That interposer fakes the whole evdev and udev surface in userspace, so it was never Wine-specific —
+it was only ever *preloaded* into Wine. A gamescope session has no Wine, so the rings had a writer
+and no reader.
+
+**Why the built-in pad on the Pocket FIT works and the Fold's Bluetooth pad does not.** The FIT is
+SELinux **Permissive**: its own logcat shows `avc: denied { open } for /dev/input/event9 ...
+permissive=1`, logged and not enforced, so the session reads the real kernel node — and
+`/dev/input/event8` there is literally `045e:028e  Microsoft X-Box 360 pad`, the best-mapped GUID in
+SDL's database. Nothing of ours is involved. On an enforcing device the same `open()` fails. The
+nodes are `crw-rw-r-x root:input`, so ordinary permissions allow it and SELinux is the only gate.
+Direct passthrough is therefore not shippable; it works on the FIT by accident of a permissive kernel.
+
+**Built.** `fakeinput.cpp` now compiles against glibc too — the only blocker was `ioctl`'s request
+type (bionic `int`, glibc `unsigned long`). Linked `-static-libstdc++ -static-libgcc`, because it is
+preloaded into every Steam process and Steam ships its own libstdc++ while rewriting
+`LD_LIBRARY_PATH`. It ships as a 1.4MB **APK asset** staged into the runtime at launch, not baked
+into the rootfs image, so an already installed runtime gains it on the next launch instead of waiting
+on a ~790MB re-host. `FAKE_EVDEV_IDENTITY=xbox360` gives it `045E:028E`, vendor/product deliberately
+**not** offset per slot, since a real pad reports the same ids on every port and offsetting produces
+a GUID no database knows. That is WinNative PR #727's change, taken scoped: the Wine path keeps the
+generic identity until it is proven on device.
+
+**Three bugs of mine, in order.**
+1. The preload was added to `bannerlator-session`, which lives *inside the rootfs image* — it could
+   never have reached an installed runtime. The app sets `LD_PRELOAD` in the session env instead.
+2. `FAKE_EVDEV_DIR` was empty when the client scanned. `open()` only serves a ring when a file of
+   that name exists, and it **rewrites** the path rather than falling back, so a missing node gives
+   ENOENT. `onCreate` deletes `event0..3` and the **Wine** launcher is what normally recreates
+   `event0`; the Linux path never did. Writers create their node when a slot is claimed, long after
+   the client has finished scanning. Now `event0` is created before the session starts — one node
+   only, since each extra file is another pad the client would list.
+3. The SDL hint was the SDL2 spelling. The client ships **SDL3**, which wants
+   `SDL_JOYSTICK_LINUX_CLASSIC`. Also `libudev.so.1` is present so SDL3 prefers
+   `udev_enumerate_scan_devices`, which enumerates from `/sys/class/input` where the synthetic pad
+   has no entry and never will — hence `SDL_JOYSTICK_DISABLE_UDEV=1`.
+
+**A bench rig that needs no Steam, no app and no controller.** Two aarch64 glibc probes, run on the
+FIT by invoking the rootfs loader directly (`ld-linux-aarch64.so.1 --library-path`), so proot is out
+of the picture. A valid ring is 98368 bytes with a four-word header. `evprobe` mimics an evdev scan;
+`sdlprobe` dlopens the client's own `libSDL3.so.0` and lists gamepads. `FAKE_EVDEV_LOG=1` writes to
+stderr, so the redirect has to be inside the bridge quotes.
+
+**Proven.** `evprobe` against the real interposer: `scandir(/dev/input)=event0`, `OPENED`,
+`id=045e:028e bus 0003 ver 0110`, `name=Xbox 360 Controller (0)`, the gamepad bits all set, so a
+client applying SDL's own test would accept it.
+
+**The wall.** `sdlprobe` on the client's SDL3 finds exactly one joystick by default — `PS4
+Controller`, the real G8+ — and it reaches it through **hidraw**, which the interposer does not hook.
+With `SDL_JOYSTICK_HIDAPI=0` it finds **zero**, with an empty `SDL_GetError` and **not one
+interposer log line**, while `evprobe` in the same configuration emits seven. So the client's SDL3
+never opens, stats or scans anything under `/dev/input`. The Linux backend is compiled in
+(`SDL_JOYSTICK_LINUX_DEADZONES`, `_HAT_DEADZONES`, `_DIGITAL_HATS`, `_CLASSIC` are all in the
+binary), so this is not a missing driver.
+
+**Where that points.** SDL's `LINUX_CLASSIC` selects the old `/dev/input/js*` interface rather than
+evdev, and the fake directory has no `js0`. `SDL_EnumerateDirectory` also walks a directory with
+`opendir`/`readdir`, which the interposer does not hook — it hooks `scandir` only — so a walk sees the
+real `/dev/input`. Next: add `js0`, hook `opendir`/`readdir`, re-run `sdlprobe`.
+
+**One correction worth carrying.** Because `open()` rewrites the path, the interposer **masks** the
+real `/dev/input` — so the Pocket FIT *is* a valid test platform once the preload is active, and
+permissive versus enforcing stops mattering. hidraw is not masked, which is exactly how the real G8+
+still reached SDL3.

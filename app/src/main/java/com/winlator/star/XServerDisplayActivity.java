@@ -2270,9 +2270,14 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // Prepare dev/input directory - actual event files created after shortcut is loaded
         File devInputDir = new File(imageFs.getRootDir(), "dev/input");
         if (devInputDir.exists() || devInputDir.mkdirs()) {
+            // js* as well as event*: a Linux session creates js0 for the Steam client, and a stale one
+            // left behind would hand the next Wine session a phantom pad it never asked for.
+            // Which nodes exist is the launcher's decision, so start every launch with none.
             for (int i = 0; i < 4; i++) {
                 File eventFile = new File(devInputDir, "event" + i);
                 if (eventFile.exists()) eventFile.delete();
+                File jsFile = new File(devInputDir, "js" + i);
+                if (jsFile.exists()) jsFile.delete();
             }
         }
 
@@ -8721,20 +8726,26 @@ public class XServerDisplayActivity extends AppCompatActivity {
         File fakeInputDir = new File(imageFs.getRootDir(), "dev/input");
         //noinspection ResultOfMethodCallIgnored
         fakeInputDir.mkdirs();
-        // The node file has to exist before the client scans, or there is no controller.
-        // open("/dev/input/event0") only reaches the ring when FAKE_EVDEV_DIR holds a file of that name.
-        // Otherwise the interposer falls through to the real kernel node, which the sandbox denies.
+        // The node files have to exist before the client scans, or there is no controller.
+        // open("/dev/input/<node>") only reaches the ring when FAKE_EVDEV_DIR holds a file of that name.
+        // The interposer rewrites the path rather than falling back, so a missing node is ENOENT.
         // onCreate deletes event0..3, and the Wine launcher is what normally recreates event0.
-        // Writers make their own node when a slot is claimed, which is long after the client has scanned.
-        // One node only: each extra file is another pad the client would list.
-        File fakeInputNode = new File(fakeInputDir, "event0");
-        try {
-            if (!fakeInputNode.exists() && !fakeInputNode.createNewFile()) {
-                Log.e("XServerDisplayActivity", "could not create " + fakeInputNode
-                        + " — the client will see no controller");
+        // Writers make their own node when a slot is claimed, long after the client has scanned.
+        // js0 is the one the Steam client finds, and it was the whole reason no pad ever appeared.
+        // Its SDL enumerates js* nodes and ignores event* entirely, then reads evdev from what it found.
+        // So js0 is what it opens, and what it reads there is input_event structs, not the old js protocol.
+        // event0 is kept beside it for anything that scans evdev directly, and SDL's own filter skips it.
+        String[] fakeInputNodes = {"js0", "event0"};
+        for (String node : fakeInputNodes) {
+            File fakeInputNode = new File(fakeInputDir, node);
+            try {
+                if (!fakeInputNode.exists() && !fakeInputNode.createNewFile()) {
+                    Log.e("XServerDisplayActivity", "could not create " + fakeInputNode
+                            + " — the client will see no controller");
+                }
+            } catch (IOException e) {
+                Log.e("XServerDisplayActivity", "could not create " + fakeInputNode, e);
             }
-        } catch (IOException e) {
-            Log.e("XServerDisplayActivity", "could not create " + fakeInputNode, e);
         }
         Log.i("XServerDisplayActivity", "fake evdev nodes: "
                 + java.util.Arrays.toString(fakeInputDir.list()));
