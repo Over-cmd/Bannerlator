@@ -8765,7 +8765,19 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // The cost is that the whole session gets the interposer rather than the Steam client alone.
         // That is the same bargain /etc/ld.so.preload already makes for libblsession.so.
         // Everything the interposer does not recognise falls straight through to libc via RTLD_NEXT.
-        guest.add("LD_PRELOAD=/usr/local/lib/libfakeinput.so");
+        // Escape hatch, because this preload is the one change here that reaches every process in the
+        // session rather than just the client. On one device it coincided with socket() returning
+        // ENOSYS, Xwayland failing wl_client_create and the whole session dying, while the identical
+        // build was fine on another. Dropping a file named bannerlator-no-fake-input in Download
+        // turns it off without a rebuild, so the two halves can actually be compared on the device
+        // that shows the fault. Controllers stop working when it is off; nothing else should change.
+        File noPreload = new File(android.os.Environment.getExternalStorageDirectory(),
+                "Download/bannerlator-no-fake-input");
+        if (noPreload.exists()) {
+            Log.w("XServerDisplayActivity", "fake evdev preload disabled by " + noPreload);
+        } else {
+            guest.add("LD_PRELOAD=/usr/local/lib/libfakeinput.so");
+        }
         // This is what makes the client look for js* nodes instead of enumerating through udev.
         // udev enumerates from /sys/class/input, where the synthetic pad has no entry and never will.
         // The hint names were read out of the strings in the runtime's own libSDL3.so.0.
@@ -8801,6 +8813,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
             sb.append("shortcut controlsProfile: ")
               .append(shortcut != null ? shortcut.getExtra("controlsProfile", "(none)") : "(no shortcut)")
               .append('\n');
+            sb.append("preload disabled by file: ").append(noPreload.exists()).append('\n');
             for (String e : guest) {
                 if (e.startsWith("FAKE_EVDEV") || e.startsWith("LD_PRELOAD")
                         || e.startsWith("SDL_JOYSTICK") || e.startsWith("SDL_LINUX")) {
