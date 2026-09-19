@@ -9302,3 +9302,18 @@ session. The staged `9ce0cf67` build was withdrawn. The unified-library design t
 — the app's two roots registered as the client's own library folders, so client downloads land
 where the app's would and are adopted into the store's database — is the next change, on top of
 this fix.
+
+**Unified libraries, written and held (`3613ba0a`).** The app's two game roots — its own
+`steam_games` and `bannerlator/steam_games` on the chosen card — are bound in whole as the
+`common/` folder of two Steam libraries the client sees, registered by name even when empty, so
+the client offers the same two install locations the store does and a download made in the client
+lands exactly where the app would have put it. Nothing is copied. Manifests are still written on
+the runtime side of each library, since the client will not treat a bare folder as a game: the
+app's own manifest for a title the database knows, reconciled by build both ways, else one
+written from what the folder says about itself. In the other direction, a game the client
+installs into either library is recorded in the store's database as installed there — at session
+start and again at exit — so the store shows it and the app can launch it; a game in the client's
+private library keeps only its Games-tab entry, because the app cannot run files that live
+inside the runtime. Pushed but deliberately not built yet, so the crash fix before it can be
+tested on its own; the next dispatch carries both. One caveat stands: the client's default
+install location is still its own library unless the user picks ours in the install dialog.
