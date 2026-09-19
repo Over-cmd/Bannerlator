@@ -8781,6 +8781,38 @@ public class XServerDisplayActivity extends AppCompatActivity {
         guest.add(com.winlator.star.linux.LinuxRuntime.SESSION_SCRIPT);
         guest.addAll(session);
 
+        // Controller diagnostics, written beside the session log because that folder is what gets sent
+        // back from a device we cannot reach. logcat holds the same facts and rotates them away within
+        // minutes, and on a phone there is no way to retrieve it at all.
+        // Everything needed to tell "no controller" apart from "no node", "not staged" or "not preloaded".
+        try {
+            File diag = new File(logDir, "fake-input-" + stamp + ".txt");
+            StringBuilder sb = new StringBuilder();
+            File lib = new File(com.winlator.star.linux.LinuxRuntime.rootDir(this),
+                    "usr/local/lib/libfakeinput.so");
+            sb.append("reader: ").append(lib.getPath())
+              .append(lib.isFile() ? " size=" + lib.length() : " MISSING")
+              .append(" executable=").append(lib.canExecute()).append('\n');
+            sb.append("nodes: ").append(java.util.Arrays.toString(fakeInputDir.list())).append('\n');
+            File rings = new File(fakeInputDir.getParentFile(), "fakeinput-rings");
+            sb.append("rings: ").append(java.util.Arrays.toString(rings.list())).append('\n');
+            // The touch profile is chosen later in the launch, so it is deliberately not reported here.
+            sb.append("physical pad connected: ").append(hasConnectedGameController()).append('\n');
+            sb.append("shortcut controlsProfile: ")
+              .append(shortcut != null ? shortcut.getExtra("controlsProfile", "(none)") : "(no shortcut)")
+              .append('\n');
+            for (String e : guest) {
+                if (e.startsWith("FAKE_EVDEV") || e.startsWith("LD_PRELOAD")
+                        || e.startsWith("SDL_JOYSTICK") || e.startsWith("SDL_LINUX")) {
+                    sb.append("env: ").append(e).append('\n');
+                }
+            }
+            java.nio.file.Files.write(diag.toPath(), sb.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            Log.i("XServerDisplayActivity", "controller diagnostics: " + diag.getName());
+        } catch (Exception e) {
+            Log.w("XServerDisplayActivity", "could not write controller diagnostics", e);
+        }
+
         EnvVars hostEnv = new EnvVars();
         hostEnv.put("PROOT_LOADER", com.winlator.star.linux.LinuxRuntime.prootLoader(this).getPath());
         hostEnv.put("PROOT_TMP_DIR", getCacheDir().getPath());
