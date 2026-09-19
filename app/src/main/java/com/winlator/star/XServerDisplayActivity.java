@@ -8854,6 +8854,10 @@ public class XServerDisplayActivity extends AppCompatActivity {
             Log.w("XServerDisplayActivity", "could not write controller diagnostics", e);
         }
 
+        // Variables worked out after the session script was appended to the command. They cannot
+        // simply be added to the end; see the FEX block below.
+        List<String> lateEnv = new ArrayList<>();
+
         EnvVars hostEnv = new EnvVars();
         hostEnv.put("PROOT_LOADER", com.winlator.star.linux.LinuxRuntime.prootLoader(this).getPath());
         hostEnv.put("PROOT_TMP_DIR", getCacheDir().getPath());
@@ -8876,7 +8880,13 @@ public class XServerDisplayActivity extends AppCompatActivity {
                     : container.getFEXCorePreset();
             EnvVars sessionEnv = com.winlator.star.fexcore.FEXCorePresetManager.getEnvVars(this, fexPreset);
             sessionEnv.putAll(effectiveUserEnv());
-            for (String entry : sessionEnv.toStringArray()) guest.add(entry);
+            // Not appended: the session script and its arguments are already on the end of this
+            // list, so anything added here becomes an argument to the script rather than a
+            // variable in its environment. The preset has been going in that way and reaching
+            // nothing - a Steam process carries every BL_ and FAKE_EVDEV_ name set before the
+            // script was added, and not one FEX one. These are put back in front of the script
+            // below, where /usr/bin/env can still read them.
+            for (String entry : sessionEnv.toStringArray()) lateEnv.add(entry);
         }
 
         List<String> gameBinds = com.winlator.star.linux.LinuxSteamLibrary.prepare(
@@ -8886,7 +8896,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // image. The client measures the folder, so it would quote the phone's free space for a
         // library full of card games - and it refuses an install it believes will not fit. The
         // session shim answers that one question from the games' own directory instead.
-        guest.add("BL_LIBRARY_SPACE=" + com.winlator.star.linux.LinuxSteamLibrary.GUEST_ROOT_SD);
+        lateEnv.add("BL_LIBRARY_SPACE=" + com.winlator.star.linux.LinuxSteamLibrary.GUEST_ROOT_SD);
         // The other direction. The client's main library is internal storage and its second is the
         // card, so a game it installs lands where the app would have put it and is recorded in the
         // store's database as installed there: the store shows it, the app can launch it.
@@ -8895,6 +8905,14 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // Apps may not list /dev/input; the fake evdev nodes the input rings back stand in for it.
         gameBinds = new ArrayList<>(gameBinds);
         if (fakeInputEnabled) gameBinds.add(fakeInputDir.getPath() + ":/dev/input");
+        // Back in front of the script, so `env -i` sets them instead of the script being handed
+        // them as filenames to run.
+        if (!lateEnv.isEmpty()) {
+            int scriptAt = guest.indexOf(com.winlator.star.linux.LinuxRuntime.SESSION_SCRIPT);
+            if (scriptAt >= 0) guest.addAll(scriptAt, lateEnv);
+            else guest.addAll(lateEnv);
+            Log.i("XServerDisplayActivity", "session env: " + lateEnv.size() + " late variable(s) placed before the script");
+        }
         List<String> command = com.winlator.star.linux.LinuxRuntime.command(this, imageFs, runtimeDir,
                 android.os.Environment.getExternalStorageDirectory(), gameBinds, guest);
         // The device's network link, for the runtime's processes: written before the session so

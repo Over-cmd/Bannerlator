@@ -9578,3 +9578,19 @@ the session shim serves a statfs of a library root named in `BL_LIBRARY_SPACE` f
 cases unit-tested on the host, including the near-miss `/mnt/bannerlator-sd-other` and the case
 with the variable unset. The game size and internal storage's figure were already correct and are
 untouched.
+
+**The free-space hook was right; the variable never arrived - and neither had the FEX preset
+(2026-09-19).** The dialog still quoted one figure for both places after `868dc007`. The hook
+itself was fine: with the shim loaded and `BL_LIBRARY_SPACE` set, a statvfs of a library root
+whose `steamapps/common` pointed at the card returned the card's 300,311 MB rather than internal's.
+But `BL_LIBRARY_SPACE` was absent from every process in the session, Steam included.
+
+The session command is `/usr/bin/env -i VAR=VAL ... <script> <args>`, and the script and its
+arguments are appended at line 8822. Two blocks then add to the same list: the FEX preset's
+environment and, as of the last build, this variable. Everything added after the script becomes
+an argument to it. A running Steam process carries every `BL_` and `FAKE_EVDEV_` name set before
+line 8822 and **not one FEX one** - so the FEX preset has never reached a Linux session, which
+makes the store-ordering it configures dead the whole time, the thing meant to stop a
+multithreaded x86 title sitting at its loading screen. Both are now collected and inserted in
+front of the script. Worth watching after this lands: client-launched games get the FEX preset
+applied for the first time, so their behaviour can change.
