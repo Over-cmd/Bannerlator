@@ -9708,3 +9708,36 @@ that side kept the code it had rather than changing.
 has it in the Linux client; the Fold - the device the client's controller problems started on -
 is fine too. The split holds on the flavour that device runs, and nothing the client kept has
 regressed on it.
+
+---
+
+## Linux/gamescope runtime — where 2026-09-19 ended
+
+Branch `feat/linux-gamescope-runtime`, **nothing merged to main**. Last build run 35468909193
+(`28922e7c`); the Fold takes the standard flavour of the same run.
+
+**Proven on device (the Pocket FIT unless noted).** FlatOut runs through ARM64 Proton. The Steam
+button opens the client's in-game menu. Library sync holds in all four directions: the app's games
+reach the client, the client's reach the store, an app-side delete cleans the client's manifest,
+and files vanishing clears the store's record. The install dialog offers "Internal Storage" and
+"SD Card" by name, each with its own real free space, and internal is the default so there is no
+choice to get wrong. Manifests carry real depot data, so the client stops re-fetching what is
+already on disk. The FEX preset reaches a session for the first time. A game downloaded in the
+client lands in internal storage, is taken into the store, and launches from the app side -
+Portal 2, end to end. Controllers work again in Wine on both devices after the interposer split.
+
+**Three things that will bite whoever comes next.** `fakeinput.cpp` is compiled twice, against
+bionic for Wine and against glibc for the client, and one file serving both is what killed Wine's
+controllers today - the client's copy is `fakeinput_steam.cpp` now and must stay separate.
+Adoption runs only when a Linux session starts or ends, so reopening the app does nothing and a
+game downloaded in the client stays invisible until a session runs. And a client-downloaded game
+needs its `.bannerlator_build` marker, owned by the app's uid, or the app offers an update that
+would re-download the whole game.
+
+**Next.** Need for Speed Most Wanted, 6,649 MB in internal storage, stamped and recorded. Its
+folder carries both `Core/ActivationUI.exe` - the bundled EA client the other NFS titles already
+activate through - and `EAappInstaller_installScript.vdf`, which is Steam's instruction to install
+the EA App. So the app side runs `NFS13.exe` and the known-good chain, while the client would hand
+off to the EA App bootstrapper, which nothing here has exercised. App side first. Still open and
+cosmetic: Half-Life 2's episodes appear in the store but not the client, adoption is not live
+during a session, and the on-screen pad has no Steam button.
