@@ -116,10 +116,15 @@ public final class LinuxSteamLibrary {
             File[] dirs = root.listFiles(File::isDirectory);
             if (dirs == null) continue;
             for (File dir : dirs) {
-                String appId = appIdOfFolder(dir, depotToApp);
-                if (appId == null || known.contains(Integer.parseInt(appId))) continue;
-                Log.i(TAG, dir.getName() + " identifies itself as " + appId + " without a database row");
-                expose(appId, dir.getName(), dir, steamapps, common, kept, binds, prefixManifests);
+                // One unreadable folder must never cost the whole session.
+                try {
+                    String appId = appIdOfFolder(dir, depotToApp);
+                    if (appId == null || known.contains(Integer.parseInt(appId))) continue;
+                    Log.i(TAG, dir.getName() + " identifies itself as " + appId + " without a database row");
+                    expose(appId, dir.getName(), dir, steamapps, common, kept, binds, prefixManifests);
+                } catch (Throwable t) {
+                    Log.w(TAG, "skipping " + dir, t);
+                }
             }
         }
 
@@ -163,9 +168,13 @@ public final class LinuxSteamLibrary {
 
     /** steam_appid.txt from a launch, else the downloader's journal mapped through the database. */
     private static String appIdOfFolder(File dir, java.util.Map<Integer, String> depotToApp) {
-        String text = FileUtils.readString(new File(dir, "steam_appid.txt"));
+        // readString throws on a file that is not there rather than returning null, and a folder
+        // that has never been launched has no steam_appid.txt: check first, every time.
+        File idFile = new File(dir, "steam_appid.txt");
+        String text = idFile.isFile() ? FileUtils.readString(idFile) : null;
         if (text != null && text.trim().matches("\\d+")) return text.trim();
-        String journal = FileUtils.readString(new File(dir, ".bl_depot/depot.config"));
+        File journalFile = new File(dir, ".bl_depot/depot.config");
+        String journal = journalFile.isFile() ? FileUtils.readString(journalFile) : null;
         if (journal == null) return null;
         Matcher m = Pattern.compile("\"(\\d+)\"\\s*:").matcher(journal);
         while (m.find()) {
@@ -237,7 +246,7 @@ public final class LinuxSteamLibrary {
             Matcher id = MANIFEST.matcher(manifest.getName());
             if (!id.matches()) continue;
             String appId = id.group(1);
-            String text = FileUtils.readString(manifest);
+            String text = manifest.isFile() ? FileUtils.readString(manifest) : null;
             if (text == null) continue;
             Matcher name = NAME.matcher(text);
             Matcher dir = INSTALLDIR.matcher(text);
