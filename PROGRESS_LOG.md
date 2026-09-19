@@ -9561,3 +9561,20 @@ app's own two folders with internal as the default, and manifests carry real dep
 client stops re-fetching what is already on disk. Two known issues remain, both understood and
 neither blocking: the card library reports internal's free space, and Half-Life 2's three
 episodes appear in the store but not in the client. Nothing on this branch is merged to main.
+
+**The card library's free space, answered where the games are (2026-09-19).** The install dialog
+quoted the same figure against both places - 275.97 GB, which is the phone's - while the card had
+293 GB. The library's `steamapps/common` is bound to the card, but the folder naming the library
+belongs to the runtime image, and that folder is what the client measures. Not only cosmetic: the
+client refuses an install it believes will not fit, so once the phone filled up it would turn
+down a card install with room to spare and give no reason.
+
+Binding the whole library onto the card was the obvious fix and is the wrong one - the prefixes
+under `steamapps/compatdata` want symlinks and file locks, and the card is served over FUSE,
+which gives neither. That is why they live in the runtime image, and moving them would trade a
+wrong number for broken prefixes. So the question is answered where the content is: `space.c` in
+the session shim serves a statfs of a library root named in `BL_LIBRARY_SPACE` from its
+`steamapps/common`, the bind that points at the card, and passes every other path through. Ten
+cases unit-tested on the host, including the near-miss `/mnt/bannerlator-sd-other` and the case
+with the variable unset. The game size and internal storage's figure were already correct and are
+untouched.

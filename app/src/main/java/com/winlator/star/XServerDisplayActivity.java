@@ -8881,6 +8881,12 @@ public class XServerDisplayActivity extends AppCompatActivity {
 
         List<String> gameBinds = com.winlator.star.linux.LinuxSteamLibrary.prepare(
                 this, containerManager.getContainers(), com.winlator.star.linux.LinuxRuntime.rootDir(this));
+        // A library's games can sit somewhere the folder naming the library does not: the card
+        // library's common/ is bound to the card while the folder above it belongs to the runtime
+        // image. The client measures the folder, so it would quote the phone's free space for a
+        // library full of card games - and it refuses an install it believes will not fit. The
+        // session shim answers that one question from the games' own directory instead.
+        guest.add("BL_LIBRARY_SPACE=" + com.winlator.star.linux.LinuxSteamLibrary.GUEST_ROOT_SD);
         // The other direction. The client's main library is internal storage and its second is the
         // card, so a game it installs lands where the app would have put it and is recorded in the
         // store's database as installed there: the store shows it, the app can launch it.
