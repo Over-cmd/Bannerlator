@@ -8683,6 +8683,14 @@ public class XServerDisplayActivity extends AppCompatActivity {
         guest.add("BL_LOG=" + sessionLog.getPath());
         guest.add("BL_DEBUG_DIR=" + new File(logDir, "session-" + stamp).getPath());
 
+        // Controllers for a Linux session.
+        // WinHandler already publishes the on-screen and physical pads into the fake-input rings (setFakeInputPath, in onCreate).
+        // What this session lacks is a reader, because there is no Wine here to preload the interposer into.
+        // Handing the rings to the glibc build of libfakeinput.so makes the Steam client enumerate a real /dev/input/eventN.
+        // The pad then works in Big Picture and in the games launched from it.
+        // Both paths below are bound into the session at their own host paths (LinuxRuntime.command), so nothing here needs translating.
+        // xbox360: SDL and Steam key their mapping database on bus+vendor+product.
+        // Only a known identity gets the standard layout without the user configuring the pad by hand.
         // One switch for the whole controller feature, not just the preload.
         // The first version gated LD_PRELOAD alone, which left the SDL hints in place: the client
         // still went scanning /dev/input/js* with no interposer there to answer, which on a sandboxed
@@ -8696,14 +8704,6 @@ public class XServerDisplayActivity extends AppCompatActivity {
             Log.w("XServerDisplayActivity", "controller support disabled by " + noFakeInput);
         }
 
-        // Controllers for a Linux session.
-        // WinHandler already publishes the on-screen and physical pads into the fake-input rings (setFakeInputPath, in onCreate).
-        // What this session lacks is a reader, because there is no Wine here to preload the interposer into.
-        // Handing the rings to the glibc build of libfakeinput.so makes the Steam client enumerate a real /dev/input/eventN.
-        // The pad then works in Big Picture and in the games launched from it.
-        // Both paths below are bound into the session at their own host paths (LinuxRuntime.command), so nothing here needs translating.
-        // xbox360: SDL and Steam key their mapping database on bus+vendor+product.
-        // Only a known identity gets the standard layout without the user configuring the pad by hand.
         // The session's preload libraries, refreshed from the app's own copies at every launch.
         // /etc/ld.so.preload in the runtime names libblsession.so, so it is loaded into every process
         // the session runs and has to match the build that starts it; a runtime installed earlier
@@ -8739,32 +8739,33 @@ public class XServerDisplayActivity extends AppCompatActivity {
             if (!installed) Log.e("XServerDisplayActivity", name + " NOT staged (asset missing?)");
         }
         Log.i("XServerDisplayActivity", "session libraries staged: " + stagedReport.toString().trim());
+        // What every process in the session preloads. The runtime image ships this naming the
+        // session shim alone; the controller reader is added here, so an installed runtime gains it
+        // and the off switch removes it again. Written by rename like the libraries.
+        String preloadList = "/usr/local/lib/libblsession.so\n"
+                + (fakeInputEnabled ? "/usr/local/lib/libfakeinput.so\n" : "");
+        try {
+            File etc = new File(com.winlator.star.linux.LinuxRuntime.rootDir(this), "etc");
+            File stagedList = new File(etc, "ld.so.preload.staged");
+            java.nio.file.Files.write(stagedList.toPath(),
+                    preloadList.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            if (!stagedList.renameTo(new File(etc, "ld.so.preload"))) {
+                //noinspection ResultOfMethodCallIgnored
+                stagedList.delete();
+                Log.e("XServerDisplayActivity", "could not write ld.so.preload");
+            }
+        } catch (Exception e) {
+            Log.w("XServerDisplayActivity", "could not write ld.so.preload", e);
+        }
 
         File fakeInputDir = new File(imageFs.getRootDir(), "dev/input");
         if (fakeInputEnabled) {
             //noinspection ResultOfMethodCallIgnored
             fakeInputDir.mkdirs();
-            // The node files have to exist before the client scans, or there is no controller.
-            // open("/dev/input/<node>") only reaches the ring when FAKE_EVDEV_DIR holds a file of that name.
-            // The interposer rewrites the path rather than falling back, so a missing node is ENOENT.
-            // onCreate deletes event0..3, and the Wine launcher is what normally recreates event0.
-            // Writers make their own node when a slot is claimed, long after the client has scanned.
-            // js0 is the one the Steam client finds, and it was the whole reason no pad ever appeared.
-            // Its SDL enumerates js* nodes and ignores event* entirely, then reads evdev from what it found.
-            // So js0 is what it opens, and what it reads there is input_event structs, not the old js protocol.
-            // event0 is kept beside it for anything that scans evdev directly, and SDL's own filter skips it.
-            String[] fakeInputNodes = {"js0", "event0"};
-            for (String node : fakeInputNodes) {
-                File fakeInputNode = new File(fakeInputDir, node);
-                try {
-                    if (!fakeInputNode.exists() && !fakeInputNode.createNewFile()) {
-                        Log.e("XServerDisplayActivity", "could not create " + fakeInputNode
-                                + " — the client will see no controller");
-                    }
-                } catch (IOException e) {
-                    Log.e("XServerDisplayActivity", "could not create " + fakeInputNode, e);
-                }
-            }
+            // The rings' own event nodes are what the client sees: the directory is bound in as
+            // /dev/input itself (see gameBinds below), so an unhooked opendir/readdir lists it and
+            // no js* node or classic-scan hint is needed. Verified on device with the runtime's proot.
+            com.winlator.star.inputcontrols.FakeInputWriter.prepareRingSlots(fakeInputDir, 4);
             Log.i("XServerDisplayActivity", "fake evdev nodes: "
                     + java.util.Arrays.toString(fakeInputDir.list()));
             guest.add("FAKE_EVDEV_DIR=" + fakeInputDir.getPath());
@@ -8783,21 +8784,17 @@ public class XServerDisplayActivity extends AppCompatActivity {
             // The cost is that the whole session gets the interposer rather than the Steam client alone.
             // That is the same bargain /etc/ld.so.preload already makes for libblsession.so.
             // Everything the interposer does not recognise falls straight through to libc via RTLD_NEXT.
-            guest.add("LD_PRELOAD=/usr/local/lib/libfakeinput.so");
-            // This is what makes the client look for js* nodes instead of enumerating through udev.
-            // udev enumerates from /sys/class/input, where the synthetic pad has no entry and never will.
-            // The hint names were read out of the strings in the runtime's own libSDL3.so.0.
-            // SDL3 spells it SDL_JOYSTICK_LINUX_CLASSIC; SDL2 spelled it SDL_LINUX_JOYSTICK_CLASSIC.
-            // Both are set, because games launched from the client bring their own SDL of either generation.
-            // Disabling udev outright was tried and is NOT needed: with js0 present the classic hint alone
-            // finds the pad, verified against that same library on device. Leaving udev alone keeps the
-            // client's own controller discovery working exactly as it did before.
-            guest.add("SDL_JOYSTICK_LINUX_CLASSIC=1");
-            guest.add("SDL_LINUX_JOYSTICK_CLASSIC=1");
-            // The interposer can narrate every hook the client hits: the open of js0, each ioctl it
-            // asks, the keyframe when reads begin. That goes to stderr, which the session log
-            // captures, so on a device we cannot reach it is the only direct evidence of whether the
-            // client ever touched our pad. A file switch rather than always-on, because it is chatty.
+                // No LD_PRELOAD here: the Steam client rebuilds LD_PRELOAD for every process it starts
+            // and appends its overlay without a separator, silently dropping whatever was there.
+            // Both shims are named in /etc/ld.so.preload instead, which the app writes below.
+            // Steam Input hides a pad it manages from the game and shows it a virtual one instead,
+            // which needs /dev/uinput; the pad carries that identity itself for everything but the client.
+            guest.add("FAKE_EVDEV_STEAM_VIRTUAL=1");
+            // No udev runs in the runtime: SDL and Steam's hidapi scan /dev/input themselves, and
+            // the netlink monitor they still open is answered by the session shim's stand-in.
+            guest.add("SDL_JOYSTICK_DISABLE_UDEV=1");
+            guest.add("SDL_HIDAPI_JOYSTICK_DISABLE_UDEV=1");
+            guest.add("SDL_JOYSTICK_HIDAPI=0");
             File traceSwitch = new File(android.os.Environment.getExternalStorageDirectory(),
                     "Download/bannerlator-fake-input-log");
             if (traceSwitch.exists()) {
@@ -8828,6 +8825,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
               .append(shortcut != null ? shortcut.getExtra("controlsProfile", "(none)") : "(no shortcut)")
               .append('\n');
             sb.append("controller support enabled: ").append(fakeInputEnabled).append('\n');
+            sb.append("ld.so.preload: ").append(preloadList.replace("\n", " ").trim()).append('\n');
             for (String e : guest) {
                 if (e.startsWith("FAKE_EVDEV") || e.startsWith("LD_PRELOAD")
                         || e.startsWith("SDL_JOYSTICK") || e.startsWith("SDL_LINUX")) {
@@ -8853,6 +8851,9 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // the same install serves both launchers and nothing is fetched twice.
         List<String> gameBinds = com.winlator.star.linux.LinuxSteamLibrary.prepare(
                 container, com.winlator.star.linux.LinuxRuntime.rootDir(this));
+        // Apps may not list /dev/input; the fake evdev nodes the input rings back stand in for it.
+        gameBinds = new ArrayList<>(gameBinds);
+        if (fakeInputEnabled) gameBinds.add(fakeInputDir.getPath() + ":/dev/input");
         List<String> command = com.winlator.star.linux.LinuxRuntime.command(this, imageFs, runtimeDir,
                 android.os.Environment.getExternalStorageDirectory(), gameBinds, guest);
         environment.addComponent(new com.winlator.star.linux.LinuxProgramLauncherComponent(

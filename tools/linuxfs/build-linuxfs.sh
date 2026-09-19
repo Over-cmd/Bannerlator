@@ -161,7 +161,7 @@ aarch64-linux-gnu-gcc -shared -fPIC -O2 -Wall -pthread -o rootfs/usr/local/lib/l
 # native Steam client gets a controller at all - it has no Wine and no XInput to read. Preloaded
 # only on the client, by bannerlator-session, not from ld.so.preload: every interposed call here
 # sits on open/read/poll/select, and nothing else in the session needs a gamepad.
-aarch64-linux-gnu-g++ -shared -fPIC -O2 -Wall -std=c++17 -static-libstdc++ -static-libgcc \
+aarch64-linux-gnu-g++ -shared -fPIC -O2 -Wall -Wno-attributes -Wno-nonnull-compare -pthread -std=c++17 -static-libstdc++ -static-libgcc \
   -o rootfs/usr/local/lib/libfakeinput.so "$here/../../app/src/main/cpp/winlator/fakeinput.cpp" -ldl
 aarch64-linux-gnu-readelf -d rootfs/usr/local/lib/libfakeinput.so | grep NEEDED
 # Games that ship a native Linux x86 build run under FEX, and the aarch64 library above cannot be

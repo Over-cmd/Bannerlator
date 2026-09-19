@@ -130,18 +130,6 @@ case $mode in
     export STEAM_RUNTIME=1
     export LD_LIBRARY_PATH=$steam_root/steamrtarm64:$steam_root/steamrtarm64/panorama${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
     export SDL_VIDEO_X11_DGAMOUSE=0
-    # The app's on-screen and physical pads: FAKE_EVDEV_* names the shared-memory rings it writes.
-    # libfakeinput.so turns those rings into a real /dev/input/eventN for whoever has it preloaded.
-    # The app normally preloads it for the whole session, because this script lives in the rootfs
-    # image and cannot reach a runtime that is already installed. This is the fallback for a session
-    # whose app did not, and it is skipped when the app already has it in LD_PRELOAD.
-    case "${LD_PRELOAD:-}" in *libfakeinput.so*) _bl_evdev_preloaded=1 ;; *) _bl_evdev_preloaded= ;; esac
-    if [ -n "${FAKE_EVDEV_DIR:-}" ] && [ -f /usr/local/lib/libfakeinput.so ] \
-       && [ -z "$_bl_evdev_preloaded" ]; then
-      export LD_PRELOAD=/usr/local/lib/libfakeinput.so${LD_PRELOAD:+:$LD_PRELOAD}
-      export SDL_JOYSTICK_LINUX_CLASSIC=1 SDL_LINUX_JOYSTICK_CLASSIC=1
-      echo "== fake evdev: $(ls "$FAKE_EVDEV_DIR" 2>/dev/null | tr '\n' ' ')id=${FAKE_EVDEV_IDENTITY:-generic}"
-    fi
     # Native-Linux x86 games go through Valve's FEX compat tool, which runs FEX with FEX_PORTABLE=1
     # - that makes FEX look for its config next to the binary, while the tool writes one into the
     # app's compatdata instead. FEX therefore starts with no rootfs, every x86_64 library lookup
