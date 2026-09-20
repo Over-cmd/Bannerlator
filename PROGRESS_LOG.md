@@ -10191,3 +10191,53 @@ never loaded.
 
 Best result of the night remains run 1, and its crash is still unexplained. Next: GTA V Legacy
 (appid 271590, D3D11) on GE-Proton, which takes vkd3d out of the picture.
+
+## Where things stand, end of 2026-09-19
+
+Branch `feat/linux-gamescope-runtime`, nothing merged. Staged APK
+`80ab76a8da6a97702b7281f387fd5762f7afccec113a94d08561d4fcbe0b0234` (run 35486662947).
+
+**Shipped and device-proven today:** third-party Protons are selectable in the client and are now
+an ordinary catalog download - `linux-protons.json` in winlator-contents, a "Proton builds" card in
+the Linux runtime tab, the app fetching and checksumming, the session unpacking and registering in
+about twelve seconds. Both GE-Proton 11-7 and proton-cachyos are installed and appear in Steam's
+Compatibility list. The card listed Valve's own ARM64 depots for about an hour until the user
+pointed out they were two entries nobody should pick sitting beside two they should; they are gone
+and the warning moved into the card's description.
+
+One regression shipped and was fixed within the hour: the card crashed the app for anyone whose
+runtime had never been asked for a Proton, because `FileUtils.readString` throws on a missing file
+rather than returning null.
+
+**What we now know about GTA V Enhanced, and what we were wrong about.**
+
+Two long-held theories died today. The 1.3 TB `allocate_virtual_memory` failure is not the blocker:
+it is a backing-off ladder of 1.3 TB, 512 GB and 256 GB, all failing inside the first thirty
+seconds, after which the game ran for another two and a half minutes. And the D3D feature-level
+refusal is simply gone under GE-Proton - every "not supported" line in that log is a DLSS warning.
+
+The best run reached `GTA5_Enhanced.exe` itself, with DXVK and vkd3d both initialised, and ended
+with an execute access violation at address zero: `rip=0000000000000000`, no stack frame, no module
+name. That is a call through a null function pointer, not a data dereference.
+
+**The live lead is a Turnip bug in our own driver, not FEX.** Max's branch carries a fix for
+exactly this: the KGSL build advertises `VK_EXT_present_timing` while withholding
+`VK_KHR_calibrated_timestamps`, so vkd3d-proton enables present timing and calls the entry point
+through a null pointer - his report is Monster Hunter Rise dying a minute into every run. We build
+the same KGSL Turnip and apply every patch in `tools/linuxfs/turnip/`; he has two patches there and
+we have one. The one we lack is the fix. It is saved at `/home/claude-user/max-port/` along with a
+list of his twenty newest commits.
+
+It is a hypothesis, not a proven cause: our run carried `PROTON_LOG=1` only, so the log has nothing
+to say about present timing either way.
+
+Two other commits of his are worth taking. Seeding the redistributable markers into Proton's prefix
+template is strictly better than the five-second racing seeder we shipped this morning, and
+shipping Turnip with the app and refreshing it at session start is what would let the Turnip fix
+reach a device by APK rather than a whole runtime re-host.
+
+**Next, at the user's direction:** delete GTA V Enhanced (96 GB, and only 106 GB free so the two
+cannot coexist) and test GTA V Legacy, appid 271590, on GE-Proton. Legacy is D3D11 and therefore
+goes through DXVK rather than vkd3d, so a clean run there would neither prove nor disprove the
+present-timing theory. Legacy will arrive mapped to `bannerlator-proton-arm64` with no launch
+options, so it needs GE chosen by hand and `PROTON_LOG=1 %command%` added.
