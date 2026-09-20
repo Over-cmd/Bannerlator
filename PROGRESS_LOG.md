@@ -10328,3 +10328,35 @@ The behaviour was correct while the only goal was getting Windows games to launc
 way to leave a native title alone - an exclusion list of appids, or detecting a Linux launcher in
 the install directory at session time. Not yet fixed, and it means the native path cannot currently
 be tested without changing the registrar.
+
+### Retraction: the registrar mapping every appid is not a bug (2026-09-20)
+
+I wrote up the registrar forcing Proton onto native Linux titles as a defect needing a fix. That
+was wrong, and the SteamDeck session caught it by asking the right question: has a native Linux x86
+title ever actually launched through Valve's FEX tool in this runtime?
+
+It has not, and the reason is worse than a namespace wall. The session script reads
+
+```sh
+[ -d /usr/share/guestos/fex-mesa ] && export FEX_ROOTFS=/usr/share/guestos/fex-mesa
+```
+
+and **nothing in the build ever creates that directory**. There is no reference to `guestos` in
+`build-linuxfs.sh`, in the overlay, or anywhere in the app - only the guard itself - and it does not
+exist on the device. So `FEX_ROOTFS` is never set and the guard silently does nothing. The native
+path fails exactly as it did on 2026-09-18: FEX starts with no rootfs, every x86_64 library lookup
+falls through to the host, and the guest shell dies on `libreadline.so.8: cannot open` before the
+game is reached.
+
+Which means the blanket mapping is load-bearing. It is what makes Half-Life 2, Lost Coast, both
+episodes and Half-Life playable here, by putting them on the Windows build instead. An exclusion
+list or launcher detection would have sent all five back to a dead end, and I would have shipped
+that as a fix.
+
+The real defect is the missing rootfs. Build or ship `/usr/share/guestos/fex-mesa` first; only once
+a native x86 title actually launches does it make sense to teach the registrar to leave such titles
+alone. Until then the mapping stays exactly as it is.
+
+Worth keeping as a general lesson: a guard of the form `[ -d X ] && export …` fails silently when X
+is never created. It reads as working code and it is a no-op. Check the thing exists before
+trusting the mechanism built on it.
