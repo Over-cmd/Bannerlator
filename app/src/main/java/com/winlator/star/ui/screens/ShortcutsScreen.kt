@@ -6669,6 +6669,10 @@ internal fun ShortcutSettingsDialogScreen(
 
     // AndroidView refs
     val cpuListViewRef = remember { mutableStateOf<CPUListView?>(null) }
+    // A Linux entry splits the affinity in two (see the Advanced tab): the Steam client plus the
+    // compositor drawing its UI, and the games the client launches. Wine keeps the single list above.
+    val linuxClientCpuListViewRef = remember { mutableStateOf<CPUListView?>(null) }
+    val linuxGameCpuListViewRef = remember { mutableStateOf<CPUListView?>(null) }
 
     // Icon
     var iconBitmap by remember { mutableStateOf<Bitmap?>(shortcut.icon) }
@@ -6827,6 +6831,10 @@ internal fun ShortcutSettingsDialogScreen(
         val wincomps = winComponents.joinToString(",") { "${it.key}=${it.selectedIndex}" }
         val envVars = envVarsStr
         val cpuList = cpuListViewRef.value?.getCheckedCPUListAsString() ?: shortcut.getExtra("cpuList", shortcut.container.getCPUList(true))
+        val linuxClientCpuList = linuxClientCpuListViewRef.value?.getCheckedCPUListAsString()
+            ?: shortcut.getExtra("linuxClientCpuList", shortcut.container.getCPUList(true))
+        val linuxGameCpuList = linuxGameCpuListViewRef.value?.getCheckedCPUListAsString()
+            ?: shortcut.getExtra("linuxGameCpuList", shortcut.container.getCPUList(true))
 
         val b64PresetId = box64Presets.getOrElse(selectedBox64PresetIndex) { null }?.id ?: Box64Preset.COMPATIBILITY
         val fexPresetId = fexCorePresets.getOrElse(selectedFexCorePresetIndex) { null }?.id ?: FEXCorePreset.COMPATIBILITY
@@ -6942,6 +6950,12 @@ internal fun ShortcutSettingsDialogScreen(
             putExtra("wincomponents", wincomps)
             putExtra("envVars", envVars.ifEmpty { null })
             putExtra("cpuList", cpuList)
+            // Only a Linux entry draws the two pickers, so only a Linux entry writes their keys — a
+            // Wine shortcut keeps exactly the extras it had.
+            if (isLinuxEntry) {
+                putExtra("linuxClientCpuList", linuxClientCpuList)
+                putExtra("linuxGameCpuList", linuxGameCpuList)
+            }
             saveData()
         }
     }
@@ -8484,6 +8498,12 @@ internal fun ShortcutSettingsDialogScreen(
             cpuListViewRef = cpuListViewRef,
             initialCpuList = shortcut.getExtra("cpuList", shortcut.container.getCPUList(true)),
             onCpuListSnapshot = { shortcut.putExtra("cpuList", it) },
+            linuxClientCpuListViewRef = linuxClientCpuListViewRef,
+            initialLinuxClientCpuList = shortcut.getExtra("linuxClientCpuList", shortcut.container.getCPUList(true)),
+            onLinuxClientCpuListSnapshot = { shortcut.putExtra("linuxClientCpuList", it) },
+            linuxGameCpuListViewRef = linuxGameCpuListViewRef,
+            initialLinuxGameCpuList = shortcut.getExtra("linuxGameCpuList", shortcut.container.getCPUList(true)),
+            onLinuxGameCpuListSnapshot = { shortcut.putExtra("linuxGameCpuList", it) },
             sharpnessEffectEntries = sharpnessEffectEntries,
             selectedSharpnessEffect = selectedSharpnessEffect,
             onSharpnessEffectChange = { selectedSharpnessEffect = it },
@@ -9022,6 +9042,13 @@ private fun ScAdvancedTab(
     cpuListViewRef: MutableState<CPUListView?>,
     initialCpuList: String,
     onCpuListSnapshot: (String) -> Unit,
+    // Linux-only: the Steam client + compositor list, and the list a client-launched game gets.
+    linuxClientCpuListViewRef: MutableState<CPUListView?> = mutableStateOf<CPUListView?>(null),
+    initialLinuxClientCpuList: String = "",
+    onLinuxClientCpuListSnapshot: (String) -> Unit = {},
+    linuxGameCpuListViewRef: MutableState<CPUListView?> = mutableStateOf<CPUListView?>(null),
+    initialLinuxGameCpuList: String = "",
+    onLinuxGameCpuListSnapshot: (String) -> Unit = {},
     sharpnessEffectEntries: List<String>,
     selectedSharpnessEffect: String,
     onSharpnessEffectChange: (String) -> Unit,
@@ -9046,6 +9073,10 @@ private fun ScAdvancedTab(
         onDispose {
             cpuListViewRef.value?.let { onCpuListSnapshot(it.checkedCPUListAsString) }
             cpuListViewRef.value = null
+            linuxClientCpuListViewRef.value?.let { onLinuxClientCpuListSnapshot(it.checkedCPUListAsString) }
+            linuxClientCpuListViewRef.value = null
+            linuxGameCpuListViewRef.value?.let { onLinuxGameCpuListSnapshot(it.checkedCPUListAsString) }
+            linuxGameCpuListViewRef.value = null
         }
     }
     // On arm64ec containers the x86 backend is WOWBox64, not Box64 — label it correctly (matching
@@ -9219,13 +9250,41 @@ private fun ScAdvancedTab(
         }
         }
 
-        SectionBox(title = stringResource(R.string.processor_affinity)) {
-            // The section's title is drawn by SectionBox, so the "?" goes in the box's own top corner.
-            if (isLinuxEntry) {
+        // A Linux session runs two things that want different cores: the Steam client (the compositor
+        // draws its Big Picture UI, which is what feels sluggish) and whatever game the client launches.
+        // The Wine path has the one process tree, so it keeps the single section below.
+        if (isLinuxEntry) {
+            // Each section's title is drawn by SectionBox, so the "?" goes in that box's own top corner.
+            SectionBox(title = "Steam client cores") {
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                    LinuxHelp(true, R.string.help_linux_processor_affinity) { helpRes = it }
+                    LinuxHelp(true, R.string.help_linux_client_cores) { helpRes = it }
                 }
+                AndroidView(
+                    factory = { ctx ->
+                        CPUListView(ctx).also { cpv ->
+                            cpv.setCheckedCPUList(initialLinuxClientCpuList)
+                            linuxClientCpuListViewRef.value = cpv
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth().wrapContentHeight()
+                )
             }
+            SectionBox(title = "Game cores") {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    LinuxHelp(true, R.string.help_linux_game_cores) { helpRes = it }
+                }
+                AndroidView(
+                    factory = { ctx ->
+                        CPUListView(ctx).also { cpv ->
+                            cpv.setCheckedCPUList(initialLinuxGameCpuList)
+                            linuxGameCpuListViewRef.value = cpv
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth().wrapContentHeight()
+                )
+            }
+        } else {
+        SectionBox(title = stringResource(R.string.processor_affinity)) {
             AndroidView(
                 factory = { ctx ->
                     CPUListView(ctx).also { cpv ->
@@ -9235,6 +9294,7 @@ private fun ScAdvancedTab(
                 },
                 modifier = Modifier.fillMaxWidth().wrapContentHeight()
             )
+        }
         }
 
         // vkBasalt (sharpness) and the ReShade loadout are Vulkan layers switched on through the Wine
