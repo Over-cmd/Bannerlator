@@ -10373,3 +10373,41 @@ throttled 32.
 
 It did not take the native Linux route, and could not have: the retraction above explains why that
 path is dead. The blanket Proton mapping is precisely what made this run possible.
+
+### Linux shortcut editor stripped and explained — device-proven (2026-09-20)
+
+`dd4cbb9a` hides every setting that does nothing on the gamescope path, and `e429caf1` gives each
+remaining one a "?" saying what it controls and whether it affects the Steam client, the games the
+client launches, or both. Installed and checked on the FIT, APK
+`8f643f1f12a93e3eda2d0edb672ae517280d0955f1973ec7d218febb3d5296ca`: a GOG game's tabs behave
+normally, and the Linux entry's help buttons work.
+
+The GOG check was the one that mattered. Dropping a whole tab meant separating "which tab is
+selected" from "which position it occupies", and that code runs for every shortcut rather than only
+the Linux one. It is the only part of this that could have reached a normal game, and it did not.
+
+Scope recorded in the help text, from tracing each one:
+
+| Setting | Affects |
+| --- | --- |
+| Screen size, alignment, fullscreen mode, HDR, FPS limiter | both |
+| Environment variables | both |
+| Controls profile, touchscreen mode, auto-hide, player slots, motion aim | both |
+| Processor affinity | both |
+| Audio driver | both, but only PulseAudio carries sound; anything else is silence |
+| FEXCore preset | games only - the client is native ARM64 and never goes through FEX |
+| Prefer game-folder DLLs | games only, and session-wide rather than per-game |
+| Microphone | games only, and does nothing on this path yet |
+
+Hidden: the whole Win Components tab, Wine layer, DXVK/VKD3D, DX wrapper, box64/WOWBox64, renderer,
+render scale, graphics and compositor driver, display backend, MIDI, exec args, storage, executable,
+and the XInput/DInput options.
+
+⚠️ One live setting is now invisible: the **compositor driver**. It is not inert - the compositor
+uses it to import the session's frames, and "System" there is a black screen. A Linux entry carries
+no per-game override so the container's value governs, which is why hiding it changes nothing
+today. Worth putting back if a per-game override is ever wanted.
+
+⚠️ Frame generation is kept and honoured, but `prepareLsfgNative()` sits past the gamescope early
+return, so the lsfg-native engine specifically may not work in a Linux session. Not yet tested, and
+deliberately not claimed in the help text.
