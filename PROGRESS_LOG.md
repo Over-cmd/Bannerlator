@@ -10002,3 +10002,22 @@ the staging folders and the debug log are gone, and Valve's originals remain in
 Four runs, in order: Valve's VKD3D refused the feature level; the ARM64EC build cleared it and
 reached further; the x86-64 build with anticheat skipped froze the same way. The Rockstar chain -
 launcher, Social Club, sign-in - worked every time, and BattlEye never objected once.
+
+**Correction: that swap never took effect, and the result attributed to it was an artefact
+(2026-09-19).** Valve's ARM64 Proton keeps its real translators in their own directories -
+`files/lib/wine/dxvk/` holding DXVK v3.1-12-g8759acd1 and `files/lib/wine/vkd3d-proton/` holding
+vkd3d-1.1-5576-g0bd10357 - and installs those into a game's prefix. What was replaced instead was
+`files/lib/wine/aarch64-windows/d3d12.dll`, which is Wine's builtin. GTA's prefix settles it: its
+`d3d12.dll` is 229,376 bytes and its `d3d12core.dll` 9,277,440, matching Valve's vkd3d-proton
+exactly, while the swapped files are 147,456 and 5,148,672 and were never loaded.
+
+The claim that the swap cleared the feature-level refusal is therefore wrong, and the way it was
+reached is worth recording. Those messages come from vkd3d and only reach the Proton log, which
+exists only when `PROTON_LOG=1` is set. The run after the swap had logging off, so the session log
+was grepped instead and returned nothing - and nothing was read as "fixed" rather than "not
+logged". The later run with logging restored still carried `Feature level ... is not supported`,
+which is what a swap with no effect looks like.
+
+So nothing has yet been proven about substituting components into Valve's Proton. The correct
+target is `files/lib/wine/vkd3d-proton/aarch64-windows/`, the experiment is still worth running,
+and any future comparison has to be logged-run against logged-run.
