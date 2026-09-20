@@ -246,9 +246,28 @@ public final class LinuxProtons {
                 + fileName(build);
     }
 
+    /**
+     * The file's text, or an empty string when it is not there.
+     *
+     * <p>{@link FileUtils#readString(File)} cannot be used directly: on a missing or unreadable
+     * file the read underneath it returns null and the String constructor throws, so asking
+     * whether a request file exists by reading it crashed the tab outright. Every file this class
+     * reads is one that legitimately does not exist yet.
+     */
+    private static String readText(File file) {
+        if (!file.isFile()) return "";
+        try {
+            String body = FileUtils.readString(file);
+            return body == null ? "" : body;
+        } catch (RuntimeException e) {
+            Log.w(TAG, "read " + file + ": " + e);
+            return "";
+        }
+    }
+
     private static boolean requested(File root, String relative, String line) {
-        String body = FileUtils.readString(new File(root, relative));
-        if (body == null) return false;
+        String body = readText(new File(root, relative));
+        if (body.isEmpty()) return false;
         for (String each : body.split("\n")) {
             if (each.trim().equals(line)) return true;
         }
@@ -257,8 +276,7 @@ public final class LinuxProtons {
 
     /** Idempotent: a line already there is not added twice. */
     private static boolean append(File file, String line) {
-        String body = FileUtils.readString(file);
-        if (body == null) body = "";
+        String body = readText(file);
         for (String each : body.split("\n")) {
             if (each.trim().equals(line)) return true;
         }
@@ -269,8 +287,8 @@ public final class LinuxProtons {
     }
 
     private static void drop(File file, String line) {
-        String body = FileUtils.readString(file);
-        if (body == null) return;
+        String body = readText(file);
+        if (body.isEmpty()) return;
         StringBuilder kept = new StringBuilder();
         for (String each : body.split("\n")) {
             if (each.trim().isEmpty() || each.trim().equals(line)) continue;

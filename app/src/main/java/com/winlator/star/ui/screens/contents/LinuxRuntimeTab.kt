@@ -195,9 +195,14 @@ private fun ProtonBuildsCard() {
     var error by remember { mutableStateOf<String?>(null) }
     var used by remember { mutableStateOf(0L) }
 
+    // Reads the runtime's filesystem, which may be half-built, absent, or owned by a session that
+    // is running right now. A tab in Contents must not be able to take the app down, whatever it
+    // finds there.
     fun refresh() {
-        states = builds.associate { it.name to LinuxProtons.stateOf(context, it) }
-        used = LinuxProtons.installedBytes(context)
+        runCatching {
+            states = builds.associate { it.name to LinuxProtons.stateOf(context, it) }
+            used = LinuxProtons.installedBytes(context)
+        }.onFailure { android.util.Log.w("LinuxRuntimeTab", "proton state", it) }
     }
 
     LaunchedEffect(Unit) {
