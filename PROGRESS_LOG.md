@@ -9913,3 +9913,19 @@ already swaps components into its own layers. What has to be checked first is th
 Valve's are arm64ec PEs, and our DXVK packages carry an explicit `arm64ec` tag while the VKD3D
 ones do not. If they are not arm64ec they will not load and the idea stops there. Nothing has
 been tried yet.
+
+**The transplant idea is dead as stated, and what replaces it is better (2026-09-19).** Reading
+the PE headers settles it: Valve's `d3d12.dll`, `d3d12core.dll` and `d3d11.dll` are ARM64EC, with
+the hybrid CHPE marker. Every one of our VKD3D packages - 3.0.1, 3.0.1-gamesir and
+3.1.0-wave64-relax - is plain x86-64. They cannot be dropped into that Proton, and forcing it
+would put the D3D12 translation layer itself under emulation, which is the opposite of the point.
+
+Two things follow. The app side runs GTA with the whole stack emulated, game and translator
+together, on our x86-64 VKD3D 3.1.0 - and that version manages feature level 12_1 where Valve's
+bundled one refuses it. Both sides sit on the same GPU and the same Turnip driver, so the
+difference is the vkd3d-proton version, not the hardware.
+
+So the real route is to build VKD3D as ARM64EC and drop that in. It is not speculative that we
+can: `contents/DXVK/1.11.0-async-arm64ec-0` is x86-64 with the hybrid marker, so the toolchain
+and the practice already exist here for DXVK. Nobody has done it for VKD3D. That would likely
+serve every D3D12 title in the client rather than GTA alone.
