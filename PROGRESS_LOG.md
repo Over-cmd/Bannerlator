@@ -9871,3 +9871,16 @@ Also hit on the way: the Rockstar launcher runs its own `vc_redist.x86.exe`, whi
 `pipe_read` exactly as Steam's copies do. The seeder cannot help there - it marks Steam's shared
 redistributables, and this one is Rockstar's. It cleared, though whether the TERM sent to it
 landed or it finished by itself is not known: the bridge dropped before the result came back.
+
+**GTA V Enhanced: the Rockstar chain works, the client's D3D12 does not (2026-09-19).** With
+`PROTON_LOG=1 VKD3D_DEBUG=warn` set as the game's launch options, the log named it plainly:
+`Feature level 0xc100 is not supported` and `0xc200 is not supported` - VKD3D on Valve's ARM64
+Proton Experimental cannot offer D3D feature level 12_1 or 12_2, which this title wants. The game
+reached its intro and aborted at the same moment every run.
+
+`VKD3D_FEATURE_LEVEL=12_1` did not rescue it: the same crash at the same point. So the game is not
+merely checking for the level, and the answer is not a flag. Everything around it worked - the
+launcher, Social Club, the sign-in, and BattlEye, which never objected - so what is missing is
+translation-layer capability, not anticheat and not the device. The user's own point is the
+practical one: the app side runs this game on its own 11.x bionic Proton layers, whose VKD3D
+manages what the client's cannot. For this title the client is the weaker path.
