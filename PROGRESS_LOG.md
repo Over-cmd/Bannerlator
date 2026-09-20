@@ -10536,3 +10536,46 @@ Team Fortress 2 runs from the client and **voice works in Steam's voice chat tes
 microphone owned by the relay helper, fanned out through PulseAudio to the client, heard back. So
 "shows a microphone" is now "hears you". Games' own capture through Wine/DirectAudio uses the same
 helper and the same stream.
+
+## Where to pick this up (2026-09-20, end of session)
+
+### Done and device-proven today
+DirectAudio for games; the Steam client's microphone (`Input Device: DirectAudioMic`); **voice
+proven in Steam's own voice chat tester with TF2 running**; GTA V Legacy and Half-Life 2 playing
+from the client; the Linux shortcut editor stripped to settings that work, each with a "?" saying
+whether it affects the client, its games, or both.
+
+### VAC / insecure — where we actually are
+**Not an evasion problem and should not be treated as one.** What the evidence says:
+- TF2 carries **no launch options**, so nothing is forcing insecure mode.
+- Steam launched it through its own `steam-launch-wrapper`, registered the processes against app
+  440 (`SSGL: change [440] ...`), tracked and released them. Steam's supervision is intact - our
+  wrapper is not taking the game out from under it.
+- **Nothing in any log mentions VAC, secure or insecure** - not the session log, not any of Steam's
+  own logs under `logs/`.
+- The `gameoverlayrenderer.so` preload errors are for the **32-bit** path, which does not exist on
+  ARM64. Normal, unrelated to our stripping.
+
+So the insecure state is TF2's own report and we were not capturing anything TF2 says. **`-condebug`
+is now set on 440**, which makes Source write its console to `console.log` in the game folder. Next
+session: run TF2, read that file, and let the game say why.
+
+This is the same shape as the SteamLite "VAC issue", which turned out to be **our own diagnostics
+reading the wrong log** and reporting a false INSECURE - the client had been secure all along.
+The user's plan is to start from a known-good secure connection on the app side with SteamLite and
+compare behaviour from there.
+
+⛔ Boundary held throughout: making Valve's own anti-cheat **run** (fixing missing libraries, paths,
+components that fail with an ordinary error) is ordinary compatibility work. Working out what VAC
+checks in order to make the client present it is not, and was declined.
+
+### Also outstanding
+- GTA V entries still show installed on both sides. Two fixes now: release a row whose folder is a
+  shell, and run that check at session start rather than only at a clean shutdown. The second fix
+  (`fe03c0ec`) widens "shell" to ignore dotfiles and `.cache` - the real folder held
+  `vkd3d-proton.cache`. **Not yet verified: needs one Linux session start after installing it.**
+- GameHub (`com.xiaoji.egggame`) has four boot receivers, restarts itself, and steals the Steam
+  login. The app should force-stop it when a Linux session starts.
+- A game's first launch under DirectAudio gets the registry key one launch late.
+- Frame generation: `prepareLsfgNative()` sits past the gamescope early return, so lsfg-native may
+  not work in a Linux session. Untested.
