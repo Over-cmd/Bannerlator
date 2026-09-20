@@ -9962,3 +9962,22 @@ ARM64 Proton, not the GPU, the Turnip driver, or anticheat.
 It still ends in an abort, six signatures and the game stopped, but later and with a different
 cause. One blocker is gone and a new one is exposed; the next step is another `VKD3D_DEBUG=warn`
 run to name it.
+
+**With the feature level out of the way, GTA V fails on address space (2026-09-19).** The run
+after the swap, logged with `VKD3D_DEBUG=warn`, ends at
+`err:virtual:allocate_virtual_memory out of memory for allocation, size 0x14a00000000` - a request
+for about 1.3 TB of virtual address space. The game reserves an enormous range up front, which is
+ordinary on a desktop and refused here. That is also what exhausted the device: RAM went to 93 MB
+free of 15.2 GB with a load average over 10, and the session had to be force-stopped to recover.
+
+Alongside it, `RtlpWaitForCriticalSection` timed out waiting sixty seconds on a lock held by
+another thread, and `d3d12_pipeline_state_init_compute` failed eleven times. Feature-level
+complaints are down from dozens to two, which is the optional 12_2 probe rather than the blocker
+that was there before. The OpenXR, OpenVR and PenDevice errors are noise - absent VR and tablet
+APIs that nothing here wants.
+
+So the swap did what it was meant to and the remaining fault is of a different kind: an address
+space limit under FEX and Wine rather than anything in the graphics path. The swapped DLLs
+survived the crash and Steam has not re-verified the depot; Valve's originals are still in
+`files/.vkd3d-valve-backup/`. The debug log cost 151 MB and should be cleared with the launch
+option when that run is no longer wanted.
