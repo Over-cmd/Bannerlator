@@ -32,7 +32,12 @@ export LDFLAGS="-L$ROOT_DIR/lib"
 
 # bionic quirk overrides (from Bruno's main-build.sh) so PA's configure accepts the NDK sysroot.
 export ALLOW_UNRESOLVED_SYMBOLS=1
-export ac_cv_func_mkfifo=no
+# mkfifo IS in bionic, and has been since API 21; this builds at 26. Carried over as "no" from an
+# older script, it made configure drop module-pipe-sink and module-pipe-source from the build
+# entirely - which is why the bundle ended up with a 17.0 pipe-source from somewhere else that this
+# 13.0 daemon refuses to load, and why the Steam client reported no microphone with everything else
+# correctly wired behind it. The only sign was "checking for mkfifo... no" in a log nobody reads.
+export ac_cv_func_mkfifo=yes
 export ac_cv_func_getuid=no
 export ax_cv_PTHREAD_PRIO_INHERIT=no
 export ac_cv_header_glob_h=no
