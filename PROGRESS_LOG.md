@@ -9884,3 +9884,32 @@ launcher, Social Club, the sign-in, and BattlEye, which never objected - so what
 translation-layer capability, not anticheat and not the device. The user's own point is the
 practical one: the app side runs this game on its own 11.x bionic Proton layers, whose VKD3D
 manages what the client's cannot. For this title the client is the weaker path.
+
+## Where a Linux-client game's components come from (established 2026-09-19)
+
+Everything but the graphics driver is Valve's, and arrives as a Steam depot the client downloads
+(appid 4427310, `Proton Experimental (ARM64)`, version `experimental-11.0-20260910b-arm64`).
+Inside it: Wine, DXVK as the `d3d9/10/11` DLLs, vkd3d-proton as `d3d12.dll` (917 KB) and
+`d3d12core.dll` (589 KB), and FEX for both widths - `libarm64ecfex` for 64-bit and `libwow64fex`
+for 32-bit, with its config under `files/share/fex-emu`. There is no box64 or wowbox64 in that
+stack at all; Valve's is FEX only. The one component that is ours is the GPU driver: Turnip,
+`usr/lib/libvulkan_freedreno.so`, Mesa 26.2.2, in the runtime we build.
+
+The app's own Wine games use none of that. Every piece is ours and versioned under
+`files/contents/`: DXVK (1.10.3, 1.11.0-async, 1.11.0-async-arm64ec, 2.4.1-gplasync), VKD3D
+(3.0.1, 3.0.1-gamesir, 3.1.0-wave64-relax), FEXCore (2507, 2608, 2609 nightlies), WOWBox64
+(0.4.1, 0.4.5-Hybrid), Box64, our Proton layers (11.0-2-arm64ec, 11.0-2.1-arm64ec,
+11.0-20260703-arm64ec) and Wine 9.5.
+
+So for a client game we choose exactly one thing, the graphics driver, and for an app game we
+choose all of it. That is the whole of the GTA result: app-side it can run on our VKD3D 3.1.0,
+while the client hands it Valve's, which refuses feature level 12_1, and nothing in the client
+lets the user pick otherwise.
+
+**A possible way through, for a later session.** Our VKD3D packages are laid out as
+`system32/d3d12.dll` and `system32/d3d12core.dll` - the same two files Valve's Proton carries -
+so ours could in principle be dropped into that Proton in place of Valve's, the way the app
+already swaps components into its own layers. What has to be checked first is the binary flavour:
+Valve's are arm64ec PEs, and our DXVK packages carry an explicit `arm64ec` tag while the VKD3D
+ones do not. If they are not arm64ec they will not load and the idea stops there. Nothing has
+been tried yet.
