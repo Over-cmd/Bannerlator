@@ -2629,7 +2629,13 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // but a container/shortcut written before this gate (or whose layer was swapped elsewhere) can
         // still arrive here as "directaudio" — the last place it could be applied to the guest registry.
         // Fall back to the default driver so an unsupported layer never gets Audio=directaudio.
-        if ("directaudio".equals(audioDriver) && !DirectAudioSupport.isSupported(wineVersion)) {
+        // Not on the gamescope path: that check asks whether the CONTAINER's Wine layer can load
+        // the driver, and a Linux session does not use it - the game runs on whichever Proton the
+        // Steam client resolved, carrying its own Wine. Answering the wrong question here would
+        // refuse DirectAudio on the strength of a layer that is not running. The real check lives
+        // in the Proton wrapper, which reads the Wine version of the tree it is about to start.
+        if (!gamescopeMode && "directaudio".equals(audioDriver)
+                && !DirectAudioSupport.isSupported(wineVersion)) {
             audioDriver = Container.DEFAULT_AUDIO_DRIVER;
         }
 
@@ -8671,9 +8677,38 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // fact nothing had been set up. DirectAudio is not an alternative to this on the Linux
         // path - it replaces the audio driver INSIDE Wine, so it changes what games do and leaves
         // the client alone.
+        // DirectAudio is chosen per shortcut and changes what GAMES do; the client keeps
+        // PulseAudio either way. The microphone is its own opt-in on top, and the helper only opens
+        // an input stream when asked - so a user who wants game sound but no recording gets exactly
+        // that, and Android's recording indicator stays off.
+        boolean wantsDirectAudio = "directaudio".equals(audioDriver);
+        boolean wantsMic = wantsDirectAudio && directMicRequestedInEnv()
+                && ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+                        == PackageManager.PERMISSION_GRANTED;
+        File audioDir = new File(getFilesDir(), "directaudio");
+        //noinspection ResultOfMethodCallIgnored
+        audioDir.mkdirs();
+        // Both paths sit under the app's files directory, which the session binds at its own path,
+        // so the same string is valid on both sides and nothing has to be translated.
+        File relaySocket = new File(audioDir, "relay.sock");
+        File micFifo = wantsMic ? new File(audioDir, "mic.fifo") : null;
+
         guest.add("PULSE_SERVER=unix:" + rootPath + UnixSocketConfig.PULSE_SERVER_PATH);
         environment.addComponent(new PulseAudioComponent(
-                UnixSocketConfig.createSocket(rootPath, UnixSocketConfig.PULSE_SERVER_PATH)));
+                UnixSocketConfig.createSocket(rootPath, UnixSocketConfig.PULSE_SERVER_PATH),
+                micFifo != null ? micFifo.getAbsolutePath() : null));
+
+        if (wantsDirectAudio) {
+            environment.addComponent(new com.winlator.star.xenvironment.components
+                    .DirectAudioRelayComponent(relaySocket, micFifo));
+            // Read by the Proton wrappers, which point Wine at the driver and name it in the
+            // prefix. Absent, they take an early return and the game uses Proton's own audio - so
+            // this variable is the whole of the selection.
+            guest.add("BL_DIRECTAUDIO=/" + LINUX_DIRECTAUDIO_DIR);
+            guest.add("BANNER_AUDIO_DIRECT_RELAY=" + relaySocket.getAbsolutePath());
+            Log.i("XServerDisplayActivity", "DirectAudio selected for games"
+                    + (wantsMic ? " with microphone" : " (no microphone)"));
+        }
         guest.add("BL_WIDTH=" + xServer.screenInfo.width);
         guest.add("BL_HEIGHT=" + xServer.screenInfo.height);
         guest.add("BL_FPS=" + (resolvedFpsLimiterEnabled() ? Math.max(0, resolvedFpsLimiterValue()) : 0));
