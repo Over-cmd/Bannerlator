@@ -10142,3 +10142,52 @@ any kind, and no `steam-3240220.log` was written. The absence of the 1.3 TB
 3240220 with the client closed (backup at `localconfig.vdf.bak-setlaunch`; brace balance checked,
 772/772). One correction during that edit: the first pass also inserted the key into the
 `controller_config` section, where it does not belong, and that was removed.
+
+## Swapping FEX across Proton trees does not work (2026-09-19)
+
+Four GTA V Enhanced runs on GE-Proton, each logged, each a different outcome:
+
+| Run | Translator | Outcome |
+| --- | --- | --- |
+| 1 | GE's own, `FEX_SMCCHECKS` default (`mtrack`) | `GTA5_Enhanced.exe` ran ~2 min, then jumped to address 0 |
+| 2 | GE's own, `FEX_SMCCHECKS=full` | launcher only; the game binary never started |
+| 3 | ours, FEX-2609+96-Nightly-48d71752e | never loaded (my error, see below) |
+| 4 | ours, permissions fixed | loaded, died dispatching its first exception |
+
+**Run 2 - full SMC checking is not a fix and the missing crash is not good news.** The address-zero
+fault is absent from that log only because the game never reached the code that caused it. It got
+*less* far than the default. Full checking is expensive and the launcher stage is .NET doing a lot
+of JIT, so slow-enough-to-fall-over-earlier is as good an explanation as anything the checking
+revealed. Inconclusive, leaning negative; reverted.
+
+**Run 3 was my mistake, and it is the kind that reads like a result.** The log said
+
+```
+err:module:load_arm64ec_module could not load L"C:\windows\system32\libarm64ecfex.dll", status c0000022
+```
+
+`c0000022` is STATUS_ACCESS_DENIED. `chown --reference` and `chmod --reference` silently do nothing
+through the root bridge, so the file landed `root:root` with no execute bit and the app could not
+read its own file. **Always chown/chmod with explicit numbers (uid 10249) and compare `ls -la`
+against a file that already worked.** Nothing was learned about the translator in that run.
+
+**Run 4 is the real answer.** With permissions fixed it loaded, then:
+
+```
+err:seh:call_seh_handlers invalid frame 1000ffcd0 (0000000000022000-0000000000120000)
+err:seh:NtRaiseException Exception frame is not in stack limits => unable to dispatch exception.
+```
+
+Our build and GE's Wine disagree about where exception frames sit on the stack, and the first
+exception Wine tries to dispatch is unrecoverable. That is an interface mismatch, not a fault in
+either piece alone: we build that translator against our own bionic ARM64EC Wine, and GE-Proton
+carries its own Wine 11 tree. **A whole Proton swaps cleanly because everything inside it matches;
+one piece does not travel between trees.** Reverted, checksums verified against the backup.
+
+Worth recording for any future swap: GTA's prefix does **not** hold its own copy of the translator.
+Those `system32` entries are symlinks into the Proton tree, so replacing the tree file is the whole
+job - the opposite of vkd3d-proton, where the prefix holds real copies and the earlier swap was
+never loaded.
+
+Best result of the night remains run 1, and its crash is still unexplained. Next: GTA V Legacy
+(appid 271590, D3D11) on GE-Proton, which takes vkd3d out of the picture.
