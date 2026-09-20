@@ -9929,3 +9929,19 @@ So the real route is to build VKD3D as ARM64EC and drop that in. It is not specu
 can: `contents/DXVK/1.11.0-async-arm64ec-0` is x86-64 with the hybrid marker, so the toolchain
 and the practice already exist here for DXVK. Nobody has done it for VKD3D. That would likely
 serve every D3D12 title in the client rather than GTA alone.
+
+**Correction: the ARM64EC VKD3D already exists, and the transplant is feasible (2026-09-19).**
+The entry above is wrong and is left in place only so the mistake is legible. It rested on a
+hand-rolled PE header read that misidentified the machine field; `llvm-readobj` is authoritative
+and says otherwise. `Nightlies` carries a dedicated `build-vkd3d-arm64ec` job in both
+`new-All-in-one-nightly+zips-latest-stable.yml` and `vkd3dProtons-standalone-nightly.yml`, and the
+artifact it produces - `VKD3D-Proton-arm64ec-3.0.1-5d0db741` - reads as `Format: COFF-ARM64EC`,
+`Machine: IMAGE_FILE_MACHINE_ARM64EC (0xA641)`, with CHPE metadata present. The DXVK ARM64EC
+package checks out the same way.
+
+So ours and Valve's are the same architecture and the same two filenames, and dropping ours into
+`Proton Experimental (ARM64)` in place of `d3d12.dll` and `d3d12core.dll` is a real thing to try.
+What is not yet known is whether 3.0.1 does what this needs: the version that runs GTA on the app
+side is 3.1.0-wave64-relax, which is built x86-64 only, so the ARM64EC line is a version behind
+it. If 3.0.1 also refuses feature level 12_1 then the answer is to build 3.1.0 for ARM64EC, which
+the same job already knows how to do.
