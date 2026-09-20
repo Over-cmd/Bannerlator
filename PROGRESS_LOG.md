@@ -10273,3 +10273,31 @@ this appid. That costs nothing while it works and everything if it later misbeha
 
 Proven from the client so far: NFS Most Wanted via `steam2ea://` at 48 fps, NFS Payback via
 `link2ea://`, Portal 2, FlatOut, and now GTA V Legacy at 32 fps. GTA V Enhanced remains unsolved.
+
+### The proven-from-the-client list, audited (2026-09-20)
+
+A `compatdata/<appid>` prefix only exists if the client actually launched that title through
+Proton, so the prefix directory is the evidence rather than anyone's memory of it. On that basis:
+
+| appid | title | |
+| --- | --- | --- |
+| 291550 | Brawlhalla | prefix plus a 229 MB Proton log; the game itself was later deleted |
+| 6220 | FlatOut | the first client launch we had to fix |
+| 620 | Portal 2 | proved the client-download to app-launch round trip |
+| 70 | Half-Life | |
+| 1262560 | NFS Most Wanted | `steam2ea://` into EA Desktop, 48 fps |
+| 1262580 | NFS Payback | `link2ea://` into Link2EA and EA Desktop |
+| 271590 | GTA V Legacy | 32 fps, plays |
+| 3240220 | GTA V Enhanced | launched, never completed |
+
+Two entries could not be confirmed, and both are worth stating precisely rather than rounding up.
+
+**Half-Life 2 has no prefix, and that is not evidence against it.** HL2 and the Orange Box titles
+beside it - Lost Coast, Episode One, Episode Two, all installed - ship native Linux x86 builds.
+Steam runs those through Valve's FEX compatibility tool, which is installed here, rather than
+through Proton, so no prefix is created. If HL2 ran, it ran by that route, which is a different
+capability from the Windows path and arguably a more interesting one. It needs a run to confirm.
+
+**Dead Space has no evidence on hand at all.** It is not in the internal library's app list. It is
+either on the card library, which is only mounted inside a session and therefore invisible from
+outside one, or it is app-side only. Worth checking inside a session before it goes on the list.
