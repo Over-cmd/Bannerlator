@@ -8983,6 +8983,18 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // library full of card games - and it refuses an install it believes will not fit. The
         // session shim answers that one question from the games' own directory instead.
         lateEnv.add("BL_LIBRARY_SPACE=" + com.winlator.star.linux.LinuxSteamLibrary.GUEST_ROOT_SD);
+
+        // Two core lists, because a Linux session runs two things that want different cores at the
+        // same time: the client (whose interface renderer Steam pins to a subset of its own choosing
+        // - five of eight on this device, without either little core or the fastest one) and a game
+        // it launches. The session applies the first on a beat, since steamwebhelper spawns children
+        // that inherit Steam's choice rather than ours; the Proton wrapper applies the second by
+        // exec'ing the game through taskset. Sent only when they are a real restriction - a list of
+        // every core is what the kernel does anyway, and saying so would just be noise in the log.
+        String clientCpus = cpuListOrEmpty("linuxClientCpuList");
+        String gameCpus = cpuListOrEmpty("linuxGameCpuList");
+        if (!clientCpus.isEmpty()) lateEnv.add("BL_CLIENT_CPUS=" + clientCpus);
+        if (!gameCpus.isEmpty()) lateEnv.add("BL_GAME_CPUS=" + gameCpus);
         // The other direction. The client's main library is internal storage and its second is the
         // card, so a game it installs lands where the app would have put it and is recorded in the
         // store's database as installed there: the store shows it, the app can launch it.
@@ -9103,6 +9115,25 @@ public class XServerDisplayActivity extends AppCompatActivity {
             report.append(target.getName()).append('=').append(ok ? target.length() : -1).append(' ');
         }
         Log.i("XServerDisplayActivity", "DirectAudio (Linux) staged: " + report.toString().trim());
+    }
+
+    /**
+     * A shortcut's CPU list as taskset spells it, or empty when it is not a restriction.
+     *
+     * <p>The editor stores what {@code CPUListView} produces - a comma-separated list of core
+     * numbers - which is already taskset's {@code -c} syntax. Empty, absent, or naming every core
+     * on the device all mean "no preference", and are all returned as empty so nothing is set:
+     * pinning a process to all cores is what the scheduler does unaided, and passing it would only
+     * put a meaningless line in the session log.
+     */
+    private String cpuListOrEmpty(String extra) {
+        String list = shortcut != null ? shortcut.getExtra(extra, "") : "";
+        if (list == null) return "";
+        list = list.trim();
+        if (list.isEmpty()) return "";
+        int named = 0;
+        for (String part : list.split(",")) if (!part.trim().isEmpty()) named++;
+        return named >= Runtime.getRuntime().availableProcessors() ? "" : list;
     }
 
     /** What the session script runs: the desktop, a Linux program, or the native Steam client. */

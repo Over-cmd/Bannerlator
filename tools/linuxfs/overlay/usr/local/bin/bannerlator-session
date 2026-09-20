@@ -151,6 +151,23 @@ case $mode in
       done < "$HOME/.bl-steam-urls"
       rm -f "$HOME/.bl-steam-urls"
     fi
+    # Cores for the client itself. Steam pins its own interface renderer to a subset - on the
+    # device it took 5 of 8, leaving out both little cores and the fastest one - which is a
+    # reasonable thing to do while a game is running and the wrong thing when the client is all
+    # there is. BL_CLIENT_CPUS overrides it. Re-applied on a beat because steamwebhelper spawns
+    # children continuously and each one inherits Steam's choice, not ours.
+    if [ -n "${BL_CLIENT_CPUS:-}" ]; then
+      step "client cores: $BL_CLIENT_CPUS"
+      (
+        for _ in $(seq 1 720); do
+          for _p in $(pgrep -f 'steamwebhelper|steamrtarm64/steam|gamescope' 2>/dev/null); do
+            taskset -cp "$BL_CLIENT_CPUS" "$_p" >/dev/null 2>&1 || true
+          done
+          sleep 5
+        done
+      ) &
+    fi
+
     step "registering the app's game library with Steam"
     bannerlator-steam-library "$steam_root" || true
     step "setting up the ARM64 Proton compatibility tool"
