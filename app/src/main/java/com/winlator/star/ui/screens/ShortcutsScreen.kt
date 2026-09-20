@@ -6181,6 +6181,19 @@ private fun DpTabs(dp: SettingsDpad, id: String, selected: Int, count: Int, onSe
     DpadHighlight(focused = dp.isFocused(id), modifier = Modifier.dpadBringIntoView(dp, id)) { content() }
 }
 
+/**
+ * The "?" a Linux entry's rows get. It draws nothing unless [show], so the ordinary Windows form keeps
+ * exactly the help buttons it already has — and, like every other "?" in this editor, it is not a
+ * D-pad target, so it can never be focused whether the row beside it is drawn or not.
+ */
+@Composable
+private fun LinuxHelp(show: Boolean, textResId: Int, onOpen: (Int) -> Unit) {
+    if (!show) return
+    IconButton(onClick = { onOpen(textResId) }) {
+        Icon(Icons.Default.Help, contentDescription = "What is this?", modifier = Modifier.size(18.dp))
+    }
+}
+
 @Composable
 internal fun ShortcutSettingsDialogScreen(
     shortcut: Shortcut,
@@ -7064,14 +7077,17 @@ internal fun ShortcutSettingsDialogScreen(
                         when (selectedTab) {
                             0 -> Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     // Name
-                    DpField(
-                        dp, "name",
-                        value = name,
-                        onValueChange = { name = it },
-                        label = stringResource(R.string.name),
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        DpField(
+                            dp, "name",
+                            value = name,
+                            onValueChange = { name = it },
+                            label = stringResource(R.string.name),
+                            modifier = Modifier.weight(1f),
+                            singleLine = true
+                        )
+                        LinuxHelp(isLinuxEntry, R.string.help_linux_name) { helpRes = it }
+                    }
 
                     // Exec Args — appended to the Wine start command. A Linux entry's Exec line is
                     // never run as written (linuxSessionArgs decides from the extras), so there is
@@ -7246,7 +7262,7 @@ internal fun ShortcutSettingsDialogScreen(
                             onSelect = { selectedScreenSize = it },
                             modifier = Modifier.weight(1f)
                         )
-                        IconButton(onClick = { helpRes = R.string.help_screen_size }) {
+                        IconButton(onClick = { helpRes = if (isLinuxEntry) R.string.help_linux_screen_size else R.string.help_screen_size }) {
                             Icon(Icons.Default.Help, contentDescription = "What is this?", modifier = Modifier.size(18.dp))
                         }
                     }
@@ -7287,13 +7303,17 @@ internal fun ShortcutSettingsDialogScreen(
                         )
                         val saIdx = saValues.indexOf(screenAlignment).coerceAtLeast(0)
                         // Applies on X11 and Wayland alike (the compositor fits the desktop the same way).
-                        DpDrop(
-                            dp, "screenAlignment",
-                            label = stringResource(R.string.screen_alignment),
-                            options = saLabels,
-                            selected = saLabels[saIdx],
-                            onSelect = { screenAlignment = saValues[saLabels.indexOf(it)] }
-                        )
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            DpDrop(
+                                dp, "screenAlignment",
+                                label = stringResource(R.string.screen_alignment),
+                                options = saLabels,
+                                selected = saLabels[saIdx],
+                                onSelect = { screenAlignment = saValues[saLabels.indexOf(it)] },
+                                modifier = Modifier.weight(1f)
+                            )
+                            LinuxHelp(isLinuxEntry, R.string.help_linux_screen_alignment) { helpRes = it }
+                        }
                     }
 
                     // Icon
@@ -7322,6 +7342,7 @@ internal fun ShortcutSettingsDialogScreen(
                                 })
                             }
                         }
+                        LinuxHelp(isLinuxEntry, R.string.help_linux_icon) { helpRes = it }
                     }
 
                     // "What is all this?" — the same newcomer glossary the container editor shows,
@@ -7535,15 +7556,18 @@ internal fun ShortcutSettingsDialogScreen(
                             val containerHdr = shortcut.container.isWaylandHdr()
                             val values = listOf("", "1", "0")
                             val labels = listOf("Use container default (" + (if (containerHdr) "On" else "Off") + ")", "On", "Off")
-                            DpDrop(
-                                dp, com.winlator.star.display.WaylandHdr.EXTRA,
-                                label = com.winlator.star.display.WaylandHdr.TITLE,
-                                options = labels,
-                                selected = labels[values.indexOf(waylandHdrOverride).coerceAtLeast(0)],
-                                onSelect = { waylandHdrOverride = values[labels.indexOf(it)] },
-                                enabled = hdrUnavailable == null,
-                                modifier = Modifier.fillMaxWidth()
-                            )
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                DpDrop(
+                                    dp, com.winlator.star.display.WaylandHdr.EXTRA,
+                                    label = com.winlator.star.display.WaylandHdr.TITLE,
+                                    options = labels,
+                                    selected = labels[values.indexOf(waylandHdrOverride).coerceAtLeast(0)],
+                                    onSelect = { waylandHdrOverride = values[labels.indexOf(it)] },
+                                    enabled = hdrUnavailable == null,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                LinuxHelp(isLinuxEntry, R.string.help_linux_hdr_output) { helpRes = it }
+                            }
                             if (hdrUnavailable != null) {
                                 Text(
                                     hdrUnavailable,
@@ -7910,7 +7934,7 @@ internal fun ShortcutSettingsDialogScreen(
                         DpSwitch(dp, "fpsLimiter", checked = fpsLimiterEnabled, onCheckedChange = { fpsLimiterEnabled = it })
                         Spacer(Modifier.width(8.dp))
                         Text(stringResource(R.string.fps_limiter), modifier = Modifier.weight(1f))
-                        IconButton(onClick = { helpRes = R.string.help_fps_limiter }) {
+                        IconButton(onClick = { helpRes = if (isLinuxEntry) R.string.help_linux_fps_limiter else R.string.help_fps_limiter }) {
                             Icon(Icons.Default.Help, contentDescription = "What is this?", modifier = Modifier.size(18.dp))
                         }
                     }
@@ -7995,7 +8019,7 @@ internal fun ShortcutSettingsDialogScreen(
                                 Icon(Icons.Default.Settings, contentDescription = "Audio settings", modifier = Modifier.size(18.dp))
                             }
                         }
-                        IconButton(onClick = { helpRes = R.string.help_audio_driver }) {
+                        IconButton(onClick = { helpRes = if (isLinuxEntry) R.string.help_linux_audio_driver else R.string.help_audio_driver }) {
                             Icon(Icons.Default.Help, contentDescription = "What is this?", modifier = Modifier.size(18.dp))
                         }
                     }
@@ -8074,6 +8098,7 @@ internal fun ShortcutSettingsDialogScreen(
                                     fontSize = 11.5.sp
                                 )
                             }
+                            LinuxHelp(isLinuxEntry, R.string.help_linux_microphone) { helpRes = it }
                         }
                     }
 
@@ -8135,16 +8160,20 @@ internal fun ShortcutSettingsDialogScreen(
                     val fsOverrideIdx = if (fullscreenModeOverride < 0) 0 else (fullscreenModeOverride + 1)
                         .coerceIn(1, fsOverrideLabels.size - 1)
                     // Applies on X11 and Wayland alike (the compositor fits the desktop the same way).
-                    DpDrop(
-                        dp, "fullscreen",
-                        label = stringResource(R.string.fullscreen_mode),
-                        options = fsOverrideLabels,
-                        selected = fsOverrideLabels[fsOverrideIdx],
-                        onSelect = { sel ->
-                            val idx = fsOverrideLabels.indexOf(sel)
-                            fullscreenModeOverride = if (idx <= 0) -1 else idx - 1
-                        }
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        DpDrop(
+                            dp, "fullscreen",
+                            label = stringResource(R.string.fullscreen_mode),
+                            options = fsOverrideLabels,
+                            selected = fsOverrideLabels[fsOverrideIdx],
+                            onSelect = { sel ->
+                                val idx = fsOverrideLabels.indexOf(sel)
+                                fullscreenModeOverride = if (idx <= 0) -1 else idx - 1
+                            },
+                            modifier = Modifier.weight(1f)
+                        )
+                        LinuxHelp(isLinuxEntry, R.string.help_linux_fullscreen_mode) { helpRes = it }
+                    }
 
                     // Close the session when this game exits (per-game override; container default is ON).
                     // The watcher that arms it lives past the gamescope early return and watches for a
@@ -8215,6 +8244,7 @@ internal fun ShortcutSettingsDialogScreen(
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             DpCheck(dp, "simTouch", checked = simTouchScreen, onCheckedChange = { simTouchScreen = it })
                             Text("Touchscreen Mode")
+                            LinuxHelp(isLinuxEntry, R.string.help_linux_touchscreen_mode) { helpRes = it }
                         }
                         if (!isLinuxEntry) {
                             DpDrop(
@@ -8231,14 +8261,18 @@ internal fun ShortcutSettingsDialogScreen(
                         run {
                             val autoHideLabels = listOf("Use container default", "On", "Off")
                             val autoHideIdx = when (autoHideControlsOnPad) { "1" -> 1; "0" -> 2; else -> 0 }
-                            LabeledDropdown(
-                                label = "Hide on-screen controls when a controller connects",
-                                options = autoHideLabels,
-                                selectedOption = autoHideLabels[autoHideIdx],
-                                onSelect = {
-                                    autoHideControlsOnPad = when (autoHideLabels.indexOf(it)) { 1 -> "1"; 2 -> "0"; else -> "" }
-                                },
-                            )
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                LabeledDropdown(
+                                    label = "Hide on-screen controls when a controller connects",
+                                    options = autoHideLabels,
+                                    selectedOption = autoHideLabels[autoHideIdx],
+                                    onSelect = {
+                                        autoHideControlsOnPad = when (autoHideLabels.indexOf(it)) { 1 -> "1"; 2 -> "0"; else -> "" }
+                                    },
+                                    modifier = Modifier.weight(1f)
+                                )
+                                LinuxHelp(isLinuxEntry, R.string.help_linux_autohide_controls) { helpRes = it }
+                            }
                         }
 
                         // Player Slots (per-game override). Empty override = inherit the container's
@@ -8248,7 +8282,7 @@ internal fun ShortcutSettingsDialogScreen(
                         Spacer(Modifier.height(12.dp))
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text("Player Slots", modifier = Modifier.weight(1f), fontWeight = FontWeight.Medium)
-                            IconButton(onClick = { helpRes = R.string.help_player_slots }) {
+                            IconButton(onClick = { helpRes = if (isLinuxEntry) R.string.help_linux_player_slots else R.string.help_player_slots }) {
                                 Icon(Icons.Default.Help, contentDescription = "What is this?", modifier = Modifier.size(18.dp))
                             }
                             if (controllerSlotOverridesJson.isNotEmpty()) {
@@ -8275,6 +8309,7 @@ internal fun ShortcutSettingsDialogScreen(
                             DpSwitch(dp, "gyroEnabled", checked = gyroEnabled, onCheckedChange = { gyroEnabled = it })
                             Spacer(Modifier.width(8.dp))
                             Text(stringResource(R.string.gyro_enabled), modifier = Modifier.weight(1f))
+                            LinuxHelp(isLinuxEntry, R.string.help_linux_gyro_enabled) { helpRes = it }
                         }
                         if (gyroEnabled) {
                             // Same pairing rule as the container editor: Tilt to Aim and the Mouse
@@ -8414,7 +8449,7 @@ internal fun ShortcutSettingsDialogScreen(
                             )
                             ScWinComponentsTab(winComponents)
                         }
-                            2 -> ScEnvVarsTab(envVarsStr, { envVarsStr = it }, gameDir)
+                            2 -> ScEnvVarsTab(envVarsStr, { envVarsStr = it }, gameDir, isLinuxEntry)
                             3 -> ScAdvancedTab(
             shortcut = shortcut,
             onPresetListChanged = {
@@ -8927,13 +8962,28 @@ private fun ScEnvVarsTab(
     envVars: String,
     onEnvVarsChange: (String) -> Unit,
     gameDir: File?,
+    /** A Linux (gamescope) entry: this tab carries its own "?" for the variables and the DLL toggle. */
+    isLinuxEntry: Boolean = false,
 ) {
-    EnvVarsEditor(
-        value = envVars,
-        onValueChange = onEnvVarsChange,
-        modifier = Modifier.fillMaxWidth(),
-        gameDir = gameDir
-    )
+    // Own helpRes, like every other tab composable here (the dialog's is out of scope).
+    var helpRes by remember { mutableStateOf<Int?>(null) }
+    helpRes?.let { HelpDialog(it) { helpRes = null } }
+    Column {
+        if (isLinuxEntry) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Environment variables", modifier = Modifier.weight(1f), fontWeight = FontWeight.Medium)
+                LinuxHelp(true, R.string.help_linux_env_vars) { helpRes = it }
+            }
+        }
+        EnvVarsEditor(
+            value = envVars,
+            onValueChange = onEnvVarsChange,
+            modifier = Modifier.fillMaxWidth(),
+            gameDir = gameDir,
+            // The toggle lives inside the shared editor, so its Linux wording is handed in as text.
+            preferDllsHelp = if (isLinuxEntry) stringResource(R.string.help_linux_prefer_game_dlls) else null
+        )
+    }
 }
 
 @Composable
@@ -9110,7 +9160,7 @@ private fun ScAdvancedTab(
                         onSelect = { opt -> onFexPresetIndexChange(fexNames.indexOf(opt).coerceAtLeast(0)) },
                         modifier = Modifier.weight(1f)
                     )
-                    IconButton(onClick = { helpRes = R.string.help_fexcore_preset }) {
+                    IconButton(onClick = { helpRes = if (isLinuxEntry) R.string.help_linux_fexcore_preset else R.string.help_fexcore_preset }) {
                         Icon(Icons.Default.Help, contentDescription = "What is this?", modifier = Modifier.size(18.dp))
                     }
                     if (fexCustomised) PresetCustomBadge()
@@ -9133,12 +9183,16 @@ private fun ScAdvancedTab(
 
         val profileNames = mutableListOf(stringResource(R.string.none))
         profileNames.addAll(controlsProfiles.map { it.getName() })
-        LabeledDropdown(
-            label = "Controls Profile",
-            options = profileNames,
-            selectedOption = profileNames.getOrElse(selectedControlsProfileIndex) { profileNames.first() },
-            onSelect = { opt -> onControlsProfileChange(profileNames.indexOf(opt).coerceAtLeast(0)) }
-        )
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            LabeledDropdown(
+                label = "Controls Profile",
+                options = profileNames,
+                selectedOption = profileNames.getOrElse(selectedControlsProfileIndex) { profileNames.first() },
+                onSelect = { opt -> onControlsProfileChange(profileNames.indexOf(opt).coerceAtLeast(0)) },
+                modifier = Modifier.weight(1f)
+            )
+            LinuxHelp(isLinuxEntry, R.string.help_linux_controls_profile) { helpRes = it }
+        }
 
         // Which Wine services the prefix starts with. A gamescope session starts no wineserver at all.
         if (!isLinuxEntry) {
@@ -9166,6 +9220,12 @@ private fun ScAdvancedTab(
         }
 
         SectionBox(title = stringResource(R.string.processor_affinity)) {
+            // The section's title is drawn by SectionBox, so the "?" goes in the box's own top corner.
+            if (isLinuxEntry) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    LinuxHelp(true, R.string.help_linux_processor_affinity) { helpRes = it }
+                }
+            }
             AndroidView(
                 factory = { ctx ->
                     CPUListView(ctx).also { cpv ->
