@@ -256,6 +256,12 @@ public class PulseAudioComponent extends EnvironmentComponent {
         command += " --daemonize=false";
         command += " --use-pid-file=false";
         command += " --exit-idle-time=-1";
+        // The daemon's own log, kept in its working directory. Its stderr is discarded by
+        // ProcessHelper, so until now a module refusing to load, a pipe that could not be created
+        // or the daemon exiting at startup left no trace anywhere - the Steam client just reported
+        // no microphone. Four separate faults hid behind that one symptom in a single night. One
+        // file per start, overwritten each time, small enough never to matter.
+        command += " --log-level=info --log-target=file:" + new File(workingDir, "pulse.log").getAbsolutePath();
 
         return ProcessHelper.exec(command, envVars.toArray(new String[0]), workingDir);
     }
