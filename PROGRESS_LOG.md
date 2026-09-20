@@ -10360,3 +10360,16 @@ alone. Until then the mapping stays exactly as it is.
 Worth keeping as a general lesson: a guard of the form `[ -d X ] && export …` fails silently when X
 is never created. It reads as working code and it is a no-op. Check the thing exists before
 trusting the mechanism built on it.
+
+### Half-Life 2 runs from the client at 79 fps (2026-09-20)
+
+Appid 220, the Windows build, on `bannerlator-proton-arm64` - Valve's ARM64 depot through our own
+wrapper - and running off the card library rather than internal storage, which proves that second
+library works end to end. A `compatdata/220` prefix now exists, so it is on the confirmed list by
+the same standard as the rest.
+
+At 79 fps it is the fastest title measured from the client so far, better than twice GTA V Legacy's
+throttled 32.
+
+It did not take the native Linux route, and could not have: the retraction above explains why that
+path is dead. The blanket Proton mapping is precisely what made this run possible.
