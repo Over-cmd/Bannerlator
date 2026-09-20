@@ -221,6 +221,17 @@ private fun ProtonBuildsCard() {
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+            // The list Steam shows is built from the account's licences, not from anything on
+            // disk, so it cannot be filtered from here. Saying which entries work is the next best
+            // thing - and the ones labelled ARM64 that are not ours are the worst trap in it,
+            // because they look like the right answer and fail with no window and no message.
+            Text(
+                "Steam's own list will also offer Protons that cannot start a game here, "
+                    + "including some labelled ARM64. The ones that work are the builds listed "
+                    + "below and \"Bannerlator Proton (ARM64)\".",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
             if (used > 0) {
                 Text("Using ${used / (1024 * 1024)} MB",
                     style = MaterialTheme.typography.labelSmall,
