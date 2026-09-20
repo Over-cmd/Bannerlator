@@ -10456,3 +10456,45 @@ Registrar still adopts a tool; both generated wrappers pass `bash -n`; the gate 
 caught here and fixed: splicing the shell function into the adopted-tool wrapper added a second
 `%s`, which would have crashed the registrar at runtime. It is now spliced after the formatting,
 as the Valve launcher already did.
+
+## DirectAudio in the Linux client — end of session, 2026-09-20
+
+**Working and device-proven: DirectAudio for games.** With it selected on the Linux shortcut, the
+helper runs under the app's uid, the socket and pipe are created, the wrapper passes its Wine 11
+check, and the registry key is written into the game's prefix. The session log says
+`DirectAudio ready (Wine 11)` and `DirectAudio selected in the prefix`. The Steam client keeps
+PulseAudio throughout, as intended - DirectAudio replaces the audio driver inside Wine, so it
+changes games and leaves the client alone.
+
+**Not yet proven: the microphone for the Steam client.** Three faults stacked behind it, all three
+now fixed, none of them tested together.
+
+| | |
+| --- | --- |
+| `ac_cv_func_mkfifo=no` in our PulseAudio build | a bionic override carried from an older script. bionic has had mkfifo since API 21 and we build at 26, so PulseAudio dropped module-pipe-sink and module-pipe-source from the build entirely |
+| the bundle carried a 17.0 pipe-source | with nothing building one at 13.0, a foreign copy filled the gap. PulseAudio refuses a module from another release on sight, with nothing in any log |
+| the bundle was never refreshed on device | it unpacks only when the app's version code changes, and dev builds freeze that - so the correct module shipped twice and the device kept using the one unpacked months ago |
+
+That last one is why two rounds of fixing this changed nothing on the device. Confirmed directly:
+the APK carried a 20,272-byte 13.0 module while the phone held a 68,056-byte 17.0 one.
+
+**Staged and untested: `acbfc4943cb8c78f5e152d8f2966d21098b45b9bd70bd25b4697c8103d9e619f`**
+(run 35498185408, `980c4220`).
+
+### First thing next session
+1. Install it, launch the Linux client once with DirectAudio and the microphone on.
+2. **Before testing anything**, check the module on the device: it must be about 20 KB and report
+   13.0. If it is still 68 KB / 17.0 the refresh did not work and Steam's audio page will tell you
+   nothing.
+3. If it is right, open Steam's Audio settings. "No input devices detected" becoming a microphone
+   is the whole result.
+
+### Still open
+- The three ARM64 driver files stage every session; the PulseAudio bundle now does too. Neither is
+  version-checked, they are simply copied. Fine, but worth knowing.
+- A game's prefix is created after the wrapper runs, so on a game's **first** launch under
+  DirectAudio the registry key lands too late and it takes effect on the second. Logged out loud.
+- Frame generation is honoured on this path but `prepareLsfgNative()` sits past the gamescope early
+  return, so lsfg-native specifically may not work. Untested, and deliberately not claimed in the
+  help text.
+- The compositor driver row is hidden but not inert; the container's value governs.
