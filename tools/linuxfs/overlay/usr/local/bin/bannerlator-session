@@ -138,6 +138,19 @@ case $mode in
       done < "$HOME/.bl-proton-extra"
       mv -f "$_bl_left" "$HOME/.bl-proton-extra"
     fi
+    # steam:// URLs left in ~/.bl-steam-urls are handed to the client on its command line. The app
+    # writes one when the user asks for a Proton that is one of Valve's own depots rather than a
+    # tarball: those are not files anywhere, the client fetches them like any other app. One per
+    # line, and the file is cleared once they have been passed on - the client either acts on a URL
+    # or it does not, and repeating it every session would re-ask forever.
+    if [ -s "$HOME/.bl-steam-urls" ]; then
+      while read -r _bl_url || [ -n "$_bl_url" ]; do
+        case ${_bl_url# } in steam://*) ;; *) continue ;; esac
+        step "asking the client for $_bl_url"
+        set -- "$@" "$_bl_url"
+      done < "$HOME/.bl-steam-urls"
+      rm -f "$HOME/.bl-steam-urls"
+    fi
     step "registering the app's game library with Steam"
     bannerlator-steam-library "$steam_root" || true
     step "setting up the ARM64 Proton compatibility tool"

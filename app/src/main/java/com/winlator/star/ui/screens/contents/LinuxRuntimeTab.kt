@@ -27,6 +27,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.winlator.star.container.ContainerManager
+import com.winlator.star.linux.LinuxProtons
 import com.winlator.star.linux.LinuxRuntime
 import com.winlator.star.linux.LinuxRuntimeInstaller
 import com.winlator.star.linux.LinuxRuntimeUpdate
@@ -164,6 +165,140 @@ fun LinuxRuntimeTab() {
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                }
+            }
+        }
+
+        // Only meaningful once the runtime is there: these land inside it, and the session is what
+        // unpacks and registers them.
+        if (installed != null) ProtonBuildsCard()
+    }
+}
+
+/**
+ * The Proton builds a game in the Steam client can be run with. Downloading one here does not
+ * finish the job: the session unpacks and registers it at its next start, because a build's own
+ * manifest asks Steam for a container Android cannot provide and has to be rewritten first. The
+ * wording says so rather than claiming an install that has not happened yet.
+ */
+@Composable
+private fun ProtonBuildsCard() {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+
+    var builds by remember { mutableStateOf<List<LinuxProtons.Build>>(emptyList()) }
+    var states by remember { mutableStateOf<Map<String, LinuxProtons.State>>(emptyMap()) }
+    var loading by remember { mutableStateOf(true) }
+    var workingOn by remember { mutableStateOf<String?>(null) }
+    var stage by remember { mutableStateOf("") }
+    var percent by remember { mutableStateOf(-1) }
+    var error by remember { mutableStateOf<String?>(null) }
+    var used by remember { mutableStateOf(0L) }
+
+    fun refresh() {
+        states = builds.associate { it.name to LinuxProtons.stateOf(context, it) }
+        used = LinuxProtons.installedBytes(context)
+    }
+
+    LaunchedEffect(Unit) {
+        builds = withContext(Dispatchers.IO) { LinuxProtons.fetchCatalog() }
+        withContext(Dispatchers.IO) { refresh() }
+        loading = false
+    }
+
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Proton builds", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "What the Steam client runs a Windows game with. Add one here and it appears in "
+                    + "that game's Compatibility list, so you can pick a different one per game. "
+                    + "A build is unpacked the next time you open the Steam client.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            if (used > 0) {
+                Text("Using ${used / (1024 * 1024)} MB",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            if (loading) {
+                Text("Checking for builds…", style = MaterialTheme.typography.labelSmall)
+            } else if (builds.isEmpty()) {
+                Text("No builds available (could not reach the catalog)",
+                    style = MaterialTheme.typography.labelSmall)
+            }
+            error?.let {
+                Text(it, style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.error)
+            }
+
+            builds.forEach { build ->
+                val state = states[build.name] ?: LinuxProtons.State.ABSENT
+                val busy = workingOn == build.name
+                Spacer(Modifier.height(4.dp))
+                Text(build.display, style = MaterialTheme.typography.labelLarge)
+                if (build.notes.isNotEmpty()) {
+                    Text(build.notes, style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Text(
+                    when (state) {
+                        LinuxProtons.State.INSTALLED -> "Added"
+                        LinuxProtons.State.PENDING ->
+                            if (build.isDepot) "Requested — the client fetches it next session"
+                            else "Ready — unpacked next time you open the Steam client"
+                        else ->
+                            if (build.isDepot) "Downloaded by the Steam client"
+                            else "${build.size / (1024 * 1024)} MB download"
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                if (busy) {
+                    Text(if (percent in 0..100) "$stage $percent%" else stage,
+                        style = MaterialTheme.typography.labelSmall)
+                    if (percent in 0..100) {
+                        LinearProgressIndicator(progress = { percent / 100f },
+                            modifier = Modifier.fillMaxWidth())
+                    } else {
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        enabled = workingOn == null && state == LinuxProtons.State.ABSENT,
+                        onClick = {
+                            workingOn = build.name; error = null
+                            stage = "Starting…"; percent = -1
+                            scope.launch {
+                                val failure = withContext(Dispatchers.IO) {
+                                    LinuxProtons.install(context, build) { s, p ->
+                                        stage = s; percent = p
+                                    }
+                                }
+                                error = failure
+                                withContext(Dispatchers.IO) { refresh() }
+                                workingOn = null
+                            }
+                        }
+                    ) { Text(if (build.isDepot) "Request" else "Download") }
+
+                    // Valve's depots belong to the client, which installs and removes them itself.
+                    if (!build.isDepot) {
+                        OutlinedButton(
+                            enabled = workingOn == null && state != LinuxProtons.State.ABSENT,
+                            onClick = {
+                                workingOn = build.name; error = null
+                                scope.launch {
+                                    withContext(Dispatchers.IO) {
+                                        LinuxProtons.remove(context, build)
+                                        refresh()
+                                    }
+                                    workingOn = null
+                                }
+                            }
+                        ) { Text("Remove") }
+                    }
                 }
             }
         }
