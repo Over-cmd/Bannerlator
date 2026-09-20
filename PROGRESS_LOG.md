@@ -10411,3 +10411,48 @@ today. Worth putting back if a per-game override is ever wanted.
 ⚠️ Frame generation is kept and honoured, but `prepareLsfgNative()` sits past the gamescope early
 return, so the lsfg-native engine specifically may not work in a Linux session. Not yet tested, and
 deliberately not claimed in the help text.
+
+## DirectAudio for the Linux client — checkpoint (2026-09-20)
+
+Three commits in, one to go. Branch `feat/linux-gamescope-runtime`.
+
+| | |
+| --- | --- |
+| `0e85efad` | PulseAudio wired unconditionally; driver + helper ship as app assets, staged each session |
+| `8a7aae0f` | PulseAudio gained an optional microphone fed from a pipe |
+| `6e265fd9` | both Proton wrappers offer DirectAudio to a game, and refuse when it would be silent |
+
+**The silence bug is fixed and stands on its own.** A Linux session used to wire audio only when the
+container's driver said "pulseaudio"; anything else launched the client mute, which read as
+"DirectAudio broke the client" when nothing had been set up at all. PulseAudio now runs for every
+Linux session. On this path the two were never alternatives: the client is a native Linux program
+and DirectAudio replaces the audio driver *inside Wine*, so it changes games and leaves the client
+alone.
+
+**Two microphone paths, one stream.** The other session added `--mic-fifo` to the helper
+(directaudio `565c879e`, restaged, sha `599f769f…`, now our `libdirectaudiorelay.so`). A game gets
+the mic through Wine and the relay; the Steam client gets it through `module-pipe-source`, which we
+already shipped and had never loaded. The helper fans one Android input stream out to both. Format
+is fixed at s16le/48000/mono - it resamples when the device grants another rate, so the daemon is
+never told a rate the bytes are not. If PulseAudio suspends an idle source and stops reading, the
+helper releases its share of the mic after 2 s (Android's recording indicator goes off) and probes
+until reads resume.
+
+**The version gate is the point, not a nicety.** The mmdevapi interface the driver implements is
+private and unversioned, so pairing it with the wrong Wine does not fail - it goes quiet, which is
+indistinguishable from us having broken the sound. The wrapper reads the Proton's own Wine version
+and leaves DirectAudio off unless it matches, and says why.
+
+### Still to do
+- Nothing sets `BL_DIRECTAUDIO`, so the wrapper takes its early return on every launch today.
+- Nothing starts the helper. It needs to run under the app's uid, before the client, with
+  `--socket` and `--mic-fifo`, and PulseAudio needs the fifo path passed to it.
+- First launch of a game creates the prefix *after* the wrapper runs, so the registry key lands on
+  the second launch. Logged out loud rather than left looking like a fault; worth improving.
+
+### Verified on the host, not yet on a device
+Registrar still adopts a tool; both generated wrappers pass `bash -n`; the gate exports
+`WINEDLLPATH` on a Wine 11 tree and returns cleanly with no driver directory. A rendering bug was
+caught here and fixed: splicing the shell function into the adopted-tool wrapper added a second
+`%s`, which would have crashed the registrar at runtime. It is now spliced after the formatting,
+as the Valve launcher already did.
