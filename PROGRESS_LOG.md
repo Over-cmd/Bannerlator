@@ -10301,3 +10301,30 @@ capability from the Windows path and arguably a more interesting one. It needs a
 **Dead Space has no evidence on hand at all.** It is not in the internal library's app list. It is
 either on the card library, which is only mounted inside a session and therefore invisible from
 outside one, or it is app-side only. Worth checking inside a session before it goes on the list.
+
+### Correction: GTA V Legacy ran on Valve's Proton, not GE (2026-09-20)
+
+I recorded Legacy as running on GE-Proton 11-7. That was an assumption, not a reading. The
+CompatToolMapping in `config.vdf` maps 271590 to `bannerlator-proton-arm64`, which is Valve's ARM64
+depot through our own wrapper; only 3240220, the Enhanced build, is mapped to
+`GE-Proton11-7-aarch64`. GE was chosen for Enhanced and I carried that assumption across to Legacy
+without checking.
+
+The corrected result is a better one: **Valve's own ARM64 Proton plays GTA V Legacy at 32 fps.** GE
+was never needed for it.
+
+### The registrar forces Proton onto native Linux titles
+
+Found while preparing a Half-Life 2 run. `register_default()` writes a priority-250 mapping to
+`bannerlator-proton-arm64` for every installed appid, and `config.vdf` confirms 220, 340, 380, 420
+and 70 are all mapped to it. Those are native Linux x86 titles which would otherwise run through
+Valve's FEX compatibility tool with no Wine involved at all.
+
+Worse, clearing such a mapping by hand does not stick. The registrar runs every fifteen seconds
+during a session and its skip condition is whether an app already has an entry, not whether it
+should have one, so it puts the mapping straight back.
+
+The behaviour was correct while the only goal was getting Windows games to launch. It now needs a
+way to leave a native title alone - an exclusion list of appids, or detecting a Linux launcher in
+the install directory at session time. Not yet fixed, and it means the native path cannot currently
+be tested without changing the registrar.
