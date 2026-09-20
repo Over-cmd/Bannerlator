@@ -8495,6 +8495,9 @@ public class XServerDisplayActivity extends AppCompatActivity {
         return "com.xiaoji.egggame".equals(pkg) ? "GameHub" : pkg;
     }
 
+    /** Where the Linux DirectAudio driver is staged, relative to the runtime root. */
+    static final String LINUX_DIRECTAUDIO_DIR = "usr/local/lib/directaudio";
+
     private volatile boolean linuxSessionWatchStop = false;
 
     /**
@@ -8623,6 +8626,10 @@ public class XServerDisplayActivity extends AppCompatActivity {
         } catch (java.io.IOException e) {
             throw new IllegalStateException(e);
         }
+        // Cheap (about 600 KB) and unconditional: the driver is only USED when the session is told
+        // to, but having it in place costs nothing and means selecting DirectAudio never has to
+        // wait for a copy, or fail because one never happened.
+        stageLinuxDirectAudio();
 
         List<String> session = linuxSessionArgs();
         // Only the Steam mode signs in; a desktop session has no client and needs no hold. The
@@ -8657,11 +8664,16 @@ public class XServerDisplayActivity extends AppCompatActivity {
         guest.add("LIBGL_KOPPER_DRI2=true");
         File icd = com.winlator.star.linux.LinuxRuntime.vulkanIcd(this);
         if (icd != null) guest.add("VK_ICD_FILENAMES=" + icd.getPath());
-        if ("pulseaudio".equals(audioDriver)) {
-            guest.add("PULSE_SERVER=unix:" + rootPath + UnixSocketConfig.PULSE_SERVER_PATH);
-            environment.addComponent(new PulseAudioComponent(
-                    UnixSocketConfig.createSocket(rootPath, UnixSocketConfig.PULSE_SERVER_PATH)));
-        }
+        // PulseAudio always, whatever the container's audio driver says. The Steam client is a
+        // native Linux program and has no other way to make a sound: its menus, its music and its
+        // voice chat all go through here. Selecting anything else used to wire nothing at all and
+        // launch the whole session silent, which read as "DirectAudio broke the client" when in
+        // fact nothing had been set up. DirectAudio is not an alternative to this on the Linux
+        // path - it replaces the audio driver INSIDE Wine, so it changes what games do and leaves
+        // the client alone.
+        guest.add("PULSE_SERVER=unix:" + rootPath + UnixSocketConfig.PULSE_SERVER_PATH);
+        environment.addComponent(new PulseAudioComponent(
+                UnixSocketConfig.createSocket(rootPath, UnixSocketConfig.PULSE_SERVER_PATH)));
         guest.add("BL_WIDTH=" + xServer.screenInfo.width);
         guest.add("BL_HEIGHT=" + xServer.screenInfo.height);
         guest.add("BL_FPS=" + (resolvedFpsLimiterEnabled() ? Math.max(0, resolvedFpsLimiterValue()) : 0));
@@ -8971,6 +8983,53 @@ public class XServerDisplayActivity extends AppCompatActivity {
             preloaderDialog.closeOnUiThread();
         }, 2000L);
         winHandler.start();
+    }
+
+    /**
+     * The Linux DirectAudio driver, copied into the runtime beside Proton rather than into it.
+     *
+     * <p>Steam verifies and repairs its own Proton depots, so anything added under one of those is
+     * removed again on the next check; a directory of our own survives, and one location serves
+     * whichever Proton a game resolves to. Wine is pointed at it with WINEDLLPATH, which it
+     * searches with the per-architecture subdirectory appended - hence this layout.
+     *
+     * <p>These are the glibc build: the unix half links libc.so.6 and could not load in a Wine
+     * container even by accident, which is why it lives in its own asset folder away from the
+     * bionic ones. Staged every session like the session scripts, so a fix reaches an installed
+     * runtime without re-hosting it.
+     */
+    private void stageLinuxDirectAudio() {
+        String[][] files = {
+                {"aarch64-unix/winedirectaudio.so", "aarch64-unix/winedirectaudio.so"},
+                {"aarch64-windows/winedirectaudio.drv", "aarch64-windows/winedirectaudio.drv"},
+                {"i386-windows/winedirectaudio.drv", "i386-windows/winedirectaudio.drv"},
+        };
+        File base = new File(com.winlator.star.linux.LinuxRuntime.rootDir(this),
+                LINUX_DIRECTAUDIO_DIR + "/lib/wine");
+        StringBuilder report = new StringBuilder();
+        for (String[] entry : files) {
+            File target = new File(base, entry[1]);
+            File staged = new File(target.getParentFile(), target.getName() + ".staged");
+            boolean ok = false;
+            try {
+                //noinspection ResultOfMethodCallIgnored
+                target.getParentFile().mkdirs();
+                try (java.io.InputStream in = getAssets().open("directaudio/linux-wine11/" + entry[0]);
+                     java.io.OutputStream out = new java.io.FileOutputStream(staged)) {
+                    byte[] buffer = new byte[1 << 16];
+                    for (int read = in.read(buffer); read > 0; read = in.read(buffer)) out.write(buffer, 0, read);
+                }
+                // Renamed into place so a session that still has the old file mapped keeps it.
+                ok = staged.renameTo(target);
+            } catch (Exception e) {
+                Log.w("XServerDisplayActivity", "could not stage " + entry[1] + " for DirectAudio", e);
+            } finally {
+                //noinspection ResultOfMethodCallIgnored
+                if (!ok) staged.delete();
+            }
+            report.append(target.getName()).append('=').append(ok ? target.length() : -1).append(' ');
+        }
+        Log.i("XServerDisplayActivity", "DirectAudio (Linux) staged: " + report.toString().trim());
     }
 
     /** What the session script runs: the desktop, a Linux program, or the native Steam client. */
