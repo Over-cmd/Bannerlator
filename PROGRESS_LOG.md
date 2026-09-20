@@ -10241,3 +10241,35 @@ cannot coexist) and test GTA V Legacy, appid 271590, on GE-Proton. Legacy is D3D
 goes through DXVK rather than vkd3d, so a clean run there would neither prove nor disprove the
 present-timing theory. Legacy will arrive mapped to `bannerlator-proton-arm64` with no launch
 options, so it needs GE chosen by hand and `PROTON_LOG=1 %command%` added.
+
+## GTA V Legacy plays from the Linux Steam client (2026-09-20)
+
+Appid 271590 on GE-Proton 11-7, Direct3D 11 through DXVK. The whole chain ran unattended: Rockstar
+launcher, Social Club, "Entering Story Mode", then into the Ludendorff prologue heist and playing.
+No crash and no intervention. This is the first time GTA V has run from the client side at all.
+
+From the on-screen HUD, mid-gameplay:
+
+| | |
+| --- | --- |
+| FPS | 32 |
+| CPU | 58% at 90 °C |
+| GPU | 77% at 69 °C |
+| RAM | 4.6 GB |
+| Battery | 78% |
+
+The CPU temperature is the number worth looking at twice. 90 °C is throttling territory, so 32 fps
+is a throttled figure rather than a ceiling - worth a second run from cold, and worth pointing the
+FPS limiter and big-core affinity work at.
+
+This is consistent with the Turnip present-timing theory without proving it. Legacy is D3D11 and
+therefore DXVK; the bug Max found is vkd3d-proton enabling `VK_EXT_present_timing` without the
+extension it depends on. Enhanced, which is vkd3d, died on a call through a null pointer. Legacy,
+which is not, plays. The pattern fits, but only Enhanced can test it and it has been deleted - at
+96 GB against 106 GB free, the two cannot coexist.
+
+No Proton log exists for this run: the launch happened before `PROTON_LOG=1 %command%` was added for
+this appid. That costs nothing while it works and everything if it later misbehaves.
+
+Proven from the client so far: NFS Most Wanted via `steam2ea://` at 48 fps, NFS Payback via
+`link2ea://`, Portal 2, FlatOut, and now GTA V Legacy at 32 fps. GTA V Enhanced remains unsolved.
