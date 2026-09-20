@@ -9945,3 +9945,20 @@ What is not yet known is whether 3.0.1 does what this needs: the version that ru
 side is 3.1.0-wave64-relax, which is built x86-64 only, so the ARM64EC line is a version behind
 it. If 3.0.1 also refuses feature level 12_1 then the answer is to build 3.1.0 for ARM64EC, which
 the same job already knows how to do.
+
+**The VKD3D swap removed the feature-level blocker (2026-09-19).** Valve's `d3d12.dll` and
+`d3d12core.dll` in `Proton Experimental (ARM64)` were replaced with the ARM64EC build from
+Nightlies, `VKD3D-Proton-arm64ec-3.0.1-5d0db741`, with the originals kept in
+`files/.vkd3d-valve-backup/`. The i386 pair was swapped from the package's `syswow64` too.
+Valve's core is 589 KB against ours at 5.1 MB, which is the difference between a stub and the
+real implementation.
+
+The run after the swap carries **no feature-level complaint at all** - the
+`Feature level 0xc100 is not supported` lines that preceded every earlier crash are simply absent
+- and the game rendered Rockstar's logo animation in engine, bloom and all, which it had never
+reached before. That settles the diagnosis: the refusal was a vkd3d-proton version gap in Valve's
+ARM64 Proton, not the GPU, the Turnip driver, or anticheat.
+
+It still ends in an abort, six signatures and the game stopped, but later and with a different
+cause. One blocker is gone and a new one is exposed; the next step is another `VKD3D_DEBUG=warn`
+run to name it.
