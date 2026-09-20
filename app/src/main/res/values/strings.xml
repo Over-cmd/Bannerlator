@@ -2476,10 +2476,7 @@ trying for speed, <b>notemplates</b> if you get driver crashes.
         <b>Environment Variables</b><br /><br />
         Extra settings handed to the Linux session when it starts. They reach <b>both</b> the Steam client and the games the client launches: the client is started with them, and every game inherits them through Steam and Proton. A variable set here overrides the same name coming from the FEXCore preset.
     ]]></string>
-    <string name="help_linux_fps_limiter"><![CDATA[
-        <b>FPS Limiter</b><br /><br />
-        Caps how many frames a second the session puts on screen - it becomes gamescope\'s frame cap. It reaches <b>both</b> the Steam client and the games the client launches. Capping frames cuts heat and battery use and can steady an uneven frame rate.
-    ]]></string>
+    <string name="help_linux_fps_limiter"><![CDATA[ <b>Frame Rate Limiter</b><br /><br /> Not used by the Steam client. The compositor's rate is set once for the whole session, so a cap meant for a game would also hold the client's menus to it - a limiter at 60 ran Big Picture at 60 on a 144 Hz screen. A Linux session always runs at this screen's highest refresh rate instead. To cap a particular game, use that game's own settings. ]]></string>
     <string name="help_linux_fexcore_preset"><![CDATA[
         <b>FEXCore Preset</b><br /><br />
         Tunes FEX, which translates a game\'s x86 code to ARM. It is for the <b>games the client launches</b> only: those run x86 code inside Proton, while the Steam client is a native ARM64 build and never goes through FEX. The preset is handed to the session at launch, and anything you set in Environment Variables overrides it.
