@@ -10626,3 +10626,47 @@ git reset --hard refs/backup/20260920/linux-gamescope-known-good
 ```
 and reinstall APK `36768d1c…`. Nothing in this state depends on an unmerged change elsewhere; the
 relay helper binary and the driver files are committed in-tree.
+
+## Autonomous run: overlay restored, GameHub stopped, VAC still open (2026-09-20)
+
+Installed build `76319254e73fe9b61d28747ed25a04adb968b9b58bb4e37cac42d3038a74f63c`
+(`334955ea`, run 35531625164), driven and tested on the device without the user present.
+
+### ✅ Steam's overlay is back, and we were stripping a working one
+`.steam/bin64` → `steamrtarm64`, which holds a genuine **ELF arm64** `gameoverlayrenderer.so`.
+`.steam/bin32` does not exist, so the bin32 entry in Steam's LD_PRELOAD fails harmlessly - that is
+the "cannot be preloaded" noise in every log, and it is normal on ARM64. The overlay we were
+dropping was real and functioning.
+
+It was dropped because it landed in front of `open()`/`read()` on `/dev/input` and answered every
+read of the session's pad with nothing. That was the wrong cure for an ordering problem: **glibc
+reads `LD_PRELOAD` before `/etc/ld.so.preload`**, and the interposer lives in the latter. Both
+wrappers now prepend the interposer to `LD_PRELOAD` instead of removing the overlay.
+
+**Verified on the device, in a live TF2 process:** `gameoverlayrenderer` and `libfakeinput` both
+mapped into the game, and a Wine process holding four fake-input ring fds - so the interposer is
+serving the pad with the overlay loaded. The deviation is closed and input survived it.
+
+### ✅ GameHub is stopped when a session starts
+`ActivityManager.killBackgroundProcesses` on the competing client, with
+`KILL_BACKGROUND_PROCESSES` in the manifest. The old comment said an app cannot force-stop another
+without root; that is true of Settings' force-stop but not of background processes, which is
+exactly GameHub's case - it declares boot receivers, so it runs from power-on having never been
+opened, and takes the Steam login seconds after every sign-in.
+
+### ❌ VAC: unchanged, and my test was inconclusive by construction
+Confirmed along the way: the game's own command line is `tf_win64.exe -steam -condebug` - **no
+insecure flag from anyone** - Proton's Steam integration in the prefix is complete (steam.exe,
+steamclient.dll, steamclient64.dll, Steam.dll, GameOverlayRenderer64.dll), and TF2 reaches
+`Connection to game coordinator established`.
+
+I drove TF2 with `+connect 127.0.0.1:27015` to exercise the secure check locally. The console shows
+`Connecting…`, four retries, `Connection failed after 4 retries` and **no insecure notice** - but
+that proves nothing: with nothing listening, the secure negotiation never happens. Only a live
+secure server produces the verdict, which is a normal in-game connect and takes ten seconds.
+
+The remaining difference from Valve's official path is the **Steam Linux Runtime container**, which
+we skip because Android denies apps the user namespaces pressure-vessel needs. That is the largest
+gap and it is not mine to close.
+
+TF2's launch options restored to `-condebug`; the autolaunch hook cleared.
