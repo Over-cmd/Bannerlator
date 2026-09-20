@@ -90,6 +90,11 @@ public final class LinuxSteamLibrary {
 
         // The database's view: app id -> folder, and depot -> app for the journal fallback.
         java.util.Map<Integer, String> depotToApp = new java.util.HashMap<>();
+        // Reconcile before presenting anything. This used to run only when a session ended, so a
+        // session killed by an APK install - every one of them today - never released what the
+        // client had uninstalled, and the next start handed the client a manifest for a folder
+        // with nothing in it.
+        releaseClientUninstalls(context);
         java.util.Map<Integer, File> recorded = new java.util.HashMap<>();
         java.util.Map<Integer, String> names = new java.util.HashMap<>();
         java.util.Map<Integer, Long> sizes = new java.util.HashMap<>();
@@ -475,6 +480,16 @@ public final class LinuxSteamLibrary {
      * from a library the app can see right now, the record follows; a library that is not
      * present - the card is out - proves nothing and is left alone.
      */
+    /** True when {@code dir} holds nothing but the build marker this app writes. */
+    private static boolean isEmptyShell(File dir) {
+        String[] entries = dir.list();
+        if (entries == null) return false;
+        for (String name : entries) {
+            if (!".bannerlator_build".equals(name)) return false;
+        }
+        return true;
+    }
+
     private static void releaseClientUninstalls(android.content.Context context) {
         try {
             com.winlator.star.store.SteamDatabase db = com.winlator.star.store.SteamDatabase.getInstance(context);
@@ -482,11 +497,23 @@ public final class LinuxSteamLibrary {
             File cardRoot = cardRoot(context);
             for (com.winlator.star.store.SteamDatabase.GameRow row : db.getInstalledGames()) {
                 File dir = installDirOf(context, row);
-                if (dir == null || dir.isDirectory()) continue;
+                if (dir == null) continue;
+                // The client removes a game's own files and stops there: it will not delete a folder
+                // holding a file it did not write, and .bannerlator_build is ours. So after a client
+                // uninstall the folder is always still standing, with nothing in it but that marker,
+                // and "is the folder gone" was never true - the row stayed installed, the next
+                // session presented the empty folder to the client as a game again, and the client
+                // showed it installed. A folder with nothing but our own bookkeeping in it is
+                // treated as gone, and removed so it cannot be mistaken for anything again.
+                boolean gone = !dir.isDirectory();
+                boolean shell = !gone && isEmptyShell(dir);
+                if (!gone && !shell) continue;
                 boolean visible = isUnder(dir, internalRoot) || (cardRoot != null && isUnder(dir, cardRoot));
                 if (!visible) continue;
                 db.markUninstalled(row.appId);
-                Log.i(TAG, row.name + " (" + row.appId + ") is gone from " + dir + "; no longer installed");
+                if (shell) com.winlator.star.core.FileUtils.delete(dir);
+                Log.i(TAG, row.name + " (" + row.appId + ") is " + (shell ? "an empty shell at " : "gone from ")
+                        + dir + "; no longer installed");
             }
         } catch (Throwable t) {
             Log.w(TAG, "could not reconcile removed games", t);
