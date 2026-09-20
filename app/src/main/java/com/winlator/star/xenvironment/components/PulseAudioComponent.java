@@ -209,6 +209,17 @@ public class PulseAudioComponent extends EnvironmentComponent {
         // resume now goes through the native pasink libpulse client instead).
         new File(workingDir, "cli").delete();
 
+        // module-pipe-source creates the pipe with mkfifo and fails outright if one is already
+        // there - EEXIST, reported as "Unknown error 17" - and the module then does not load at
+        // all, so the source never appears and the client reports no microphone. Ours lives in the
+        // app's files directory and survives a session, so after the very first run the path was
+        // always occupied. Removed here, before the daemon reads this config: the daemon makes it,
+        // and the relay helper starts afterwards and is content to find one already made.
+        if (micFifoPath != null && !micFifoPath.isEmpty()) {
+            //noinspection ResultOfMethodCallIgnored
+            new File(micFifoPath).delete();
+        }
+
         File configFile = new File(workingDir, "default.pa");
         java.util.List<String> config = new ArrayList<>(java.util.Arrays.asList(
             "load-module module-native-protocol-unix auth-anonymous=1 auth-cookie-enabled=0 socket=\""+socketConfig.path+"\"",
