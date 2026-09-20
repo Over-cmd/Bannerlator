@@ -10021,3 +10021,63 @@ which is what a swap with no effect looks like.
 So nothing has yet been proven about substituting components into Valve's Proton. The correct
 target is `files/lib/wine/vkd3d-proton/aarch64-windows/`, the experiment is still worth running,
 and any future comparison has to be logged-run against logged-run.
+
+## Third-party Protons selectable in the Linux client (2026-09-19)
+
+Rather than keep substituting single DLLs into Valve's ARM64 depot, whole Protons can now be
+installed beside it. Both projects the user asked about publish native ARM64 builds, and both
+unpack to an ordinary Proton tree - a python entry point beside `files/` carrying Wine, DXVK and
+VKD3D - which is the same shape as the depot, so this runtime can run them the same way.
+
+| Build | Asset | Bytes |
+| --- | --- | --- |
+| GE-Proton11-7 | `GE-Proton11-7-aarch64.tar.gz` | 645,786,140 |
+| proton-cachyos cachyos-11.0-20260703-slr | `proton-cachyos-11.0-20260703-slr-arm64.tar.xz` | 339,912,088 |
+
+Both are already on the device under `compatibilitytools.d/.bannerlator-download/`, and both were
+checked against the projects' published `.sha512sum` files rather than trusted on size alone:
+
+```
+GE     741cf70256f13b20d44952b590defd68b115814097f911c9ec053a64d33795267e2a982a5ce939407e8b649613eb3943bb2e2ebf4794d302ff96b83b61457cdd
+Cachy  54514fc117f2f74cfbc8e9a321a0432513fd44d875ce1c0c48c72af0518d683f3d16ff755d213c0fb42d6e8a1db2a290e9ab883e3505baccc4f43e5e9e692a09
+```
+
+`bannerlator-proton-extra` installs one: it resolves the newest release that actually carries an
+ARM64 asset (neither project builds one for every tag), downloads it resumably, verifies the
+published sha512, unpacks it and hands over to the registrar. A tarball already on the device is
+taken by path instead, which is how these two will be used - a session that has to pull 646 MB down
+first shows nothing on screen for ten minutes. `~/.bl-proton-extra` holds one request per line and
+is processed before the client starts; a line is dropped on success and kept for a retry on
+failure. The request file is already written with both local paths.
+
+`bannerlator-steam-compat` gained `adopt_extras()`, which is what makes an installed tool
+launchable. Their own manifests declare `require_tool_appid`, so Steam would stack pressure-vessel
+underneath, and pressure-vessel wants unprivileged user namespaces an Android app does not get -
+the same silent failure Valve's own ARM64 depot has here. The shipped manifest is copied once to
+`toolmanifest.vdf.bannerlator-orig` and stays the source of the entry point, so re-running cannot
+wrap the wrapper; the live manifest names `bannerlator-proton-wrap`, which drops the client's
+overlay library from `LD_PRELOAD` for the same reason `bannerlator-proton` does and then execs the
+tool's own entry point in place, since Proton takes its base directory from `dirname(sys.argv[0])`.
+
+One bug was worth the trouble of finding before it shipped. `register_default()` repointed every
+mapping whose tool name began with "proton", and the registrar re-runs every fifteen seconds during
+a session - so picking GE-Proton for a game would have been undone a few seconds later, looking
+like the dropdown simply did not work. Adopted tools are now exempt. proton-cachyos needed this
+specifically: its internal tool name is `proton-cachyos`, which the old prefix test caught. The
+client's own ARM64 and x86_64 Protons are still repointed, because none of them can start anything
+here.
+
+Verified on the host against a fake GE-Proton tree and a fake CachyOS tree with a config.vdf that
+had GTA V deliberately mapped to GE-Proton: both mappings survived, Valve's was repointed, the
+manifests lost `require_tool_appid`, and a second run did not wrap the wrapper. Also tested
+end to end from a tarball. **Nothing is device-proven yet.**
+
+Why this is the right experiment for GTA V: the named blocker is
+`allocate_virtual_memory out of memory, size 0x14a00000000`, about 1.3 TB of address space, which is
+in Wine's memory manager. Substituting a graphics component cannot touch it. A whole Proton
+replaces Wine itself.
+
+Staged for the device: `Bannerlator-1.0-test-pubg.apk`
+sha256 `a74a5294eb95cc1a01f0a4b3c5cd4111f6cfccf15901108fc1b578aa162acab1`, run 35482455341,
+headSha `0386765669a39c2f38a55342789b2e1e86653b0f`. The APK carries the new script as an asset, so
+it reaches the installed rootfs without a runtime re-host.
