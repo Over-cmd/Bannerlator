@@ -480,12 +480,28 @@ public final class LinuxSteamLibrary {
      * from a library the app can see right now, the record follows; a library that is not
      * present - the card is out - proves nothing and is left alone.
      */
-    /** True when {@code dir} holds nothing but the build marker this app writes. */
+    /**
+     * True when {@code dir} holds nothing a game would need - only bookkeeping and caches left
+     * behind by an uninstall.
+     *
+     * <p>The first version of this accepted only our own build marker, and missed the real case on
+     * the device: GTA V Enhanced was left with the marker and a {@code vkd3d-proton.cache} that
+     * Proton had written into the game's folder, so the folder was not "empty" and the game stayed
+     * installed forever.
+     *
+     * <p>The test that carries the weight is that an installed game always has at least one
+     * subdirectory - every one of them keeps its content in folders - so a flat directory holding
+     * nothing but dotfiles and caches has no game in it.
+     */
     private static boolean isEmptyShell(File dir) {
-        String[] entries = dir.list();
+        File[] entries = dir.listFiles();
         if (entries == null) return false;
-        for (String name : entries) {
-            if (!".bannerlator_build".equals(name)) return false;
+        for (File entry : entries) {
+            if (entry.isDirectory()) return false;
+            String name = entry.getName();
+            if (name.startsWith(".")) continue;          // our marker and other bookkeeping
+            if (name.endsWith(".cache")) continue;       // vkd3d-proton.cache and friends
+            return false;
         }
         return true;
     }
