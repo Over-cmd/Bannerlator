@@ -6199,6 +6199,12 @@ internal fun ShortcutSettingsDialogScreen(
 
     // Epic Online Services (EOS) auth — only relevant for Epic-origin shortcuts. Default ON.
     val isEpicShortcut = remember { shortcut.getExtra("storeSource") == "epic" }
+    // An entry the Linux runtime owns (the Steam client and the games it starts). Nothing below the
+    // gamescope session's proot reads the Wine half of this editor - no prefix, no wineserver, no
+    // dxwrapper, no guest launcher exist there (XServerDisplayActivity.setupLinuxSession) - so those
+    // rows are conditioned off rather than shown as settings that quietly do nothing. Stored values
+    // are never touched: an entry converted either way keeps whatever it had.
+    val isLinuxEntry = remember { com.winlator.star.linux.LinuxShortcuts.isLinuxEntry(shortcut) }
     var epicEosEnabled by remember { mutableStateOf(shortcut.getExtra("epicEos", "1") != "0") }
     // Manual override: force the -epicovt ownership-token path even when the auto
     // DenuvoDetector misses an obfuscated Denuvo exe. Default OFF.
@@ -6682,13 +6688,25 @@ internal fun ShortcutSettingsDialogScreen(
     // tvLaunchStored, not the live switch: turning the switch off with no TV plugged in must not yank
     // the tab out from under the finger that just moved it. It goes when the dialog is next opened.
     val tvTabVisible = tvDisplay != null || tvLaunchStored || tvLaunch
-    val tabTitles = remember(tvTabVisible) {
-        listOf("General", "Win Components", "Env Vars", "Advanced", "Controller") +
-            (if (tvTabVisible) listOf("TV") else emptyList())
+    // selectedTab is the CONTENT index in the when() below, and tabIndices is which of those the tab
+    // strip offers, in order. The two were the same list until a Linux entry had to drop a whole tab:
+    // Win Components is Wine DLL-override plumbing and a gamescope session has no prefix to override.
+    // Keeping selectedTab a content index means the when() branches never have to be renumbered.
+    val tabIndices = remember(tvTabVisible, isLinuxEntry) {
+        listOf(0) + (if (isLinuxEntry) emptyList() else listOf(1)) + listOf(2, 3, 4) +
+            (if (tvTabVisible) listOf(5) else emptyList())
+    }
+    val tabTitles = remember(tabIndices) {
+        tabIndices.map {
+            when (it) {
+                0 -> "General"; 1 -> "Win Components"; 2 -> "Env Vars"
+                3 -> "Advanced"; 4 -> "Controller"; else -> "TV"
+            }
+        }
     }
     // Unplugging a TV on a game that never wanted one takes the tab away under the user's finger; land
     // them back on General rather than on an index that no longer has content.
-    LaunchedEffect(tabTitles.size) { if (selectedTab > tabTitles.lastIndex) selectedTab = 0 }
+    LaunchedEffect(tabIndices) { if (selectedTab !in tabIndices) selectedTab = tabIndices.first() }
 
     // Icon picker
     fun applyIconFromUri(uri: Uri) {
@@ -6820,8 +6838,10 @@ internal fun ShortcutSettingsDialogScreen(
             putExtra("graphicsDriverConfig", graphicsDriverConfig)
             // Display backend override: "" clears the extra (use container default) via putExtra(null).
             // A "Force Wayland" the container's layer can't honour displayed as X11, so X11 is saved.
+            // Not for a Linux entry: its backend isn't shown as a choice and the launch path pins
+            // Wayland regardless, so saving must hand back exactly what the entry already carried.
             putExtra("displayBackend",
-                if (displayBackendOverride == Container.DISPLAY_BACKEND_WAYLAND && !containerWaylandCapable) Container.DISPLAY_BACKEND_X11
+                if (!isLinuxEntry && displayBackendOverride == Container.DISPLAY_BACKEND_WAYLAND && !containerWaylandCapable) Container.DISPLAY_BACKEND_X11
                 else displayBackendOverride.ifEmpty { null })
             // Wayland game driver override: "" clears the extra (container default).
             putExtra("waylandGameDriver", waylandGameDriverOverride.ifEmpty { null })
@@ -6931,24 +6951,39 @@ internal fun ShortcutSettingsDialogScreen(
         add("titleX")
         when (selectedTab) {
             0 -> { // General
-                add("name"); add("execArgs"); add("screenSize")
+                add("name")
+                if (!isLinuxEntry) add("execArgs")
+                add("screenSize")
                 if (selectedScreenSize == "Custom") { add("customW"); add("customH") }
                 add("screenAlignment")
-                add("selectIcon"); add("displayBackend"); add("gfxDriver")
-                if (effectiveWaylandShortcut) { add("waylandGameDriver"); add("waylandDriverCfg"); add(com.winlator.star.display.WaylandHdr.EXTRA) }
-                if (!effectiveWaylandShortcut) { add("gfxWrapper"); add("gfxConfig") } // hidden on Wayland (X11 shims/tuning)
-                add(com.winlator.star.core.UnrealHdr.EXTRA)
-                add("dxWrapper"); add("dxConfig"); add("renderer")
-                if (!effectiveWaylandShortcut && selectedRenderer == "SurfaceFlinger") add("sfCompat")
-                if (!effectiveWaylandShortcut && selectedRenderer == "Vulkan") { add("vkNative"); add("vkColors"); add("vkPresent"); if (vkNative) add("vkBackend"); add("vkDriver") }
-                add("renderScale")
-                if (panelRates.isNotEmpty()) add("refresh")
-                add("frameGen"); add("fpsLimiter"); add("audio"); add("emulator")
-                if (midiList.isNotEmpty()) add("midi")
-                add("lcAll"); add("fullscreen"); add("autoClose")
+                add("selectIcon")
+                // The Wine/X11 graphics stack is not registered for a Linux entry, so the D-pad
+                // cursor can never land on a row that isn't drawn (see the render conditionals).
+                if (!isLinuxEntry) { add("displayBackend"); add("gfxDriver") }
+                if (effectiveWaylandShortcut && !isLinuxEntry) { add("waylandGameDriver"); add("waylandDriverCfg") }
+                if (effectiveWaylandShortcut || isLinuxEntry) add(com.winlator.star.display.WaylandHdr.EXTRA)
+                if (!effectiveWaylandShortcut && !isLinuxEntry) { add("gfxWrapper"); add("gfxConfig") } // hidden on Wayland (X11 shims/tuning)
+                if (!isLinuxEntry) {
+                    add(com.winlator.star.core.UnrealHdr.EXTRA)
+                    add("dxWrapper"); add("dxConfig"); add("renderer")
+                    if (!effectiveWaylandShortcut && selectedRenderer == "SurfaceFlinger") add("sfCompat")
+                    if (!effectiveWaylandShortcut && selectedRenderer == "Vulkan") { add("vkNative"); add("vkColors"); add("vkPresent"); if (vkNative) add("vkBackend"); add("vkDriver") }
+                    add("renderScale")
+                    if (panelRates.isNotEmpty()) add("refresh")
+                }
+                add("frameGen"); add("fpsLimiter"); add("audio")
+                if (!isLinuxEntry) {
+                    add("emulator")
+                    if (midiList.isNotEmpty()) add("midi")
+                    add("lcAll")
+                }
+                add("fullscreen")
+                if (!isLinuxEntry) add("autoClose")
             }
             4 -> { // Controller
-                add("enableXInput"); add("enableDInput"); add("exclusiveXInput"); add("disableXInput"); add("simTouch"); add("numControllers")
+                if (!isLinuxEntry) { add("enableXInput"); add("enableDInput"); add("exclusiveXInput"); add("disableXInput") }
+                add("simTouch")
+                if (!isLinuxEntry) add("numControllers")
                 add("gyroEnabled")
                 if (gyroEnabled) {
                     add("gyroMode"); add("gyroTarget"); add("gyroActivator")
@@ -7038,18 +7073,25 @@ internal fun ShortcutSettingsDialogScreen(
                         singleLine = true
                     )
 
-                    // Exec Args
-                    DpField(
-                        dp, "execArgs",
-                        value = execArgs,
-                        onValueChange = { execArgs = it },
-                        label = stringResource(R.string.exec_arguments),
-                        modifier = Modifier.fillMaxWidth()
-                    )
+                    // Exec Args — appended to the Wine start command. A Linux entry's Exec line is
+                    // never run as written (linuxSessionArgs decides from the extras), so there is
+                    // nothing for arguments to be appended to.
+                    if (!isLinuxEntry) {
+                        DpField(
+                            dp, "execArgs",
+                            value = execArgs,
+                            onValueChange = { execArgs = it },
+                            label = stringResource(R.string.exec_arguments),
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
 
                     // Storage — where this game's files currently live, and (unless it's already on
                     // C:) a one-tap "Move to Drive C" that copies the folder onto native app storage.
                     // Games that stream assets over FUSE-backed shared storage stall; from C: they run.
+                    // Both this and Executable below describe a Windows install under a drive letter;
+                    // a Linux entry has neither, and the client owns where its games live.
+                    if (!isLinuxEntry) {
                     val storageLabel = remember(shortcut) { CopyGameToDriveC.storageLabel(shortcut) }
                     val alreadyOnC = remember(shortcut) { CopyGameToDriveC.parse(shortcut).onDriveC }
                     Row(
@@ -7077,10 +7119,11 @@ internal fun ShortcutSettingsDialogScreen(
                             }
                         }
                     }
+                    }
 
                     // Executable — the .exe this shortcut launches, with a one-tap repoint to a
                     // different exe in the same game (launcher → real exe, dx11 ↔ dx9, a config tool).
-                    if (onChangeExe != null) {
+                    if (onChangeExe != null && !isLinuxEntry) {
                         val currentExeName = remember(shortcut) {
                             CopyGameToDriveC.parse(shortcut).exeWin.substringAfterLast('\\').substringAfterLast('/')
                         }
@@ -7290,7 +7333,9 @@ internal fun ShortcutSettingsDialogScreen(
                     // Display backend override (per-game): default to the container, or force
                     // X11 / Wayland. Wayland greys the Renderer group below (compositor replaces it)
                     // and the driver-config button (the game runs on the Proton's bundled Turnip).
-                    run {
+                    // gamescope is a Wayland client and the launch path pins the backend to Wayland
+                    // for a Linux entry whatever this says, so there is no choice left to offer.
+                    if (!isLinuxEntry) {
                         val dbLabels = listOf("Use container default", "Force X11", "Force Wayland")
                         val dbValues = listOf("", Container.DISPLAY_BACKEND_X11, Container.DISPLAY_BACKEND_WAYLAND)
                         // A stored "Force Wayland" the container's layer can't honour shows as the
@@ -7365,6 +7410,10 @@ internal fun ShortcutSettingsDialogScreen(
                         waylandAutoPick = waylandAutoVariant(gfxContext)
                     }
                     val compositorVersion = GraphicsDriverConfigDialog.getVersion(graphicsDriverConfig) ?: ""
+                    // A Linux session renders on the Turnip ICD inside the Linux runtime, not on a
+                    // driver picked here, and the compositor it presents through takes the container's
+                    // driver — so neither picker nor the wrapper manager has anything to act on.
+                    if (!isLinuxEntry) {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                         if (effectiveWaylandShortcut) {
                             DpDrop(
@@ -7403,15 +7452,20 @@ internal fun ShortcutSettingsDialogScreen(
                         showWrapperManager = false
                         wrapperRefreshKey++ // pick up a just-imported/deleted wrapper
                     })
+                    }
                     // Driver configuration is X11 tuning; on Wayland its only live field (the Turnip
                     // version) is covered by the Compositor driver dropdown, so the button is hidden.
-                    if (!effectiveWaylandShortcut) {
+                    // The Wayland branch is also where HDR output lives, and that one DOES reach a
+                    // Linux session (the compositor gates HDR for every Wayland session, gamescope
+                    // included), so a Linux entry takes it with the driver rows conditioned off.
+                    if (!effectiveWaylandShortcut && !isLinuxEntry) {
                         DpButton(dp, "gfxConfig", onActivate = { showGfxConfig = true }, modifier = Modifier.fillMaxWidth()) {
                             OutlinedButton(onClick = { showGfxConfig = true }, modifier = Modifier.fillMaxWidth()) {
                                 Text("${stringResource(R.string.graphics_driver)}: ${GraphicsDriverConfigDialog.getVersion(graphicsDriverConfig)}")
                             }
                         }
                     } else {
+                        if (!isLinuxEntry) {
                         // "System"/empty falls back to the system libvulkan, which can't import the
                         // game's dmabufs (black screen) — mirrors XServerDisplayActivity's resolve; so
                         // does an id that is no longer installed. Warn only.
@@ -7472,6 +7526,7 @@ internal fun ShortcutSettingsDialogScreen(
                             )
                         }
                         Spacer(Modifier.height(8.dp))
+                        }
                         // HDR output (per-game): "Use container default (<On/Off>)" / On / Off, see
                         // display.WaylandHdr. On a screen that doesn't report HDR10 the dropdown is greyed
                         // with the reason but still shows what is stored.
@@ -7503,6 +7558,13 @@ internal fun ShortcutSettingsDialogScreen(
                             )
                         }
                     }
+
+                    // Everything from here to the Frame Generation row is Wine-side rendering: the
+                    // Unreal HDR fix swaps DLLs in the prefix, the DX wrapper and its config are the
+                    // prefix's D3D translation, and Renderer / render scale / in-game refresh belong to
+                    // the X server and its Wine registry keys. A gamescope session has no prefix and no
+                    // X server, and the Linux runtime brings its own D3D stack.
+                    if (!isLinuxEntry) {
 
                     // Unreal Engine HDR (per-game, both backends; under HDR output on Wayland):
                     // "Use container default (<its mode>)" / Off / DirectX 12 fix / DirectX 11. See
@@ -7792,6 +7854,8 @@ internal fun ShortcutSettingsDialogScreen(
                         }
                     }
 
+                    } // end of the Wine-side rendering rows (see isLinuxEntry above)
+
                     // Frame Generation engine — per-game override (lsfg grayed without Lossless.dll).
                     run {
                         val fgLabels = listOf(
@@ -8017,6 +8081,9 @@ internal fun ShortcutSettingsDialogScreen(
                     // backend is wowbox64, and on an x86_64 container this picker is inert (the
                     // launcher always runs bin/box64) so the disabled field must read Box64 instead
                     // of the stored "FEXCore" default. What save() persists is unchanged.
+                    // It names which x86 backend the Wine launcher runs under, and the Linux runtime
+                    // brings its own FEX; the preset it honours is on the Advanced tab.
+                    if (!isLinuxEntry) {
                     val emulatorShown =
                         if (archLoaded && !isArm64EC) EmulatorLabels.box64EntryOf(emulatorEntries)
                         else EmulatorLabels.display(selectedEmulator, isArm64EC)
@@ -8043,7 +8110,8 @@ internal fun ShortcutSettingsDialogScreen(
                         )
                     }
 
-                    // LC_ALL
+                    // LC_ALL — goes into the Wine environment (setupXEnvironment), which the gamescope
+                    // path returns before ever building; the session's locale comes from the runtime.
                     DpField(
                         dp, "lcAll",
                         value = lcAll,
@@ -8052,6 +8120,7 @@ internal fun ShortcutSettingsDialogScreen(
                         modifier = Modifier.fillMaxWidth(),
                         singleLine = true
                     )
+                    } // end of the Wine launcher rows (Emulator / MIDI / LC_ALL)
 
                     // Fullscreen aspect-ratio mode (#71) — per-game override. Index 0 = use the
                     // container default; indices 1..5 map to Container.FULLSCREEN_OFF/FIT/STRETCH/FILL/INTEGER.
@@ -8077,15 +8146,25 @@ internal fun ShortcutSettingsDialogScreen(
                         }
                     )
 
-                    // Close the session when this game exits (per-game override; container default is ON)
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        DpCheck(dp, "autoClose", checked = autoCloseOnExit, onCheckedChange = { autoCloseOnExit = it })
-                        Text("Close when game exits")
+                    // Close the session when this game exits (per-game override; container default is ON).
+                    // The watcher that arms it lives past the gamescope early return and watches for a
+                    // Windows exe leaving the prefix, so it never fires for a Linux entry.
+                    if (!isLinuxEntry) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            DpCheck(dp, "autoClose", checked = autoCloseOnExit, onCheckedChange = { autoCloseOnExit = it })
+                            Text("Close when game exits")
+                        }
                     }
                             }
                             4 -> Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     // Input section
                     SectionBox(title = "Input") {
+                        // XInput/DInput, exclusive input and the controller count are how WinHandler
+                        // presents pads to a Wine game and what it writes into the prefix's joystick
+                        // registry keys. A Linux session's pads arrive as fake-evdev devices instead,
+                        // so those rows are conditioned off and the ones that still act on the host
+                        // side (touchscreen mode, on-screen-control auto-hide, player slots, gyro) stay.
+                        if (!isLinuxEntry) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             DpSwitch(
                                 dp, "enableXInput",
@@ -8132,17 +8211,20 @@ internal fun ShortcutSettingsDialogScreen(
                             DpCheck(dp, "disableXInput", checked = disabledXInput, onCheckedChange = { disabledXInput = it })
                             Text("Disable XInput")
                         }
+                        }
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             DpCheck(dp, "simTouch", checked = simTouchScreen, onCheckedChange = { simTouchScreen = it })
                             Text("Touchscreen Mode")
                         }
-                        DpDrop(
-                            dp, "numControllers",
-                            label = "Num Controllers",
-                            options = numControllersEntries,
-                            selected = selectedNumControllers,
-                            onSelect = { selectedNumControllers = it }
-                        )
+                        if (!isLinuxEntry) {
+                            DpDrop(
+                                dp, "numControllers",
+                                label = "Num Controllers",
+                                options = numControllersEntries,
+                                selected = selectedNumControllers,
+                                onSelect = { selectedNumControllers = it }
+                            )
+                        }
 
                         // #333 per-game auto-hide override (tri-state): inherit container / On / Off.
                         Spacer(Modifier.height(12.dp))
@@ -8340,6 +8422,7 @@ internal fun ShortcutSettingsDialogScreen(
                 fexCorePresets = FEXCorePresetManager.getPresets(context)
             },
             isArm64EC = isArm64EC,
+            isLinuxEntry = isLinuxEntry,
             box64Versions = box64Versions,
             selectedBox64Version = selectedBox64Version,
             onBox64VersionChange = { selectedBox64Version = it },
@@ -8408,14 +8491,17 @@ internal fun ShortcutSettingsDialogScreen(
                 // beside the content. Left/Right on the focused "tabs" node still switches tabs for
                 // D-pad/controller users in both orientations, and L1/R1 switch from anywhere.
                 val railState = rememberRailState("shortcut")
-                val railItems = tabTitles.mapIndexed { index, tab ->
-                    RailItem(tab, shortcutTabIcon(tab), index == selectedTab) { selectedTab = index }
+                val railItems = tabTitles.mapIndexed { position, tab ->
+                    val contentIndex = tabIndices[position]
+                    RailItem(tab, shortcutTabIcon(tab), contentIndex == selectedTab) { selectedTab = contentIndex }
                 }
                 // Same "What is all this?" glossary link the container editor surfaces on its rail.
                 val railLinks = listOf(RailLink("What is all this?", Icons.Filled.Help) { glossaryQuery = "" })
                 if (isPortrait) {
                     Column(modifier = Modifier.weight(1f).fillMaxWidth()) {
-                        DpTabs(dp, "tabs", selected = selectedTab, count = tabTitles.size, onSelect = { selectedTab = it }) {
+                        // Left/Right and L1/R1 step through the strip, so DpTabs works in POSITIONS.
+                        DpTabs(dp, "tabs", selected = tabIndices.indexOf(selectedTab).coerceAtLeast(0),
+                               count = tabTitles.size, onSelect = { selectedTab = tabIndices[it] }) {
                             RailTopTabs(items = railItems, links = railLinks)
                         }
                         // Weighted so the internally-scrolling content takes exactly the space left
@@ -8424,7 +8510,8 @@ internal fun ShortcutSettingsDialogScreen(
                     }
                 } else {
                     Row(modifier = Modifier.weight(1f).fillMaxWidth()) {
-                        DpTabs(dp, "tabs", selected = selectedTab, count = tabTitles.size, onSelect = { selectedTab = it }) {
+                        DpTabs(dp, "tabs", selected = tabIndices.indexOf(selectedTab).coerceAtLeast(0),
+                               count = tabTitles.size, onSelect = { selectedTab = tabIndices[it] }) {
                             CollapsibleRail(
                                 state = railState,
                                 title = shortcut.name,
@@ -8856,6 +8943,12 @@ private fun ScAdvancedTab(
     /** A preset was added / duplicated / removed / imported, so both lists need re-reading. */
     onPresetListChanged: () -> Unit,
     isArm64EC: Boolean,
+    /**
+     * An entry the Linux runtime owns. Its session reads the FEXCore preset and the controls profile
+     * and pins CPU affinity through the compositor, but has no prefix for the x86 Wine backend,
+     * Wine's startup services or the vkBasalt/ReShade layers to act on.
+     */
+    isLinuxEntry: Boolean = false,
     box64Versions: List<String>,
     selectedBox64Version: String,
     onBox64VersionChange: (String) -> Unit,
@@ -8914,6 +9007,9 @@ private fun ScAdvancedTab(
     var helpRes by remember { mutableStateOf<Int?>(null) }
     helpRes?.let { HelpDialog(it) { helpRes = null } }
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        // Box64/WOWBox64 runs x86 Windows code inside the prefix. The Linux runtime's x86 games go
+        // through its own FEX, so this whole section (and its per-game preset) reaches nothing there.
+        if (!isLinuxEntry) {
         SectionBox(title = emulatorLabel) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 LabeledDropdown(
@@ -8967,9 +9063,15 @@ private fun ScAdvancedTab(
                 onValuesChanged = { presetRevision++ },
             )
         }
+        }
 
-        if (isArm64EC) {
+        // A Linux session hands the FEXCore preset to the games the Steam client launches whatever the
+        // container's Windows architecture is, so the section is offered there even off arm64ec.
+        if (isArm64EC || isLinuxEntry) {
             SectionBox(title = "FEXCore") {
+                // The version picks which FEX build is staged into the container for the Wine
+                // launcher; the Linux runtime carries its own, so only the preset is offered there.
+                if (!isLinuxEntry) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     LabeledDropdown(
                         label = stringResource(R.string.fexcore_version),
@@ -8992,6 +9094,7 @@ private fun ScAdvancedTab(
                     }
                 }
                 Spacer(Modifier.height(8.dp))
+                }
                 val fexNames = fexCorePresets.map { it.name }
                 val fexId = fexCorePresets.getOrNull(selectedFexPresetIndex)?.id ?: ""
                 val fexCustomised = remember(presetRevision, fexId) {
@@ -9037,6 +9140,8 @@ private fun ScAdvancedTab(
             onSelect = { opt -> onControlsProfileChange(profileNames.indexOf(opt).coerceAtLeast(0)) }
         )
 
+        // Which Wine services the prefix starts with. A gamescope session starts no wineserver at all.
+        if (!isLinuxEntry) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             LabeledDropdown(
                 label = stringResource(R.string.startup_selection),
@@ -9058,6 +9163,7 @@ private fun ScAdvancedTab(
                 onToggle = onStartupServiceToggle
             )
         }
+        }
 
         SectionBox(title = stringResource(R.string.processor_affinity)) {
             AndroidView(
@@ -9071,6 +9177,9 @@ private fun ScAdvancedTab(
             )
         }
 
+        // vkBasalt (sharpness) and the ReShade loadout are Vulkan layers switched on through the Wine
+        // environment, which the gamescope path never builds; the client's games load neither.
+        if (!isLinuxEntry) {
         SectionBox(title = "Sharpness (VKBasalt)") {
             LabeledDropdown(
                 label = "Effect",
@@ -9104,6 +9213,7 @@ private fun ScAdvancedTab(
                 supported = reshadeSupported,
                 onCatalogChanged = onReshadeCatalogChanged,
             )
+        }
         }
     }
 }
