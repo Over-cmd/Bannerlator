@@ -9981,3 +9981,24 @@ space limit under FEX and Wine rather than anything in the graphics path. The sw
 survived the crash and Steam has not re-verified the depot; Valve's originals are still in
 `files/.vkd3d-valve-backup/`. The debug log cost 151 MB and should be cleared with the launch
 option when that run is no longer wanted.
+
+**Two more attempts, and the wall is memory (2026-09-19).** The x86-64 VKD3D 3.0.1 was swapped in
+place of the ARM64EC one, on the thought that the app side runs its translator emulated and that
+configuration is known to work, and `-nobattleye` was added so the game would run
+`GTA5_Enhanced.exe` rather than the BattlEye-wrapped build. Neither moved it: the game froze at
+the Rockstar intro with 94 MB free of 15.2 GB and a load average of 11.6, and the session had to
+be force-stopped again.
+
+That also corrects something said earlier. Debug logging was off for this run, so the 151 MB log
+was never the cause of the exhaustion - the game does it on its own, at the same point, whichever
+translator is in place and with or without anticheat. It is the 1.3 TB reservation showing up as
+real memory pressure.
+
+Left in place afterwards: the ARM64EC VKD3D, because it is the better of the three and clears the
+feature-level refusal for every D3D12 title, not only this one. The launch options are cleared,
+the staging folders and the debug log are gone, and Valve's originals remain in
+`files/.vkd3d-valve-backup/` beside the ARM64EC copy in `files/.vkd3d-arm64ec-kept/`.
+
+Four runs, in order: Valve's VKD3D refused the feature level; the ARM64EC build cleared it and
+reached further; the x86-64 build with anticheat skipped froze the same way. The Rockstar chain -
+launcher, Social Club, sign-in - worked every time, and BattlEye never objected once.
