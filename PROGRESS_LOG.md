@@ -10579,3 +10579,50 @@ checks in order to make the client present it is not, and was declined.
 - A game's first launch under DirectAudio gets the registry key one launch late.
 - Frame generation: `prepareLsfgNative()` sits past the gamescope early return, so lsfg-native may
   not work in a Linux session. Untested.
+
+## 🔖 KNOWN-GOOD ROLLBACK POINT — 2026-09-20
+
+Everything below is working on the device. If something later breaks, come back here.
+
+```
+branch  feat/linux-gamescope-runtime
+commit  44b6d914          (code identical to fe03c0ec; 44b6d914 is docs only)
+ref     refs/backup/20260920/linux-gamescope-known-good   (pushed)
+APK     36768d1cc57c4e1abf4dba3804bdd1071a137631e949b772d1b38f8d64fa874d
+        run 35530176867 - staged AND installed, verified equal
+```
+
+### Proven on the device at this point
+- **Games play from the Linux Steam client:** Half-Life 2 (79 fps, Windows build off the card
+  library), GTA V Legacy (32 fps), NFS Most Wanted (48 fps), NFS Payback, Portal 2, FlatOut,
+  Half-Life, Brawlhalla, TF2.
+- **Third-party Protons** are a catalog download and selectable per game; GE-Proton 11-7 and
+  proton-cachyos installed and adopted. GE ran the GTA V Enhanced binary further than anything else.
+- **DirectAudio for games**, wrapper gate on Wine 11, registry key written into the prefix.
+- **Microphone for the Steam client** - `Input Device: DirectAudioMic` - and **voice proven in
+  Steam's own voice chat tester with TF2 running**. One Android mic owned by the relay helper,
+  fanned out to games through Wine and to the client through PulseAudio's pipe source.
+- **Session teardown** asks proot to stop and sweeps what it leaves, instead of orphaning a tree
+  that spins on ENOSYS.
+- **Library sync** releases a game the client uninstalled even though its folder remains, and runs
+  at session start rather than only at a clean shutdown. Both GTA entries verified cleared.
+- **The Linux shortcut editor** shows only settings that do something, each with a "?" saying
+  whether it affects the client, its games, or both. A GOG game's editor verified unchanged.
+
+### Known-not-working, deliberately
+- **VAC:** TF2 reports `You are in insecure mode.` at connect. Everything around it is correct -
+  logged on, tracked by Steam, no insecure flag anywhere, nothing failing with an error. The cause
+  sits in engine startup before the console log begins. **Not an evasion problem to solve; the
+  honest paths are environment fidelity (restore the overlay, close the gap to Valve's launch path)
+  or requirements from Valve.** Games not gated on VAC are online and fine - Brawlhalla, Stumble
+  Guys - and BattlEye did not block GTA V, so the runtime is not hostile to anti-cheat generally.
+- GameHub restarts itself at boot (four boot receivers) and steals the Steam login.
+- A game's first launch under DirectAudio gets its registry key one launch late.
+- lsfg-native frame generation may not work on this path; untested.
+
+### If you need to roll back
+```
+git reset --hard refs/backup/20260920/linux-gamescope-known-good
+```
+and reinstall APK `36768d1c…`. Nothing in this state depends on an unmerged change elsewhere; the
+relay helper binary and the driver files are committed in-tree.
