@@ -131,6 +131,15 @@ cp -a "$ROOT_DIR/lib/libsndfile.so"                            "$OUT/libsndfile.
 cp -a "$ROOT_DIR/lib/libltdl.so"                               "$OUT/libltdl.so"
 cp -a "$ROOT_DIR"/lib/pulse-*/modules/libprotocol-native.so           "$OUT/modules/"
 cp -a "$ROOT_DIR"/lib/pulse-*/modules/module-native-protocol-unix.so  "$OUT/modules/"
+# The microphone the Steam client sees. PulseAudio refuses a module built against another
+# release, and the copy that was in the bundle came from 17.0 while this daemon is 13.0 - so it
+# was rejected on sight and the client reported no input device, with nothing in any log to say
+# why. Taking it from this build is the whole fix. Fail loudly rather than ship the gap again.
+for m in module-pipe-source module-pipe-sink; do
+  src=$(echo "$ROOT_DIR"/lib/pulse-*/modules/$m.so)
+  [ -f "$src" ] || { echo "ERROR: $m.so was not built - the client would have no microphone"; exit 1; }
+  cp -a "$src" "$OUT/modules/"
+done
 echo "stack built -> $OUT"; ls -la "$OUT" "$OUT/modules"
 # expose the extracted PA source path for build-module.sh
 echo "$SRC_DIR/pulseaudio-$PA_VER" > "$BASE_DIR/.pa_src_path"
