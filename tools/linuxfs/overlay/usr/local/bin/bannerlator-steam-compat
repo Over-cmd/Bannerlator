@@ -118,18 +118,23 @@ LAUNCHER_SH = """#!/bin/bash
 # Steam Linux Runtime container its own manifest asks for (no user namespaces on Android).
 verb=$1; shift
 steam_root=${STEAM_COMPAT_CLIENT_INSTALL_PATH:-${XDG_DATA_HOME:-$HOME/.local/share}/Steam}
-# The client preloads its overlay library into every game. In a gamescope session the overlay is
-# the client's own window, so the library draws nothing - but it stands in front of open() and
-# read() on /dev/input, lets Wine open the session's pad and answers every read of it with nothing:
-# a controller that never reports, and Wine's HID thread spinning a core on it. Dropped here;
-# anything else in LD_PRELOAD is kept.
-kept=
-IFS=': '
-for lib in ${LD_PRELOAD:-}; do
-  case $lib in */gameoverlayrenderer.so) ;; *) kept=${kept:+$kept:}$lib ;; esac
-done
-unset IFS
-if [ -n "$kept" ]; then export LD_PRELOAD="$kept"; else unset LD_PRELOAD; fi
+# Steam's overlay is preloaded into every game Valve launches, and used to be dropped here: it was
+# landing in front of open() and read() on /dev/input, letting Wine open the session's pad and
+# answering every read of it with nothing - a controller that never reports, and Wine's HID thread
+# spinning a core on it.
+#
+# Removing it was the wrong cure for an ordering problem. glibc processes LD_PRELOAD BEFORE
+# /etc/ld.so.preload, and the interposer lives in the latter, so the overlay was simply ahead of it.
+# Naming the interposer first in LD_PRELOAD puts it back in front and the overlay loads as Valve
+# intends. That matters beyond the overlay itself: every deviation from the launch Valve ships is a
+# difference this runtime would otherwise have to justify.
+fake=/usr/local/lib/libfakeinput.so
+if [ -f "$fake" ]; then
+  case ":${LD_PRELOAD:-}:" in
+    *":$fake:"*) ;;
+    *) LD_PRELOAD="$fake${LD_PRELOAD:+:$LD_PRELOAD}"; export LD_PRELOAD ;;
+  esac
+fi
 for name in %s; do
   depot="$steam_root/steamapps/common/$name"
   if [ -d "$depot/files/bin-arm64" ] && [ -x "$depot/proton" ]; then
@@ -165,16 +170,16 @@ EXTRA_WRAPPER_SH = """#!/bin/bash
 # an Android app does not get, and the launch dies before Proton is reached.
 verb=$1; shift
 here=$(dirname "$0")
-# See bannerlator-proton: in a gamescope session the client's overlay draws nothing, but it stands
-# in front of open() and read() on /dev/input and answers every read of the session's pad with
-# nothing - a controller that never reports. Dropped here; anything else in LD_PRELOAD is kept.
-kept=
-IFS=': '
-for lib in ${LD_PRELOAD:-}; do
-  case $lib in */gameoverlayrenderer.so) ;; *) kept=${kept:+$kept:}$lib ;; esac
-done
-unset IFS
-if [ -n "$kept" ]; then export LD_PRELOAD="$kept"; else unset LD_PRELOAD; fi
+# See bannerlator-proton: the interposer goes first in LD_PRELOAD rather than the overlay being
+# removed, because glibc reads LD_PRELOAD before /etc/ld.so.preload and the overlay was simply
+# ahead of it on /dev/input.
+fake=/usr/local/lib/libfakeinput.so
+if [ -f "$fake" ]; then
+  case ":${LD_PRELOAD:-}:" in
+    *":$fake:"*) ;;
+    *) LD_PRELOAD="$fake${LD_PRELOAD:+:$LD_PRELOAD}"; export LD_PRELOAD ;;
+  esac
+fi
 bl_directaudio "$here"
 # Proton takes its base directory from dirname(sys.argv[0]) without resolving it, so it has to be
 # started from its own tree.

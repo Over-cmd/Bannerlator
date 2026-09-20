@@ -8607,8 +8607,31 @@ public class XServerDisplayActivity extends AppCompatActivity {
         if (!rivals.isEmpty()) {
             String who = competingClientName(rivals.get(0));
             Log.w("BH_REALSTEAM", "competing Steam client installed: " + rivals);
-            runOnUiThread(() -> showToast(this, "If " + who + " is open, close it first - it signs "
-                    + "into your Steam account and will sign the Linux client out."));
+            // Ask Android to stop them first. This is not the force-stop a user performs from
+            // Settings - it ends background processes and leaves anything in the foreground alone -
+            // but that is exactly the case that keeps happening: GameHub declares boot receivers,
+            // so it is running from the moment the phone starts without ever being opened, and it
+            // takes the Steam login off the client 2-3 seconds after every sign-in. Telling the
+            // user to close an app they never opened is not much help.
+            boolean asked = false;
+            try {
+                android.app.ActivityManager am =
+                        (android.app.ActivityManager) getSystemService(ACTIVITY_SERVICE);
+                if (am != null) {
+                    for (String pkg : rivals) am.killBackgroundProcesses(pkg);
+                    asked = true;
+                    Log.i("BH_REALSTEAM", "asked Android to stop background processes of " + rivals);
+                }
+            } catch (Throwable t) {
+                Log.w("BH_REALSTEAM", "could not stop competing Steam clients", t);
+            }
+            // Still say so: a foreground rival survives this, and the watcher below is what proves
+            // whether the sign-out actually happened.
+            final boolean stopped = asked;
+            runOnUiThread(() -> showToast(this, stopped
+                    ? "Closed " + who + " in the background - it signs into your Steam account."
+                    : "If " + who + " is open, close it first - it signs into your Steam account "
+                      + "and will sign the Linux client out."));
         }
         watchLinuxSteamForSessionReplaced();
         if (realSteamSessionHeld) return;
