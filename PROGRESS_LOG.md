@@ -10530,3 +10530,9 @@ Installed build `e14a6e4db27d7be361df720177a919826cd0cd8d93e97e8db963e7f28d2b56b
 through Wine/DirectAudio and to the Steam client through PulseAudio's pipe source.
 
 Not yet done: an actual voice test (Steam's mic test, or TF2 `voice_loopback 1`) to hear it.
+
+### Voice proven end to end (2026-09-20)
+Team Fortress 2 runs from the client and **voice works in Steam's voice chat tester** - the
+microphone owned by the relay helper, fanned out through PulseAudio to the client, heard back. So
+"shows a microphone" is now "hears you". Games' own capture through Wine/DirectAudio uses the same
+helper and the same stream.
