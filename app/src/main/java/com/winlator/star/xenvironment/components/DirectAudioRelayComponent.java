@@ -59,6 +59,28 @@ public class DirectAudioRelayComponent extends EnvironmentComponent {
         //noinspection ResultOfMethodCallIgnored
         socketPath.delete();
 
+        // PulseAudio's pipe module insists on creating the pipe itself and fails if one is already
+        // there. The helper creates one too when the path is missing, and it starts a few
+        // milliseconds after the daemon is exec'd - well before the daemon has read its config. So
+        // left to itself the helper won its own race, the daemon's mkfifo failed with EEXIST, and
+        // the microphone was lost while everything else came up. Reproduced on the device by
+        // starting both back to back. Wait for the daemon to make the pipe before the helper runs;
+        // it appears within a second, and if it never does the helper starts anyway and creates
+        // it, which is the right thing when the daemon is not involved.
+        if (micFifoPath != null) {
+            long deadline = System.currentTimeMillis() + 3000L;
+            while (!micFifoPath.exists() && System.currentTimeMillis() < deadline) {
+                try {
+                    Thread.sleep(50L);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+            Log.i(TAG, micFifoPath.exists() ? "microphone pipe made by the daemon; starting helper"
+                    : "daemon did not make the microphone pipe in 3 s; helper will make it");
+        }
+
         StringBuilder command = new StringBuilder(binary.getAbsolutePath());
         command.append(" --socket ").append(socketPath.getAbsolutePath());
         if (micFifoPath != null) {
