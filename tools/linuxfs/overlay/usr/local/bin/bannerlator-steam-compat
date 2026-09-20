@@ -100,6 +100,56 @@ echo "bannerlator-proton: no ARM64 Proton depot yet - the client downloads one a
 exit 1
 """ % " ".join('"%s"' % n for n in SOURCES)
 
+# A third-party Proton dropped into compatibilitytools.d - GE-Proton, proton-cachyos, anything of
+# that shape - is adopted rather than used as shipped, for the same two reasons Valve's ARM64 depot
+# is: its manifest declares require_tool_appid, and the client's overlay library has to come out of
+# LD_PRELOAD. Its own entry point is left untouched and called through this wrapper.
+EXTRA_WRAPPER = "bannerlator-proton-wrap"
+EXTRA_MANIFEST_VDF = """"manifest"
+{
+	"version" "2"
+	"commandline" "/%s %%verb%%"
+	"use_sessions" "1"
+	"compatmanager_layer_name" "proton"
+}
+""" % EXTRA_WRAPPER
+# %s is the tool's own entry point, read out of the manifest it shipped with.
+EXTRA_WRAPPER_SH = """#!/bin/bash
+# Bannerlator: runs a Proton installed into compatibilitytools.d without the Steam Linux Runtime
+# container its own manifest asks for - pressure-vessel needs unprivileged user namespaces, which
+# an Android app does not get, and the launch dies before Proton is reached.
+verb=$1; shift
+here=$(dirname "$0")
+# See bannerlator-proton: in a gamescope session the client's overlay draws nothing, but it stands
+# in front of open() and read() on /dev/input and answers every read of the session's pad with
+# nothing - a controller that never reports. Dropped here; anything else in LD_PRELOAD is kept.
+kept=
+IFS=': '
+for lib in ${LD_PRELOAD:-}; do
+  case $lib in */gameoverlayrenderer.so) ;; *) kept=${kept:+$kept:}$lib ;; esac
+done
+unset IFS
+if [ -n "$kept" ]; then export LD_PRELOAD="$kept"; else unset LD_PRELOAD; fi
+# Proton takes its base directory from dirname(sys.argv[0]) without resolving it, so it has to be
+# started from its own tree.
+exec "$here/%s" "$verb" "$@"
+"""
+EXTRA_COMPAT_TOOL_VDF = """"compatibilitytools"
+{
+	"compat_tools"
+	{
+		"%s"
+		{
+			"install_path" "."
+			"display_name" "%s (Bannerlator)"
+			"from_oslist" "windows"
+			"to_oslist" "linux"
+		}
+	}
+}
+"""
+
+
 TOKEN = re.compile(r'\s*(?:"((?:[^"\\]|\\.)*)"|([{}])|//[^\n]*)')
 
 
@@ -169,6 +219,88 @@ def serialize(tokens):
     return "\n".join(out) + "\n"
 
 
+def first_key(path, section):
+    """The single key naming a block inside `section`, or None. Used to keep a third-party tool's
+    own internal name, so a mapping the user already made against it keeps working."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            tokens = tokenize(f.read())
+    except OSError:
+        return None
+    block = find_block(tokens, section)
+    if block is None:
+        return None
+    for i in range(block + 1, block_end(tokens, block)):
+        if tokens[i] == "}":
+            break
+        if i + 1 < len(tokens) and tokens[i + 1] == "{":
+            return tokens[i].strip('"')
+    return None
+
+
+def manifest_entry_point(path):
+    """The script a toolmanifest's commandline runs, relative to the tool directory."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            tokens = tokenize(f.read())
+    except OSError:
+        return None
+    for i in range(len(tokens) - 1):
+        if tokens[i].lower() == '"commandline"':
+            command = tokens[i + 1].strip('"').split()
+            if command:
+                return command[0].lstrip("/")
+    return None
+
+
+def adopt_extras(tools):
+    """Makes every other Proton in compatibilitytools.d launchable here, and returns the tool names
+    to leave alone in CompatToolMapping - the whole point of installing one is to pick it per game,
+    so register_default must not repoint it back at ours."""
+    adopted = {}
+    try:
+        entries = sorted(os.listdir(tools))
+    except OSError:
+        return adopted
+    for entry in entries:
+        if entry == TOOL or entry.startswith("."):
+            continue
+        tool_dir = os.path.join(tools, entry)
+        manifest = os.path.join(tool_dir, "toolmanifest.vdf")
+        if not os.path.isdir(tool_dir) or not os.path.isfile(manifest):
+            continue
+        # The shipped manifest is kept, once, and stays the source of the entry point: re-running
+        # must not read back our own rewritten commandline and wrap the wrapper.
+        original = manifest + ".bannerlator-orig"
+        if not os.path.isfile(original):
+            try:
+                shutil.copy2(manifest, original)
+            except OSError:
+                continue
+        entry_point = manifest_entry_point(original)
+        if not entry_point or entry_point == EXTRA_WRAPPER:
+            entry_point = "proton"
+        if not os.path.exists(os.path.join(tool_dir, entry_point)):
+            print("bannerlator-steam-compat: %s has no %s; left alone" % (entry, entry_point))
+            continue
+        compat_vdf = os.path.join(tool_dir, "compatibilitytool.vdf")
+        name = first_key(compat_vdf, ["compatibilitytools", "compat_tools"]) or entry
+        wrapper = os.path.join(tool_dir, EXTRA_WRAPPER)
+        try:
+            with open(wrapper, "w", encoding="utf-8") as f:
+                f.write(EXTRA_WRAPPER_SH % entry_point)
+            os.chmod(wrapper, 0o755)
+            with open(manifest, "w", encoding="utf-8") as f:
+                f.write(EXTRA_MANIFEST_VDF)
+            with open(compat_vdf, "w", encoding="utf-8") as f:
+                f.write(EXTRA_COMPAT_TOOL_VDF % (name, entry))
+        except OSError as e:
+            print("bannerlator-steam-compat: could not adopt %s (%s)" % (entry, e))
+            continue
+        adopted[name] = entry
+    return adopted
+
+
 # Steam's own tools and runtimes live in steamapps beside the games; they are not titles and must
 # not be mapped to a compatibility tool.
 NOT_GAMES = frozenset((
@@ -200,9 +332,11 @@ def installed_apps(steam_root):
     return sorted(apps, key=int)
 
 
-def register_default(config_path, apps=(), name=None):
+def register_default(config_path, apps=(), name=None, protect=()):
     """Writes the mapping. `name` defaults to our own tool; the first-run seed passes Valve's."""
     tool = name or TOOL
+    # Tool names the user may deliberately have chosen (see adopt_extras); never repointed.
+    keep = {n.lower() for n in protect}
     with open(config_path, encoding="utf-8", errors="replace") as f:
         tokens = tokenize(f.read())
     steam = find_block(tokens, ["InstallConfigStore", "Software", "Valve", "Steam"])
@@ -218,7 +352,8 @@ def register_default(config_path, apps=(), name=None):
         # Repoint every per-app entry the client aimed at a Proton it cannot actually start.
         for i in range(mapping, block_end(tokens, mapping)):
             named = tokens[i + 1].strip('"').lower()
-            if tokens[i] == '"name"' and named.startswith("proton") and named != tool:
+            if (tokens[i] == '"name"' and named.startswith("proton")
+                    and named != tool.lower() and named not in keep):
                 tokens[i + 1] = '"%s"' % tool
         if find_block(tokens[mapping + 1:], ["0"]) is None:
             tokens[mapping + 1:mapping + 1] = entry
@@ -270,6 +405,9 @@ def main():
     tools = os.path.join(steam_root, "compatibilitytools.d")
     os.makedirs(tools, exist_ok=True)
     build_tool(os.path.join(tools, TOOL))
+    extras = adopt_extras(tools)
+    for name, directory in sorted(extras.items()):
+        print("bannerlator-steam-compat: adopted %s as %s" % (directory, name))
     depot = find_source(steam_root)
     print("bannerlator-steam-compat: registered %s (%s)" % (
         TOOL, "depot %s present" % os.path.basename(depot) if depot else
@@ -277,7 +415,7 @@ def main():
     config = os.path.join(steam_root, "config", "config.vdf")
     if os.path.isfile(config):
         apps = installed_apps(steam_root)
-        register_default(config, apps)
+        register_default(config, apps, protect=extras)
         print("bannerlator-steam-compat: default and %d installed title(s) set to %s" % (len(apps), TOOL))
 
 

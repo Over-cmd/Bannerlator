@@ -8722,6 +8722,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
                 {"usr/local/bin/bannerlator-steam-install", "usr/local/bin/bannerlator-steam-install"},
                 {"usr/local/bin/bannerlator-steam-library", "usr/local/bin/bannerlator-steam-library"},
                 {"usr/local/bin/bannerlator-seed-redists", "usr/local/bin/bannerlator-seed-redists"},
+                {"usr/local/bin/bannerlator-proton-extra", "usr/local/bin/bannerlator-proton-extra"},
         };
         // Android has no /dev/shm; a directory under the cache stands in for it, and unlike the real
         // thing it keeps whatever a session leaves. The client abandons some fifty megabytes of
