@@ -21,6 +21,17 @@ import java.util.ArrayList;
 
 public class PulseAudioComponent extends EnvironmentComponent {
     private final UnixSocketConfig socketConfig;
+    /**
+     * A named pipe carrying microphone audio, or null for no microphone.
+     *
+     * <p>The bundle ships module-aaudio-sink but no matching source, which is why the Steam client
+     * reports "No input devices detected" and its voice chat has nothing to record with. The relay
+     * helper already owns an Android input stream - opened under the app's own uid, the only way
+     * Android permits recording - so pointing module-pipe-source at a pipe the helper writes turns
+     * that one stream into a source the client can see. The helper fans the same microphone out to
+     * the games capturing through the relay as well, so both hear the same thing.
+     */
+    private final String micFifoPath;
     private static int pid = -1;
     private static final Object lock = new Object();
 
@@ -79,7 +90,13 @@ public class PulseAudioComponent extends EnvironmentComponent {
     private static volatile String currentSinkName = "AAudioSink";
 
     public PulseAudioComponent(UnixSocketConfig socketConfig) {
+        this(socketConfig, null);
+    }
+
+    /** As above, with a microphone fed from {@code micFifoPath}; null for output only. */
+    public PulseAudioComponent(UnixSocketConfig socketConfig, String micFifoPath) {
         this.socketConfig = socketConfig;
+        this.micFifoPath = micFifoPath;
     }
 
     private File pulseDir() { return new File(environment.getContext().getFilesDir(), "pulseaudio"); }
@@ -193,11 +210,21 @@ public class PulseAudioComponent extends EnvironmentComponent {
         new File(workingDir, "cli").delete();
 
         File configFile = new File(workingDir, "default.pa");
-        FileUtils.writeString(configFile, String.join("\n",
+        java.util.List<String> config = new ArrayList<>(java.util.Arrays.asList(
             "load-module module-native-protocol-unix auth-anonymous=1 auth-cookie-enabled=0 socket=\""+socketConfig.path+"\"",
             "load-module module-aaudio-sink " + resolveSinkArgs(),
             "set-default-sink AAudioSink"
         ));
+        if (micFifoPath != null && !micFifoPath.isEmpty()) {
+            // The format is the helper's, fixed at s16le/48000/mono: it resamples when the device
+            // grants another input rate, so the daemon is never told a rate the bytes are not.
+            // A pipe has no clock, so nothing here corrects drift - acceptable for voice, which is
+            // all this is for.
+            config.add("load-module module-pipe-source source_name=DirectAudioMic file=\""
+                    + micFifoPath + "\" format=s16le rate=48000 channels=1");
+            config.add("set-default-source DirectAudioMic");
+        }
+        FileUtils.writeString(configFile, String.join("\n", config));
 
         String archName = AppUtils.getArchName();
         File modulesDir = new File(workingDir, "modules/"+archName);
