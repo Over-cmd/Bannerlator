@@ -10081,3 +10081,64 @@ Staged for the device: `Bannerlator-1.0-test-pubg.apk`
 sha256 `a74a5294eb95cc1a01f0a4b3c5cd4111f6cfccf15901108fc1b578aa162acab1`, run 35482455341,
 headSha `0386765669a39c2f38a55342789b2e1e86653b0f`. The APK carries the new script as an asset, so
 it reaches the installed rootfs without a runtime re-host.
+
+## Proton builds as a catalog download (2026-09-19)
+
+Tonight's two builds were placed on the device by hand, which is no use to anyone else. They are
+now a catalog row like the runtime itself: `linux-protons.json` in winlator-contents
+(`d03046a`), read by `LinuxProtons`, shown as a "Proton builds" card in the Linux runtime tab.
+
+Two kinds of row, because two different things exist:
+
+| Kind | What it is | What the button does |
+| --- | --- | --- |
+| tarball | a build published as a file (GE-Proton, proton-cachyos) | app downloads it, checks the project's own sha512, queues it |
+| depot | one of Valve's, which is not a file anywhere | asks the Steam client to fetch it |
+
+Unpacking stays in the session. That is where `bannerlator-proton-extra` and the registrar already
+live, and a build cannot run until it has been adopted anyway. So a downloaded row reads "unpacked
+next time you open the Steam client" rather than claiming an install that has not happened. On the
+device that step took twelve seconds. The session gained `~/.bl-steam-urls` for the depot rows:
+steam:// URLs handed to the client at next start, then cleared, because the client either acts on a
+URL or it does not and re-asking every session would never stop.
+
+Only ARM64 builds are listed - an x86_64 Proton cannot start here, so offering one would be
+offering a download that can only fail.
+
+**Valve's two ARM64 rows were reworded almost immediately, and the reason is worth keeping.** The
+user pointed out that the only entry labelled ARM64 that ever worked was ours. That is exactly
+right: Valve's "Proton Experimental (ARM64)" and "Proton 11.0 (ARM64)" fail silently when picked,
+because their manifests ask for the Steam Linux Runtime container. They are the most misleading
+entries in that dropdown precisely because they say ARM64, and listing them as ordinary choices
+repeated the trap in our own UI. They are now "engine only", with notes saying not to pick them in
+Steam: their real job is that `bannerlator-proton-arm64` has nothing to run without one of those
+depots on disk.
+
+The list cannot be filtered from our side - the client builds it from the account's licences, not
+from anything on disk. Two mitigations already exist: Steam's own "Show all compatibility tools"
+toggle sits in the same dialog, and the registrar repoints any mapping aimed at a Proton that is
+neither ours nor an adopted build, so a wrong pick self-corrects within fifteen seconds.
+
+### GTA V Enhanced under GE-Proton — the first swap that actually took effect
+Launched three times. Timeline from `session-20260919-221027.log`:
+
+- both builds installed in 22 s (02:10:28 → 02:10:50)
+- first GE attempt: stopped before the game
+- second GE attempt: **`GTA5_Enhanced.exe` itself ran**, created nine Vulkan swapchains, five
+  reported `pEngineName: DXVK` and four `vkd3d` - so it started both its D3D11 and D3D12 renderers
+- CachyOS attempt: reached `Launcher.exe` and `SocialClubHelper.exe`; the game binary never created
+  a surface
+
+**Proof the swap took, unlike the DLL attempt:** GTA's prefix `d3d12core.dll` is now 8,847,360
+bytes, matching GE-Proton's own vkd3d-proton exactly. Valve's is 9,277,440.
+
+Both runs ended with the Proton script raising `KeyboardInterrupt` inside `os.waitpid`, which is an
+interruption rather than a crash. **Why is unknown and stays unknown**: the runs had no
+`PROTON_LOG`, and Wine's channels never reached the session log - it contains zero `err:` lines of
+any kind, and no `steam-3240220.log` was written. The absence of the 1.3 TB
+`allocate_virtual_memory` message therefore means nothing. Same trap as before, not repeated.
+
+`PROTON_LOG=1 %command%` has now been written into `userdata/2932373/config/localconfig.vdf` for
+3240220 with the client closed (backup at `localconfig.vdf.bak-setlaunch`; brace balance checked,
+772/772). One correction during that edit: the first pass also inserted the key into the
+`controller_config` section, where it does not belong, and that was removed.
