@@ -10498,3 +10498,35 @@ the APK carried a 20,272-byte 13.0 module while the phone held a 68,056-byte 17.
   return, so lsfg-native specifically may not work. Untested, and deliberately not claimed in the
   help text.
 - The compositor driver row is hidden but not inert; the container's value governs.
+
+## The Steam client has a microphone (2026-09-20, afternoon) — DEVICE-PROVEN
+
+Steam's Audio page now shows a **Voice** section with a level slider and
+**Input Device: Default (DirectAudioMic)**, where it had said "No input devices detected" since the
+Linux client first existed. The daemon's own log agrees: source created, set as default, pipe held
+open, `Daemon startup complete`, no errors. Sound is back as well.
+
+Behind that one line sat **five** separate faults, each invisible in the only place anyone would
+look, fixed in this order:
+
+| | fault | fix |
+| --- | --- | --- |
+| 1 | `ac_cv_func_mkfifo=no` in our PulseAudio build | bionic has had mkfifo since API 21; the flag now tells the truth, so the pipe modules build |
+| 2 | bundle carried a 17.0 pipe-source against a 13.0 daemon | swapped only the two modules into the existing 74-file bundle |
+| 3 | bundle never refreshed on a frozen versionCode | re-extracted every Linux session |
+| 4 | module refuses an existing pipe (EEXIST) and ours persisted | deleted before the daemon starts |
+| 5 | helper's mkfifo raced the daemon's | helper waits for the daemon to make the pipe |
+
+And one that was not a fault in the build at all: **my by-hand diagnostics ran as root** and left a
+root-owned `.config/pulse/` in the app's audio directory, so the app's own daemon died on EACCES at
+startup with no log. That was the "no sound" on the last three builds - the builds were fine and I
+had broken the phone underneath them. Ownership repaired; recorded as a standing rule.
+
+The daemon now writes `pulse.log` beside its config on every start, so none of this can be
+invisible again.
+
+Installed build `e14a6e4db27d7be361df720177a919826cd0cd8d93e97e8db963e7f28d2b56b3` (run 35527019006,
+`6db75ca9`). Whole chain: one Android microphone owned by the relay helper, fanned out to games
+through Wine/DirectAudio and to the Steam client through PulseAudio's pipe source.
+
+Not yet done: an actual voice test (Steam's mic test, or TF2 `voice_loopback 1`) to hear it.
