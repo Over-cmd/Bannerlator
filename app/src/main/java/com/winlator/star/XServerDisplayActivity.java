@@ -8636,6 +8636,15 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // to, but having it in place costs nothing and means selecting DirectAudio never has to
         // wait for a copy, or fail because one never happened.
         stageLinuxDirectAudio();
+        // The PulseAudio bundle, for the same reason and with a sharper edge. Elsewhere it is
+        // unpacked only when the container notices the app's version code has changed, and dev
+        // builds deliberately freeze that - so a rebuilt daemon or module never reached the device
+        // and the old one was used instead, with nothing to say so. That is exactly how a
+        // module-pipe-source built for 17.0 stayed in place against a 13.0 daemon, refused on
+        // sight, leaving the Steam client reporting no microphone. Refreshed every session here,
+        // like the session scripts, so what runs is always what the APK carries.
+        TarCompressorUtils.extract(TarCompressorUtils.Type.ZSTD, this, "pulseaudio.tzst",
+                new File(getFilesDir(), "pulseaudio"));
 
         List<String> session = linuxSessionArgs();
         // Only the Steam mode signs in; a desktop session has no client and needs no hold. The
