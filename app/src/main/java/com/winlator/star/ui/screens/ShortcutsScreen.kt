@@ -6332,6 +6332,11 @@ internal fun ShortcutSettingsDialogScreen(
     // Wayland GAME driver override (per-game, same extra name as the container's): "" = the
     // container's choice. Only shown when the effective backend is Wayland; see core.WaylandGameDriver.
     var waylandGameDriverOverride by remember { mutableStateOf(shortcut.getExtra("waylandGameDriver", "")) }
+    // Which Vulkan driver a LINUX session draws with ("" = the one inside the runtime). Separate
+    // from the row above it in the editor, which picks the Android driver that displays the session.
+    var linuxVulkanDriverOverride by remember {
+        mutableStateOf(shortcut.getExtra(com.winlator.star.core.LinuxVulkanDriver.EXTRA, ""))
+    }
     // HDR output override (per-game, same extra name as the container's): "" = the container's,
     // "1" on, "0" off. Only shown when the effective backend is Wayland; see display.WaylandHdr.
     var waylandHdrOverride by remember { mutableStateOf(com.winlator.star.display.WaylandHdr.shortcutChoice(shortcut)) }
@@ -6866,6 +6871,7 @@ internal fun ShortcutSettingsDialogScreen(
                 else displayBackendOverride.ifEmpty { null })
             // Wayland game driver override: "" clears the extra (container default).
             putExtra("waylandGameDriver", waylandGameDriverOverride.ifEmpty { null })
+            putExtra(com.winlator.star.core.LinuxVulkanDriver.EXTRA, linuxVulkanDriverOverride.ifEmpty { null })
             // HDR output override: "" clears the extra (container default).
             putExtra(com.winlator.star.display.WaylandHdr.EXTRA, waylandHdrOverride.ifEmpty { null })
             // Unreal Engine HDR override: "" clears the extra (container default).
@@ -6989,6 +6995,7 @@ internal fun ShortcutSettingsDialogScreen(
                 if (!isLinuxEntry) add("displayBackend")
                 add("gfxDriver")   // the compositor driver: live on the gamescope path too
                 if (effectiveWaylandShortcut && !isLinuxEntry) { add("waylandGameDriver"); add("waylandDriverCfg") }
+                if (isLinuxEntry) add("linuxVulkanDriver")
                 if (effectiveWaylandShortcut || isLinuxEntry) add(com.winlator.star.display.WaylandHdr.EXTRA)
                 if (!effectiveWaylandShortcut && !isLinuxEntry) { add("gfxWrapper"); add("gfxConfig") } // hidden on Wayland (X11 shims/tuning)
                 if (!isLinuxEntry) {
@@ -7437,6 +7444,8 @@ internal fun ShortcutSettingsDialogScreen(
                     // Wayland GAME driver choices + the variant Auto resolves to (native probe, off-main
                     // under graphicsProbeMutex with the compositor choices; cached after the first run).
                     var waylandGameDriverValues by remember { mutableStateOf<List<String>>(emptyList()) }
+                    // Imported Linux ICDs, for a Linux entry's draw-driver row (same probe pass).
+                    var linuxVulkanDriverValues by remember { mutableStateOf<List<String>>(emptyList()) }
                     var waylandAutoPick by remember { mutableStateOf(com.winlator.star.core.WaylandGameDriver.autoVariantIfKnown()) }
                     LaunchedEffect(effectiveWaylandShortcut, isLinuxEntry) {
                         if (!effectiveWaylandShortcut && !isLinuxEntry) return@LaunchedEffect
@@ -7444,6 +7453,7 @@ internal fun ShortcutSettingsDialogScreen(
                         compositorChoicesLoaded = true
                         waylandGameDriverValues = com.winlator.star.core.WaylandGameDriver.optionValues(gfxContext)
                         waylandAutoPick = waylandAutoVariant(gfxContext)
+                        linuxVulkanDriverValues = com.winlator.star.core.LinuxVulkanDriver.optionValues(gfxContext)
                     }
                     val compositorVersion = GraphicsDriverConfigDialog.getVersion(graphicsDriverConfig) ?: ""
                     // Two different drivers are involved in a Linux session and only one of them is
@@ -7507,6 +7517,39 @@ internal fun ShortcutSettingsDialogScreen(
                             }
                         }
                     } else {
+                        // A Linux session has two drivers and the row above picked the wrong half of
+                        // the pair on its own: that one DISPLAYS, this one DRAWS - the client's UI
+                        // through the runtime's Zink and every game the client launches through
+                        // Proton. Imported "-Linux" zips only; "" leaves the runtime's own driver in
+                        // place. A stored id whose import is gone stays listed and labelled, and the
+                        // launch path falls back to the runtime's driver for it.
+                        if (isLinuxEntry) {
+                            val linuxValues = if (linuxVulkanDriverOverride.isEmpty() || linuxVulkanDriverOverride in linuxVulkanDriverValues)
+                                linuxVulkanDriverValues.ifEmpty { listOf("") }
+                            else linuxVulkanDriverValues + linuxVulkanDriverOverride
+                            val linuxLabels = linuxValues.map { com.winlator.star.core.LinuxVulkanDriver.optionLabel(gfxContext, it) }
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                DpDrop(
+                                    dp, "linuxVulkanDriver",
+                                    label = "Draw driver (Linux runtime)",
+                                    options = linuxLabels,
+                                    selected = linuxLabels[linuxValues.indexOf(linuxVulkanDriverOverride).coerceAtLeast(0)],
+                                    onSelect = { linuxVulkanDriverOverride = linuxValues[linuxLabels.indexOf(it)] },
+                                    modifier = Modifier.weight(1f)
+                                )
+                                IconButton(onClick = { helpRes = R.string.help_linux_draw_driver }) {
+                                    Icon(Icons.Default.Help, contentDescription = "What is this?", modifier = Modifier.size(18.dp))
+                                }
+                            }
+                            Text(
+                                com.winlator.star.core.LinuxVulkanDriver.HELP_TEXT
+                                        + if (linuxVulkanDriverValues.size > 1) ""
+                                          else " Nothing imported yet: Contents \u2192 Installed \u2192 Linux runtime drivers.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Spacer(Modifier.height(8.dp))
+                        }
                         if (!isLinuxEntry) {
                         // "System"/empty falls back to the system libvulkan, which can't import the
                         // game's dmabufs (black screen) — mirrors XServerDisplayActivity's resolve; so

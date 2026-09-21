@@ -868,6 +868,12 @@ private fun InstalledTab(vm: ContentsHubViewModel) {
     val waylandManager = remember { WaylandGameDriverManager(context) }
     val waylandDrivers = remember(refreshKey) { waylandManager.enumerateInstalledDrivers().toList() }
     var confirmRemoveWaylandDriver by remember { mutableStateOf<String?>(null) }
+    // Imported LINUX Vulkan drivers: glibc Turnip ICDs for the Linux runtime, i.e. the driver the
+    // native Steam client and the games it launches draw with. The third kind, and the only one the
+    // client can load at all - the two above are bionic. Listed from meta.json, never probed.
+    val linuxDriverManager = remember { com.winlator.star.contents.LinuxVulkanDriverManager(context) }
+    val linuxDrivers = remember(refreshKey) { linuxDriverManager.enumerateInstalledDrivers().toList() }
+    var confirmRemoveLinuxDriver by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
     val components = remember(refreshKey) {
         val cm = ContentsManager(context)
@@ -903,6 +909,25 @@ private fun InstalledTab(vm: ContentsHubViewModel) {
                     val r = withContext(Dispatchers.IO) { runCatching { waylandManager.installDriver(uri, name) } }
                     r.onSuccess { id ->
                         Toast.makeText(context, "Imported Wayland game driver: ${waylandManager.getDriverName(id)}", Toast.LENGTH_LONG).show()
+                        refreshKey++
+                    }.onFailure { e ->
+                        Toast.makeText(context, "Not imported: ${e.message ?: e.javaClass.simpleName}", Toast.LENGTH_LONG).show()
+                    }
+                }
+            }
+        }
+    }
+
+    // Linux runtime driver import: same shape as the Wayland one. The reasons a zip is refused
+    // (no libvulkan_freedreno*.so, not an AArch64 ELF, links Android's libc) reach the user as a Toast.
+    val linuxDriverPicker = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            InAppFilePicker.pickedUri(result.data)?.let { uri ->
+                val name = uri.lastPathSegment?.substringAfterLast('/') ?: "linux-driver.zip"
+                scope.launch {
+                    val r = withContext(Dispatchers.IO) { runCatching { linuxDriverManager.installDriver(uri, name) } }
+                    r.onSuccess { id ->
+                        Toast.makeText(context, "Imported Linux runtime driver: ${linuxDriverManager.getDriverName(id)}", Toast.LENGTH_LONG).show()
                         refreshKey++
                     }.onFailure { e ->
                         Toast.makeText(context, "Not imported: ${e.message ?: e.javaClass.simpleName}", Toast.LENGTH_LONG).show()
@@ -959,6 +984,34 @@ private fun InstalledTab(vm: ContentsHubViewModel) {
         }
 
         Spacer(Modifier.height(20.dp))
+        InstalledSectionHeader("Linux runtime drivers (Steam client)", Icons.Filled.ViewInAr)
+        Spacer(Modifier.height(6.dp))
+        Text("The Vulkan driver the Linux runtime draws with: the native Steam client\u2019s interface and every " +
+            "game it launches. Import a \"-Linux\" Turnip zip (glibc). The client and its games are Linux " +
+            "processes, so an Android (vulkan.adXXXX.so) or \"-Wayland\" zip cannot be loaded by them and is " +
+            "rejected here. Frames still reach the screen through the GPU driver above.",
+            style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant)
+        Spacer(Modifier.height(10.dp))
+        PrimaryButton("Import Linux runtime driver (.zip)\u2026", Icons.Filled.FolderOpen, enabled = true,
+            container = cs.onSurface.copy(alpha = 0.06f), content = cs.onSurface, modifier = Modifier.fillMaxWidth()) {
+            linuxDriverPicker.launch(InAppFilePicker.buildIntent(context, arrayOf("zip"), "Select Linux runtime driver zip"))
+        }
+        Spacer(Modifier.height(12.dp))
+        if (linuxDrivers.isEmpty()) {
+            InstalledEmpty("No Linux runtime drivers imported. Linux sessions use the Turnip built into the runtime.")
+        } else {
+            linuxDrivers.forEach { id ->
+                val ver = linuxDriverManager.getDriverVersion(id)
+                val glibc = linuxDriverManager.getMinGlibc(id)
+                InstalledRow(icon = Icons.Filled.ViewInAr, driver = true,
+                    title = linuxDriverManager.getDriverName(id),
+                    subtitle = (if (ver.isEmpty()) "imported" else ver) + (if (glibc.isEmpty()) "" else "  \u00b7  glibc $glibc+"),
+                    onRemove = { confirmRemoveLinuxDriver = id })
+                Spacer(Modifier.height(10.dp))
+            }
+        }
+
+        Spacer(Modifier.height(20.dp))
         InstalledSectionHeader("Components", Icons.Filled.Extension)
         Spacer(Modifier.height(10.dp))
         if (components.isEmpty()) {
@@ -989,6 +1042,24 @@ private fun InstalledTab(vm: ContentsHubViewModel) {
                 }) { Text("Remove", color = cs.primary) }
             },
             dismissButton = { TextButton(onClick = { confirmRemoveDriver = null }) { Text("Cancel", color = cs.primary) } },
+        )
+    }
+
+    // Confirm: remove an imported Linux runtime driver. A shortcut still set to it falls back to the
+    // runtime's own driver at launch (LinuxVulkanDriver logs that), so nothing else needs rewriting.
+    confirmRemoveLinuxDriver?.let { id ->
+        OutlinedAlertDialog(
+            onDismissRequest = { confirmRemoveLinuxDriver = null },
+            containerColor = cs.surfaceContainerHigh,
+            title = { Text("Remove Linux runtime driver?", color = cs.onSurface) },
+            text = { Text("Remove \"${linuxDriverManager.getDriverName(id)}\"? Linux sessions set to it go back to the " +
+                    "driver built into the runtime.", color = cs.onSurface) },
+            confirmButton = {
+                TextButton(onClick = {
+                    linuxDriverManager.removeDriver(id); confirmRemoveLinuxDriver = null; refreshKey++
+                }) { Text("Remove", color = cs.primary) }
+            },
+            dismissButton = { TextButton(onClick = { confirmRemoveLinuxDriver = null }) { Text("Cancel", color = cs.primary) } },
         )
     }
 

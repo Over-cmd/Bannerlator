@@ -8991,6 +8991,16 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // that inherit Steam's choice rather than ours; the Proton wrapper applies the second by
         // exec'ing the game through taskset. Sent only when they are a real restriction - a list of
         // every core is what the kernel does anyway, and saying so would just be noise in the log.
+        // The driver the session DRAWS with: the client's UI through the runtime's Zink, and every
+        // game the client launches through Proton's DXVK/VKD3D. Unset means the runtime keeps the
+        // Turnip it was built with; an imported one is handed over as an ICD manifest path, so
+        // nothing inside the runtime is modified. This is not the driver that puts the frame on the
+        // screen - that is the Android one the app's own compositor loads, picked by the shortcut's
+        // "Display driver" row.
+        String vkIcd = com.winlator.star.core.LinuxVulkanDriver.resolveIcdPath(
+                this, shortcut != null ? shortcut.getExtra(com.winlator.star.core.LinuxVulkanDriver.EXTRA, "") : "");
+        if (vkIcd != null) lateEnv.add(com.winlator.star.core.LinuxVulkanDriver.ENV + "=" + vkIcd);
+
         String clientCpus = cpuListOrEmpty("linuxClientCpuList");
         String gameCpus = cpuListOrEmpty("linuxGameCpuList");
         if (!clientCpus.isEmpty()) lateEnv.add("BL_CLIENT_CPUS=" + clientCpus);

@@ -36,6 +36,28 @@ collect_steam_logs() {
   [ -f "$steam_root/steam.pid" ] && cp "$steam_root/steam.pid" "$BL_DEBUG_DIR/" 2>/dev/null
   echo "== steam logs copied to $BL_DEBUG_DIR"
 }
+# The driver everything in this session draws with: gamescope's compositing, the client's UI
+# (OpenGL through Zink) and every game Proton launches. BL_VK_DRIVER names an imported driver's ICD
+# manifest on the Android side, which is bound into the session at its own path; unset means the
+# runtime keeps the Turnip it was built with. VK_DRIVER_FILES REPLACES the loader's search, so a
+# manifest whose library is unreadable would leave the session with no Vulkan at all - check both
+# before setting it, and say so in the log rather than fail silently half a minute later.
+if [ -n "${BL_VK_DRIVER:-}" ]; then
+  bl_icd_lib=$(sed -n 's/.*"library_path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$BL_VK_DRIVER" 2>/dev/null | head -1)
+  case $bl_icd_lib in
+    /*) ;;
+    ?*) bl_icd_lib="$(dirname "$BL_VK_DRIVER")/$bl_icd_lib" ;;
+  esac
+  if [ -r "$BL_VK_DRIVER" ] && [ -n "$bl_icd_lib" ] && [ -r "$bl_icd_lib" ]; then
+    export VK_DRIVER_FILES="$BL_VK_DRIVER"
+    # Loaders older than 1.3.207 only know the old name; both are harmless together.
+    export VK_ICD_FILENAMES="$BL_VK_DRIVER"
+    echo "== vulkan driver: imported $bl_icd_lib (via $BL_VK_DRIVER)"
+  else
+    echo "== vulkan driver: IGNORING $BL_VK_DRIVER (manifest or ${bl_icd_lib:-library} unreadable); using the runtime's own"
+  fi
+  unset bl_icd_lib
+fi
 export XDG_DATA_HOME=${XDG_DATA_HOME:-$HOME/.local/share}
 export XDG_CONFIG_HOME=${XDG_CONFIG_HOME:-$HOME/.config}
 export XDG_CACHE_HOME=${XDG_CACHE_HOME:-$HOME/.cache}
