@@ -113,7 +113,16 @@ static int openStream(AlsaStream *s) {
     // which made the heartbeat report buf>cap and made adaptBuffer's "curBufferSize >= capacity" guard
     // fire immediately — so the buffer never grew despite live underruns. curBufferSize must be truth.
     int32_t want = g_bufTarget > 0 ? g_bufTarget : s->curBufferSize;
-    if (want <= 0) want = s->framesPerBurst > 0 ? s->framesPerBurst * 2 : 0;
+
+    /* 🚨 COJÍN ELÁSTICO DE AUDIO MALI (ANTI-CRACKLING PARCHE):
+       Si el tamaño por defecto es menor o igual a cero, o si el hardware arranca en frío por debajo 
+       del mínimo seguro, forzamos de forma incondicional un mínimo de 6 ráfagas de hardware (framesPerBurst * 6).
+       Esto le da un colchón de memoria RAM virtual al AAudio de Android, impidiendo que la CPU Unisoc
+       vacíe el buffer cuando la GPU Mali-G52 esté bajo máxima carga gráfica en 3D. */
+    if (want <= 0 || want < (s->framesPerBurst * 4)) {
+        want = s->framesPerBurst > 0 ? s->framesPerBurst * 6 : 4096;
+    }
+
     if (s->capacity > 0 && want > s->capacity) want = s->capacity;
     if (want > 0) {
         int32_t got = AAudioStream_setBufferSizeInFrames(s->stream, want);
