@@ -15343,10 +15343,12 @@ return true;
                     linuxRuntimeLabel(), "", resolvedRenderer(), linuxDriverSummary(), res, device,
                     "Wayland", hdrRowValue(), null, true);
             }
+            // The trailing flag is passed explicitly: a Kotlin default value is not visible from
+            // Java, so the old nine-argument call stopped compiling when the field was added.
             return new XServerDialogState.TmContainerInfo(
                 wine, dxwrapper, resolvedRenderer(),
                 waylandMode ? waylandDriverSummary() : graphicsDriver, res, device,
-                waylandMode ? "Wayland" : "X11", hdrRowValue(), deliveredGpuSpoofName);
+                waylandMode ? "Wayland" : "X11", hdrRowValue(), deliveredGpuSpoofName, false);
         } catch (Exception e) {
             return null;
         }
