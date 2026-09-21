@@ -249,6 +249,48 @@ case $mode in
       echo "== autolaunch $_bl_url"
       set -- "$@" "$_bl_url"
     fi
+    # The client builds Settings > Internet and its connection indicator on NetworkManager, which
+    # it looks for on the SYSTEM bus as it starts. This runtime has neither, so the page failed
+    # ("StartScanningForNetworks is not a function") under a header that showed no connection even
+    # while downloads ran. A system bus and a stand-in that reports Android's connection - and
+    # refuses what it cannot do, since the app has no say over Wi-Fi - answer what the client asks.
+    # The bus config is written here rather than shipped, so a runtime installed earlier gets this
+    # from the app's copy of the session scripts without a re-host. (WinNative, maxjivi05, e7a224ae.)
+    if command -v dbus-daemon >/dev/null 2>&1 && command -v bannerlator-netmanager >/dev/null 2>&1; then
+      mkdir -p /run/dbus /usr/local/share/bannerlator
+      cat > /usr/local/share/bannerlator/system-bus.conf <<'BUSCONF'
+<!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-Bus Bus Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
+<busconfig>
+  <type>system</type>
+  <listen>unix:path=/run/dbus/system_bus_socket</listen>
+  <auth>EXTERNAL</auth>
+  <policy context="default">
+    <allow user="*"/>
+    <allow own="*"/>
+    <allow send_destination="*"/>
+    <allow receive_sender="*"/>
+  </policy>
+</busconfig>
+BUSCONF
+      rm -f /run/dbus/system_bus_socket
+      dbus-daemon --config-file=/usr/local/share/bannerlator/system-bus.conf --nofork --nopidfile &
+      system_bus=$!
+      for _ in $(seq 1 50); do
+        [ -S /run/dbus/system_bus_socket ] && break
+        sleep 0.1
+      done
+      if [ -S /run/dbus/system_bus_socket ]; then
+        bannerlator-netmanager &
+        netmanager=$!
+        echo "== network: system bus up, NetworkManager stand-in running"
+      else
+        echo "== network: the system bus did not come up; the client will show no connection"
+      fi
+    else
+      echo "== network: no dbus-daemon or netmanager in this runtime; the client will show no connection"
+    fi
+
     export STEAM_RUNTIME=1
     export LD_LIBRARY_PATH=$steam_root/steamrtarm64:$steam_root/steamrtarm64/panorama${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
     export SDL_VIDEO_X11_DGAMOUSE=0
@@ -269,6 +311,7 @@ case $mode in
       collect_steam_logs
       [ "$rc" -eq 42 ] || break
     done
+    kill ${netmanager:-} ${system_bus:-} 2>/dev/null || true
     reap_orphans
     exit "$rc"
     ;;

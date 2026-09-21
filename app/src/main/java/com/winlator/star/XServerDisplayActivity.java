@@ -8776,6 +8776,9 @@ public class XServerDisplayActivity extends AppCompatActivity {
         guest.add("PATH=/usr/local/bin:/usr/bin:/bin");
         guest.add("TERM=xterm-256color");
         guest.add("LANG=C.UTF-8");
+        // Without this the session is UTC and the client's clock and log timestamps are hours off
+        // from the device's. (WinNative, maxjivi05, cb52935c.)
+        guest.add("TZ=" + java.util.TimeZone.getDefault().getID());
         guest.add("XDG_RUNTIME_DIR=" + runtimeDir.getPath());
         guest.add("XDG_SESSION_TYPE=wayland");
         guest.add("WAYLAND_DISPLAY=wayland-0");
@@ -8895,6 +8898,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
                 {"usr/local/bin/bannerlator-steam-library", "usr/local/bin/bannerlator-steam-library"},
                 {"usr/local/bin/bannerlator-seed-redists", "usr/local/bin/bannerlator-seed-redists"},
                 {"usr/local/bin/bannerlator-proton-extra", "usr/local/bin/bannerlator-proton-extra"},
+                {"usr/local/bin/bannerlator-netmanager", "usr/local/bin/bannerlator-netmanager"},
         };
         // Android has no /dev/shm; a directory under the cache stands in for it, and unlike the real
         // thing it keeps whatever a session leaves. The client abandons some fifty megabytes of

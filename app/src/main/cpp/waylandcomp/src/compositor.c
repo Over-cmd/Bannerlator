@@ -266,6 +266,8 @@ struct surface {
     struct wl_list children;                /* bottom to top */
     struct wl_list child_link;
     int sub_x, sub_y, sub_pending_x, sub_pending_y, sub_pending;
+    int sub_sync;                           /* wl_subsurface mode: its frames reach the screen with the parent's commit */
+    int hud_frame;                          /* a GPU frame arrived in this window since the HUD last counted one */
     int below_parent;
     int fullscreen;                         /* xdg_toplevel.set_fullscreen: no client decorations */
 
@@ -670,7 +672,16 @@ static void take_shm(struct surface *s, struct wl_shm_buffer *shm, struct wl_res
 
 /* The window the app's performance HUD follows: the latest one to start presenting GPU frames
  * (X11 binds the HUD to the _MESA_DRV window and counts X presents instead). JNI upcalls. */
+/* A synchronized subsurface belongs to its parent's frame: gamescope presents through a toplevel
+ * and a plane per layer, attaches to all of them and commits the toplevel last. Following one plane
+ * counts nothing once the game moves to another - which is why a Linux session's HUD read 0 fps -
+ * so such a surface is counted as the window it is part of, once per commit of that window.
+ * (From WinNative, maxjivi05, feature/wayland-gamescope f467345c; GPL-3.0.) */
 static struct surface *g_hud_surface;
+static struct surface *hud_window(struct surface *s) {
+    while (s->parent && s->sub_sync) s = s->parent;
+    return s;
+}
 extern void banner_on_game_surface(const char *window, const char *gpu); /* window NULL = gone */
 extern void banner_on_game_frame(void);
 /* The program behind that window: its Linux pid (the Wayland client's credentials) and executable name
@@ -723,8 +734,9 @@ static void take_dmabuf(struct surface *s, struct dmabuf_buffer *b, struct wl_re
                        name, b->width, b->height, (unsigned long long)b->modifier);
         /* The HUD follows the window whether its frames are copied or go straight to the layer:
          * a zero-copy frame the compositor never imported is still a presented game frame. */
-        if (b->img || ahb_swapchain_has_ahb(b)) {
-            g_hud_surface = s;
+        if ((b->img || ahb_swapchain_has_ahb(b)) && g_hud_surface != hud_window(s)) {
+            g_hud_surface = hud_window(s);
+            g_hud_surface->hud_frame = 0;
             banner_on_game_surface(name, vkp_gpu_name());
             struct client_info *ci = client_info_of(wl_resource_get_client(s->resource));
             if (ci) banner_on_game_program((int)ci->pid, strncmp(ci->name, "pid ", 4) ? ci->name : "");
@@ -750,7 +762,7 @@ static void take_dmabuf(struct surface *s, struct dmabuf_buffer *b, struct wl_re
      * Asking whether the compositor could import it, as this used to, is a question about the
      * copy path and not about whether a frame happened: a game whose buffers go straight to
      * the display layer draws on screen while the counter sat at 0.0 fps and 1000.0 ms. */
-    if (s == g_hud_surface) banner_on_game_frame();
+    if (hud_window(s) == g_hud_surface) g_hud_surface->hud_frame = 1;
 }
 
 /* ---- hooks for ahb_swapchain.c (zero-copy layers) */
@@ -923,6 +935,11 @@ static void surface_commit(struct wl_client *c, struct wl_resource *r) {
     wl_list_init(&s->pending_frames);
     wl_list_insert_list(s->feedback.prev, &s->pending_feedback);
     wl_list_init(&s->pending_feedback);
+    /* One frame per commit of the window, however many of its planes were attached to. */
+    if (s == g_hud_surface && s->hud_frame) {
+        s->hud_frame = 0;
+        banner_on_game_frame();
+    }
     constraints_surface_commit(s);
     banner_color_commit(s->resource); /* wp_color_management_surface_v1 state (returns at once when HDR is off) */
 
@@ -1096,8 +1113,14 @@ static void subsurface_place_below(struct wl_client *c, struct wl_resource *r,
                                    struct wl_resource *sibling) {
     restack_child(wl_resource_get_user_data(r), wl_resource_get_user_data(sibling), 0);
 }
-static void subsurface_set_sync(struct wl_client *c, struct wl_resource *r) {}
-static void subsurface_set_desync(struct wl_client *c, struct wl_resource *r) {}
+static void subsurface_set_sync(struct wl_client *c, struct wl_resource *r) {
+    struct surface *s = wl_resource_get_user_data(r);
+    if (s) s->sub_sync = 1;
+}
+static void subsurface_set_desync(struct wl_client *c, struct wl_resource *r) {
+    struct surface *s = wl_resource_get_user_data(r);
+    if (s) s->sub_sync = 0;
+}
 static const struct wl_subsurface_interface subsurface_impl = {
     .destroy = subsurface_destroy,
     .set_position = subsurface_set_position,
@@ -1131,6 +1154,7 @@ static void subcompositor_get_subsurface(struct wl_client *c, struct wl_resource
     s->subsurface = sub;
     s->parent = p;
     s->below_parent = 0;
+    s->sub_sync = 1;   /* wl_subsurface starts synchronized */
     s->sub_x = s->sub_y = 0;
     wl_list_insert(p->children.prev, &s->child_link); /* new subsurfaces go on top */
 }
@@ -2394,6 +2418,37 @@ static void pointer_focus(struct wl_resource *target, wl_fixed_t fx, wl_fixed_t 
     if (entered) constraints_focus_entered(target, client);
 }
 
+/* The seat's modifiers in the keymap's real-modifier bits. Wine and gamescope work them out from
+ * the keys they are sent; a nested wlroots compositor takes them from wl_keyboard.modifiers alone,
+ * and without it Shift never reaches its programs.
+ * (From WinNative, maxjivi05, feature/wayland-gamescope cb52935c; GPL-3.0.) */
+static uint32_t g_mod_keys_held, g_mods_locked;
+
+static uint32_t mods_depressed(void) {
+    static const uint32_t bits[] = { 1u << 0, 1u << 0, 1u << 2, 1u << 2, 1u << 3, 1u << 3, 1u << 6, 1u << 6 };
+    uint32_t mods = 0;
+    for (unsigned i = 0; i < sizeof(bits) / sizeof(bits[0]); i++)
+        if (g_mod_keys_held & (1u << i)) mods |= bits[i];
+    return mods;
+}
+
+/* Returns whether the key changed the seat's modifiers. */
+static int mods_key(uint32_t evdev, int pressed) {
+    static const uint32_t keys[] = { 42, 54, 29, 97, 56, 100, 125, 126 }; /* L/R Shift, Ctrl, Alt, Meta */
+    if (evdev == 58) { /* Caps Lock toggles on its press */
+        if (pressed) g_mods_locked ^= 1u << 1;
+        return pressed;
+    }
+    for (unsigned i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
+        if (keys[i] != evdev) continue;
+        uint32_t held = pressed ? g_mod_keys_held | (1u << i) : g_mod_keys_held & ~(1u << i);
+        if (held == g_mod_keys_held) return 0;
+        g_mod_keys_held = held;
+        return 1;
+    }
+    return 0;
+}
+
 static void keyboard_focus(struct wl_resource *target) {
     struct wl_client *client = wl_resource_get_client(target);
     struct seat_keyboard *sk;
@@ -2411,8 +2466,7 @@ static void keyboard_focus(struct wl_resource *target) {
         if (sk->focus == target) continue;
         sk->focus = target;
         wl_keyboard_send_enter(sk->kb, wl_display_next_serial(g_display), target, &keys);
-        /* Baseline modifiers = none; Shift/Ctrl arrive as their own key events. */
-        wl_keyboard_send_modifiers(sk->kb, wl_display_next_serial(g_display), 0, 0, 0, 0);
+        wl_keyboard_send_modifiers(sk->kb, wl_display_next_serial(g_display), mods_depressed(), 0, g_mods_locked, 0);
     }
     wl_array_release(&keys);
     banner_clipboard_keyboard_focus(client); /* wl_data_device selection follows focus */
@@ -2947,9 +3001,14 @@ static void key_event(uint32_t evdev, int pressed) {
     struct seat_keyboard *sk;
     if (!keyboard_for(client)) return;
     keyboard_focus(target->resource);
-    for_each_keyboard_of(client, sk)
+    int mods_changed = mods_key(evdev, pressed);
+    for_each_keyboard_of(client, sk) {
         wl_keyboard_send_key(sk->kb, wl_display_next_serial(g_display), now_ms(), evdev,
                              pressed ? WL_KEYBOARD_KEY_STATE_PRESSED : WL_KEYBOARD_KEY_STATE_RELEASED);
+        if (mods_changed)
+            wl_keyboard_send_modifiers(sk->kb, wl_display_next_serial(g_display),
+                                       mods_depressed(), 0, g_mods_locked, 0);
+    }
     wl_display_flush_clients(g_display);
 }
 
