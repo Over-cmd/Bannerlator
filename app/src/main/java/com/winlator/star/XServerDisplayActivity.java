@@ -8367,6 +8367,32 @@ public class XServerDisplayActivity extends AppCompatActivity {
         } catch (Exception e) {
             Log.e("XServerDisplayActivity", "wayland: driver resolve failed", e);
         }
+        // No usable driver here and the compositor cannot import the session's frames at all: the
+        // system Vulkan has no dma-buf extensions, vkCreateDevice fails and the user gets a black
+        // screen with nothing said. It is the state a container carries when nobody ever picked a
+        // driver, or when the one it names was removed. Rather than start that session, take the
+        // first bundled Turnip this GPU supports - the same list the picker offers - so a clean
+        // install boots. (The problem is WinNative's c01a89f0; it downloads a driver, we already
+        // ship several.)
+        if (libraryName == null || libraryName.isEmpty()) {
+            try {
+                com.winlator.star.contents.AdrenotoolsManager atm =
+                        new com.winlator.star.contents.AdrenotoolsManager(this);
+                for (String candidate : getResources().getStringArray(R.array.wrapper_graphics_driver_version_entries)) {
+                    if (candidate == null || candidate.isEmpty() || candidate.equals("System")) continue;
+                    if (!com.winlator.star.core.GPUInformation.isDriverSupported(candidate, this)) continue;
+                    String lib = atm.getLibraryName(candidate);
+                    if (lib == null || lib.isEmpty()) continue;
+                    driverPath = atm.getDriverPath(candidate);
+                    libraryName = lib;
+                    Log.w("XServerDisplayActivity", "wayland: no usable driver was set; falling back to bundled "
+                            + candidate + " so the session is not black");
+                    break;
+                }
+            } catch (Exception e) {
+                Log.e("XServerDisplayActivity", "wayland: bundled driver fallback failed", e);
+            }
+        }
         final String fDriverPath = driverPath, fLibraryName = libraryName;
         final String nativeLibDir = getApplicationInfo().nativeLibraryDir;
         // Experimental layer mode (ZERO_COPY_SPIKE.md): BANNER_WAYLAND_ZERO_COPY=1 in the container's
@@ -9038,6 +9064,14 @@ public class XServerDisplayActivity extends AppCompatActivity {
         EnvVars hostEnv = new EnvVars();
         hostEnv.put("PROOT_LOADER", com.winlator.star.linux.LinuxRuntime.prootLoader(this).getPath());
         hostEnv.put("PROOT_TMP_DIR", getCacheDir().getPath());
+        // Some vendor kernels fail every execve under proot's seccomp acceleration, so no session
+        // ever starts - the button appears to do nothing. Probe it once and fall back to proot
+        // tracing every system call itself, which works everywhere and is only slower.
+        if (!com.winlator.star.linux.LinuxRuntime.seccompWorks(this)) {
+            Log.w("XServerDisplayActivity",
+                    "proot: seccomp acceleration does not work on this kernel; tracing every system call");
+            hostEnv.put(com.winlator.star.linux.LinuxRuntime.ENV_NO_SECCOMP, "1");
+        }
         // The runtime's proot links against a libtalloc that sits beside it. Android's linker does
         // not search a plain executable's own directory, so it has to be named here or the process
         // dies before it starts, with the reason only in `logcat -b crash`.
