@@ -82,9 +82,9 @@ jobs:
           name: linuxfs-${{ inputs.label || github.run_number }}
           path: out/linuxfs.tar.zst
 
-      # The Vulkan driver on its own as well as inside the rootfs. It also ships as an app asset so
-      # a driver fix reaches a runtime that is already installed, and pulling one file beats
-      # unpacking a whole rootfs to get at it.
+      # The Vulkan driver on its own as well as inside the rootfs: pulling one file beats unpacking
+      # a whole rootfs to get at it. This is the default the runtime ships with; a NEWER driver
+      # reaches an installed runtime as an imported "-Linux" zip from Banners-Turnip instead.
       - name: Upload the Vulkan driver
         uses: actions/upload-artifact@v4
         with:

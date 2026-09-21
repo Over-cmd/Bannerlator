@@ -104,12 +104,11 @@ chmod -R u+rwX rootfs
 # build-turnip.sh cross-builds Mesa's Turnip with the KGSL backend against this rootfs.
 "$here/build-turnip.sh" "$work/turnip" "$work/rootfs"
 install -m 755 "$work/turnip/libvulkan_freedreno.so" rootfs/usr/lib/libvulkan_freedreno.so
-# The same driver as an app asset. An installed runtime keeps whatever it was unpacked with, so
-# without this a driver fix can never reach one - the rootfs would have to be rebuilt and
-# re-downloaded for a file of a few megabytes. Staged into the runtime at session start like the
-# session scripts, so a fix reaches a runtime installed long before it.
-install -Dm644 "$work/turnip/libvulkan_freedreno.so" \
-  "$here/../../app/src/main/assets/linuxfs/usr/lib/libvulkan_freedreno.so"
+# A driver fix reaches an installed runtime by importing a "-Linux" Turnip zip (Contents ->
+# Installed -> Linux runtime drivers), which the session then loads through VK_DRIVER_FILES without
+# touching the rootfs - see core/LinuxVulkanDriver. So the app does NOT carry a copy of this driver:
+# 15MB in every apk to do what a 3MB zip already does, and it would freeze the choice besides. The
+# driver in this rootfs is the default the runtime ships with.
 printf '{\n    "ICD": {\n        "api_version": "1.4.0",\n        "library_path": "/usr/lib/libvulkan_freedreno.so"\n    },\n    "file_format_version": "1.0.0"\n}\n' \
   > rootfs/usr/share/vulkan/icd.d/freedreno_icd.json
 rm -f rootfs/usr/share/vulkan/icd.d/nvidia_icd.json
