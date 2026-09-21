@@ -469,8 +469,30 @@ void VulkanRendererContext::createSwapchain() {
     vk_.GetPhysicalDeviceSurfacePresentModesKHR(physicalDevice,surface,&pmCount,nullptr);
     availablePresentModes.resize(pmCount);
     vk_.GetPhysicalDeviceSurfacePresentModesKHR(physicalDevice,surface,&pmCount,availablePresentModes.data());
-    VkPresentModeKHR presentMode=VK_PRESENT_MODE_FIFO_KHR;
-    for (auto pm:availablePresentModes) if(pm==requestedPresentMode){presentMode=pm;break;}
+    /* 🚨 INTERCEPTOR WSI MAESTRO (MALI ULTRA-LOW LATENCY):
+       Bypasseamos la asignación rígida de FIFO de Winlator para la sesión X11.
+       Escaneamos en caliente los modos físicos reales que tu tablet Unisoc soporta:
+       1. Forzamos MAILBOX (Triple búfer veloz) para aniquilar el Input Lag táctil.
+       2. Usamos FIFO_RELAXED como segunda opción para suavizar tirones gráficos. */
+    VkPresentModeKHR presentMode = VK_PRESENT_MODE_FIFO_KHR;
+    bool mailbox_found = false;
+    bool relaxed_found = false;
+
+    for (auto pm : availablePresentModes) {
+        if (pm == VK_PRESENT_MODE_MAILBOX_KHR) {
+            mailbox_found = true;
+        }
+        if (pm == VK_PRESENT_MODE_FIFO_RELAXED_KHR) {
+            relaxed_found = true;
+        }
+    }
+
+    if (mailbox_found) {
+        presentMode = VK_PRESENT_MODE_MAILBOX_KHR;
+    } else if (relaxed_found) {
+        presentMode = VK_PRESENT_MODE_FIFO_RELAXED_KHR;
+    }
+
     if(verboseLog){
         std::string pmList;
         for(auto pm:availablePresentModes) pmList+=std::to_string((int)pm)+" ";
