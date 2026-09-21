@@ -221,6 +221,19 @@ public class AdrenotoolsManager {
                 entry = zis.getNextEntry();
             }
             zis.close();
+            // An AdrenoTools driver is one the Android Vulkan loader can be pointed at: meta.json
+            // names the library in "libraryName" and that library is in the zip. Without this check
+            // ANY zip carrying a meta.json installed here - including our own "-Linux" (glibc) and
+            // "-Wayland" Turnip zips, which name no library on purpose. They then appeared in the
+            // Android display-driver list, where setDriverById quietly sets nothing because
+            // libraryName is empty, so picking one left the compositor on the system Vulkan: a
+            // black screen wearing a driver's name. Refuse them here and say which list they belong in.
+            String rejected = rejectionReason(tmpDir);
+            if (rejected != null) {
+                Log.d("AdrenotoolsManager", "not an AdrenoTools driver: " + rejected);
+                FileUtils.delete(tmpDir);
+                return "";
+            }
             if (new File(tmpDir, "meta.json").exists()) {
                 name = getDriverName(tmpDir.getName());
                 File dst = new File(adrenotoolsContentDir, name);
@@ -244,6 +257,33 @@ public class AdrenotoolsManager {
         return name;
     }
     
+    /**
+     * Why this extracted zip is not an AdrenoTools driver, or null when it is one. Reads the zip's
+     * own meta.json rather than the installed-driver accessors, which key off an installed id.
+     */
+    private static String rejectionReason(File dir) {
+        File metaFile = new File(dir, "meta.json");
+        if (!metaFile.isFile()) return "no meta.json";
+        String libraryName = "", kind = "";
+        try {
+            JSONObject meta = new JSONObject(FileUtils.readString(metaFile));
+            libraryName = meta.optString("libraryName", "");
+            kind = meta.optString("kind", "");
+        }
+        catch (Exception e) {
+            return "meta.json is unreadable (" + e.getMessage() + ")";
+        }
+        if ("linux-vulkan-icd".equals(kind))
+            return "this is a Linux runtime driver (import it under \"Linux runtime drivers\")";
+        if ("wayland-game-driver".equals(kind))
+            return "this is a Wayland game driver (import it under \"Wayland game drivers\")";
+        if (libraryName.isEmpty())
+            return "meta.json names no libraryName, so nothing could be handed to AdrenoTools";
+        if (!new File(dir, libraryName).isFile())
+            return "meta.json names " + libraryName + ", which is not in the zip";
+        return null;
+    }
+
     public void setDriverById(EnvVars envVars, ImageFs imagefs, String adrenotoolsDriverId) {
         boolean isFromResources = isFromResources(adrenotoolsDriverId);
 

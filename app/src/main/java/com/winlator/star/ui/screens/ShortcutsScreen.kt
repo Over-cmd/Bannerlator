@@ -7524,6 +7524,18 @@ internal fun ShortcutSettingsDialogScreen(
                         // place. A stored id whose import is gone stays listed and labelled, and the
                         // launch path falls back to the runtime's driver for it.
                         if (isLinuxEntry) {
+                            // The row above is live on this path and "System"/a missing driver is a
+                            // black screen here too, so the same warning applies - it used to be
+                            // inside the Wayland-only branch below.
+                            if (compositorDriverUnusable(compositorVersion, compositorChoices, compositorChoicesLoaded)) {
+                                Text(
+                                    "The display driver above cannot show this session. \"System\" or a driver that is no "
+                                        + "longer installed leaves the compositor on the system Vulkan, which shows a black screen.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.error
+                                )
+                                Spacer(Modifier.height(8.dp))
+                            }
                             val linuxValues = if (linuxVulkanDriverOverride.isEmpty() || linuxVulkanDriverOverride in linuxVulkanDriverValues)
                                 linuxVulkanDriverValues.ifEmpty { listOf("") }
                             else linuxVulkanDriverValues + linuxVulkanDriverOverride
