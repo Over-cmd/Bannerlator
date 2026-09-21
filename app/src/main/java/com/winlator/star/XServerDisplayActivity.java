@@ -1408,6 +1408,31 @@ public class XServerDisplayActivity extends AppCompatActivity {
                 // Layered resolver, highest-confidence signal first (each returns null to fall through):
                 //   P1 guest self-report (AIO Graphics Test) · P2 engine log (Unity Player.log) ·
                 //   P3 wrapper logs (arm64ec-proof DXVK/VKD3D ground truth) · P4 /proc/maps module scan.
+                // A LINUX session has no Wine container to reason about, and every resolver below
+                // reads one: the engine and wrapper logs live in the container's prefix, and the
+                // /proc/maps scan walks wine processes. In a Linux session they answer with
+                // whatever the LAST WINE GAME left behind - which is how the pill read
+                // "D3D12 · VKD3D" while only the Steam client was running. Ask that session's own
+                // processes instead, and show nothing rather than a leftover.
+                if (isLinuxRuntimeSession()) {
+                    String lx = resolveLinuxSessionApi();
+                    if (lx != null && !lx.equals(lastApi)) {
+                        lastApi = lx;
+                        final String lxLabel = lx.equals(rendererMode) ? lx : rendererMode + " | " + lx;
+                        final String lxFinal = lx;
+                        runOnUiThread(() -> {
+                            hudRendererLabel = lxLabel;
+                            hudEngineShort = lxFinal;
+                            if (frameRatingHorizontal != null) frameRatingHorizontal.setRenderer(lxLabel);
+                            if (frameRating != null) frameRating.setRenderer(lxLabel);
+                            if (perfHud != null) perfHud.setEngineLabel(lxFinal);
+                            if (gameNativeHud != null) gameNativeHud.setEngineLabel(lxFinal);
+                            if (fusionHud != null) fusionHud.setEngineLabel(lxFinal);
+                        });
+                    }
+                    try { Thread.sleep(2000); } catch (InterruptedException e) { return; }
+                    continue;
+                }
                 String api = readAppDeclaredApi();                                  // P1
                 if (api == null) api = resolveApiFromEngineLogTopLevel(fallback);   // P2
                 if (api == null) api = resolveApiFromWrapperLogs(fallback);         // P3
@@ -1445,6 +1470,68 @@ public class XServerDisplayActivity extends AppCompatActivity {
             }
         }, "dx-api-detect");
         dxApiThread.start();
+    }
+
+    /** True while this activity is running the Linux runtime rather than a Wine container. */
+    private boolean isLinuxRuntimeSession() {
+        return com.winlator.star.linux.LinuxShortcuts.isLinuxEntry(shortcut);
+    }
+
+    /**
+     * The graphics API a LINUX session is really using, read from the processes of that session -
+     * they run under this app's uid, so their /proc/&lt;pid&gt;/maps is readable here.
+     *
+     * <p>Two things can be true at once and the game wins: the Steam client's own interface is
+     * OpenGL through the runtime's Zink, and a game the client launched is Direct3D through the
+     * DXVK/VKD3D inside Valve's Proton. Both end in Vulkan on the same Turnip. Nothing here reads
+     * a Wine prefix, so nothing an earlier Wine game left behind can be reported.
+     *
+     * @return "D3D12 · VKD3D", "D3D11 · DXVK", "D3D9 · DXVK", "Zink", or null when only the
+     *         compositor's own Vulkan is in evidence (the neutral label then stands).
+     */
+    private String resolveLinuxSessionApi() {
+        String root;
+        try {
+            root = com.winlator.star.linux.LinuxRuntime.rootDir(this).getAbsolutePath();
+        } catch (Exception e) {
+            return null;
+        }
+        String[] pids = new File("/proc").list();
+        if (pids == null) return null;
+        boolean zink = false, dxvk = false, vkd3d = false, d3d11 = false, d3d9 = false;
+        for (String pid : pids) {
+            if (pid.isEmpty() || !Character.isDigit(pid.charAt(0))) continue;
+            // Identify the session's processes by their MAPPINGS, not by /proc/<pid>/exe: proot
+            // execs everything through its own loader, so exe resolves to
+            // .../com.termux/files/usr/libexec/proot/loader for every one of them and a check on
+            // it matches nothing (device-checked). Their libraries are mapped by host path, so the
+            // runtime's directory appears in maps - and that is the file we need to read anyway.
+            boolean ours = false;
+            try (java.io.BufferedReader r = new java.io.BufferedReader(
+                    new java.io.FileReader("/proc/" + pid + "/maps"))) {
+                String line;
+                while ((line = r.readLine()) != null) {
+                    if (!ours) {
+                        if (line.indexOf(root) < 0) continue;
+                        ours = true;
+                    }
+                    if (line.indexOf("vkd3d") >= 0 || line.indexOf("d3d12") >= 0) vkd3d = true;
+                    else if (line.indexOf("dxvk") >= 0) dxvk = true;
+                    if (line.indexOf("d3d11.dll") >= 0 || line.indexOf("d3d10") >= 0) d3d11 = true;
+                    else if (line.indexOf("d3d9.dll") >= 0) d3d9 = true;
+                    else if (line.indexOf("zink") >= 0) zink = true;
+                }
+            } catch (Exception ignored) {
+                // Another uid's process (unreadable) or one that exited mid-read: both are normal,
+                // and the next poll two seconds later sees the truth.
+            }
+        }
+        if (vkd3d) return "D3D12 \u00b7 VKD3D";
+        if (d3d11) return dxvk ? "D3D11 \u00b7 DXVK" : "D3D11";
+        if (d3d9) return dxvk ? "D3D9 \u00b7 DXVK" : "D3D9";
+        if (dxvk) return "D3D \u00b7 DXVK";
+        if (zink) return "Zink";
+        return null;
     }
 
     private void stopDxApiDetection() {
