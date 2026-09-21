@@ -10724,3 +10724,45 @@ TF2's launch options restored to `-condebug`; the autolaunch hook cleared.
 > untested with a real imported zip.
 >
 > Untested on device. App build `35549635663` (sha `e1701623`), Turnip dry run `35549416109`.
+
+### 2026-09-21 — 🔖 ROLLBACK POINT, and what the ports from WinNative cost
+
+> **Go here if the Linux client will not start:** commit **`17663f36`**, ref
+> `refs/backup/20260921/linux-pre-max-ports` (pushed), APK **`9ee955fab660ab7e4c3b0b6e33cc2f94a1ea5c7bece8111fd55f4c3e4dc2f974`**
+> (run 35577699317). That build is **device-proven**: the imported glibc Turnip loads
+> (`== vulkan driver: imported …`, and it is mapped in `gamescope-wl`, `steam` and `steamwebhelper`
+> with the runtime's own at zero), the client logs in, and the in-game drawer names both drivers.
+> `git reset --hard refs/backup/20260921/linux-pre-max-ports`, then install that APK.
+>
+> `ba8851cb` (the HUD API label for Linux sessions) is one commit later and looks safe - it only
+> changes which resolver a Linux session uses - but it was staged (`3b676086…`) and **never
+> confirmed installed**, so it is not the rollback target.
+>
+> **What came after, and what it did to the device.** Six fixes were taken from WinNative
+> (maxjivi05, `feature/wayland-gamescope`) in `20b1236e` and `ba07c7c7`: the HUD's frame counter
+> (`f467345c`), the seat's modifiers and the session's time zone (`cb52935c`), a NetworkManager
+> stand-in so the client stops showing no connection (`e7a224ae`), a seccomp probe (`2e8b31a8`),
+> and a bundled-driver fallback in our own shape (`c01a89f0`). Five of those are quiet. The
+> **seccomp probe broke every Linux session, twice**:
+>
+> - First as `ba07c7c7`: the probe execs proot from the app's data directory with a plain
+>   ProcessBuilder, which Android refuses (W^X), and I had written "could not run" as "this kernel
+>   is broken". `PROOT_NO_SECCOMP` went on, `getcwd`/`mkdir`/`statx` all returned **ENOSYS**, and
+>   gamescope threw `filesystem error: status: Function not implemented [/etc/gamescope/scripts]`
+>   before the client existed. The good log for comparison has **zero** "Function not implemented".
+> - Then again as `ecb8c093`: with the exec fixed, proot died in the **linker** instead -
+>   `CANNOT LINK EXECUTABLE … library "libtalloc.so.2" not found` - because the probe did not set
+>   `LD_LIBRARY_PATH`, which the session has always set. My "ran and said nothing" branch took that
+>   as the same broken kernel. Same ENOSYS storm.
+> - `8d5ac999` runs proot the way the session does and makes silence inconclusive: only output
+>   showing an exec refused under the filter disables seccomp.
+>
+> **The lesson, written down because it cost two installs:** a probe that fails for its own reasons
+> must never be read as a verdict about the machine. Both times the log said exactly what had
+> happened and both times the code had already decided.
+>
+> Also this session: the proot termios2 fix (`c347fac8`, terminals under glibc 2.42+ - our rootfs is
+> **2.43**, so it is live for us) was applied to `app/src/main/cpp/proot` and **reverted**: that tree
+> is the dead 5.1.0 snapshot, while the shipped binary is built by `build-proot.yml` from a fresh
+> download of termux/proot. Delivering it means patching in that workflow and then settling the open
+> question of whether our own build still aborts GTK - the prebuilts are Termux's deliberately.
