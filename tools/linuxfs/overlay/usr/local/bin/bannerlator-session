@@ -44,6 +44,10 @@ collect_steam_logs() {
 # before setting it, and say so in the log rather than fail silently half a minute later.
 if [ -n "${BL_VK_DRIVER:-}" ]; then
   bl_icd_lib=$(sed -n 's/.*"library_path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$BL_VK_DRIVER" 2>/dev/null | head -1)
+  # JSON may escape the separator: org.json writes "\/data\/user\/0\/...". The Vulkan loader
+  # parses that correctly; this check has to as well, or an absolute path looks relative and gets
+  # glued onto the manifest's directory - which is exactly what happened the first time.
+  bl_icd_lib=$(printf '%s' "$bl_icd_lib" | sed 's|\\/|/|g')
   case $bl_icd_lib in
     /*) ;;
     ?*) bl_icd_lib="$(dirname "$BL_VK_DRIVER")/$bl_icd_lib" ;;
