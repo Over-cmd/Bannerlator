@@ -10670,3 +10670,52 @@ we skip because Android denies apps the user namespaces pressure-vessel needs. T
 gap and it is not mine to close.
 
 TF2's launch options restored to `-condebug`; the autolaunch hook cleared.
+
+### 2026-09-20 — The third driver: a glibc Turnip for the Linux runtime, and a row that picks it
+
+> Every Turnip we ship came in two builds and **both are bionic**: the AdrenoTools zip
+> (`-Dplatforms=android`, the only one with the Android surface WSI, so the only one that can hand a
+> frame to SurfaceFlinger) and the `-Wayland` zip for Wine containers. The Linux runtime could use
+> neither: the Steam client and every game it launches are glibc processes and cannot load a bionic
+> object at all. So a Linux session drew with whatever Turnip the runtime *image* was built with, and
+> a driver fix could not reach an installed runtime without a new ~790 MB image.
+>
+> **Banners-Turnip now builds a third leg per driver** (branch `feat/linux-driver`, commit
+> `f6f9a2b`-line, **not merged to `A8xx`**): `Turnip-<tag>[-variant]-Linux.zip`.
+> `build_turnip_linux.sh` cross-builds with `aarch64-linux-gnu-*` against a sysroot assembled from
+> the **same Arch Linux ARM packages the runtime itself is made of** — a 44-package dependency
+> closure over the core/extra/alarm databases, the resolver lifted from `build-linuxfs.sh` — so the
+> `libdrm` / `wayland` / `libxcb` it links against are the ones on the device. KGSL backend,
+> `-Dplatforms=wayland,x11`: both WSIs are in the chain, because gamescope reaches the app with
+> `--backend wayland` while the client and its games are X11 clients of gamescope's own Xwayland.
+> `patches/linux/` carries the two KGSL fixes (DRM-node report, and gating calibrated timestamps and
+> present timing on the kernel interface actually implementing the counter read), both verified to
+> apply to Mesa main `366b006c` with offsets only.
+>
+> **Why no distro build would do.** Mesa's `meson.options` defaults `freedreno-kmds` to `['msm']`
+> and every distro package takes that default, so a stock Arch/Fedora Turnip finds no GPU on an
+> Android kernel (`/dev/kgsl-3d0`, not a DRM node). The two fixes are not upstream either. Nobody
+> publishes a KGSL-capable aarch64 Linux Turnip; that is the gap.
+>
+> First CI run built all three and failed one check: Arch's `libc.so` is a linker script naming
+> `ld-linux-aarch64.so.1` AS_NEEDED, which my allow-list did not know. Everything else passed on the
+> real binary — **26 `wl_` and 99 `xcb_` symbols** (both WSIs compiled in), **minimum glibc 2.38**
+> read back out of the ELF, both KGSL patch markers present, nothing bionic linked.
+>
+> **App side:** `LinuxVulkanDriverManager` imports a `-Linux` zip into
+> `files/linux_vulkan_drivers/<id>/`; the check that separates the three kinds is the libc soname in
+> the driver's `.dynstr` (glibc's is versioned, bionic's is not), so a bionic zip is refused with a
+> reason rather than loading into nothing. The shortcut editor gains **Draw driver (Linux runtime)**
+> beneath the display-driver row, Contents → Installed gains a **Linux runtime drivers** section, and
+> the session is handed `BL_VK_DRIVER` and points the loader at it with `VK_DRIVER_FILES`. Nothing
+> inside the runtime is modified, so switching back is instant. `VK_DRIVER_FILES` *replaces* the
+> loader's search, so an unreadable manifest or library would leave the session with no Vulkan at
+> all — both are checked in `bannerlator-session` before it is set, and ignored loudly otherwise
+> (tested against absolute and relative `library_path`).
+>
+> **Also confirmed, and it is a real gap:** nothing in `proton-wine` reads `BANNER_WAYLAND_VK_ICD`.
+> The app sets it for an imported Wayland game driver and no layer honours it, so on the app side the
+> layer's bundled Turnip is what loads and importing a Wayland driver has no effect. The Linux path
+> deliberately does not work that way.
+>
+> Untested on device. App build `35549635663` (sha `e1701623`), Turnip dry run `35549416109`.
