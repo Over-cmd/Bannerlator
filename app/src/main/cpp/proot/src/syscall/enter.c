@@ -28,7 +28,8 @@
 #include <sys/prctl.h> /* PR_SET_DUMPABLE */
 #include <sys/un.h>    /* struct sockaddr_un, */
 #include <talloc.h>    /* talloc_*, */
-#include <termios.h>   /* TCSETS, TCSANOW */
+#include <asm/ioctls.h>   /* TCGETS*, TCSETS*, */
+#include <asm/termbits.h> /* struct termios2, */
 
 #include "arch.h"
 #include "execve/execve.h"
@@ -123,6 +124,33 @@ int translate_syscall_enter(Tracee *tracee) {
 
   case PR_brk:
     translate_brk_enter(tracee);
+    status = 0;
+    break;
+
+  case PR_ioctl:
+    /* glibc 2.42 and later read and write terminal settings with the termios2
+     * requests, which Android's SELinux policy denies an app on a pty, so no
+     * program in the guest saw a terminal: shells ran with no prompt and no line
+     * editing.  Turn them into the older requests the policy does allow; the
+     * kernel reads and writes the part the two structures share, and exit.c
+     * fills in the speeds termios2 adds.
+     * (From WinNative, maxjivi05, c347fac8; GPL-2.0 proot.)  */
+    switch ((uint32_t)peek_reg(tracee, CURRENT, SYSARG_2)) {
+    case TCGETS2:
+      poke_reg(tracee, SYSARG_2, TCGETS);
+      break;
+    case TCSETS2:
+      poke_reg(tracee, SYSARG_2, TCSETS);
+      break;
+    case TCSETSW2:
+      poke_reg(tracee, SYSARG_2, TCSETSW);
+      break;
+    case TCSETSF2:
+      poke_reg(tracee, SYSARG_2, TCSETSF);
+      break;
+    default:
+      break;
+    }
     status = 0;
     break;
 
