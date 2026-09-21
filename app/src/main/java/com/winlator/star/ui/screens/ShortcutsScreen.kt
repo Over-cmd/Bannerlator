@@ -6986,7 +6986,8 @@ internal fun ShortcutSettingsDialogScreen(
                 add("selectIcon")
                 // The Wine/X11 graphics stack is not registered for a Linux entry, so the D-pad
                 // cursor can never land on a row that isn't drawn (see the render conditionals).
-                if (!isLinuxEntry) { add("displayBackend"); add("gfxDriver") }
+                if (!isLinuxEntry) add("displayBackend")
+                add("gfxDriver")   // the compositor driver: live on the gamescope path too
                 if (effectiveWaylandShortcut && !isLinuxEntry) { add("waylandGameDriver"); add("waylandDriverCfg") }
                 if (effectiveWaylandShortcut || isLinuxEntry) add(com.winlator.star.display.WaylandHdr.EXTRA)
                 if (!effectiveWaylandShortcut && !isLinuxEntry) { add("gfxWrapper"); add("gfxConfig") } // hidden on Wayland (X11 shims/tuning)
@@ -7437,23 +7438,27 @@ internal fun ShortcutSettingsDialogScreen(
                     // under graphicsProbeMutex with the compositor choices; cached after the first run).
                     var waylandGameDriverValues by remember { mutableStateOf<List<String>>(emptyList()) }
                     var waylandAutoPick by remember { mutableStateOf(com.winlator.star.core.WaylandGameDriver.autoVariantIfKnown()) }
-                    LaunchedEffect(effectiveWaylandShortcut) {
-                        if (!effectiveWaylandShortcut) return@LaunchedEffect
+                    LaunchedEffect(effectiveWaylandShortcut, isLinuxEntry) {
+                        if (!effectiveWaylandShortcut && !isLinuxEntry) return@LaunchedEffect
                         compositorChoices = compositorDriverChoices(gfxContext) // same source as the config dialog
                         compositorChoicesLoaded = true
                         waylandGameDriverValues = com.winlator.star.core.WaylandGameDriver.optionValues(gfxContext)
                         waylandAutoPick = waylandAutoVariant(gfxContext)
                     }
                     val compositorVersion = GraphicsDriverConfigDialog.getVersion(graphicsDriverConfig) ?: ""
-                    // A Linux session renders on the Turnip ICD inside the Linux runtime, not on a
-                    // driver picked here, and the compositor it presents through takes the container's
-                    // driver — so neither picker nor the wrapper manager has anything to act on.
-                    if (!isLinuxEntry) {
+                    // Two different drivers are involved in a Linux session and only one of them is
+                    // chosen here. This row picks the ANDROID driver the app's own compositor loads to
+                    // import the session's finished frames and put them on screen - it is live on this
+                    // path, and "System" here is a black screen. What the client and its games render
+                    // WITH is the Linux-built driver inside the runtime, which no row here touches.
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        if (effectiveWaylandShortcut) {
+                        if (effectiveWaylandShortcut || isLinuxEntry) {
                             DpDrop(
                                 dp, "gfxDriver",
-                                label = "Compositor driver",
+                                // Named for what it does on each path. On a Linux entry the distinction
+                                // matters: this is the Android driver that DISPLAYS the session, while a
+                                // separate Linux driver inside the runtime is what draws it.
+                                label = if (isLinuxEntry) "Display driver (Android side)" else "Compositor driver",
                                 options = compositorChoices,
                                 selected = compositorDriverLabel(compositorVersion, compositorChoices, compositorChoicesLoaded),
                                 onSelect = { graphicsDriverConfig = withGraphicsDriverVersion(graphicsDriverConfig, it) },
@@ -7470,12 +7475,15 @@ internal fun ShortcutSettingsDialogScreen(
                                 onRightId = "gfxWrapper"
                             )
                         }
-                        IconButton(onClick = { helpRes = R.string.help_graphics_driver }) {
+                        IconButton(onClick = {
+                            helpRes = if (isLinuxEntry) R.string.help_linux_display_driver
+                                      else R.string.help_graphics_driver
+                        }) {
                             Icon(Icons.Default.Help, contentDescription = "What is this?", modifier = Modifier.size(18.dp))
                         }
                         // Wrappers are X11 game-driver shims: nothing on the Wayland path uses them,
                         // so the manager button is left out there (the "?" stays).
-                        if (!effectiveWaylandShortcut) {
+                        if (!effectiveWaylandShortcut && !isLinuxEntry) {
                             DpButton(dp, "gfxWrapper", onActivate = { showWrapperManager = true }, onLeftId = "gfxDriver") {
                                 IconButton(onClick = { showWrapperManager = true }) {
                                     Icon(Icons.Default.CloudDownload, contentDescription = stringResource(R.string.wrapper_manager_open))
@@ -7487,7 +7495,6 @@ internal fun ShortcutSettingsDialogScreen(
                         showWrapperManager = false
                         wrapperRefreshKey++ // pick up a just-imported/deleted wrapper
                     })
-                    }
                     // Driver configuration is X11 tuning; on Wayland its only live field (the Turnip
                     // version) is covered by the Compositor driver dropdown, so the button is hidden.
                     // The Wayland branch is also where HDR output lives, and that one DOES reach a

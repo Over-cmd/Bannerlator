@@ -2513,7 +2513,11 @@ trying for speed, <b>notemplates</b> if you get driver crashes.
         <b>Game cores</b><br /><br />
         Chooses which CPU cores a <b>game launched from the Steam client</b> may run on. It reaches games only - the client and its menus keep the list above. Leaving every core ticked lets Android place the work itself, which is usually the best choice.
     ]]></string>
-    <string name="help_linux_audio_driver"><![CDATA[
+        <string name="help_linux_display_driver"><![CDATA[
+        <b>Display driver (Android side)</b><br /><br />
+        Two graphics drivers are involved in a Linux session and this is one of them. This is the Android driver the app loads to take the session\'s finished frames and put them on your screen. It affects <b>both</b> the Steam client and its games, because everything you see goes through it. Setting it to System gives a black screen. What the client and its games actually render with is a separate driver inside the Linux runtime, which is not chosen here.
+    ]]></string>
+<string name="help_linux_audio_driver"><![CDATA[
         <b>Audio Driver</b><br /><br />
         How sound leaves the session and reaches Android. On this path only <b>PulseAudio</b> carries sound, and it carries it for <b>both</b> the Steam client and the games the client launches. Every other value leaves the whole session silent, so keep this on PulseAudio.
     ]]></string>
