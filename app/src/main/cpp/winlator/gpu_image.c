@@ -10,6 +10,7 @@
 #include <GLES2/gl2ext.h>
 #include <jni.h>
 #include <unistd.h>
+#include <stdlib.h>
 
 #define LOG_TAG "GPUImage"
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
