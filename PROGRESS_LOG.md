@@ -10681,7 +10681,7 @@ TF2's launch options restored to `-condebug`; the autolaunch hook cleared.
 > a driver fix could not reach an installed runtime without a new ~790 MB image.
 >
 > **Banners-Turnip now builds a third leg per driver** (branch `feat/linux-driver`, commit
-> `f6f9a2b`-line, **not merged to `A8xx`**): `Turnip-<tag>[-variant]-Linux.zip`.
+> `8f1f91d`, **not merged to `A8xx`**): `Turnip-<tag>[-variant]-Linux.zip`.
 > `build_turnip_linux.sh` cross-builds with `aarch64-linux-gnu-*` against a sysroot assembled from
 > the **same Arch Linux ARM packages the runtime itself is made of** — a 44-package dependency
 > closure over the core/extra/alarm databases, the resolver lifted from `build-linuxfs.sh` — so the
