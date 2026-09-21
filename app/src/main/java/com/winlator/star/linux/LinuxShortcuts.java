@@ -223,4 +223,32 @@ public final class LinuxShortcuts {
         File file = steamShortcutFile(container);
         return !file.isFile() || file.delete();
     }
+
+    /**
+     * Moves the Steam entry from one container to another exactly as it is - the file IS the
+     * user's settings for it (driver, cores, resolution, everything the editor wrote) - and gives
+     * the destination the icon the entry names. Used once, when the entry leaves the Wine
+     * container it used to need for the Linux runtime's own settings container. Returns false and
+     * leaves the source alone if the copy could not be written.
+     */
+    public static boolean moveSteamShortcut(Container from, Container to, Context context) {
+        File src = steamShortcutFile(from);
+        if (!src.isFile()) return false;
+        File desktopDir = to.getDesktopDir();
+        if (!desktopDir.isDirectory() && !desktopDir.mkdirs()) {
+            Log.w(TAG, "cannot create " + desktopDir);
+            return false;
+        }
+        String content = FileUtils.readString(src);
+        if (content == null || content.isEmpty()) return false;
+        if (context != null) writeIcon(context, to);
+        if (!FileUtils.writeString(steamShortcutFile(to), content)) {
+            Log.w(TAG, "could not write " + steamShortcutFile(to));
+            return false;
+        }
+        //noinspection ResultOfMethodCallIgnored
+        src.delete();
+        Log.i(TAG, "moved the Steam entry out of container " + from.id + " into the Linux runtime's own");
+        return true;
+    }
 }

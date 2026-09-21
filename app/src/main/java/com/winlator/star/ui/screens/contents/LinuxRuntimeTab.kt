@@ -329,19 +329,21 @@ private fun ProtonBuildsCard() {
 private fun addSteamEntry(context: android.content.Context) {
     runCatching {
         val manager = ContainerManager(context)
-        // Check EVERY container, not just the one we are about to write to. The choice below can
-        // land on a different container than last time - one got marked as a gamescope runtime, or
-        // the order changed - and an update then added a SECOND entry beside the one already there.
-        if (manager.containers.any { LinuxShortcuts.hasSteamShortcut(it) }) return
-        val container = manager.containers.firstOrNull { it.isGamescopeRuntime }
-            ?: manager.containers.firstOrNull() ?: return
-        LinuxShortcuts.createSteamShortcut(container, context)
+        val linux = manager.linuxContainer
+        if (LinuxShortcuts.hasSteamShortcut(linux)) return
+        // The entry used to be written into a Wine container, whichever one was first. A copy
+        // still there is moved here as it is - its extras are the user's settings - so nothing is
+        // lost and the Games tab does not show the client twice. It needs no container at all now.
+        val old = manager.containers.firstOrNull { LinuxShortcuts.hasSteamShortcut(it) }
+        if (old != null && LinuxShortcuts.moveSteamShortcut(old, linux, context)) return
+        LinuxShortcuts.createSteamShortcut(linux, context)
     }
 }
 
 private fun removeSteamEntry(context: android.content.Context) {
     runCatching {
         val manager = ContainerManager(context)
+        LinuxShortcuts.removeSteamShortcut(manager.linuxContainer)
         manager.containers.forEach { LinuxShortcuts.removeSteamShortcut(it) }
     }
 }
