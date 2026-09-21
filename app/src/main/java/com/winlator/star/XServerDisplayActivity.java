@@ -15263,6 +15263,63 @@ return true;
     // The active container's config for the Task Manager header. Set once (it doesn't change while
     // the game runs). Uses the same resolved getters the launch path uses so it reflects per-game
     // shortcut overrides, not just the raw container.
+    /** "Linux (gamescope) - rootfs r9", from the version the runtime image itself carries. */
+    private String linuxRuntimeLabel() {
+        String version = "";
+        try {
+            File marker = new File(com.winlator.star.linux.LinuxRuntime.rootDir(this), ".version");
+            if (marker.isFile()) {
+                version = new String(java.nio.file.Files.readAllBytes(marker.toPath()),
+                        java.nio.charset.StandardCharsets.UTF_8).trim();
+            }
+        } catch (Exception e) {
+            Log.w("XServerDisplayActivity", "linux: rootfs version unavailable", e);
+        }
+        return "Linux (gamescope)" + (version.isEmpty() ? "" : " \u00b7 rootfs " + version);
+    }
+
+    /**
+     * The two drivers a Linux session really uses: the Android one the app's compositor loads to
+     * put the session on screen, and the Linux one inside the runtime that the client and every
+     * game it launches draw with. Same shape as {@link #waylandDriverSummary()}, different pair.
+     */
+    private String linuxDriverSummary() {
+        String display = "System";
+        try {
+            String gdc = (shortcut != null)
+                    ? shortcut.getExtra("graphicsDriverConfig", container.getGraphicsDriverConfig())
+                    : container.getGraphicsDriverConfig();
+            String driverId = com.winlator.star.contentdialog.GraphicsDriverConfigDialog.getVersion(gdc);
+            if (driverId != null && !driverId.isEmpty() && !driverId.equals("System")) {
+                AdrenotoolsManager atm = new AdrenotoolsManager(this);
+                String name = atm.getDriverName(driverId);
+                String ver = atm.getDriverVersion(driverId);
+                display = (name == null || name.isEmpty() ? driverId : name)
+                        + (ver == null || ver.isEmpty() ? "" : " " + ver);
+            }
+        } catch (Exception e) {
+            Log.w("XServerDisplayActivity", "linux: display driver name unavailable", e);
+        }
+        String draw = "Runtime default";
+        try {
+            String choice = shortcut != null
+                    ? shortcut.getExtra(com.winlator.star.core.LinuxVulkanDriver.EXTRA, "") : "";
+            if (choice != null && !choice.isEmpty()) {
+                com.winlator.star.contents.LinuxVulkanDriverManager m =
+                        new com.winlator.star.contents.LinuxVulkanDriverManager(this);
+                // An import that is gone falls back at launch; say that here rather than name it.
+                draw = m.isInstalled(choice)
+                        ? m.getDriverName(choice)
+                                + (m.getDriverVersion(choice).isEmpty() ? "" : " " + m.getDriverVersion(choice))
+                                + " (imported)"
+                        : "Runtime default (" + choice + " is gone)";
+            }
+        } catch (Exception e) {
+            Log.w("XServerDisplayActivity", "linux: draw driver name unavailable", e);
+        }
+        return "display: " + display + " · draw: " + draw;
+    }
+
     private XServerDialogState.TmContainerInfo buildTmContainerInfo() {
         try {
             String wine = wineInfo != null ? wineInfo.toString() : "—";
@@ -15275,6 +15332,17 @@ return true;
             }
             String device = android.os.Build.MODEL + soc + " · " + cores + " cores · Android "
                 + android.os.Build.VERSION.RELEASE;
+            // A Linux session is not a Wine container and the panel must not describe it as one:
+            // there is no Wine (the client is a native aarch64 ELF), no DX wrapper of ours (a game
+            // the client launches brings Valve's Proton with its own), and the driver pair is a
+            // different pair - the Android driver that displays the session, and the Linux driver
+            // inside the runtime that draws it.
+            boolean linuxRuntime = com.winlator.star.linux.LinuxShortcuts.isLinuxEntry(shortcut);
+            if (linuxRuntime) {
+                return new XServerDialogState.TmContainerInfo(
+                    linuxRuntimeLabel(), "", resolvedRenderer(), linuxDriverSummary(), res, device,
+                    "Wayland", hdrRowValue(), null, true);
+            }
             return new XServerDialogState.TmContainerInfo(
                 wine, dxwrapper, resolvedRenderer(),
                 waylandMode ? waylandDriverSummary() : graphicsDriver, res, device,
