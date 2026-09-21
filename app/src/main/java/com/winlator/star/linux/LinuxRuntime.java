@@ -83,6 +83,12 @@ public final class LinuxRuntime {
                     "/usr/bin/echo", PROBE_WORD);
             builder.environment().put("PROOT_LOADER", prootLoader(context).getPath());
             builder.environment().put("PROOT_TMP_DIR", context.getCacheDir().getPath());
+            // proot links against libtalloc, which sits beside it in the runtime. Without this the
+            // probe's proot dies in the linker ("library libtalloc.so.2 not found") before it can
+            // say anything about the kernel - which is how this probe came to blame a kernel that
+            // was fine. The session has always set it; the probe has to run proot the same way.
+            String libs = prootLibraryPath(context);
+            if (!libs.isEmpty()) builder.environment().put("LD_LIBRARY_PATH", libs);
             builder.redirectErrorStream(true).redirectOutput(output);
             probe = builder.start();
             if (!probe.waitFor(PROBE_TIMEOUT_SECONDS, java.util.concurrent.TimeUnit.SECONDS)) {
@@ -93,9 +99,15 @@ public final class LinuxRuntime {
             byte[] said = output.isFile() ? Files.readAllBytes(output.toPath()) : new byte[0];
             String text = new String(said, StandardCharsets.UTF_8);
             if (text.contains(PROBE_WORD)) return true;
-            // The probe RAN and the program did not speak: that is the kernel this exists for.
-            android.util.Log.w(TAG, "proot probe ran and said nothing: " + text.trim());
-            return false;
+            // Silence alone proves nothing - proot can fail for its own reasons before the kernel
+            // is ever reached. Only the failure this exists for counts: an exec that came back
+            // ENOSYS under the filter. Anything else leaves the fast path alone.
+            if (text.contains("Function not implemented") || text.contains("execve")) {
+                android.util.Log.w(TAG, "proot probe: the kernel refused an exec under seccomp: " + text.trim());
+                return false;
+            }
+            android.util.Log.w(TAG, "proot probe inconclusive, leaving seccomp acceleration on: " + text.trim());
+            return true;
         } catch (java.io.IOException e) {
             // The probe could not be started at all - which is the normal case here, because
             // Android refuses to exec a binary out of the app's data directory (W^X), and the
