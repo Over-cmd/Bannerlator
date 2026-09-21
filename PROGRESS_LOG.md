@@ -10713,9 +10713,14 @@ TF2's launch options restored to `-condebug`; the autolaunch hook cleared.
 > all — both are checked in `bannerlator-session` before it is set, and ignored loudly otherwise
 > (tested against absolute and relative `library_path`).
 >
-> **Also confirmed, and it is a real gap:** nothing in `proton-wine` reads `BANNER_WAYLAND_VK_ICD`.
-> The app sets it for an imported Wayland game driver and no layer honours it, so on the app side the
-> layer's bundled Turnip is what loads and importing a Wayland driver has no effect. The Linux path
-> deliberately does not work that way.
+> **A claim I made here earlier and then disproved, recorded so it is not believed twice:** I said
+> nothing in `proton-wine` reads `BANNER_WAYLAND_VK_ICD`, so importing a Wayland game driver had no
+> effect. That came from grepping the wrong worktree (`p10-2c-aio-refresh`). It **is** implemented -
+> `dlls/winewayland.drv/waylanddrv_main.c` `use_bundled_drivers`, commit `ccc31af185f` on the Wayland
+> layer line - it takes the path when it is absolute and readable, prefers it over the bundled
+> variant, and logs `winewayland: Vulkan driver <manifest>` either way. Device-verified in the
+> INSTALLED layer `Proton/11.0-2.1-arm64ec-16`: both strings are in its `winewayland.so` and it ships
+> all eight bundled variant manifests. So the Wayland side needed no work; only the log line is
+> untested with a real imported zip.
 >
 > Untested on device. App build `35549635663` (sha `e1701623`), Turnip dry run `35549416109`.
