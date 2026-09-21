@@ -126,7 +126,17 @@ JNIEXPORT void JNICALL
 Java_com_winlator_star_renderer_GPUImage_destroyHardwareBuffer(JNIEnv *env, jclass obj, jlong ptr) {
     AHardwareBuffer *ahb = (AHardwareBuffer *)ptr;
     if (ahb) {
-        AHardwareBuffer_unlock(ahb, NULL);
+        /* 🚨 ESCUDO ANTIFUGAS DE MEMORIA MALI (PURGA DE DESCRIPTORES AHB):
+           En lugar de pasar NULL, capturamos el descriptor de archivo de la valla (fenceFd)
+           que la GPU Mali-G52 genera al desbloquear el búfer gráfico. Si el descriptor es válido,
+           lo clausuramos inmediatamente con 'close()', liberando el canal de la RAM virtual 
+           y erradicando por completo los cierres inesperados tras largas sesiones de juego. */
+        int fenceFd = -1;
+        AHardwareBuffer_unlock(ahb, &fenceFd);
+        if (fenceFd >= 0) {
+            close(fenceFd);
+        }
+        
         AHardwareBuffer_release(ahb);
     }
 }
