@@ -59,6 +59,7 @@ public final class LinuxRuntime {
      * run the runtime.
      */
     /** Told to proot when its seccomp acceleration does not work on this kernel. */
+    private static final String TAG = "LinuxRuntime";
     public static final String ENV_NO_SECCOMP = "PROOT_NO_SECCOMP";
     private static final String PROBE_WORD = "bannerlator-proot";
     private static final long PROBE_TIMEOUT_SECONDS = 15;
@@ -84,15 +85,30 @@ public final class LinuxRuntime {
             builder.environment().put("PROOT_TMP_DIR", context.getCacheDir().getPath());
             builder.redirectErrorStream(true).redirectOutput(output);
             probe = builder.start();
-            if (!probe.waitFor(PROBE_TIMEOUT_SECONDS, java.util.concurrent.TimeUnit.SECONDS)) return false;
+            if (!probe.waitFor(PROBE_TIMEOUT_SECONDS, java.util.concurrent.TimeUnit.SECONDS)) {
+                android.util.Log.w(TAG, "proot probe timed out; assuming seccomp works");
+                return true;
+            }
             // Read the file directly: FileUtils.readString throws when the probe wrote nothing.
             byte[] said = output.isFile() ? Files.readAllBytes(output.toPath()) : new byte[0];
-            return new String(said, StandardCharsets.UTF_8).contains(PROBE_WORD);
-        } catch (java.io.IOException e) {
+            String text = new String(said, StandardCharsets.UTF_8);
+            if (text.contains(PROBE_WORD)) return true;
+            // The probe RAN and the program did not speak: that is the kernel this exists for.
+            android.util.Log.w(TAG, "proot probe ran and said nothing: " + text.trim());
             return false;
+        } catch (java.io.IOException e) {
+            // The probe could not be started at all - which is the normal case here, because
+            // Android refuses to exec a binary out of the app's data directory (W^X), and the
+            // session does not start proot this way. A probe that cannot run proves nothing, and
+            // taking it as proof of a broken kernel set PROOT_NO_SECCOMP on a device where seccomp
+            // works: every syscall then came back "Function not implemented" and gamescope threw
+            // on the first directory it looked at. Change nothing unless the probe actually ran.
+            android.util.Log.w(TAG, "proot probe could not run (" + e.getMessage()
+                    + "); leaving seccomp acceleration on");
+            return true;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            return false;
+            return true;
         } finally {
             if (probe != null) probe.destroyForcibly();
             //noinspection ResultOfMethodCallIgnored
