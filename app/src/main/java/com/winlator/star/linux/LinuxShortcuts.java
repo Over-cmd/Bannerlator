@@ -126,7 +126,12 @@ public final class LinuxShortcuts {
                 + Container.EXTRA_RUNTIME + "=" + Container.RUNTIME_GAMESCOPE + "\n"
                 + LinuxRuntime.EXTRA_LINUX_MODE + "=" + LinuxRuntime.MODE_STEAM + "\n"
                 + "app_id=" + appId + "\n"
-                + "displayBackend=wayland\n";
+                + "displayBackend=wayland\n"
+                // Written out rather than inherited: a Linux session sizes gamescope by this, and
+                // the client's own interface is the most expensive thing it draws. A container set
+                // to 1080p, or a TV mode, would otherwise carry the client with it. The editor's
+                // Screen size row changes it as for any entry.
+                + "screenSize=" + Container.DEFAULT_SCREEN_SIZE + "\n";
         return FileUtils.writeString(file, content);
     }
 
@@ -148,7 +153,9 @@ public final class LinuxShortcuts {
                 + Container.EXTRA_RUNTIME + "=" + Container.RUNTIME_GAMESCOPE + "\n"
                 + LinuxRuntime.EXTRA_LINUX_MODE + "=" + LinuxRuntime.MODE_STEAM + "\n"
                 // gamescope is a Wayland client; the launch path would pin this anyway.
-                + "displayBackend=" + Container.DISPLAY_BACKEND_WAYLAND + "\n";
+                + "displayBackend=" + Container.DISPLAY_BACKEND_WAYLAND + "\n"
+                // 720p by default, whatever the container is set to (see the game entry above).
+                + "screenSize=" + Container.DEFAULT_SCREEN_SIZE + "\n";
         if (context != null) {
             String cover = writeCoverArt(context);
             if (!cover.isEmpty()) content += "customCoverArtPath=" + cover + "\n";
