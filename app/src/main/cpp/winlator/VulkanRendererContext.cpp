@@ -103,7 +103,11 @@ VulkanRendererContext::~VulkanRendererContext() {
     isRunning = false; dirtyCV.notify_all();
     if (renderThread.joinable()) renderThread.join();
     std::lock_guard<std::mutex> lk(renderMutex);
-    vk_.DeviceWaitIdle(device);
+    
+    if (device != VK_NULL_HANDLE) {
+        vk_.DeviceWaitIdle(device);
+    }
+
     for (auto& [id, wt] : texMap) destroyWinTex(wt);
     texMap.clear();
     
@@ -154,6 +158,20 @@ VulkanRendererContext::~VulkanRendererContext() {
     vk_.DestroyPipeline(device, pipeline, nullptr);
     vk_.DestroyPipelineLayout(device, pipeLayout, nullptr);
     vk_.DestroyDescriptorSetLayout(device, dsLayout, nullptr);
+
+    /* 🚨 ORDENACIÓN REGLAMENTARIA DE PURGA MALI (MESA CORE):
+       Primero destruimos el command pool y el render pass base. Al remover las dependencias 
+       de dibujo primero, desatamos las vallas y semáforos de la GPU, permitiendo que la 
+       memoria se recicle de inmediato en la RAM virtual sin dejar residuos colgando. */
+    if (cmdPool != VK_NULL_HANDLE) {
+        vk_.DestroyCommandPool(device, cmdPool, nullptr);
+        cmdPool = VK_NULL_HANDLE;
+    }
+    if (renderPass != VK_NULL_HANDLE) {
+        vk_.DestroyRenderPass(device, renderPass, nullptr);
+        renderPass = VK_NULL_HANDLE;
+    }
+
     // Semaphores are per pending present, fences per frame slot.
     for (size_t i = 0; i < renderDoneSems.size(); i++)
         vk_.DestroySemaphore(device, renderDoneSems[i], nullptr);
@@ -161,11 +179,16 @@ VulkanRendererContext::~VulkanRendererContext() {
         vk_.DestroySemaphore(device, imgAvailSems[i], nullptr);
     for (size_t i = 0; i < inFlightFences.size(); i++)
         vk_.DestroyFence(device, inFlightFences[i], nullptr);
+
     lsfgEngine_.reset();
     winfgEngine_.reset();
     destroyFgQueryPool();
-    vk_.DestroyCommandPool(device, cmdPool, nullptr);
-    vk_.DestroyRenderPass(device, renderPass, nullptr);
+
+    /* 🚨 SELLO ATÓMICO MULTI-ARCH MALI:
+       Forzamos una barrera de sincronización en el microprocesador justo antes de apagar 
+       el dispositivo lógico de Vulkan, barriendo por completo la RAM física de la tablet. */
+    __sync_synchronize();
+
     vk_.DestroyDevice(device, nullptr);
     vk_.DestroySurfaceKHR(instance, surface, nullptr);
     vk_.DestroyInstance(instance, nullptr);
