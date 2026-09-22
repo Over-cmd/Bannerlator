@@ -28,13 +28,11 @@ fi
 # Until the runtime is stable, Steam's own logs are copied beside the session log at exit so a
 # failed launch can be handed over as one folder.
 collect_steam_logs() {
-  [ -n "${BL_DEBUG_DIR:-}" ] || return 0
-  local steam_root=${XDG_DATA_HOME:-$HOME/.local/share}/Steam
-  mkdir -p "$BL_DEBUG_DIR" 2>/dev/null || return 0
-  [ -d "$steam_root/logs" ] && cp -r "$steam_root/logs" "$BL_DEBUG_DIR/steam-logs" 2>/dev/null
-  [ -f "$HOME/.steam/steam/logs/steamwebhelper.log" ] && cp "$HOME/.steam/steam/logs/steamwebhelper.log" "$BL_DEBUG_DIR/" 2>/dev/null
-  [ -f "$steam_root/steam.pid" ] && cp "$steam_root/steam.pid" "$BL_DEBUG_DIR/" 2>/dev/null
-  echo "== steam logs copied to $BL_DEBUG_DIR"
+  # The app collects Steam's logs at teardown now - whatever ended the session, and scrubbed of
+  # credentials (the client logs its session token in connection_log.txt). This used to copy them
+  # raw into Download, and only on a clean exit. Kept as a name so nothing that calls it breaks.
+  [ -n "${BL_DEBUG_DIR:-}" ] && echo "== steam logs are collected by the app into $BL_DEBUG_DIR/steam"
+  return 0
 }
 # The driver everything in this session draws with: gamescope's compositing, the client's UI
 # (OpenGL through Zink) and every game Proton launches. BL_VK_DRIVER names an imported driver's ICD

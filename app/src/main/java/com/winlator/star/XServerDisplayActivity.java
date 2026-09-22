@@ -1549,6 +1549,8 @@ public class XServerDisplayActivity extends AppCompatActivity {
     private boolean waylandMode = false;
     // The session runs gamescope in the Linux runtime instead of Wine; the compositor is its display.
     private boolean gamescopeMode = false;
+    /** This Linux session's log folder, for the teardown collection. */
+    private File linuxSessionLogDir;
     // HUD metric sampling for wayland mode (see startWaylandCompositor): its own thread, never the
     // compositor's. update() self-throttles to 500 ms and posts the view refresh to the UI thread.
     private android.os.HandlerThread waylandHudThread;
@@ -8888,13 +8890,36 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // public Downloads folder — the whole session (proot, gamescope, Steam stdout) goes in it,
         // and the script copies Steam's own logs beside it at exit — so a user can hand over a
         // folder without digging into app-private storage.
-        File logDir = com.winlator.star.linux.LinuxRuntime.debugLogDir();
-        logDir.mkdirs();
-        String stamp = new java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US)
-                .format(new java.util.Date());
-        File sessionLog = new File(logDir, "session-" + stamp + ".log");
+        // One folder per session now (see SessionLogs): the guest log, the controller diagnostics,
+        // a device and a network report written before anything starts, the app's own logcat while
+        // launch logging is on, and at teardown the audio log, the crash buffer and Steam's own logs
+        // scrubbed of credentials. Same layout as the SteamDeck standalone app's bundles.
+        final File logDir = com.winlator.star.linux.SessionLogs.begin();
+        File sessionLog = new File(logDir, "session.log");
         guest.add("BL_LOG=" + sessionLog.getPath());
-        guest.add("BL_DEBUG_DIR=" + new File(logDir, "session-" + stamp).getPath());
+        guest.add("BL_DEBUG_DIR=" + logDir.getPath());
+        linuxSessionLogDir = logDir;
+        try {
+            StringBuilder eff = new StringBuilder();
+            String[][] keys = {
+                    {"Screen size", "screenSize"}, {"Display driver (Android)", "graphicsDriverConfig"},
+                    {"Draw driver (Linux)", com.winlator.star.core.LinuxVulkanDriver.EXTRA},
+                    {"Client cores", "linuxClientCpuList"}, {"Game cores", "linuxGameCpuList"},
+                    {"Audio driver", "audioDriver"}, {"Frame generation", "frameGenEngine"},
+                    {"Env vars", "envVars"}};
+            for (String[] k : keys) {
+                String v = shortcut != null ? shortcut.getExtra(k[1], "") : "";
+                eff.append(String.format(java.util.Locale.US, "%-24s", k[0]))
+                   .append(v == null || v.isEmpty() ? "(container default)" : v).append('\n');
+            }
+            eff.append(String.format(java.util.Locale.US, "%-24s", "Settings container"))
+               .append(container != null ? container.id + " (" + container.getName() + ")" : "none").append('\n');
+            com.winlator.star.linux.SessionLogs.writeDeviceReport(this, new File(logDir, "device.txt"), eff.toString());
+            com.winlator.star.linux.SessionLogs.writeNetworkReport(this, new File(logDir, "network.txt"));
+            if (isLaunchLoggingEnabled()) com.winlator.star.linux.SessionLogs.startAppLog(new File(logDir, "app.log"));
+        } catch (Exception e) {
+            Log.w("XServerDisplayActivity", "session reports", e);
+        }
 
         // Controllers for a Linux session.
         // WinHandler already publishes the on-screen and physical pads into the fake-input rings (setFakeInputPath, in onCreate).
@@ -9042,7 +9067,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // minutes, and on a phone there is no way to retrieve it at all.
         // Everything needed to tell "no controller" apart from "no node", "not staged" or "not preloaded".
         try {
-            File diag = new File(logDir, "fake-input-" + stamp + ".txt");
+            File diag = new File(logDir, "fake-input.txt");
             StringBuilder sb = new StringBuilder();
             sb.append("session libraries staged (name=bytes, -1 = failed): ")
               .append(stagedReport.toString().trim()).append('\n');
@@ -9184,6 +9209,8 @@ public class XServerDisplayActivity extends AppCompatActivity {
         environment.addComponent(new com.winlator.star.linux.LinuxProgramLauncherComponent(
                 command, hostEnv, com.winlator.star.linux.LinuxRuntime.rootDir(this), (status) -> {
                     Log.i("XServerDisplayActivity", "Linux session " + session + " ended: " + status);
+                    com.winlator.star.linux.SessionLogs.collect(XServerDisplayActivity.this, linuxSessionLogDir,
+                            new File(getFilesDir(), "pulseaudio/pulse.log"));
                     // Whatever the client installed during the session is the app's now.
                     try {
                         com.winlator.star.linux.LinuxSteamLibrary.adoptClientInstalls(
