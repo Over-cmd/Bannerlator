@@ -8260,8 +8260,12 @@ public class XServerDisplayActivity extends AppCompatActivity {
             if (winStarted) return;
             winStarted = true;
             cancelLaunchTimers();
+            // A Linux session uncovers at once: the Steam client plays its start-up sound on its
+            // first frame, and the grace held the loading screen over it for five audible seconds
+            // (device-heard). The grace stays for Wine, where the boot steps are worth a glance.
+            long grace = gamescopeMode ? 0L : LAUNCH_OVERLAY_GRACE_MS;
             new android.os.Handler(getMainLooper()).postDelayed(
-                    preloaderDialog::closeOnUiThread, LAUNCH_OVERLAY_GRACE_MS);
+                    preloaderDialog::closeOnUiThread, grace);
         }));
         // Performance HUD: X11 shows it when a window gets _MESA_DRV and counts X presents. Here the
         // compositor reports the window presenting GPU frames, then each of its frames.
