@@ -5156,12 +5156,23 @@ private fun TmContainerPanel(info: XServerDialogState.TmContainerInfo?) {
                     .padding(horizontal = 10.dp, vertical = 6.dp)
             ) {
                 val wayland = info.displayBackend == "Wayland"
-                ContainerInfoRow("Wine", info.wine)
+                // A Linux session runs no Wine of ours and no DX wrapper of ours: a game the client
+                // launches brings Valve's Proton with its own DXVK/VKD3D, which we do not pick and
+                // cannot name from here. Say what is true and leave out what would be invented.
+                ContainerInfoRow(if (info.linuxRuntime) "Runtime" else "Wine", info.wine)
                 ContainerInfoRow("Display backend", info.displayBackend)
-                ContainerInfoRow("DX wrapper", prettyDxWrapper(info.dxWrapper), accent)
+                if (!info.linuxRuntime) ContainerInfoRow("DX wrapper", prettyDxWrapper(info.dxWrapper), accent)
                 // Wayland: the game presents through the embedded compositor's Vulkan backend, and the
                 // driver value is the "compositor: … · game: …" pair the activity resolved (wraps).
-                ContainerInfoRow("Renderer", if (wayland) "Vulkan (Wayland compositor)" else prettyRenderer(info.renderer), accent)
+                ContainerInfoRow(
+                    "Renderer",
+                    when {
+                        info.linuxRuntime -> "Vulkan (gamescope \u2192 Wayland compositor)"
+                        wayland -> "Vulkan (Wayland compositor)"
+                        else -> prettyRenderer(info.renderer)
+                    },
+                    accent,
+                )
                 ContainerInfoRow("Graphics driver", info.graphicsDriver)
                 // Wayland hands the GPU-name spoof to DXVK and leaves the Vulkan device alone, so this
                 // is the only place that can say the game is being told about a GPU that isn't here.

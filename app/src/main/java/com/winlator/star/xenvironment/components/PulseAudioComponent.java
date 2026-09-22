@@ -21,6 +21,17 @@ import java.util.ArrayList;
 
 public class PulseAudioComponent extends EnvironmentComponent {
     private final UnixSocketConfig socketConfig;
+    /**
+     * A named pipe carrying microphone audio, or null for no microphone.
+     *
+     * <p>The bundle ships module-aaudio-sink but no matching source, which is why the Steam client
+     * reports "No input devices detected" and its voice chat has nothing to record with. The relay
+     * helper already owns an Android input stream - opened under the app's own uid, the only way
+     * Android permits recording - so pointing module-pipe-source at a pipe the helper writes turns
+     * that one stream into a source the client can see. The helper fans the same microphone out to
+     * the games capturing through the relay as well, so both hear the same thing.
+     */
+    private final String micFifoPath;
     private static int pid = -1;
     private static final Object lock = new Object();
 
@@ -79,7 +90,13 @@ public class PulseAudioComponent extends EnvironmentComponent {
     private static volatile String currentSinkName = "AAudioSink";
 
     public PulseAudioComponent(UnixSocketConfig socketConfig) {
+        this(socketConfig, null);
+    }
+
+    /** As above, with a microphone fed from {@code micFifoPath}; null for output only. */
+    public PulseAudioComponent(UnixSocketConfig socketConfig, String micFifoPath) {
         this.socketConfig = socketConfig;
+        this.micFifoPath = micFifoPath;
     }
 
     private File pulseDir() { return new File(environment.getContext().getFilesDir(), "pulseaudio"); }
@@ -192,12 +209,33 @@ public class PulseAudioComponent extends EnvironmentComponent {
         // resume now goes through the native pasink libpulse client instead).
         new File(workingDir, "cli").delete();
 
+        // module-pipe-source creates the pipe with mkfifo and fails outright if one is already
+        // there - EEXIST, reported as "Unknown error 17" - and the module then does not load at
+        // all, so the source never appears and the client reports no microphone. Ours lives in the
+        // app's files directory and survives a session, so after the very first run the path was
+        // always occupied. Removed here, before the daemon reads this config: the daemon makes it,
+        // and the relay helper starts afterwards and is content to find one already made.
+        if (micFifoPath != null && !micFifoPath.isEmpty()) {
+            //noinspection ResultOfMethodCallIgnored
+            new File(micFifoPath).delete();
+        }
+
         File configFile = new File(workingDir, "default.pa");
-        FileUtils.writeString(configFile, String.join("\n",
+        java.util.List<String> config = new ArrayList<>(java.util.Arrays.asList(
             "load-module module-native-protocol-unix auth-anonymous=1 auth-cookie-enabled=0 socket=\""+socketConfig.path+"\"",
             "load-module module-aaudio-sink " + resolveSinkArgs(),
             "set-default-sink AAudioSink"
         ));
+        if (micFifoPath != null && !micFifoPath.isEmpty()) {
+            // The format is the helper's, fixed at s16le/48000/mono: it resamples when the device
+            // grants another input rate, so the daemon is never told a rate the bytes are not.
+            // A pipe has no clock, so nothing here corrects drift - acceptable for voice, which is
+            // all this is for.
+            config.add("load-module module-pipe-source source_name=DirectAudioMic file=\""
+                    + micFifoPath + "\" format=s16le rate=48000 channels=1");
+            config.add("set-default-source DirectAudioMic");
+        }
+        FileUtils.writeString(configFile, String.join("\n", config));
 
         String archName = AppUtils.getArchName();
         File modulesDir = new File(workingDir, "modules/"+archName);
@@ -218,6 +256,12 @@ public class PulseAudioComponent extends EnvironmentComponent {
         command += " --daemonize=false";
         command += " --use-pid-file=false";
         command += " --exit-idle-time=-1";
+        // The daemon's own log, kept in its working directory. Its stderr is discarded by
+        // ProcessHelper, so until now a module refusing to load, a pipe that could not be created
+        // or the daemon exiting at startup left no trace anywhere - the Steam client just reported
+        // no microphone. Four separate faults hid behind that one symptom in a single night. One
+        // file per start, overwritten each time, small enough never to matter.
+        command += " --log-level=info --log-target=file:" + new File(workingDir, "pulse.log").getAbsolutePath();
 
         return ProcessHelper.exec(command, envVars.toArray(new String[0]), workingDir);
     }

@@ -774,6 +774,7 @@ internal fun xmbScrapeCoverMenu(xmb: XmbScope, shortcut: Shortcut): XmbMenu {
                 add(
                     XmbRow.Action(
                         key = "c:$url", label = "Cover ${i + 1}", icon = Icons.Filled.Image, thumbnail = thumb,
+                        thumbnailLarge = true,
                         disabledReason = if (saving) "Saving cover…" else null,
                     ) { useCover(url) }
                 )

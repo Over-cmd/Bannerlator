@@ -219,7 +219,7 @@ static void on_client_created(struct wl_listener *l, void *data) {
 
 /* ------------------------------------------------------------------ surfaces */
 
-enum surface_role { ROLE_NONE, ROLE_TOPLEVEL, ROLE_SUBSURFACE, ROLE_DESKTOP };
+enum surface_role { ROLE_NONE, ROLE_TOPLEVEL, ROLE_SUBSURFACE, ROLE_DESKTOP, ROLE_CURSOR };
 
 struct surface {
     struct wl_resource *resource;
@@ -266,7 +266,10 @@ struct surface {
     struct wl_list children;                /* bottom to top */
     struct wl_list child_link;
     int sub_x, sub_y, sub_pending_x, sub_pending_y, sub_pending;
+    int sub_sync;                           /* wl_subsurface mode: its frames reach the screen with the parent's commit */
+    int hud_frame;                          /* a GPU frame arrived in this window since the HUD last counted one */
     int below_parent;
+    int fullscreen;                         /* xdg_toplevel.set_fullscreen: no client decorations */
 
     char *title;                            /* xdg_toplevel title, for the session log */
     int announced_vulkan;                   /* logged its first dmabuf frame */
@@ -286,7 +289,7 @@ static struct wl_event_source *g_render_idle, *g_frame_timer;
  * window) a fallback timer renders instead. */
 static int g_dirty;                         /* something changed since the last render */
 static int64_t g_last_vsync_ns;             /* last tick, 0 = none yet */
-static int64_t g_refresh_ns = 16666667;     /* screen refresh interval, from the ticks */
+static int64_t g_refresh_ns = 16666667;     /* measured tick interval (pacing only, never reported) */
 static struct wl_event_source *g_fallback_timer;
 static int g_fallback_armed;
 
@@ -456,11 +459,77 @@ static void release_buffer(struct surface *s, struct wl_resource *buffer, int64_
 /* Each Wine process is a separate client with its own wl_pointer / wl_keyboard. */
 struct seat_pointer { struct wl_resource *ptr; struct wl_resource *focus; };
 struct seat_keyboard { struct wl_resource *kb; struct wl_resource *focus; };
+struct seat_touch { struct wl_resource *touch; struct wl_resource *focus; };
 #define MAX_PTRS 32
 static struct seat_pointer g_ptrs[MAX_PTRS];
 static int g_nptrs;
 static struct seat_keyboard g_kbs[MAX_PTRS];
 static int g_nkbs;
+static struct seat_touch g_touches[MAX_PTRS];
+static int g_ntouches;
+
+/* ---- the guest's cursor (wl_pointer.set_cursor) ----------------------------------------------
+ * The compositor does not composite the cursor: under zero-copy the game's buffer goes straight to
+ * an Android layer and there is nothing to composite into, so a composited cursor would vanish
+ * exactly when the fast path is on. Instead the client's cursor surface is snapshotted here and the
+ * app draws it as its overlay - which sits above every present path. What this buys over guessing:
+ * the real cursor SHAPE, and an authoritative HIDE (a Wayland client hides the pointer by calling
+ * set_cursor with a NULL surface, which is what a mouse-look game does). */
+#define CURSOR_MAX_PX (128 * 128)
+static pthread_mutex_t g_cursor_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct surface *g_cursor_surface;     /* compositor thread only */
+static int g_cursor_hx, g_cursor_hy;         /* hotspot, surface-local */
+static uint32_t g_cursor_px[CURSOR_MAX_PX];  /* guarded by g_cursor_lock: ARGB8888 snapshot */
+static int g_cursor_w, g_cursor_h;           /* 0 = nothing to draw */
+static int g_cursor_hidden = 1;              /* the guest asked for no pointer */
+static int g_cursor_serial;                  /* bumped on every change; the app polls it */
+
+static void cursor_publish_hidden(void) {
+    pthread_mutex_lock(&g_cursor_lock);
+    if (!g_cursor_hidden) { g_cursor_hidden = 1; g_cursor_serial++; }
+    pthread_mutex_unlock(&g_cursor_lock);
+}
+
+/* Copy a committed cursor buffer out for the app. wl_shm only: Wine draws cursors in software. */
+static void cursor_publish_shm(struct wl_shm_buffer *shm, int hx, int hy) {
+    int32_t w = wl_shm_buffer_get_width(shm), h = wl_shm_buffer_get_height(shm);
+    int32_t stride = wl_shm_buffer_get_stride(shm);
+    if (w <= 0 || h <= 0 || w * h > CURSOR_MAX_PX) return;
+    wl_shm_buffer_begin_access(shm);
+    const unsigned char *src = (const unsigned char *)wl_shm_buffer_get_data(shm);
+    pthread_mutex_lock(&g_cursor_lock);
+    for (int y = 0; y < h; y++)
+        memcpy(&g_cursor_px[y * w], src + (size_t)y * stride, (size_t)w * 4);
+    g_cursor_w = w; g_cursor_h = h;
+    g_cursor_hx = hx; g_cursor_hy = hy;
+    g_cursor_hidden = 0;
+    g_cursor_serial++;
+    pthread_mutex_unlock(&g_cursor_lock);
+    wl_shm_buffer_end_access(shm);
+}
+
+/* Read by the app (UI thread). out = [serial, hidden, w, h, hotspotX, hotspotY, pixels...].
+ * Returns the number of ints written, or 0 if out is too small. */
+int banner_cursor_snapshot(int *out, int cap) {
+    int n = 0;
+    pthread_mutex_lock(&g_cursor_lock);
+    int need = 6 + (g_cursor_hidden ? 0 : g_cursor_w * g_cursor_h);
+    if (cap >= need) {
+        out[0] = g_cursor_serial; out[1] = g_cursor_hidden;
+        out[2] = g_cursor_w; out[3] = g_cursor_h;
+        out[4] = g_cursor_hx; out[5] = g_cursor_hy;
+        if (!g_cursor_hidden)
+            memcpy(out + 6, g_cursor_px, (size_t)g_cursor_w * g_cursor_h * 4);
+        n = need;
+    }
+    pthread_mutex_unlock(&g_cursor_lock);
+    return n;
+}
+/* Fingers currently down, so a move/up reaches the surface the finger went down on even if it
+ * later slides outside it (Wayland requires the whole sequence to go to the same surface). */
+#define MAX_FINGERS 10
+struct finger { int id; struct surface *target; int active; };
+static struct finger g_fingers[MAX_FINGERS];
 static struct surface *g_grab;              /* no-desktop fallback: surface holding the button */
 static struct surface *g_key_target;        /* no-desktop fallback: last clicked surface */
 static struct surface *g_ime_click;         /* last clicked program window: where text input goes */
@@ -669,7 +738,16 @@ static void take_shm(struct surface *s, struct wl_shm_buffer *shm, struct wl_res
 
 /* The window the app's performance HUD follows: the latest one to start presenting GPU frames
  * (X11 binds the HUD to the _MESA_DRV window and counts X presents instead). JNI upcalls. */
+/* A synchronized subsurface belongs to its parent's frame: gamescope presents through a toplevel
+ * and a plane per layer, attaches to all of them and commits the toplevel last. Following one plane
+ * counts nothing once the game moves to another - which is why a Linux session's HUD read 0 fps -
+ * so such a surface is counted as the window it is part of, once per commit of that window.
+ * (From WinNative, maxjivi05, feature/wayland-gamescope f467345c; GPL-3.0.) */
 static struct surface *g_hud_surface;
+static struct surface *hud_window(struct surface *s) {
+    while (s->parent && s->sub_sync) s = s->parent;
+    return s;
+}
 extern void banner_on_game_surface(const char *window, const char *gpu); /* window NULL = gone */
 extern void banner_on_game_frame(void);
 /* The program behind that window: its Linux pid (the Wayland client's credentials) and executable name
@@ -722,8 +800,9 @@ static void take_dmabuf(struct surface *s, struct dmabuf_buffer *b, struct wl_re
                        name, b->width, b->height, (unsigned long long)b->modifier);
         /* The HUD follows the window whether its frames are copied or go straight to the layer:
          * a zero-copy frame the compositor never imported is still a presented game frame. */
-        if (b->img || ahb_swapchain_has_ahb(b)) {
-            g_hud_surface = s;
+        if ((b->img || ahb_swapchain_has_ahb(b)) && g_hud_surface != hud_window(s)) {
+            g_hud_surface = hud_window(s);
+            g_hud_surface->hud_frame = 0;
             banner_on_game_surface(name, vkp_gpu_name());
             struct client_info *ci = client_info_of(wl_resource_get_client(s->resource));
             if (ci) banner_on_game_program((int)ci->pid, strncmp(ci->name, "pid ", 4) ? ci->name : "");
@@ -745,7 +824,11 @@ static void take_dmabuf(struct surface *s, struct dmabuf_buffer *b, struct wl_re
                                : "the compositor's driver could NOT import it (nothing can show it)");
         s->hdr_fmt_logged = b->format;
     }
-    if (s == g_hud_surface && (b->img || ahb_swapchain_has_ahb(b))) banner_on_game_frame();
+    /* Every buffer that reaches take_dmabuf is a presented GPU frame, so the HUD counts it.
+     * Asking whether the compositor could import it, as this used to, is a question about the
+     * copy path and not about whether a frame happened: a game whose buffers go straight to
+     * the display layer draws on screen while the counter sat at 0.0 fps and 1000.0 ms. */
+    if (hud_window(s) == g_hud_surface) g_hud_surface->hud_frame = 1;
 }
 
 /* ---- hooks for ahb_swapchain.c (zero-copy layers) */
@@ -802,13 +885,26 @@ static void feedback_discard_all(struct wl_list *list) {
     }
 }
 
+/* The current mode's refresh interval in ns, from the rate the app read off the display. */
+static uint32_t nominal_refresh_ns(void) {
+    int mhz = g_output_refresh_mhz;
+    if (mhz <= 0) mhz = 60000;
+    return (uint32_t)(1000000000000LL / (int64_t)mhz);
+}
+
 static void feedback_present_all(struct wl_list *list, int64_t t) {
     struct wl_resource *fb, *tmp;
     uint64_t sec = (uint64_t)(t / 1000000000LL);
     uint32_t nsec = (uint32_t)(t % 1000000000LL);
     wl_resource_for_each_safe(fb, tmp, list) {
+        /* The protocol's "refresh" is the NOMINAL interval of the current mode, a constant - not
+         * the interval this frame happened to take. Reporting the measured average instead makes a
+         * variable-refresh panel look like a mode change on every frame: gamescope re-derives its
+         * pacing each time ("Changed refresh to: 119.2 ... 121.4hz", 826 times in a minute on a
+         * Galaxy Z Fold, none on a fixed-refresh device). Report the panel's rate, which the app
+         * gives us and wl_output already advertises. */
         wp_presentation_feedback_send_presented(fb, (uint32_t)(sec >> 32), (uint32_t)sec, nsec,
-                                                (uint32_t)g_refresh_ns, 0, 0,
+                                                nominal_refresh_ns(), 0, 0,
                                                 WP_PRESENTATION_FEEDBACK_KIND_VSYNC);
         wl_resource_destroy(fb);
     }
@@ -877,8 +973,13 @@ static void surface_commit(struct wl_client *c, struct wl_resource *r) {
         s->pending_buffer = NULL;
         s->pending_attach = 0;
 
-        if (s->role == ROLE_NONE) {
-            /* Cursor or role-less surface: never drawn (the app draws its own pointer). */
+        if (s->role == ROLE_CURSOR) {
+            /* The guest's pointer image. Copied out for the app's overlay (see cursor_publish_shm)
+             * rather than composited, so it survives the zero-copy and HDR layer paths. */
+            if (shm) cursor_publish_shm(shm, g_cursor_hx, g_cursor_hy);
+            if (buffer) wl_buffer_send_release(buffer);
+        } else if (s->role == ROLE_NONE) {
+            /* Role-less surface: never drawn. */
             if (buffer) wl_buffer_send_release(buffer);
         } else if (db) {
             take_dmabuf(s, db, buffer);
@@ -905,6 +1006,11 @@ static void surface_commit(struct wl_client *c, struct wl_resource *r) {
     wl_list_init(&s->pending_frames);
     wl_list_insert_list(s->feedback.prev, &s->pending_feedback);
     wl_list_init(&s->pending_feedback);
+    /* One frame per commit of the window, however many of its planes were attached to. */
+    if (s == g_hud_surface && s->hud_frame) {
+        s->hud_frame = 0;
+        banner_on_game_frame();
+    }
     constraints_surface_commit(s);
     banner_color_commit(s->resource); /* wp_color_management_surface_v1 state (returns at once when HDR is off) */
 
@@ -949,6 +1055,11 @@ static void surface_resource_destroy(struct wl_resource *r) {
     if (!s) return;
     for (int i = 0; i < g_nptrs; i++) if (g_ptrs[i].focus == r) g_ptrs[i].focus = NULL;
     for (int i = 0; i < g_nkbs; i++) if (g_kbs[i].focus == r) g_kbs[i].focus = NULL;
+    for (int i = 0; i < g_ntouches; i++) if (g_touches[i].focus == r) g_touches[i].focus = NULL;
+    if (g_cursor_surface && g_cursor_surface->resource == r) { g_cursor_surface = NULL; cursor_publish_hidden(); }
+    for (int i = 0; i < MAX_FINGERS; i++)
+        if (g_fingers[i].active && g_fingers[i].target && g_fingers[i].target->resource == r)
+            g_fingers[i].active = 0;
     if (g_grab == s) g_grab = NULL;
     if (g_key_target == s) g_key_target = NULL;
     if (g_ime_click == s) g_ime_click = NULL;
@@ -1078,8 +1189,14 @@ static void subsurface_place_below(struct wl_client *c, struct wl_resource *r,
                                    struct wl_resource *sibling) {
     restack_child(wl_resource_get_user_data(r), wl_resource_get_user_data(sibling), 0);
 }
-static void subsurface_set_sync(struct wl_client *c, struct wl_resource *r) {}
-static void subsurface_set_desync(struct wl_client *c, struct wl_resource *r) {}
+static void subsurface_set_sync(struct wl_client *c, struct wl_resource *r) {
+    struct surface *s = wl_resource_get_user_data(r);
+    if (s) s->sub_sync = 1;
+}
+static void subsurface_set_desync(struct wl_client *c, struct wl_resource *r) {
+    struct surface *s = wl_resource_get_user_data(r);
+    if (s) s->sub_sync = 0;
+}
 static const struct wl_subsurface_interface subsurface_impl = {
     .destroy = subsurface_destroy,
     .set_position = subsurface_set_position,
@@ -1113,6 +1230,7 @@ static void subcompositor_get_subsurface(struct wl_client *c, struct wl_resource
     s->subsurface = sub;
     s->parent = p;
     s->below_parent = 0;
+    s->sub_sync = 1;   /* wl_subsurface starts synchronized */
     s->sub_x = s->sub_y = 0;
     wl_list_insert(p->children.prev, &s->child_link); /* new subsurfaces go on top */
 }
@@ -1197,6 +1315,34 @@ static void xdg_toplevel_resize(struct wl_client *c, struct wl_resource *r, stru
                                 uint32_t serial, uint32_t edges) {}
 static void xdg_toplevel_set_i32(struct wl_client *c, struct wl_resource *r, int32_t w, int32_t h) {}
 static void xdg_toplevel_noop(struct wl_client *c, struct wl_resource *r) {}
+/* Size 0x0 = the client picks; active, and fullscreen when asked. gamescope waits for the
+ * fullscreen state before it drops its libdecor frame, and never draws until it arrives. */
+static void send_toplevel_configure(struct surface *s) {
+    struct wl_array states;
+    wl_array_init(&states);
+    uint32_t *st = wl_array_add(&states, sizeof(uint32_t));
+    *st = XDG_TOPLEVEL_STATE_ACTIVATED;
+    if (s->fullscreen) {
+        st = wl_array_add(&states, sizeof(uint32_t));
+        *st = XDG_TOPLEVEL_STATE_FULLSCREEN;
+    }
+    xdg_toplevel_send_configure(s->xdg_toplevel, 0, 0, &states);
+    wl_array_release(&states);
+    xdg_surface_send_configure(s->xdg_surface, wl_display_next_serial(g_display));
+}
+static void xdg_toplevel_set_fullscreen(struct wl_client *c, struct wl_resource *r,
+                                        struct wl_resource *output) {
+    struct surface *s = wl_resource_get_user_data(r);
+    if (!s || !s->xdg_surface || !s->xdg_toplevel || s->fullscreen) return;
+    s->fullscreen = 1;
+    send_toplevel_configure(s);
+}
+static void xdg_toplevel_unset_fullscreen(struct wl_client *c, struct wl_resource *r) {
+    struct surface *s = wl_resource_get_user_data(r);
+    if (!s || !s->xdg_surface || !s->xdg_toplevel || !s->fullscreen) return;
+    s->fullscreen = 0;
+    send_toplevel_configure(s);
+}
 static const struct xdg_toplevel_interface xdg_toplevel_impl = {
     .destroy = xdg_toplevel_destroy_req,
     .set_parent = xdg_toplevel_noop_parent,
@@ -1209,8 +1355,8 @@ static const struct xdg_toplevel_interface xdg_toplevel_impl = {
     .set_min_size = xdg_toplevel_set_i32,
     .set_maximized = xdg_toplevel_noop,
     .unset_maximized = xdg_toplevel_noop,
-    .set_fullscreen = xdg_toplevel_noop_parent,
-    .unset_fullscreen = xdg_toplevel_noop,
+    .set_fullscreen = xdg_toplevel_set_fullscreen,
+    .unset_fullscreen = xdg_toplevel_unset_fullscreen,
     .set_minimized = xdg_toplevel_noop,
 };
 static void xdg_toplevel_resource_destroy(struct wl_resource *r) {
@@ -1229,18 +1375,10 @@ static void xdg_surface_get_toplevel(struct wl_client *c, struct wl_resource *r,
     struct wl_resource *tl = wl_resource_create(c, &xdg_toplevel_interface, wl_resource_get_version(r), id);
     if (!tl) { wl_client_post_no_memory(c); return; }
     wl_resource_set_implementation(tl, &xdg_toplevel_impl, s, xdg_toplevel_resource_destroy);
-    if (s) {
-        s->role = ROLE_TOPLEVEL;
-        s->xdg_toplevel = tl;
-    }
-    /* Size 0x0 = the client picks; active. Then the surface configure that applies it. */
-    struct wl_array states;
-    wl_array_init(&states);
-    uint32_t *st = wl_array_add(&states, sizeof(uint32_t));
-    *st = XDG_TOPLEVEL_STATE_ACTIVATED;
-    xdg_toplevel_send_configure(tl, 0, 0, &states);
-    wl_array_release(&states);
-    xdg_surface_send_configure(r, wl_display_next_serial(g_display));
+    if (!s) return;
+    s->role = ROLE_TOPLEVEL;
+    s->xdg_toplevel = tl;
+    send_toplevel_configure(s);
 }
 static void xdg_surface_get_popup(struct wl_client *c, struct wl_resource *r, uint32_t id,
                                   struct wl_resource *parent, struct wl_resource *positioner) {}
@@ -1656,6 +1794,10 @@ static void bind_output(struct wl_client *c, void *data, uint32_t ver, uint32_t 
     wl_output_send_mode(r, WL_OUTPUT_MODE_CURRENT | WL_OUTPUT_MODE_PREFERRED,
                         g_output_w > 0 ? g_output_w : 1920, g_output_h > 0 ? g_output_h : 1080,
                         g_output_refresh_mhz > 0 ? g_output_refresh_mhz : 60000);
+    if (ver >= WL_OUTPUT_NAME_SINCE_VERSION) {
+        wl_output_send_name(r, "Bannerlator-1");
+        wl_output_send_description(r, "Bannerlator display");
+    }
     if (ver >= 2) {
         wl_output_send_scale(r, 1);
         wl_output_send_done(r);
@@ -2232,9 +2374,24 @@ static uint32_t now_ms(void) {
     return (uint32_t)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
 }
 
+/* wl_pointer.set_cursor: the client tells us its pointer image, or asks for none.
+ * A NULL surface means "no cursor" - what a game does for mouse-look - and is the authoritative
+ * signal the app never had before. The surface itself is snapshotted on its next commit. */
 static void pointer_set_cursor(struct wl_client *c, struct wl_resource *r, uint32_t serial,
                                struct wl_resource *surface, int32_t hx, int32_t hy) {
-    /* The app draws its own pointer; cursor surfaces stay role-less and aren't drawn. */
+    if (!surface) {
+        if (g_cursor_surface) g_cursor_surface->role = ROLE_NONE;
+        g_cursor_surface = NULL;
+        cursor_publish_hidden();
+        return;
+    }
+    struct surface *s = wl_resource_get_user_data(surface);
+    if (!s) return;
+    if (s->role != ROLE_NONE && s->role != ROLE_CURSOR) return;  /* already has another role */
+    s->role = ROLE_CURSOR;
+    g_cursor_surface = s;
+    g_cursor_hx = hx;
+    g_cursor_hy = hy;
 }
 static void pointer_release(struct wl_client *c, struct wl_resource *r) { wl_resource_destroy(r); }
 static const struct wl_pointer_interface pointer_impl = {
@@ -2284,9 +2441,15 @@ static void seat_get_keyboard(struct wl_client *c, struct wl_resource *r, uint32
     if (wl_resource_get_version(k) >= WL_KEYBOARD_REPEAT_INFO_SINCE_VERSION)
         wl_keyboard_send_repeat_info(k, 25, 500);
 }
+static void touch_res_destroy(struct wl_resource *r) {
+    for (int i = 0; i < g_ntouches; i++)
+        if (g_touches[i].touch == r) { g_touches[i] = g_touches[--g_ntouches]; break; }
+}
 static void seat_get_touch(struct wl_client *c, struct wl_resource *r, uint32_t id) {
     struct wl_resource *t = wl_resource_create(c, &wl_touch_interface, wl_resource_get_version(r), id);
-    if (t) wl_resource_set_implementation(t, &touch_impl, NULL, NULL);
+    if (!t) { wl_client_post_no_memory(c); return; }
+    wl_resource_set_implementation(t, &touch_impl, NULL, touch_res_destroy);
+    if (g_ntouches < MAX_PTRS) { g_touches[g_ntouches].touch = t; g_touches[g_ntouches].focus = NULL; g_ntouches++; }
 }
 static void seat_release(struct wl_client *c, struct wl_resource *r) { wl_resource_destroy(r); }
 static const struct wl_seat_interface seat_impl = {
@@ -2296,7 +2459,8 @@ static const struct wl_seat_interface seat_impl = {
 static void bind_seat(struct wl_client *c, void *data, uint32_t ver, uint32_t id) {
     struct wl_resource *r = wl_resource_create(c, &wl_seat_interface, ver, id);
     wl_resource_set_implementation(r, &seat_impl, NULL, NULL);
-    wl_seat_send_capabilities(r, WL_SEAT_CAPABILITY_POINTER | WL_SEAT_CAPABILITY_KEYBOARD);
+    wl_seat_send_capabilities(r, WL_SEAT_CAPABILITY_POINTER | WL_SEAT_CAPABILITY_KEYBOARD
+                                 | WL_SEAT_CAPABILITY_TOUCH);
     if (ver >= 2) wl_seat_send_name(r, "bannerlator-seat");
 }
 
@@ -2310,6 +2474,16 @@ static struct seat_keyboard *keyboard_for(struct wl_client *client) {
         if (wl_resource_get_client(g_kbs[i].kb) == client) return &g_kbs[i];
     return NULL;
 }
+
+/* A client may hold more than one wl_pointer/wl_keyboard: gamescope creates a second pair and
+ * reads input on its own thread, so an event sent only to the first object is never seen.
+ * Every delivery below walks all of the client's objects. */
+#define for_each_pointer_of(client, sp) \
+    for (int _i = 0; _i < g_nptrs; _i++) \
+        if (((sp) = &g_ptrs[_i]), wl_resource_get_client((sp)->ptr) == (client))
+#define for_each_keyboard_of(client, sk) \
+    for (int _i = 0; _i < g_nkbs; _i++) \
+        if (((sk) = &g_kbs[_i]), wl_resource_get_client((sk)->kb) == (client))
 
 /* Topmost window whose scene rectangle contains the point (no-desktop fallback). */
 static struct surface *toplevel_at(double x, double y) {
@@ -2331,31 +2505,69 @@ static void pointer_focus(struct wl_resource *target, wl_fixed_t fx, wl_fixed_t 
             wl_pointer_send_frame(g_ptrs[i].ptr);
         g_ptrs[i].focus = NULL;
     }
-    struct seat_pointer *sp = pointer_for(client);
-    if (sp && sp->focus != target) {
+    struct seat_pointer *sp;
+    int entered = 0;
+    for_each_pointer_of(client, sp) {
+        if (sp->focus == target) continue;
         sp->focus = target;
         wl_pointer_send_enter(sp->ptr, wl_display_next_serial(g_display), target, fx, fy);
-        constraints_focus_entered(target, client);
+        entered = 1;
     }
+    if (entered) constraints_focus_entered(target, client);
+}
+
+/* The seat's modifiers in the keymap's real-modifier bits. Wine and gamescope work them out from
+ * the keys they are sent; a nested wlroots compositor takes them from wl_keyboard.modifiers alone,
+ * and without it Shift never reaches its programs.
+ * (From WinNative, maxjivi05, feature/wayland-gamescope cb52935c; GPL-3.0.) */
+static uint32_t g_mod_keys_held, g_mods_locked;
+
+static uint32_t mods_depressed(void) {
+    static const uint32_t bits[] = { 1u << 0, 1u << 0, 1u << 2, 1u << 2, 1u << 3, 1u << 3, 1u << 6, 1u << 6 };
+    uint32_t mods = 0;
+    for (unsigned i = 0; i < sizeof(bits) / sizeof(bits[0]); i++)
+        if (g_mod_keys_held & (1u << i)) mods |= bits[i];
+    return mods;
+}
+
+/* Returns whether the key changed the seat's modifiers. */
+static int mods_key(uint32_t evdev, int pressed) {
+    static const uint32_t keys[] = { 42, 54, 29, 97, 56, 100, 125, 126 }; /* L/R Shift, Ctrl, Alt, Meta */
+    if (evdev == 58) { /* Caps Lock toggles on its press */
+        if (pressed) g_mods_locked ^= 1u << 1;
+        return pressed;
+    }
+    for (unsigned i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
+        if (keys[i] != evdev) continue;
+        uint32_t held = pressed ? g_mod_keys_held | (1u << i) : g_mod_keys_held & ~(1u << i);
+        if (held == g_mod_keys_held) return 0;
+        g_mod_keys_held = held;
+        return 1;
+    }
+    return 0;
 }
 
 static void keyboard_focus(struct wl_resource *target) {
-    struct seat_keyboard *sk = keyboard_for(wl_resource_get_client(target));
-    if (!sk || sk->focus == target) return;
+    struct wl_client *client = wl_resource_get_client(target);
+    struct seat_keyboard *sk;
+    int need = 0;
+    for_each_keyboard_of(client, sk) if (sk->focus != target) need = 1;
+    if (!need) return;
     for (int i = 0; i < g_nkbs; i++) {
-        if (!g_kbs[i].focus || &g_kbs[i] == sk) continue;
+        if (!g_kbs[i].focus || g_kbs[i].focus == target) continue;
         wl_keyboard_send_leave(g_kbs[i].kb, wl_display_next_serial(g_display), g_kbs[i].focus);
         g_kbs[i].focus = NULL;
     }
     struct wl_array keys;
     wl_array_init(&keys);
-    if (sk->focus) wl_keyboard_send_leave(sk->kb, wl_display_next_serial(g_display), sk->focus);
-    sk->focus = target;
-    wl_keyboard_send_enter(sk->kb, wl_display_next_serial(g_display), target, &keys);
-    /* Baseline modifiers = none; Shift/Ctrl arrive as their own key events. */
-    wl_keyboard_send_modifiers(sk->kb, wl_display_next_serial(g_display), 0, 0, 0, 0);
+    for_each_keyboard_of(client, sk) {
+        if (sk->focus == target) continue;
+        sk->focus = target;
+        wl_keyboard_send_enter(sk->kb, wl_display_next_serial(g_display), target, &keys);
+        wl_keyboard_send_modifiers(sk->kb, wl_display_next_serial(g_display), mods_depressed(), 0, g_mods_locked, 0);
+    }
     wl_array_release(&keys);
-    banner_clipboard_keyboard_focus(wl_resource_get_client(target)); /* wl_data_device selection follows focus */
+    banner_clipboard_keyboard_focus(client); /* wl_data_device selection follows focus */
 }
 
 /* ------------------------------------------------------------------ pointer constraints
@@ -2773,21 +2985,24 @@ static void pointer_input(double x, double y, int relative, uint32_t button, int
     if (!target) return;
 
     struct wl_client *client = wl_resource_get_client(target->resource);
-    struct seat_pointer *sp = pointer_for(client);
-    if (!sp) return;
+    struct seat_pointer *sp;
+    if (!pointer_for(client)) return;
     int tx = 0, ty = 0;
     if (target != g_desktop && target->placed) { tx = target->x; ty = target->y; }
     wl_fixed_t fx = wl_fixed_from_double(g_ptr_x - tx), fy = wl_fixed_from_double(g_ptr_y - ty);
     uint32_t t = now_ms();
 
     pointer_focus(target->resource, fx, fy);
-    if (!(k && k->is_lock)) wl_pointer_send_motion(sp->ptr, t, fx, fy);
+    if (!(k && k->is_lock))
+        for_each_pointer_of(client, sp) wl_pointer_send_motion(sp->ptr, t, fx, fy);
     send_relative_motion(client, dx, dy);
-    if (button)
-        wl_pointer_send_button(sp->ptr, wl_display_next_serial(g_display), t, button,
-                               pressed ? WL_POINTER_BUTTON_STATE_PRESSED : WL_POINTER_BUTTON_STATE_RELEASED);
-    if (wl_resource_get_version(sp->ptr) >= WL_POINTER_FRAME_SINCE_VERSION)
-        wl_pointer_send_frame(sp->ptr);
+    for_each_pointer_of(client, sp) {
+        if (button)
+            wl_pointer_send_button(sp->ptr, wl_display_next_serial(g_display), t, button,
+                                   pressed ? WL_POINTER_BUTTON_STATE_PRESSED : WL_POINTER_BUTTON_STATE_RELEASED);
+        if (wl_resource_get_version(sp->ptr) >= WL_POINTER_FRAME_SINCE_VERSION)
+            wl_pointer_send_frame(sp->ptr);
+    }
     /* A click lands text input (the soft keyboard's IME text) on the window under the pointer:
      * that's where Wine's focus goes, and winewayland routes IME updates per process. */
     if (button && pressed && !(k && k->is_lock)) {
@@ -2833,6 +3048,76 @@ static void deliver_pointer(const struct input_msg *m) {
     pointer_event(x, y, m->p1 == 1 ? 0 : BTN_LEFT, m->p1 == 0);
 }
 
+static struct seat_touch *touch_for(struct wl_client *client) {
+    for (int i = 0; i < g_ntouches; i++)
+        if (wl_resource_get_client(g_touches[i].touch) == client) return &g_touches[i];
+    return NULL;
+}
+
+/* Real multi-touch: one wl_touch sequence per finger, so a game sees fingers rather than a mouse.
+ * action 0=down 1=move 2=up 3=cancel; p1 = finger id, p2/p3 = INPUT_SPACE position.
+ * A finger stays bound to the surface it went down on until it lifts, as the protocol requires. */
+static void deliver_touch(const struct input_msg *m, int action) {
+    int w, h, ow, oh;
+    double x, y;
+    scene_size(&w, &h);
+    vkp_output_size(&ow, &oh);
+    if (ow <= 0 || oh <= 0 ||
+        !vkp_output_to_scene((double)m->p2 * ow / INPUT_SPACE_W, (double)m->p3 * oh / INPUT_SPACE_H, &x, &y)) {
+        x = (double)m->p2 * w / INPUT_SPACE_W;
+        y = (double)m->p3 * h / INPUT_SPACE_H;
+    }
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    if (x > w - 1) x = w - 1;
+    if (y > h - 1) y = h - 1;
+
+    int id = m->p1;
+    struct finger *f = NULL;
+    for (int i = 0; i < MAX_FINGERS; i++)
+        if (g_fingers[i].active && g_fingers[i].id == id) { f = &g_fingers[i]; break; }
+
+    if (action == 3) {  /* cancel: tell every client holding a finger, then forget them all */
+        for (int i = 0; i < g_ntouches; i++)
+            if (g_touches[i].focus) wl_touch_send_cancel(g_touches[i].touch);
+        for (int i = 0; i < MAX_FINGERS; i++) g_fingers[i].active = 0;
+        wl_display_flush_clients(g_display);
+        return;
+    }
+
+    if (action == 0) {
+        if (f) f->active = 0;                       /* stale id: start it again */
+        struct surface *target = g_desktop ? g_desktop : toplevel_at(x, y);
+        if (!target) return;
+        for (int i = 0; i < MAX_FINGERS && !f; i++)
+            if (!g_fingers[i].active) f = &g_fingers[i];
+        if (!f) return;                             /* more fingers than we track: ignore the extra */
+        f->id = id; f->target = target; f->active = 1;
+    }
+    if (!f || !f->active || !f->target) return;
+
+    struct surface *target = f->target;
+    struct seat_touch *st = touch_for(wl_resource_get_client(target->resource));
+    if (!st) return;
+    int tx = 0, ty = 0;
+    if (target != g_desktop && target->placed) { tx = target->x; ty = target->y; }
+    wl_fixed_t sx = wl_fixed_from_double(x - tx), sy = wl_fixed_from_double(y - ty);
+    uint32_t t = now_ms();
+
+    if (action == 0) {
+        st->focus = target->resource;
+        wl_touch_send_down(st->touch, wl_display_next_serial(g_display), t, target->resource, id, sx, sy);
+    } else if (action == 1) {
+        wl_touch_send_motion(st->touch, t, id, sx, sy);
+    } else {
+        wl_touch_send_up(st->touch, wl_display_next_serial(g_display), t, id);
+        f->active = 0;
+    }
+    if (wl_resource_get_version(st->touch) >= WL_TOUCH_FRAME_SINCE_VERSION)
+        wl_touch_send_frame(st->touch);
+    wl_display_flush_clients(g_display);
+}
+
 static void key_event(uint32_t evdev, int pressed);
 struct wl_resource *banner_ime_target(void);
 static void deliver_key(const struct input_msg *m) {
@@ -2844,17 +3129,23 @@ static void scroll_event(int steps) {
     struct surface *target = g_active_constraint ? g_active_constraint->surface
                            : g_desktop ? g_desktop : (g_grab ? g_grab : toplevel_at(g_ptr_x, g_ptr_y));
     if (!target || !steps) return;
-    struct seat_pointer *sp = pointer_for(wl_resource_get_client(target->resource));
-    if (!sp) return;
+    struct wl_client *client = wl_resource_get_client(target->resource);
+    struct seat_pointer *sp;
+    if (!pointer_for(client)) return;
     int tx = 0, ty = 0;
     if (target != g_desktop && target->placed) { tx = target->x; ty = target->y; }
     uint32_t t = now_ms();
     pointer_focus(target->resource, wl_fixed_from_double(g_ptr_x - tx), wl_fixed_from_double(g_ptr_y - ty));
-    if (wl_resource_get_version(sp->ptr) >= WL_POINTER_AXIS_DISCRETE_SINCE_VERSION)
-        wl_pointer_send_axis_discrete(sp->ptr, WL_POINTER_AXIS_VERTICAL_SCROLL, steps);
-    wl_pointer_send_axis(sp->ptr, t, WL_POINTER_AXIS_VERTICAL_SCROLL, wl_fixed_from_int(steps * 10));
-    if (wl_resource_get_version(sp->ptr) >= WL_POINTER_FRAME_SINCE_VERSION)
-        wl_pointer_send_frame(sp->ptr);
+    for_each_pointer_of(client, sp) {
+        /* From version 8 the discrete event is replaced by value120 and must not be sent. */
+        if (wl_resource_get_version(sp->ptr) >= WL_POINTER_AXIS_VALUE120_SINCE_VERSION)
+            wl_pointer_send_axis_value120(sp->ptr, WL_POINTER_AXIS_VERTICAL_SCROLL, steps * 120);
+        else if (wl_resource_get_version(sp->ptr) >= WL_POINTER_AXIS_DISCRETE_SINCE_VERSION)
+            wl_pointer_send_axis_discrete(sp->ptr, WL_POINTER_AXIS_VERTICAL_SCROLL, steps);
+        wl_pointer_send_axis(sp->ptr, t, WL_POINTER_AXIS_VERTICAL_SCROLL, wl_fixed_from_int(steps * 10));
+        if (wl_resource_get_version(sp->ptr) >= WL_POINTER_FRAME_SINCE_VERSION)
+            wl_pointer_send_frame(sp->ptr);
+    }
     wl_display_flush_clients(g_display);
 }
 
@@ -2874,11 +3165,18 @@ static void key_event(uint32_t evdev, int pressed) {
         wl_list_for_each_reverse(s, &g_toplevels, toplevel_link) { target = s; break; }
     }
     if (!target) return;
-    struct seat_keyboard *sk = keyboard_for(wl_resource_get_client(target->resource));
-    if (!sk) return;
+    struct wl_client *client = wl_resource_get_client(target->resource);
+    struct seat_keyboard *sk;
+    if (!keyboard_for(client)) return;
     keyboard_focus(target->resource);
-    wl_keyboard_send_key(sk->kb, wl_display_next_serial(g_display), now_ms(), evdev,
-                         pressed ? WL_KEYBOARD_KEY_STATE_PRESSED : WL_KEYBOARD_KEY_STATE_RELEASED);
+    int mods_changed = mods_key(evdev, pressed);
+    for_each_keyboard_of(client, sk) {
+        wl_keyboard_send_key(sk->kb, wl_display_next_serial(g_display), now_ms(), evdev,
+                             pressed ? WL_KEYBOARD_KEY_STATE_PRESSED : WL_KEYBOARD_KEY_STATE_RELEASED);
+        if (mods_changed)
+            wl_keyboard_send_modifiers(sk->kb, wl_display_next_serial(g_display),
+                                       mods_depressed(), 0, g_mods_locked, 0);
+    }
     wl_display_flush_clients(g_display);
 }
 
@@ -2893,6 +3191,10 @@ static int on_input_readable(int fd, uint32_t mask, void *data) {
         case 4: scroll_event(m.p1); break;
         case 5: on_vsync(((int64_t)m.p1 << 32) | (uint32_t)m.p2); break;
         case 6: pointer_delta(m.p1 / 256.0, m.p2 / 256.0); break; /* relative motion, 1/256 px */
+        case 7: deliver_touch(&m, 0); break;                     /* finger down */
+        case 8: deliver_touch(&m, 1); break;                     /* finger moved */
+        case 9: deliver_touch(&m, 2); break;                     /* finger up */
+        case 10: deliver_touch(&m, 3); break;                    /* touch cancelled */
         default: deliver_pointer(&m); break;
         }
     }
@@ -2904,6 +3206,16 @@ static int on_input_readable(int fd, uint32_t mask, void *data) {
 void banner_wayland_send_pointer(int action, int x, int y) {
     if (g_input_pipe[1] < 0) return;
     struct input_msg m = { 0, action, x, y };
+    ssize_t n = write(g_input_pipe[1], &m, sizeof(m));
+    (void)n;
+}
+
+/* Called from JNI (Android UI thread). Queues one finger's event; the compositor thread dispatches it.
+ * action 0=down 1=move 2=up 3=cancel, id = Android pointer id, x/y in INPUT_SPACE. */
+void banner_wayland_send_touch(int action, int id, int x, int y) {
+    if (g_input_pipe[1] < 0) return;
+    int type = action == 0 ? 7 : action == 1 ? 8 : action == 2 ? 9 : 10;
+    struct input_msg m = { type, id, x, y };
     ssize_t n = write(g_input_pipe[1], &m, sizeof(m));
     (void)n;
 }
@@ -3149,10 +3461,12 @@ int banner_wayland_run(void) {
     wl_global_create(display, &wl_subcompositor_interface, 1, NULL, bind_subcompositor);
     wl_global_create(display, &wp_viewporter_interface, 1, NULL, bind_viewporter);
     wl_display_init_shm(display); /* wl_shm global + pool/buffer handling */
-    wl_global_create(display, &wl_output_interface, 2, NULL, bind_output);
+    /* libdecor binds wl_output at 4; a lower version is a protocol error for the client. */
+    wl_global_create(display, &wl_output_interface, 4, NULL, bind_output);
     wl_global_create(display, &xdg_wm_base_interface, 1, NULL, bind_xdg_wm_base);
     wl_global_create(display, &zwp_linux_dmabuf_v1_interface, 4, NULL, bind_dmabuf);
-    wl_global_create(display, &wl_seat_interface, 5, NULL, bind_seat);
+    /* gamescope's Wayland backend refuses a seat older than 8. */
+    wl_global_create(display, &wl_seat_interface, 9, NULL, bind_seat);
     wl_global_create(display, &banner_desktop_v1_interface, 1, NULL, bind_desktop);
     wl_global_create(display, &wp_presentation_interface, 2, NULL, bind_presentation);
     wl_global_create(display, &zwp_pointer_constraints_v1_interface, 1, NULL, bind_pointer_constraints);

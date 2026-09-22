@@ -2438,4 +2438,92 @@ trying for speed, <b>notemplates</b> if you get driver crashes.
     <string name="gog_login_error_verification">Login verification failed, please try again</string>
     <string name="gog_login_error_generic">Login error, please try again</string>
     <string name="gog_login_error_idp_blocked">This sign-in provider refused to load inside the app.\n\nSign in with your GOG email and password instead. If your GOG account has no password yet, set one at gog.com in your phone\'s browser first.</string>
+
+    <!-- ─────────────────────────────────────────────────────────────────────────────
+         Help text for the settings a Linux (gamescope) entry keeps. Separate strings, not edits to
+         the ones above: the Windows form must keep reading exactly as it does. Each one says what the
+         setting controls and who it reaches - the Steam client, the games the client launches, or both.
+         ───────────────────────────────────────────────────────────────────────────── -->
+    <string name="help_linux_name"><![CDATA[
+        <b>Name</b><br /><br />
+        The label this entry shows on its card in your library. It reaches neither the Steam client nor the games the client launches - it is only how you find this entry in the app.
+    ]]></string>
+    <string name="help_linux_icon"><![CDATA[
+        <b>Icon</b><br /><br />
+        The picture this entry shows on its card in your library. It reaches neither the Steam client nor the games the client launches - it is only artwork for the app.
+    ]]></string>
+    <string name="help_linux_screen_size"><![CDATA[
+        <b>Screen Size</b><br /><br />
+        The resolution the Linux session renders at. It sets the size of gamescope\'s output, so it reaches <b>both</b> the Steam client and every game the client launches - Big Picture and the games inside it all draw into that one output. A smaller size is less work for the GPU and is scaled up to fill your screen.
+    ]]></string>
+    <string name="help_linux_screen_alignment"><![CDATA[
+        <b>Screen Alignment</b><br /><br />
+        Where the session\'s picture sits on your screen when it does not fill it - centred, at the top, or at the bottom. It reaches <b>both</b> the Steam client and the games the client launches, because they share one output. Top or bottom frees the other half of the screen for on-screen controls.
+    ]]></string>
+    <string name="help_linux_fullscreen_mode"><![CDATA[
+        <b>Fullscreen Mode</b><br /><br />
+        How the session\'s picture is fitted to your screen when the two shapes do not match - left alone, fitted with black bars, stretched, filled, or scaled in whole steps. It reaches <b>both</b> the Steam client and the games the client launches, since both render into the same output.
+    ]]></string>
+    <string name="help_linux_hdr_output"><![CDATA[
+        <b>HDR Output</b><br /><br />
+        Sends the session\'s picture to your screen in HDR. The compositor opens the HDR path for the whole session, so it reaches <b>both</b> the Steam client and the games the client launches. On a screen that does not report HDR10 the setting is greyed out and the session runs in ordinary SDR.
+    ]]></string>
+    <string name="help_linux_prefer_game_dlls"><![CDATA[
+        <b>Prefer game-folder DLLs</b><br /><br />
+        Makes a game load its own copies of certain support DLLs instead of the ones Proton ships, which is what many wrappers and mod loaders need. This is for the <b>games the client launches</b> only - the Steam client is a native Linux program and has no Windows DLLs. The session has one environment for everything in it, so this applies to every game you start from the client, not to one game.
+    ]]></string>
+    <string name="help_linux_env_vars"><![CDATA[
+        <b>Environment Variables</b><br /><br />
+        Extra settings handed to the Linux session when it starts. They reach <b>both</b> the Steam client and the games the client launches: the client is started with them, and every game inherits them through Steam and Proton. A variable set here overrides the same name coming from the FEXCore preset.
+    ]]></string>
+    <string name="help_linux_fps_limiter"><![CDATA[ <b>Frame Rate Limiter</b><br /><br /> Not used by the Steam client. The compositor\'s rate is set once for the whole session, so a cap meant for a game would also hold the client\'s menus to it - a limiter at 60 ran Big Picture at 60 on a 144 Hz screen. A Linux session always runs at this screen\'s highest refresh rate instead. To cap a particular game, use that game\'s own settings. ]]></string>
+    <string name="help_linux_fexcore_preset"><![CDATA[
+        <b>FEXCore Preset</b><br /><br />
+        Tunes FEX, which translates a game\'s x86 code to ARM. It is for the <b>games the client launches</b> only: those run x86 code inside Proton, while the Steam client is a native ARM64 build and never goes through FEX. The preset is handed to the session at launch, and anything you set in Environment Variables overrides it.
+    ]]></string>
+    <string name="help_linux_controls_profile"><![CDATA[
+        <b>Controls Profile</b><br /><br />
+        Which on-screen control layout the session uses. It reaches <b>both</b> the Steam client and the games the client launches: the overlay sits over the whole session, so the same buttons drive Big Picture and the game inside it. Left on None, the session brings up the bundled Virtual Gamepad layout when no physical controller is connected.
+    ]]></string>
+    <string name="help_linux_touchscreen_mode"><![CDATA[
+        <b>Touchscreen Mode</b><br /><br />
+        Makes a touch act as a tap at the place you touched instead of moving a mouse pointer there. It reaches <b>both</b> the Steam client and the games the client launches, because it changes how the whole session receives your touches.
+    ]]></string>
+    <string name="help_linux_autohide_controls"><![CDATA[
+        <b>Hide on-screen controls when a controller connects</b><br /><br />
+        Takes the on-screen buttons away as soon as a physical controller is connected, and brings them back when it goes. It reaches <b>both</b> the Steam client and the games the client launches, because the overlay covers the whole session.
+    ]]></string>
+    <string name="help_linux_player_slots"><![CDATA[
+        <b>Player Slots</b><br /><br />
+        Pins your controllers to player 1, 2, 3 and 4 so they stop swapping places between launches. It reaches <b>both</b> the Steam client and the games the client launches, because the session hands the pads on in the order set here. Leave it on the container default unless a pad keeps arriving as the wrong player.
+    ]]></string>
+    <string name="help_linux_gyro_enabled"><![CDATA[
+        <b>Motion Aim</b><br /><br />
+        Turns tilting the device into aiming or pointer movement. It reaches <b>both</b> the Steam client and the games the client launches, because the motion is fed in as controller or mouse input for the whole session. The finer numbers - deadzone and smoothing - live in Container Settings.
+    ]]></string>
+    <string name="help_linux_processor_affinity"><![CDATA[
+        <b>Processor Affinity</b><br /><br />
+        Chooses which CPU cores the session is allowed to run on. It reaches <b>both</b> the Steam client and the games the client launches: the compositor finds each program by its real process id and pins it to these cores. Leaving every core ticked lets Android place the work itself, which is usually the best choice.
+    ]]></string>
+    <string name="help_linux_client_cores"><![CDATA[
+        <b>Steam client cores</b><br /><br />
+        Chooses which CPU cores the <b>Steam client</b> and the compositor drawing its interface may run on. It reaches the client and its menus only, never the games it launches - those have their own list below. Steam holds its own interface renderer to a subset of this device\'s cores by default, which is why Big Picture can feel sluggish; what you tick here replaces that choice.
+    ]]></string>
+    <string name="help_linux_game_cores"><![CDATA[
+        <b>Game cores</b><br /><br />
+        Chooses which CPU cores a <b>game launched from the Steam client</b> may run on. It reaches games only - the client and its menus keep the list above. Leaving every core ticked lets Android place the work itself, which is usually the best choice.
+    ]]></string>
+    <string name="help_linux_draw_driver">"<b>Draw driver (Linux runtime)</b> — Linux Steam client only.\n\nThis is the Vulkan driver that <b>draws</b> inside the Linux runtime. Everything in the session uses it: gamescope\'s compositing, the Steam client\'s own interface (its OpenGL goes through the runtime\'s Zink to Vulkan) and every game the client launches (Direct3D goes through Proton\'s DXVK/VKD3D to Vulkan). One choice covers the client and its games.\n\n<b>Runtime default</b> is the Turnip the runtime was built with. Anything else is a driver you imported under Contents → Installed → Linux runtime drivers. Only <b>-Linux</b> Turnip zips can be imported: the client and its games are Linux processes and cannot load an Android or Wayland driver at all.\n\nNothing inside the runtime is modified — the Vulkan loader is simply pointed at the driver you picked, so switching back is instant. If an imported driver is deleted, the session quietly uses the runtime default again.\n\nThis is not the driver that puts the picture on the screen. That is <b>Display driver (Android side)</b> above, and both are always involved: this one draws the frame, that one shows it."</string>
+    <string name="help_linux_display_driver"><![CDATA[
+        <b>Display driver (Android side)</b><br /><br />
+        Two graphics drivers are involved in a Linux session and this is one of them. This is the Android driver the app loads to take the session\'s finished frames and put them on your screen. It affects <b>both</b> the Steam client and its games, because everything you see goes through it. Setting it to System gives a black screen. What the client and its games actually render with is a separate driver inside the Linux runtime, which is not chosen here.
+    ]]></string>
+<string name="help_linux_audio_driver"><![CDATA[
+        <b>Audio Driver</b><br /><br />
+        How sound leaves the session and reaches Android. On this path only <b>PulseAudio</b> carries sound, and it carries it for <b>both</b> the Steam client and the games the client launches. Every other value leaves the whole session silent, so keep this on PulseAudio.
+    ]]></string>
+    <string name="help_linux_microphone"><![CDATA[
+        <b>Microphone</b><br /><br />
+        Lets a game use the microphone for voice chat. It is meant for the <b>games the client launches</b>, not for the Steam client. It does nothing in a Linux session yet: the switch is wired for the Windows side, and the Linux side that would carry the sound in is not in place.
+    ]]></string>
 </resources>
