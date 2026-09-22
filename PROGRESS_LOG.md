@@ -10830,3 +10830,23 @@ TF2's launch options restored to `-condebug`; the autolaunch hook cleared.
 > Also: the informational Rust unit-test step in CI hung 25 minutes on one flavour with no
 > timeout; capped at 8. And `com.steamdeck.launcher` on the device is OUR standalone app, recorded
 > under the Bannerlator index all along - I compared against it for an hour thinking it was Max's.
+
+### 2026-09-21 — ✅ Session log bundles, device-proven (`8deba310`, APK `ca24163e…`)
+
+> One folder per Linux session, the SteamDeck app's shape: `device.txt`, `network.txt`,
+> `session.log`, `fake-input.txt`, `app.log` (launch-logging only), `audio.log`, `crash.log`,
+> `steam/` scrubbed. Proven on the FIT: 45 of 45 Steam logs, 60 `Using JWT` lines redacted and none
+> raw, SteamIDs masked, `loginusers.vdf`/`config.vdf`/`ssfn*` never copied, six multi-megabyte logs
+> reduced to their last 3000 lines with a header saying so.
+>
+> Two rounds to get the teardown right, both found on the device. The collection first ran from the
+> exit callback - which fires from the monitor thread after `stopEnvironmentComponents()` kills the
+> session, while `exit()` carries on to finish the process: one of forty-five files landed. Moved to
+> the close path, before the components stop, on a worker with a bounded wait. Then forty-five files
+> through ten regexes a line took longer than the wait: twenty-five landed and neither the crash
+> buffer nor the audio log. Crash buffer and audio log now go first, Steam's logs smallest-first, and
+> anything over 512 KB by its tail. Nothing in this costs a frame: everything runs before the
+> session starts or after it ends, and `app.log` is gated on the launch-logging switch.
+>
+> Steam's logs used to be copied raw into Download, with the account's session token in
+> `connection_log.txt`, and only on a clean exit. Neither is true any more.
