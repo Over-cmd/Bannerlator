@@ -9140,7 +9140,21 @@ public class XServerDisplayActivity extends AppCompatActivity {
 
         String clientCpus = cpuListOrEmpty("linuxClientCpuList");
         String gameCpus = cpuListOrEmpty("linuxGameCpuList");
-        if (!clientCpus.isEmpty()) lateEnv.add("BL_CLIENT_CPUS=" + clientCpus);
+        // The CLIENT list is always sent, every core when nothing narrower was chosen. "All cores"
+        // is not a no-op for the client the way it is for a game: Steam pins its own interface
+        // renderer to a subset of its choosing - 0x7c on this device, five of eight, without the
+        // fastest core - and the session's re-pinning beat only runs when this is set. Leaving it
+        // out left Steam's choice standing, and the client's menus at 66 fps where the same
+        // runtime with the list exported does 90+ (measured, both on the FIT).
+        if (clientCpus.isEmpty()) {
+            StringBuilder all = new StringBuilder();
+            for (int i = 0, n = Runtime.getRuntime().availableProcessors(); i < n; i++) {
+                if (i > 0) all.append(',');
+                all.append(i);
+            }
+            clientCpus = all.toString();
+        }
+        lateEnv.add("BL_CLIENT_CPUS=" + clientCpus);
         if (!gameCpus.isEmpty()) lateEnv.add("BL_GAME_CPUS=" + gameCpus);
         // The other direction. The client's main library is internal storage and its second is the
         // card, so a game it installs lands where the app would have put it and is recorded in the
