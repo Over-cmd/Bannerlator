@@ -88,6 +88,30 @@ public final class LinuxSettings {
      * The settings container, read from disk or created with the Linux runtime's defaults the
      * first time. Cheap enough to build on demand; {@link ContainerManager} keeps one per instance.
      */
+    /**
+     * The bundled driver a Wayland/gamescope session should start on when nothing was picked.
+     * The compositor imports every frame as a dma-buf, and only Turnip (Mesa) advertises
+     * {@code VK_EXT_external_memory_dma_buf} + {@code VK_EXT_image_drm_format_modifier} on
+     * Adreno; the proprietary blob (v819 = vulkan.ad8191.so) has neither, so on it
+     * {@code vkCreateDevice} fails and the session is sound over a black screen - exactly what a
+     * fresh install got, because v819 is first in the picker's list. Prefer a Turnip entry the
+     * GPU supports; fall back to the first supported entry at all.
+     */
+    public static String defaultDrawDriver(Context context) {
+        String first = null;
+        try {
+            for (String id : context.getResources().getStringArray(com.winlator.star.R.array.wrapper_graphics_driver_version_entries)) {
+                if (id == null || id.isEmpty() || id.equals("System")) continue;
+                if (!com.winlator.star.core.GPUInformation.isDriverSupported(id, context)) continue;
+                if (id.toLowerCase().contains("turnip")) return id;
+                if (first == null) first = id;
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "could not pick a default draw driver: " + e.getMessage());
+        }
+        return first;
+    }
+
     public static Container container(Context context, ContainerManager manager) {
         File root = rootDir(context);
         //noinspection ResultOfMethodCallIgnored
@@ -113,6 +137,16 @@ public final class LinuxSettings {
                 // gamescope is a Wayland client, and its output is sized by this: the client's own
                 // interface is the most expensive thing a session draws, so 720p to start.
                 data.put("screenSize", Container.DEFAULT_SCREEN_SIZE);
+                // And a driver that can feed it (see defaultDrawDriver): stored here so the editor
+                // shows the real default instead of an empty version the launch quietly replaces.
+                String draw = defaultDrawDriver(context);
+                if (draw != null) {
+                    java.util.HashMap<String, String> gdc = com.winlator.star.contentdialog.GraphicsDriverConfigDialog
+                            .parseGraphicsDriverConfig(Container.DEFAULT_GRAPHICSDRIVERCONFIG);
+                    gdc.put("version", draw);
+                    data.put("graphicsDriverConfig", com.winlator.star.contentdialog.GraphicsDriverConfigDialog.toGraphicsDriverConfig(gdc));
+                    Log.i(TAG, "fresh Linux settings start on the " + draw + " driver");
+                }
             }
             container.loadData(data);
             // Always the Linux runtime, whatever the stored data says. Both of these live in the

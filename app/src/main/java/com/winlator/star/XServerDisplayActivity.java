@@ -8511,23 +8511,22 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // system Vulkan has no dma-buf extensions, vkCreateDevice fails and the user gets a black
         // screen with nothing said. It is the state a container carries when nobody ever picked a
         // driver, or when the one it names was removed. Rather than start that session, take the
-        // first bundled Turnip this GPU supports - the same list the picker offers - so a clean
-        // install boots. (The problem is WinNative's c01a89f0; it downloads a driver, we already
-        // ship several.)
+        // bundled Turnip this GPU supports (LinuxSettings.defaultDrawDriver - NOT the first entry
+        // of the picker's list: that is v819, the proprietary blob, which has no dma-buf
+        // extensions either and gave a fresh install the very same black screen, device-seen
+        // 2026-09-22) so a clean install boots. (The problem is WinNative's c01a89f0; it
+        // downloads a driver, we already ship several.)
         if (libraryName == null || libraryName.isEmpty()) {
             try {
                 com.winlator.star.contents.AdrenotoolsManager atm =
                         new com.winlator.star.contents.AdrenotoolsManager(this);
-                for (String candidate : getResources().getStringArray(R.array.wrapper_graphics_driver_version_entries)) {
-                    if (candidate == null || candidate.isEmpty() || candidate.equals("System")) continue;
-                    if (!com.winlator.star.core.GPUInformation.isDriverSupported(candidate, this)) continue;
-                    String lib = atm.getLibraryName(candidate);
-                    if (lib == null || lib.isEmpty()) continue;
+                String candidate = com.winlator.star.linux.LinuxSettings.defaultDrawDriver(this);
+                String lib = candidate != null ? atm.getLibraryName(candidate) : null;
+                if (lib != null && !lib.isEmpty()) {
                     driverPath = atm.getDriverPath(candidate);
                     libraryName = lib;
                     Log.w("XServerDisplayActivity", "wayland: no usable driver was set; falling back to bundled "
                             + candidate + " so the session is not black");
-                    break;
                 }
             } catch (Exception e) {
                 Log.e("XServerDisplayActivity", "wayland: bundled driver fallback failed", e);
