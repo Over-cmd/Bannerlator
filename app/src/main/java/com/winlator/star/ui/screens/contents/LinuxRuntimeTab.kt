@@ -27,6 +27,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.winlator.star.container.ContainerManager
+import com.winlator.star.linux.ChildProcessRestrictions
+import com.winlator.star.linux.LinuxDeviceSupport
 import com.winlator.star.linux.LinuxProtons
 import com.winlator.star.linux.LinuxRuntime
 import com.winlator.star.linux.LinuxRuntimeInstaller
@@ -74,6 +76,62 @@ fun LinuxRuntimeTab() {
         modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
+        // Both gates are read here, before the download: each is a failure the app cannot fix and
+        // that leaves nothing in any log to read, so the only thing worth doing is saying so first.
+        if (!LinuxDeviceSupport.drawable(context)) {
+            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("This device cannot draw a Linux session",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onErrorContainer)
+                    Text(
+                        "The runtime draws with Turnip, an Adreno driver, and this device reports "
+                            + "${LinuxDeviceSupport.gpuName(context)}. A session on it comes up as sound over a "
+                            + "black screen. You can still download the runtime, but nothing will render — "
+                            + "Mali, Xclipse and PowerVR are not supported yet.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onErrorContainer
+                    )
+                }
+            }
+        }
+
+        if (ChildProcessRestrictions.active(context)) {
+            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer)) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Turn off child process restrictions first",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onTertiaryContainer)
+                    Text(
+                        "A Linux session is dozens of processes — gamescope, the Steam client, its web "
+                            + "helper and the game — and Android is set to kill an app's extra child "
+                            + "processes. When it does, the session ends with no error and nothing in the "
+                            + "log. Turn on \"Disable child process restrictions\" in Developer options "
+                            + "before the first launch.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onTertiaryContainer
+                    )
+                    if (ChildProcessRestrictions.hasSwitch()) {
+                        OutlinedButton(onClick = {
+                            if (!ChildProcessRestrictions.openDeveloperOptions(context)) {
+                                message = "Could not open Developer options. Settings \u2192 About phone "
+                                    + "\u2192 tap Build number seven times, then Developer options."
+                            }
+                        }) { Text("Open Developer options") }
+                    } else {
+                        // Before Android 14 the switch is not in the UI at all; adb is the only way,
+                        // and the app cannot write the setting itself whatever the user grants it.
+                        Text(
+                            "This Android version has no switch for it. From a computer:\n"
+                                + ChildProcessRestrictions.adbCommand(),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onTertiaryContainer
+                        )
+                    }
+                }
+            }
+        }
+
         Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("Linux runtime", style = MaterialTheme.typography.titleMedium)

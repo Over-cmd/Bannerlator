@@ -70,6 +70,18 @@ public final class LinuxRuntime {
         return new File(context.getApplicationInfo().nativeLibraryDir, "libproot-loader.so");
     }
 
+    /**
+     * Whether this proot takes {@code -i uid:gid}, i.e. whether it is the runtime's own build.
+     *
+     * <p>Asked of the binary that was chosen rather than of the device, so a runtime that arrives
+     * without its host directory, or is still downloading, falls back to the apk copy and is given
+     * the option list that copy actually has.
+     */
+    static boolean emulatesIdentityByOption(Context context, File proot) {
+        File shipped = new File(rootDir(context), HOST_DIR + "/proot");
+        return shipped.isFile() && shipped.getPath().equals(proot.getPath());
+    }
+
     /** proot links against libtalloc, which sits beside it; empty when the apk copy is in use. */
     public static String prootLibraryPath(Context context) {
         File dir = new File(rootDir(context), HOST_DIR);
@@ -113,16 +125,29 @@ public final class LinuxRuntime {
                                        File externalStorage, List<String> extraBinds,
                                        List<String> guestCommand) {
         File root = rootDir(context);
+        File proot = prootBinary(context);
         List<String> cmd = new ArrayList<>();
-        cmd.add(prootBinary(context).getPath());
+        cmd.add(proot.getPath());
         cmd.add("--kill-on-exit");
         // Android's app seccomp policy traps the whole set*id family. Xwayland's Popen() calls
         // setgid()/setuid() before it execs xkbcomp and _exit(127)s when they fail, so without
-        // this the keymap never compiles and Xwayland dies. -i makes proot answer those calls
-        // itself while still reporting our real ids, so nothing inside sees a different user.
-        int uid = Process.myUid();
-        cmd.add("-i");
-        cmd.add(uid + ":" + uid);
+        // this the keymap never compiles and Xwayland dies. -i makes the runtime's proot answer
+        // those calls itself while still reporting our real ids, so nothing inside sees a
+        // different user.
+        //
+        // The copy in the apk takes no such option: it answers set*id from its own seccomp
+        // handler unconditionally (src/tracee/seccomp.c, PR_setuid and its family, granting an id
+        // the process already holds and refusing any other), and its option table is only
+        // -r/-b/-w/--kill-on-exit/-v/-V/-h. An option it does not know is fatal in cli.c before a
+        // single guest process starts — a session that fell back to it died instantly with no
+        // window and nothing in the log. So the flag goes only to the binary that accepts it.
+        // (The same class of fault, found and fixed independently in WinNative, maxjivi05,
+        // b6b2fce8.)
+        if (emulatesIdentityByOption(context, proot)) {
+            int uid = Process.myUid();
+            cmd.add("-i");
+            cmd.add(uid + ":" + uid);
+        }
         cmd.add("-r");
         cmd.add(root.getPath());
         cmd.add("-w");
