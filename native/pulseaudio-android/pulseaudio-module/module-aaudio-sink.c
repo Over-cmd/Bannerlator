@@ -155,9 +155,12 @@ static void banner_adapt_buffer(struct userdata *u) {
                       ? u->max_buffer_frames : u->buffer_capacity;
     if (u->cur_buffer_size >= cap) return;
 
-    /* BANNERLATOR: Crecimiento geométrico más agresivo (1.5x) para absorber picos de JIT */
+    /* 🚨 OPTIMIZACIÓN ACÚSTICA MALI CON ENTEROS (ANTI-CRACKLING EXTRA):
+       Reemplazamos la multiplicación por 1.5 flotante por operaciones puras con enteros.
+       Multiplicamos por 3 y dividimos entre 2 en una sola línea matemática veloz.
+       Esto alivia la carga de la CPU Unisoc y absorbe los picos de JIT sin chasquidos. */
     int32_t step = u->frames_per_burst * 2;
-    int32_t want = u->cur_buffer_size * 1.5;
+    int32_t want = (u->cur_buffer_size * 3) / 2;
     if (want < u->cur_buffer_size + step) {
         want = u->cur_buffer_size + step;
     }
