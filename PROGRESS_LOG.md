@@ -10956,3 +10956,34 @@ TF2's launch options restored to `-condebug`; the autolaunch hook cleared.
 > Clean standard install → runtime → Steam (Linux) → sign-in → the layer downloads on its own →
 > the client restarts itself once → FlatOut installed → FlatOut running. Nothing chosen by hand.
 > Main is a fast-forward of the branch; both APKs from main's build staged.
+
+## 2026-09-22 — checkpoint: 3.1.3 pre-release 1 published (the Linux Steam client)
+
+> **Known-good point.** main `0e9b7cbc` = tag `3.1.3-pre1` = backup ref
+> `refs/backup/20260922/linux-313-pre1-known-good`. versionCode 87. Release page live, pre-release,
+> Latest stays 3.1.2; `update.json` offers it to "Include pre-releases" testers only. The released
+> APKs were staged from the page itself (standard `1123c802…`, pubg `88baff42…`).
+>
+> **Proven today, from a clean standard install:** runtime download → client (self-download,
+> self-update) → sign-in → the ARM64 Proton fetched on its own → the client's one-time restart →
+> FlatOut installed and running through our tool; the loading screen covers every wait and leaves on
+> the first frame; the Steam (Linux) settings open; Turnip is the fresh-install default. On the
+> seeded device: FlatOut 2 as well, and the app's Installed list, its database and the client's
+> manifests agree exactly (11 games).
+>
+> **Found and fixed today, in order:** v819 default → black screen; editor crash on a fresh Linux
+> entry; the client segfault on a first game install (request made before sign-in → Valve's chain →
+> "Reconfiguring" crash) → re-ask after sign-in → one-time restart when the layer lands; the
+> loading screen's 5 s grace over the start-up chime.
+>
+> **Lessons that cost time:** `git add -A` in the worktree swept four 535 MB APKs (stager download
+> folders) into a commit and a 12-minute "push" — `art*/` is ignored now and the stagers download
+> into the scratchpad; `git gc --auto` on the handheld repacks 2 GB and cooks the device (auto-gc
+> off); a `timeout 90` on a push of this repo is too short. A cancelled release run leaves a DRAFT
+> release behind — delete it. Published pre-releases now bump versionCode (87) so the updater can
+> offer them; the next stable must be ≥ 88.
+>
+> **Open, in the order the notes promise:** the process-limit ("Disable child process
+> restrictions") warning card + root/Shizuku fix; a non-Adreno gate; closing the first-run window
+> (Valve's chain pulled in when a game is installed before the layer lands); TF2 "insecure";
+> then custom games and GOG / Epic / Amazon titles inside the client's library.
