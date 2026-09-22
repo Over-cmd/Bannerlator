@@ -36,6 +36,40 @@ public final class LinuxSettings {
 
     private LinuxSettings() {}
 
+    /** Set once the settings have been seeded from a container; names the source. */
+    public static final String EXTRA_SEEDED_FROM = "linuxSeededFrom";
+
+    public static boolean isSeeded(Container linux) {
+        return linux != null && !linux.getExtra(EXTRA_SEEDED_FROM, "").isEmpty();
+    }
+
+    /**
+     * Copies every setting of {@code source} into the Linux settings - HUD config and its master
+     * switch, frame generation and LSFG flags, audio, env vars, cpu lists, the lot - keeping the
+     * settings container's own id, root, name and runtime. Done once, when the Steam entry leaves
+     * the Wine container it used to live in: that container's settings ARE the user's settings for
+     * the client, and starting from the app's defaults instead lost them (device-seen: the HUD went
+     * missing, because showFPS defaulted to false). Returns false if nothing could be copied.
+     */
+    public static boolean seedFrom(Container linux, Container source) {
+        if (linux == null || source == null || source.id == linux.id) return false;
+        try {
+            JSONObject data = source.getData();
+            data.remove("id");
+            data.remove("name");
+            linux.loadData(data);
+            linux.setName(NAME);
+            linux.setRuntime(Container.RUNTIME_GAMESCOPE);
+            linux.putExtra(EXTRA_SEEDED_FROM, String.valueOf(source.id));
+            linux.saveData();
+            Log.i(TAG, "Linux settings seeded from container " + source.id + " (" + source.getName() + ")");
+            return true;
+        } catch (Exception e) {
+            Log.w(TAG, "could not seed the Linux settings from container " + source.id, e);
+            return false;
+        }
+    }
+
     public static boolean isLinuxContainer(int id) {
         return id == CONTAINER_ID;
     }

@@ -31,6 +31,7 @@ import com.winlator.star.linux.LinuxProtons
 import com.winlator.star.linux.LinuxRuntime
 import com.winlator.star.linux.LinuxRuntimeInstaller
 import com.winlator.star.linux.LinuxRuntimeUpdate
+import com.winlator.star.linux.LinuxSettings
 import com.winlator.star.linux.LinuxShortcuts
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -337,6 +338,16 @@ private fun addSteamEntry(context: android.content.Context) {
     runCatching {
         val manager = ContainerManager(context)
         val linux = manager.linuxContainer
+        // The settings the client ran with lived at the CONTAINER level of the Wine container its
+        // entry used to sit in - the HUD's master switch, its skin, LSFG flags, audio - and the
+        // Linux settings start from the app's defaults otherwise. Seed them once from that container:
+        // the one still holding the Steam entry, or, if the entry moved before this existed, the one
+        // still holding any Linux entry (the desktop one stays behind).
+        if (!LinuxSettings.isSeeded(linux)) {
+            val source = manager.containers.firstOrNull { LinuxShortcuts.hasSteamShortcut(it) }
+                ?: manager.containers.firstOrNull { LinuxShortcuts.hasLinuxEntry(it) }
+            if (source != null) LinuxSettings.seedFrom(linux, source)
+        }
         if (LinuxShortcuts.hasSteamShortcut(linux)) return
         // The entry used to be written into a Wine container, whichever one was first. A copy
         // still there is moved here as it is - its extras are the user's settings - so nothing is

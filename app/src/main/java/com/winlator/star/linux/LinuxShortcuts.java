@@ -219,6 +219,18 @@ public final class LinuxShortcuts {
         FileUtils.writeString(desktop, out.toString());
     }
 
+    /** True when any entry in the container's desktop directory is the Linux runtime's. */
+    public static boolean hasLinuxEntry(Container container) {
+        File[] files = container.getDesktopDir().listFiles();
+        if (files == null) return false;
+        for (File f : files) {
+            if (!f.getName().endsWith(".desktop")) continue;
+            String text = FileUtils.readString(f);
+            if (text != null && text.contains(Container.EXTRA_RUNTIME + "=" + Container.RUNTIME_GAMESCOPE)) return true;
+        }
+        return false;
+    }
+
     public static boolean removeSteamShortcut(Container container) {
         File file = steamShortcutFile(container);
         return !file.isFile() || file.delete();
