@@ -3020,18 +3020,30 @@ public class XServerDisplayActivity extends AppCompatActivity {
                     // found here is stale by construction. (A paused-session in-app resume never
                     // re-enters this runnable, so a live session can't be swept.)
                     sweepStaleWineProcesses();
-                    preloaderDialog.step(2, "Preparing Wine & graphics driver…");
-                    setWineDisplayDriver();   // BEFORE setupWineSystemFiles starts the first wineserver
-                    setupWineSystemFiles();
-                    // Steam install-recipe robustness pass: a steamAppId-tagged game's installScript.vdf
-                    // Registry + Copy Files land in this prefix before the game boots (covers shortcuts made
-                    // before the feature or re-bound to a new container). Local stages only — the Run
-                    // Process step (EA Desktop installer) is driven from the Games tab's EA setup flow.
-                    runSteamInstallScriptPreLaunch();
-                    extractGraphicsDriverFiles();
-                    changeWineAudioDriver();
-                    applyGameRefreshRateUnlock();
-                    provisionEpicOverlay();
+                    // Every step of this stage prepares a WINE PREFIX: the display driver into its
+                    // registry, its system files, install scripts, audio driver, refresh unlock, the
+                    // Epic overlay. A Linux session has no prefix - it runs gamescope and Valve's
+                    // native client - and its settings container has no .wine beneath it, so the
+                    // first registry edit met a missing user.reg and threw. It only ever ran here
+                    // because the entry used to sit in a real container, whose unused prefix absorbed
+                    // all of it. Nothing below is read by the Linux session; setupXEnvironment
+                    // branches into it before any of this would matter.
+                    if (!gamescopeMode) {
+                        preloaderDialog.step(2, "Preparing Wine & graphics driver…");
+                        setWineDisplayDriver();   // BEFORE setupWineSystemFiles starts the first wineserver
+                        setupWineSystemFiles();
+                        // Steam install-recipe robustness pass: a steamAppId-tagged game's installScript.vdf
+                        // Registry + Copy Files land in this prefix before the game boots (covers shortcuts made
+                        // before the feature or re-bound to a new container). Local stages only — the Run
+                        // Process step (EA Desktop installer) is driven from the Games tab's EA setup flow.
+                        runSteamInstallScriptPreLaunch();
+                        extractGraphicsDriverFiles();
+                        changeWineAudioDriver();
+                        applyGameRefreshRateUnlock();
+                        provisionEpicOverlay();
+                    } else {
+                        preloaderDialog.step(2, "Preparing the Linux runtime…");
+                    }
                     stage[0] = "Building environment";
                     setupXEnvironment();
                 } catch (Exception e) {
