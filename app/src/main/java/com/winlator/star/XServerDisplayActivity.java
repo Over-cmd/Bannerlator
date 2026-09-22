@@ -5264,6 +5264,22 @@ public class XServerDisplayActivity extends AppCompatActivity {
                 handler.removeCallbacks(savePlaytimeRunnable);
                 if (midiHandler != null) midiHandler.stop();
                 // Unregister sensor listener to avoid memory leaks
+                // A Linux session's log bundle is collected HERE, before the components are stopped:
+                // the exit callback also collects, but it fires from the monitor thread after the
+                // session is killed, while this runnable carries on to finish the process - the
+                // first bundle on the device had one of forty-five Steam logs and no crash buffer,
+                // cut off between files. A few seconds, on a worker, bounded; the shutdown dialog
+                // is up. The callback then finds nothing left to do.
+                if (gamescopeMode && linuxSessionLogDir != null) {
+                    final File bundle = linuxSessionLogDir;
+                    linuxSessionLogDir = null;
+                    Thread collector = new Thread(() -> com.winlator.star.linux.SessionLogs.collect(
+                            XServerDisplayActivity.this, bundle, new File(getFilesDir(), "pulseaudio/pulse.log")),
+                            "session-log-collect");
+                    collector.start();
+                    try { collector.join(6000); } catch (InterruptedException ignored) {}
+                    if (collector.isAlive()) Log.w("XServerDisplayActivity", "session log collection still running at shutdown; leaving it");
+                }
                 if (environment != null) environment.stopEnvironmentComponents();
                 // Release the Steam Controller (SDL closes it, so it drops back to its own
                 // keyboard/mouse mode) before WinHandler tears the slots down.
