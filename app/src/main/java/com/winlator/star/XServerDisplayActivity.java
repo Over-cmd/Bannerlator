@@ -9045,10 +9045,10 @@ public class XServerDisplayActivity extends AppCompatActivity {
         File sessionLog = new File(logDir, "session.log");
         guest.add("BL_LOG=" + sessionLog.getPath());
         guest.add("BL_DEBUG_DIR=" + logDir.getPath());
-        // The performance switches and, with them, BL_STEAMDECK for the client's command line.
-        // Read from Download/Bannerlator-LinuxSteam/linux-tuning.conf every launch so a change
-        // can be measured without a build; the effective set goes into the session log below.
-        com.winlator.star.linux.LinuxTuning.apply(guest);
+        // The entry's performance switches, and with them BL_STEAMDECK for the client's own
+        // command line. Set in the Steam (Linux) settings; the effective set goes into the
+        // device report below so a measurement names what produced it.
+        com.winlator.star.linux.LinuxTuning.apply(guest, shortcut);
         linuxSessionLogDir = logDir;
         try {
             StringBuilder eff = new StringBuilder();
@@ -9068,7 +9068,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
             // The tuning switches too: a measurement is only worth keeping if the report beside
             // it says what was set when it was taken.
             eff.append("--- performance switches (linux-tuning.conf) ---\n")
-               .append(com.winlator.star.linux.LinuxTuning.report());
+               .append(com.winlator.star.linux.LinuxTuning.report(shortcut));
             com.winlator.star.linux.SessionLogs.writeDeviceReport(this, new File(logDir, "device.txt"), eff.toString());
             com.winlator.star.linux.SessionLogs.writeNetworkReport(this, new File(logDir, "network.txt"));
             if (isLaunchLoggingEnabled()) com.winlator.star.linux.SessionLogs.startAppLog(new File(logDir, "app.log"));

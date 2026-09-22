@@ -6337,6 +6337,24 @@ internal fun ShortcutSettingsDialogScreen(
     var linuxVulkanDriverOverride by remember {
         mutableStateOf(shortcut.getExtra(com.winlator.star.core.LinuxVulkanDriver.EXTRA, ""))
     }
+    // The Linux session's performance switches, one extra each; LinuxTuning owns what an unset
+    // one means, so the editor and the launch path can never disagree about a default.
+    var linuxGlThread by remember {
+        mutableStateOf(com.winlator.star.linux.LinuxTuning.isOn(
+            shortcut, com.winlator.star.linux.LinuxTuning.EXTRA_GLTHREAD))
+    }
+    var linuxLazyDescriptors by remember {
+        mutableStateOf(com.winlator.star.linux.LinuxTuning.isOn(
+            shortcut, com.winlator.star.linux.LinuxTuning.EXTRA_LAZY_DESCRIPTORS))
+    }
+    var linuxNoGlError by remember {
+        mutableStateOf(com.winlator.star.linux.LinuxTuning.isOn(
+            shortcut, com.winlator.star.linux.LinuxTuning.EXTRA_NO_GL_ERROR))
+    }
+    var linuxDeckMode by remember {
+        mutableStateOf(com.winlator.star.linux.LinuxTuning.isOn(
+            shortcut, com.winlator.star.linux.LinuxTuning.EXTRA_STEAMDECK))
+    }
     // HDR output override (per-game, same extra name as the container's): "" = the container's,
     // "1" on, "0" off. Only shown when the effective backend is Wayland; see display.WaylandHdr.
     var waylandHdrOverride by remember { mutableStateOf(com.winlator.star.display.WaylandHdr.shortcutChoice(shortcut)) }
@@ -6969,6 +6987,10 @@ internal fun ShortcutSettingsDialogScreen(
             if (isLinuxEntry) {
                 putExtra("linuxClientCpuList", linuxClientCpuList)
                 putExtra("linuxGameCpuList", linuxGameCpuList)
+                putExtra(com.winlator.star.linux.LinuxTuning.EXTRA_GLTHREAD, if (linuxGlThread) "1" else "0")
+                putExtra(com.winlator.star.linux.LinuxTuning.EXTRA_LAZY_DESCRIPTORS, if (linuxLazyDescriptors) "1" else "0")
+                putExtra(com.winlator.star.linux.LinuxTuning.EXTRA_NO_GL_ERROR, if (linuxNoGlError) "1" else "0")
+                putExtra(com.winlator.star.linux.LinuxTuning.EXTRA_STEAMDECK, if (linuxDeckMode) "1" else "0")
             }
             saveData()
         }
@@ -7004,6 +7026,12 @@ internal fun ShortcutSettingsDialogScreen(
                 add("gfxDriver")   // the compositor driver: live on the gamescope path too
                 if (effectiveWaylandShortcut && !isLinuxEntry) { add("waylandGameDriver"); add("waylandDriverCfg") }
                 if (isLinuxEntry) add("linuxVulkanDriver")
+                if (isLinuxEntry) {
+                    add(com.winlator.star.linux.LinuxTuning.EXTRA_GLTHREAD)
+                    add(com.winlator.star.linux.LinuxTuning.EXTRA_LAZY_DESCRIPTORS)
+                    add(com.winlator.star.linux.LinuxTuning.EXTRA_NO_GL_ERROR)
+                    add(com.winlator.star.linux.LinuxTuning.EXTRA_STEAMDECK)
+                }
                 if (effectiveWaylandShortcut || isLinuxEntry) add(com.winlator.star.display.WaylandHdr.EXTRA)
                 if (!effectiveWaylandShortcut && !isLinuxEntry) { add("gfxWrapper"); add("gfxConfig") } // hidden on Wayland (X11 shims/tuning)
                 if (!isLinuxEntry) {
@@ -7565,6 +7593,42 @@ internal fun ShortcutSettingsDialogScreen(
                                 com.winlator.star.core.LinuxVulkanDriver.HELP_TEXT
                                         + if (linuxVulkanDriverValues.size > 1) ""
                                           else " Nothing imported yet: Contents \u2192 Installed \u2192 Linux runtime drivers.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Spacer(Modifier.height(8.dp))
+
+                            // Performance switches. The client's interface is not short of
+                            // hardware - on an Adreno 840 its menus ran ~14 fps with the core
+                            // override applied while a game on the same device ran 89 - so these
+                            // make the chain that draws it cheaper (Chromium to ANGLE to Zink to
+                            // Turnip) rather than asking for more. None is device-proven; change
+                            // ONE, launch, read the HUD, and the session's device.txt says what
+                            // was set when the number was taken.
+                            Text("Performance (experimental)", style = MaterialTheme.typography.titleSmall)
+                            Spacer(Modifier.height(4.dp))
+                            PerfEditRow(dp, com.winlator.star.linux.LinuxTuning.EXTRA_GLTHREAD,
+                                "Threaded GL (mesa_glthread)", linuxGlThread,
+                                com.winlator.star.linux.LinuxTuning.defaultOn(
+                                    com.winlator.star.linux.LinuxTuning.EXTRA_GLTHREAD)) { linuxGlThread = it }
+                            PerfEditRow(dp, com.winlator.star.linux.LinuxTuning.EXTRA_LAZY_DESCRIPTORS,
+                                "Lazy descriptors (ZINK_DESCRIPTORS)", linuxLazyDescriptors,
+                                com.winlator.star.linux.LinuxTuning.defaultOn(
+                                    com.winlator.star.linux.LinuxTuning.EXTRA_LAZY_DESCRIPTORS)) { linuxLazyDescriptors = it }
+                            PerfEditRow(dp, com.winlator.star.linux.LinuxTuning.EXTRA_NO_GL_ERROR,
+                                "Skip GL error checks (MESA_NO_ERROR)", linuxNoGlError,
+                                com.winlator.star.linux.LinuxTuning.defaultOn(
+                                    com.winlator.star.linux.LinuxTuning.EXTRA_NO_GL_ERROR)) { linuxNoGlError = it }
+                            PerfEditRow(dp, com.winlator.star.linux.LinuxTuning.EXTRA_STEAMDECK,
+                                "Steam Deck mode (-steamdeck)", linuxDeckMode,
+                                com.winlator.star.linux.LinuxTuning.defaultOn(
+                                    com.winlator.star.linux.LinuxTuning.EXTRA_STEAMDECK)) { linuxDeckMode = it }
+                            Text(
+                                "Threaded GL is the likeliest of these to move the number: the menu is "
+                                    + "CPU-bound in exactly what it moves off the calling thread. Steam Deck "
+                                    + "mode runs the client the way SteamOS runs its own session, which is what "
+                                    + "Valve tunes Big Picture for \u2014 but it also makes the client expect Deck "
+                                    + "hardware that is not here, so it is off until someone measures it.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
