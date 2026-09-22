@@ -10950,3 +10950,9 @@ TF2's launch options restored to `-condebug`; the autolaunch hook cleared.
 > compositor's first-frame signal (`nativeResetFirstFrame`, `vkp_reset_first_frame`), so the
 > restart is covered instead of black and the screen leaves on the first frame as before. Armed only
 > when the depot was missing at session start: a seeded device never sees it.
+
+## 2026-09-22 — merged to main `856ff6dd`: the clean-install flow proven end to end
+
+> Clean standard install → runtime → Steam (Linux) → sign-in → the layer downloads on its own →
+> the client restarts itself once → FlatOut installed → FlatOut running. Nothing chosen by hand.
+> Main is a fast-forward of the branch; both APKs from main's build staged.
