@@ -212,46 +212,74 @@ public final class SessionLogs {
     public static void collect(Context context, File dir, File pulseLog) {
         if (dir == null) return;
         try {
+            // Cheapest and most valuable first: a session that ends while this runs still has these.
+            dumpCrashBuffer(new File(dir, "crash.log"));
+            if (pulseLog != null && pulseLog.isFile()) copyLines(pulseLog, new File(dir, "audio.log"), false, 0);
             File logs = new File(LinuxRuntime.rootDir(context), "root/.local/share/Steam/logs");
             File[] files = logs.isDirectory() ? logs.listFiles() : null;
             if (files != null) {
                 File out = new File(dir, "steam");
                 //noinspection ResultOfMethodCallIgnored
                 out.mkdirs();
+                // Smallest first, so the many small logs are all in before the few big ones; and a big
+                // one is reduced to its tail - the end of a log is what a diagnosis reads, and the first
+                // bundle lost twenty files and the crash buffer to scrubbing megabytes of old lines.
+                java.util.Arrays.sort(files, java.util.Comparator.comparingLong(File::length));
                 int n = 0;
                 for (File src : files) {
-                    if (!src.isFile() || src.length() > 8L * 1024 * 1024) continue;
+                    if (!src.isFile()) continue;
                     String name = src.getName();
                     if (name.equals("loginusers.vdf") || name.equals("config.vdf") || name.startsWith("ssfn")) continue;
-                    try (BufferedReader r = new BufferedReader(new FileReader(src));
-                         BufferedWriter w = new BufferedWriter(new FileWriter(new File(out, name)))) {
-                        String line;
-                        while ((line = r.readLine()) != null) {
-                            w.write(LogRedactor.INSTANCE.redact(line));
-                            w.newLine();
-                        }
-                        n++;
-                    } catch (IOException e) {
-                        Log.w(TAG, "could not scrub " + name, e);
-                    }
+                    boolean big = src.length() > TAIL_ABOVE_BYTES;
+                    if (copyLines(src, new File(out, name), true, big ? TAIL_LINES : 0)) n++;
                 }
                 Log.i(TAG, "collected " + n + " Steam log(s), scrubbed, into " + out);
             }
-            if (pulseLog != null && pulseLog.isFile()) {
-                try (BufferedReader r = new BufferedReader(new FileReader(pulseLog));
-                     BufferedWriter w = new BufferedWriter(new FileWriter(new File(dir, "audio.log")))) {
-                    String line;
-                    while ((line = r.readLine()) != null) { w.write(line); w.newLine(); }
-                } catch (IOException e) {
-                    Log.w(TAG, "could not copy the audio log", e);
-                }
-            }
-            dumpCrashBuffer(new File(dir, "crash.log"));
         } catch (Exception e) {
             Log.w(TAG, "collecting session artifacts", e);
         } finally {
             stopAppLog();
             if (current == dir) current = null;
+        }
+    }
+
+    private static final long TAIL_ABOVE_BYTES = 512L * 1024;
+    private static final int TAIL_LINES = 3000;
+
+    /**
+     * Copies {@code src} to {@code dst} line by line, through the redactor when {@code scrub},
+     * keeping only the last {@code tailLines} lines when that is above zero.
+     */
+    private static boolean copyLines(File src, File dst, boolean scrub, int tailLines) {
+        try {
+            java.util.List<String> lines = null;
+            if (tailLines > 0) {
+                java.util.ArrayDeque<String> tail = new java.util.ArrayDeque<>(tailLines + 1);
+                try (BufferedReader r = new BufferedReader(new FileReader(src))) {
+                    String line;
+                    while ((line = r.readLine()) != null) {
+                        tail.addLast(line);
+                        if (tail.size() > tailLines) tail.removeFirst();
+                    }
+                }
+                lines = new java.util.ArrayList<>(tail);
+            }
+            try (BufferedWriter w = new BufferedWriter(new FileWriter(dst))) {
+                if (lines != null) {
+                    w.write("[last " + lines.size() + " lines of " + src.length() + " bytes]");
+                    w.newLine();
+                    for (String line : lines) { w.write(scrub ? LogRedactor.INSTANCE.redact(line) : line); w.newLine(); }
+                } else {
+                    try (BufferedReader r = new BufferedReader(new FileReader(src))) {
+                        String line;
+                        while ((line = r.readLine()) != null) { w.write(scrub ? LogRedactor.INSTANCE.redact(line) : line); w.newLine(); }
+                    }
+                }
+            }
+            return true;
+        } catch (IOException e) {
+            Log.w(TAG, "could not copy " + src.getName(), e);
+            return false;
         }
     }
 

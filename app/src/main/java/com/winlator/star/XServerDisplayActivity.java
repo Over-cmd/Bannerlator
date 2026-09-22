@@ -5277,7 +5277,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
                             XServerDisplayActivity.this, bundle, new File(getFilesDir(), "pulseaudio/pulse.log")),
                             "session-log-collect");
                     collector.start();
-                    try { collector.join(6000); } catch (InterruptedException ignored) {}
+                    try { collector.join(8000); } catch (InterruptedException ignored) {}
                     if (collector.isAlive()) Log.w("XServerDisplayActivity", "session log collection still running at shutdown; leaving it");
                 }
                 if (environment != null) environment.stopEnvironmentComponents();
