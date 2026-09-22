@@ -10873,3 +10873,18 @@ TF2's launch options restored to `-condebug`; the autolaunch hook cleared.
 > (device + bundle needed - the new bundle makes that a one-look diagnosis); proot's termios2 fix
 > via `build-proot.yml` and the GTK A/B, proot staying in the runtime; the WinNative features not
 > taken (non-Steam games through the client, Epic, client updates, logs manager, tap accuracy).
+
+### 2026-09-22 — ✅ MERGED TO MAIN: `af360838`
+
+> `feat/linux-gamescope-runtime` at `60f3a166` merged into `main` (from `eb5812d3`, the 3.1.2
+> stable), no-ff, ~270 commits. Gate before merging: DiRT Showdown on the Wayland/Wine path presented
+> zero-copy with no compositor errors (proving the frame-counting change on the shipped path), the
+> Linux client came up container-free on all eight cores. Three of Max's last-day fixes went in first:
+> the seccomp probe removed outright, the account's owned games (132 here) and the BattlEye/EAC
+> runtimes mapped to the ARM64 tool before the client can fetch anything x86 - verified on the FIT as
+> "default and 134 app(s) set to bannerlator-proton-arm64".
+>
+> **Next:** a fresh-install end-to-end test as a new user on the STANDARD flavour
+> (`com.winlator.banner`, its own package, so it sits beside the pubg install and starts from nothing):
+> setup wizard, Contents → Linux Runtime download, Steam (Linux) launch with no container ever
+> created, sign-in, a game. Both APKs from the main build are staged in Download.
