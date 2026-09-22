@@ -390,6 +390,32 @@ NOT_GAMES = frozenset((
 ))
 
 
+# The anti-cheat runtimes a game brings with it are Linux apps to the client, and a Linux app is
+# run in the Steam Linux Runtime: installing one has the client fetch scout and soldier, hundreds
+# of megabytes of x86 container that cannot start here. Set to this tool they depend on nothing.
+# Nothing ever runs them - Proton reads their files - so the tool named is never started for them.
+# (WinNative, maxjivi05, 7804d460.)
+ANTICHEAT_RUNTIMES = (
+    "1161040",   # Proton BattlEye Runtime
+    "1826330",   # Proton EasyAntiCheat Runtime
+)
+
+# Every Steam game the account OWNS, one app id per line, written by the app before the session.
+# Valve names a Proton of its own for thousands of titles at a priority above the client's default
+# tool, so a title set only after install had the client fetch an x86-64 Proton, its runtime and
+# FEX first - gigabytes that cannot run here - and then fail to start. Mapped before install, it
+# fetches the ARM64 tool it can use. (After WinNative 8874cfc7, which reads the store directly.)
+OWNED_APPS_FILE = os.path.expanduser("~/.bl-owned-apps")
+
+
+def owned_apps():
+    try:
+        with open(OWNED_APPS_FILE) as f:
+            return {line.strip() for line in f if line.strip().isdigit()}
+    except OSError:
+        return set()
+
+
 def installed_apps(steam_root):
     """App ids of the titles the client has installed, tools and runtimes excluded."""
     apps = set()
@@ -403,6 +429,12 @@ def installed_apps(steam_root):
             m = re.fullmatch(r"appmanifest_(\d+)\.acf", name)
             if m and m.group(1) not in NOT_GAMES:
                 apps.add(m.group(1))
+    return sorted(apps, key=int)
+
+
+def mapped_apps(steam_root):
+    """Everything to run with this tool: installed titles, owned titles, the anti-cheat runtimes."""
+    apps = set(installed_apps(steam_root)) | (owned_apps() - NOT_GAMES) | set(ANTICHEAT_RUNTIMES)
     return sorted(apps, key=int)
 
 
@@ -488,9 +520,9 @@ def main():
         "no ARM64 Proton depot yet; the session asks the client to fetch it"))
     config = os.path.join(steam_root, "config", "config.vdf")
     if os.path.isfile(config):
-        apps = installed_apps(steam_root)
+        apps = mapped_apps(steam_root)
         register_default(config, apps, protect=extras)
-        print("bannerlator-steam-compat: default and %d installed title(s) set to %s" % (len(apps), TOOL))
+        print("bannerlator-steam-compat: default and %d app(s) set to %s (installed + owned + anti-cheat runtimes)" % (len(apps), TOOL))
 
 
 if __name__ == "__main__":

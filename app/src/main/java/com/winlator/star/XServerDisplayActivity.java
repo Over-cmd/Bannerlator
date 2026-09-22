@@ -9033,6 +9033,9 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // a device and a network report written before anything starts, the app's own logcat while
         // launch logging is on, and at teardown the audio log, the crash buffer and Steam's own logs
         // scrubbed of credentials. Same layout as the SteamDeck standalone app's bundles.
+        // The account's owned games for the registrar, so every one of them is mapped to the ARM64
+        // tool BEFORE the client is asked to install it (see LinuxOwnedApps).
+        com.winlator.star.linux.LinuxOwnedApps.write(new File(com.winlator.star.linux.LinuxRuntime.rootDir(this), "root"));
         final File logDir = com.winlator.star.linux.SessionLogs.begin();
         File sessionLog = new File(logDir, "session.log");
         guest.add("BL_LOG=" + sessionLog.getPath());
@@ -9240,14 +9243,6 @@ public class XServerDisplayActivity extends AppCompatActivity {
         EnvVars hostEnv = new EnvVars();
         hostEnv.put("PROOT_LOADER", com.winlator.star.linux.LinuxRuntime.prootLoader(this).getPath());
         hostEnv.put("PROOT_TMP_DIR", getCacheDir().getPath());
-        // Some vendor kernels fail every execve under proot's seccomp acceleration, so no session
-        // ever starts - the button appears to do nothing. Probe it once and fall back to proot
-        // tracing every system call itself, which works everywhere and is only slower.
-        if (!com.winlator.star.linux.LinuxRuntime.seccompWorks(this)) {
-            Log.w("XServerDisplayActivity",
-                    "proot: seccomp acceleration does not work on this kernel; tracing every system call");
-            hostEnv.put(com.winlator.star.linux.LinuxRuntime.ENV_NO_SECCOMP, "1");
-        }
         // The runtime's proot links against a libtalloc that sits beside it. Android's linker does
         // not search a plain executable's own directory, so it has to be named here or the process
         // dies before it starts, with the reason only in `logcat -b crash`.
