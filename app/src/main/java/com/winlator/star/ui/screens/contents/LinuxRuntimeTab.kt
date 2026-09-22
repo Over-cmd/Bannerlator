@@ -344,16 +344,30 @@ private fun addSteamEntry(context: android.content.Context) {
         // the one still holding the Steam entry, or, if the entry moved before this existed, the one
         // still holding any Linux entry (the desktop one stays behind).
         if (!LinuxSettings.isSeeded(linux)) {
+            // In order of certainty: the container still holding the Steam entry; the one the entry
+            // was moved out of, recorded at the move; one still holding any Linux entry; one marked
+            // as a gamescope runtime. Say so when there is none - a silent miss cost a device its
+            // HUD and LSFG settings before this was written.
+            val movedFrom = linux.getExtra(LinuxSettings.EXTRA_MOVED_FROM, "").toIntOrNull()
             val source = manager.containers.firstOrNull { LinuxShortcuts.hasSteamShortcut(it) }
+                ?: movedFrom?.let { id -> manager.containers.firstOrNull { it.id == id } }
                 ?: manager.containers.firstOrNull { LinuxShortcuts.hasLinuxEntry(it) }
+                ?: manager.containers.firstOrNull { it.isGamescopeRuntime }
             if (source != null) LinuxSettings.seedFrom(linux, source)
+            else android.util.Log.w("LinuxRuntimeTab", "Linux settings not seeded: no container to take them from")
         }
         if (LinuxShortcuts.hasSteamShortcut(linux)) return
         // The entry used to be written into a Wine container, whichever one was first. A copy
         // still there is moved here as it is - its extras are the user's settings - so nothing is
         // lost and the Games tab does not show the client twice. It needs no container at all now.
         val old = manager.containers.firstOrNull { LinuxShortcuts.hasSteamShortcut(it) }
-        if (old != null && LinuxShortcuts.moveSteamShortcut(old, linux, context)) return
+        if (old != null && LinuxShortcuts.moveSteamShortcut(old, linux, context)) {
+            // Remembered so the seed above can still find its source on a later open, even after
+            // every other entry has left that container.
+            linux.putExtra(LinuxSettings.EXTRA_MOVED_FROM, old.id.toString())
+            linux.saveData()
+            return
+        }
         LinuxShortcuts.createSteamShortcut(linux, context)
     }
 }

@@ -38,6 +38,8 @@ public final class LinuxSettings {
 
     /** Set once the settings have been seeded from a container; names the source. */
     public static final String EXTRA_SEEDED_FROM = "linuxSeededFrom";
+    /** The container the Steam entry was moved out of, recorded at the move. */
+    public static final String EXTRA_MOVED_FROM = "linuxMovedFrom";
 
     public static boolean isSeeded(Container linux) {
         return linux != null && !linux.getExtra(EXTRA_SEEDED_FROM, "").isEmpty();
