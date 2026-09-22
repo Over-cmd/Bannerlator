@@ -9045,9 +9045,9 @@ public class XServerDisplayActivity extends AppCompatActivity {
         File sessionLog = new File(logDir, "session.log");
         guest.add("BL_LOG=" + sessionLog.getPath());
         guest.add("BL_DEBUG_DIR=" + logDir.getPath());
-        // The entry's performance switches, and with them BL_STEAMDECK for the client's own
-        // command line. Set in the Steam (Linux) settings; the effective set goes into the
-        // device report below so a measurement names what produced it.
+        // The entry's performance switches, and with them BL_STEAMDECK for the client's own command line.
+        // They are set in the Steam (Linux) settings.
+        // The effective set goes into the device report below, so a measurement names what produced it.
         com.winlator.star.linux.LinuxTuning.apply(guest, shortcut);
         linuxSessionLogDir = logDir;
         try {
@@ -9065,8 +9065,8 @@ public class XServerDisplayActivity extends AppCompatActivity {
             }
             eff.append(String.format(java.util.Locale.US, "%-24s", "Settings container"))
                .append(container != null ? container.id + " (" + container.getName() + ")" : "none").append('\n');
-            // The tuning switches too: a measurement is only worth keeping if the report beside
-            // it says what was set when it was taken.
+            // The tuning switches too.
+            // A measurement is only worth keeping if the report beside it says what was set when it was taken.
             eff.append("--- performance switches (linux-tuning.conf) ---\n")
                .append(com.winlator.star.linux.LinuxTuning.report(shortcut));
             com.winlator.star.linux.SessionLogs.writeDeviceReport(this, new File(logDir, "device.txt"), eff.toString());

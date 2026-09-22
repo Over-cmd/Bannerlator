@@ -129,20 +129,18 @@ public final class LinuxRuntime {
         List<String> cmd = new ArrayList<>();
         cmd.add(proot.getPath());
         cmd.add("--kill-on-exit");
-        // Android's app seccomp policy traps the whole set*id family. Xwayland's Popen() calls
-        // setgid()/setuid() before it execs xkbcomp and _exit(127)s when they fail, so without
-        // this the keymap never compiles and Xwayland dies. -i makes the runtime's proot answer
-        // those calls itself while still reporting our real ids, so nothing inside sees a
-        // different user.
+        // Android's app seccomp policy traps the whole set*id family.
+        // Xwayland's Popen() calls setgid()/setuid() before it execs xkbcomp, and _exit(127)s when they fail.
+        // Without this the keymap never compiles and Xwayland dies.
+        // -i makes the runtime's proot answer those calls itself while still reporting our real ids, so nothing inside sees a different user.
         //
-        // The copy in the apk takes no such option: it answers set*id from its own seccomp
-        // handler unconditionally (src/tracee/seccomp.c, PR_setuid and its family, granting an id
-        // the process already holds and refusing any other), and its option table is only
-        // -r/-b/-w/--kill-on-exit/-v/-V/-h. An option it does not know is fatal in cli.c before a
-        // single guest process starts — a session that fell back to it died instantly with no
-        // window and nothing in the log. So the flag goes only to the binary that accepts it.
-        // (The same class of fault, found and fixed independently in WinNative, maxjivi05,
-        // b6b2fce8.)
+        // The copy in the apk takes no such option.
+        // It answers set*id from its own seccomp handler unconditionally (src/tracee/seccomp.c, PR_setuid and its family, granting an id the process already holds and refusing any other).
+        // Its option table is only -r/-b/-w/--kill-on-exit/-v/-V/-h.
+        // An option it does not know is fatal in cli.c before a single guest process starts.
+        // A session that fell back to it died instantly with no window and nothing in the log.
+        // So the flag goes only to the binary that accepts it.
+        // (The same class of fault, found and fixed independently in WinNative, maxjivi05, b6b2fce8.)
         if (emulatesIdentityByOption(context, proot)) {
             int uid = Process.myUid();
             cmd.add("-i");
@@ -174,17 +172,14 @@ public final class LinuxRuntime {
 
         // Android denies apps these; glibc, Steam and libcap read them at startup.
         File fakeProc = new File(root, "etc/bannerlator/proc");
-        // libpci picks its procfs backend on whether it can read the /proc/bus/pci directory, which
-        // the app can, then die()s - exit(1) on the calling process - on the devices file inside it,
-        // which the app cannot. Chromium loads libpci in its GPU process to name the video card, so
-        // that exit kills the process; after a few tries CEF gives up on hardware and draws the rest
-        // of the session on SwiftShader, which is the client's interface rendered on the CPU. An
-        // empty list is the truthful answer from in here: nothing the app can see is on a PCI bus.
-        // Created at session start rather than shipped in the rootfs so an installed runtime is
-        // fixed too, and the table's guard below binds it only when the real file cannot be read,
-        // so it can never stand in front of real data.
-        // (WinNative, maxjivi05, deff1ac6: 44 -> 85 fps scrolling the Big Picture library on a
-        // OnePlus 15, GPU-process crashes 12 -> 0.)
+        // libpci picks its procfs backend on whether it can read the /proc/bus/pci directory, which the app can.
+        // It then opens the devices file inside it, which the app cannot, and its error path is die() - exit(1) on the calling process.
+        // Chromium loads libpci in its GPU process to name the video card, so that exit kills the process.
+        // After a few tries CEF gives up on hardware and draws the rest of the session on SwiftShader, which is the client's interface rendered on the CPU.
+        // An empty list is the truthful answer from in here: nothing the app can see is on a PCI bus.
+        // It is created at session start rather than shipped in the rootfs, so an installed runtime is fixed too.
+        // The table's guard below binds it only when the real file cannot be read, so it can never stand in front of real data.
+        // (WinNative, maxjivi05, deff1ac6: 44 -> 85 fps scrolling the Big Picture library on a OnePlus 15, GPU-process crashes 12 -> 0.)
         File pciDevices = new File(fakeProc, "pci_devices");
         if (!pciDevices.isFile()) {
             try {

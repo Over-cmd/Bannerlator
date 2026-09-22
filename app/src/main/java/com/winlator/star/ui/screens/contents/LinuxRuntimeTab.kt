@@ -76,8 +76,9 @@ fun LinuxRuntimeTab() {
         modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        // Both gates are read here, before the download: each is a failure the app cannot fix and
-        // that leaves nothing in any log to read, so the only thing worth doing is saying so first.
+        // Both gates are read here, before the download.
+        // Each is a failure the app cannot fix and that leaves nothing in any log to read.
+        // The only thing worth doing about either is saying so first.
         if (!LinuxDeviceSupport.drawable(context)) {
             Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -120,8 +121,8 @@ fun LinuxRuntimeTab() {
                             }
                         }) { Text("Open Developer options") }
                     } else {
-                        // Before Android 14 the switch is not in the UI at all; adb is the only way,
-                        // and the app cannot write the setting itself whatever the user grants it.
+                        // Before Android 14 the switch is not in the UI at all, so adb is the only way.
+                        // The app cannot write the setting itself whatever the user grants it.
                         Text(
                             "This Android version has no switch for it. From a computer:\n"
                                 + ChildProcessRestrictions.adbCommand(),

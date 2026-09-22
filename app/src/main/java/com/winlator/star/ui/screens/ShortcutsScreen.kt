@@ -6337,8 +6337,8 @@ internal fun ShortcutSettingsDialogScreen(
     var linuxVulkanDriverOverride by remember {
         mutableStateOf(shortcut.getExtra(com.winlator.star.core.LinuxVulkanDriver.EXTRA, ""))
     }
-    // The Linux session's performance switches, one extra each; LinuxTuning owns what an unset
-    // one means, so the editor and the launch path can never disagree about a default.
+    // The Linux session's performance switches, one extra each.
+    // LinuxTuning owns what an unset one means, so the editor and the launch path can never disagree about a default.
     var linuxGlThread by remember {
         mutableStateOf(com.winlator.star.linux.LinuxTuning.isOn(
             shortcut, com.winlator.star.linux.LinuxTuning.EXTRA_GLTHREAD))
@@ -7598,13 +7598,10 @@ internal fun ShortcutSettingsDialogScreen(
                             )
                             Spacer(Modifier.height(8.dp))
 
-                            // Performance switches. The client's interface is not short of
-                            // hardware - on an Adreno 840 its menus ran ~14 fps with the core
-                            // override applied while a game on the same device ran 89 - so these
-                            // make the chain that draws it cheaper (Chromium to ANGLE to Zink to
-                            // Turnip) rather than asking for more. None is device-proven; change
-                            // ONE, launch, read the HUD, and the session's device.txt says what
-                            // was set when the number was taken.
+                            // Performance switches for the chain that draws the client's interface.
+                            // They make that chain cheaper rather than asking for more hardware.
+                            // None of them is device-proven.
+                            // Change ONE, launch, and read the HUD; the session's device.txt says what was set when the number was taken.
                             Text("Performance (experimental)", style = MaterialTheme.typography.titleSmall)
                             Spacer(Modifier.height(4.dp))
                             PerfEditRow(dp, com.winlator.star.linux.LinuxTuning.EXTRA_GLTHREAD,
