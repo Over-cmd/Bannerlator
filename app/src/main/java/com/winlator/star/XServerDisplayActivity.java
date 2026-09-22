@@ -9233,7 +9233,9 @@ public class XServerDisplayActivity extends AppCompatActivity {
                                         .order(java.nio.ByteOrder.LITTLE_ENDIAN).getLong();
                             }
                         }
-                        File diag = new File(logDir, "fake-input-" + stamp + ".txt");
+                        // Same file the start-of-session writer used; appended, so the ring
+                        // counts at the end sit under the setup lines rather than replacing them.
+                        File diag = new File(logDir, "fake-input.txt");
                         java.nio.file.Files.write(diag.toPath(),
                                 ("session ended: " + status + "\nring0 events written by the app: "
                                         + writes + "\n").getBytes(java.nio.charset.StandardCharsets.UTF_8),
