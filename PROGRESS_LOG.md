@@ -10888,3 +10888,25 @@ TF2's launch options restored to `-condebug`; the autolaunch hook cleared.
 > (`com.winlator.banner`, its own package, so it sits beside the pubg install and starts from nothing):
 > setup wizard, Contents → Linux Runtime download, Steam (Linux) launch with no container ever
 > created, sign-in, a game. Both APKs from the main build are staged in Download.
+
+## 2026-09-22 — the new-user test found two blockers; both fixed in main `0904fa71`
+
+> A clean install of the standard flavour (`com.winlator.banner`, from nothing) downloaded the
+> runtime and launched the client to **sound over a black screen**, and **opening the Steam (Linux)
+> entry's settings crashed the app**. Neither shows on a seeded device, which is the whole point of
+> the test.
+>
+> **Black screen** — no draw driver had ever been picked, so the launch fallback took the first
+> bundled entry the GPU supports: `v819`, the proprietary `vulkan.ad8191.so`. The compositor imports
+> every frame as a dma-buf and the blob has no `VK_EXT_external_memory_dma_buf` /
+> `VK_EXT_image_drm_format_modifier` (compositor log: `vkCreateDevice failed`); only Turnip carries
+> them. `LinuxSettings.defaultDrawDriver()` now prefers a supported Turnip entry (turnip-sdk36); a
+> fresh settings container stores it so the editor shows the real default, and the launch fallback
+> uses the same choice.
+>
+> **Crash** — the editor's `selectedBox64Version` / `selectedFexCoreVersion` / emulator id were
+> initialised from the container's value, and the Linux runtime's settings container has none (a
+> Linux session runs no Box64, no FEX). Null reached `.isEmpty()`. Now `?: ""`.
+>
+> **Next:** repeat the clean-install flow on the `0904fa71` standard APK: wizard → Linux Runtime
+> download → Steam (Linux) launch → sign-in → open its settings → a game.
