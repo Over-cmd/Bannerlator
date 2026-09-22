@@ -10766,3 +10766,35 @@ TF2's launch options restored to `-condebug`; the autolaunch hook cleared.
 > is the dead 5.1.0 snapshot, while the shipped binary is built by `build-proot.yml` from a fresh
 > download of termux/proot. Delivering it means patching in that workflow and then settling the open
 > question of whether our own build still aborts GTK - the prebuilts are Termux's deliberately.
+
+### 2026-09-21 — ✅ The Linux client runs without a Wine container (device-proven, `db10530b`)
+
+> **What a user does now:** install the app, download the runtime under Contents, launch
+> `Steam (Linux)`. No container is created, touched or needed. The entry lives in the runtime's own
+> settings - a `Container` with the reserved id **-7** rooted at `files/linux/`, no prefix beneath
+> it, its config in `files/linux/.container` (720p, Wayland, gamescope). `ContainerManager` hands it
+> out by id, so the activity, the editors and every launch intent work on it unchanged; it is never in
+> `getContainers()`, so no container screen offers to copy, back up or delete it. Global on purpose:
+> one Steam client, one set of settings, which is how Steam itself thinks.
+>
+> **Proven on the FIT** (APK `a100e62d…`, run 35673470153): the runtime tab moved the entry out of
+> container 8 as it was (its extras are the user's settings), `Final Container ID: -7`, session
+> `210249` 472 lines with 0 ENOSYS, imported Turnip loaded, NetworkManager stand-in up, logged in at
+> 21:03:07. Library sync is unaffected: app→client scans every REAL Wine container's steamapps
+> (`prepare(…, getContainers(), …)`), client→app reads the runtime's manifests into the store
+> database; neither ever touched the entry's container. `syncClientGames` has no caller.
+>
+> **Three things it took to get there, each found on the device, not guessed:**
+> 1. The migration only ran from the install-success path, so an already-installed runtime kept its
+>    entry in container 8 (`getLinuxContainer()` built the settings file, nothing moved). The tab now
+>    runs the idempotent step on open.
+> 2. "Preparing Wine & graphics driver" writes the display driver into the prefix's `user.reg` and
+>    runs BEFORE the Linux branch - `WineRegistryEditor.getValueLocation` NPE'd on a prefix that does
+>    not exist. Container 8's unused prefix had absorbed the whole stage all along. Skipped in
+>    `gamescopeMode`; nothing in it is read by a Linux session.
+> 3. One pubg CI job hung 25+ min in the informational Rust unit-test step (siblings: 11 s) with no
+>    timeout - it would have held the build to GitHub's 6-hour cap. Capped at 8 min.
+>
+> Container 8 is still there, untouched, until the user deletes it. Merge gate before `main`: a Wine
+> game in a Wayland container to confirm the two compositor ports (frame counting, seat modifiers)
+> did not regress the shipped path.
