@@ -332,6 +332,12 @@ Java_com_winlator_star_wayland_WaylandCompositor_nativeZeroCopyLastFrameAgeMs(JN
 }
 
 /* Zero-copy frames in the last completed 10 s stats window (on_stats_timer), for the drawer's live line. */
+JNIEXPORT void JNICALL
+Java_com_winlator_star_wayland_WaylandCompositor_nativeResetFirstFrame(JNIEnv *env, jclass clazz) {
+    (void)env; (void)clazz;
+    vkp_reset_first_frame();
+}
+
 JNIEXPORT jint JNICALL
 Java_com_winlator_star_wayland_WaylandCompositor_nativeZeroCopyFrames(JNIEnv *env, jclass clazz) {
     return (jint)g_zero_copy_last;

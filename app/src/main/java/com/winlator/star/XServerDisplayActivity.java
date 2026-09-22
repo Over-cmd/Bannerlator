@@ -8792,16 +8792,34 @@ public class XServerDisplayActivity extends AppCompatActivity {
                 new com.winlator.star.linux.LinuxLoadingState(this);
         Thread t = new Thread(() -> {
             long deadline = System.currentTimeMillis() + 10 * 60 * 1000L;
+            String restartSeen = null;
             while (!linuxSessionWatchStop) {
                 try { Thread.sleep(500); } catch (InterruptedException e) { return; }
-                // Once it is gone (first frame, cancel, teardown), so is this watcher.
-                if (preloaderDialog == null || !preloaderDialog.isShowing()) return;
-                if (System.currentTimeMillis() > deadline) {
+                boolean up = preloaderDialog != null && preloaderDialog.isShowing();
+                if (up && !winStarted && System.currentTimeMillis() > deadline) {
                     Log.w("XServerDisplayActivity", "Linux session: no first frame after 10 min; uncovering the session");
                     runOnUiThread(() -> { if (!winStarted) preloaderDialog.closeOnUiThread(); });
-                    return;
+                    deadline = Long.MAX_VALUE;
                 }
+                // Always read (a tail of the log, cheap): the screen updates only while it is up,
+                // but the restart milestone below has to be seen while it is down.
                 try { loading.update(sessionLog); } catch (Throwable ignore) {}
+                // A first run restarts the client once, after the compatibility layer has landed
+                // (bannerlator-session). The client's window goes away for ~20 s; put the screen
+                // back for it and re-arm the compositor's first-frame signal, which dismisses it
+                // again exactly as it did the first time.
+                String step = loading.step();
+                if (step.contains("restarting the Steam client") && !step.equals(restartSeen)) {
+                    restartSeen = step;
+                    loading.restartClock();
+                    deadline = System.currentTimeMillis() + 10 * 60 * 1000L;
+                    runOnUiThread(() -> {
+                        winStarted = false;
+                        com.winlator.star.core.PreloaderState.show("Steam is restarting once…");
+                        try { com.winlator.star.wayland.WaylandCompositor.nativeResetFirstFrame(); }
+                        catch (Throwable e) { Log.w("XServerDisplayActivity", "first-frame re-arm unavailable", e); }
+                    });
+                }
             }
         }, "LinuxLoadingScreen");
         t.setDaemon(true);

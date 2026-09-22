@@ -204,6 +204,28 @@ case $mode in
     if [ ! -f "$steam_root/steamapps/appmanifest_4427310.acf" ]; then
       step "asking the client to fetch the ARM64 Proton"
       set -- "$@" steam://install/4427310
+      # The client decides a title's compatibility tool when the title is installed and keeps that
+      # decision for the rest of its run; every session start sets the tool up before the client
+      # comes up. So once the depot has fully landed, restart the client once (its own -shutdown
+      # switch, then the same restart loop that serves its self-update) and everything installed
+      # before or after that moment runs through our tool - no second launch by the user. The
+      # marker tells the loop below this exit is ours. A first run only: with the depot present
+      # at session start nothing here is armed.
+      (
+        _bl_acf="$steam_root/steamapps/appmanifest_4427310.acf"
+        for _ in $(seq 1 360); do
+          sleep 10
+          # StateFlags 4 = fully installed; a moment more for the client to finish its bookkeeping.
+          if grep -q '"StateFlags"[[:space:]]*"4"' "$_bl_acf" 2>/dev/null; then
+            sleep 10
+            bannerlator-steam-compat "$steam_root" >/dev/null 2>&1 || true
+            step "compatibility layer installed: restarting the Steam client once"
+            : > "$HOME/.bl-restart-once"
+            "$steam_root/steamrtarm64/steam" -shutdown >/dev/null 2>&1 || true
+            exit 0
+          fi
+        done
+      ) &
       # A client that starts signed out drops that request: on a clean install nobody has signed
       # in yet, so the tool stayed incomplete, and the first game install then made the client
       # fall back to its own four-app chain (Proton Experimental, SLR 4.0, FEX) - which it
@@ -323,6 +345,7 @@ BUSCONF
     [ -d /usr/share/guestos/fex-mesa ] && export FEX_ROOTFS=/usr/share/guestos/fex-mesa
     # The client exits 42 when it has updated itself and wants a fresh start (steam.sh does this).
     while :; do
+      rm -f "$HOME/.bl-restart-once"
       step "starting the Steam client"
       "$steam_root/steamrtarm64/steam" -gamepadui -clientbeta publicbeta \
         -no-cef-sandbox -cef-force-gpu -cef-ozone-platform=x11 \
@@ -330,6 +353,9 @@ BUSCONF
       rc=$?
       echo "== steam exited rc=$rc"
       collect_steam_logs
+      # 42 = the client updated itself; the marker = the session asked for one restart after the
+      # compatibility layer landed. The URL arguments are not repeated: they were acted on.
+      if [ -f "$HOME/.bl-restart-once" ]; then set --; continue; fi
       [ "$rc" -eq 42 ] || break
     done
     kill ${netmanager:-} ${system_bus:-} 2>/dev/null || true

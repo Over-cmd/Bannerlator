@@ -20,9 +20,15 @@ import java.nio.charset.StandardCharsets
  */
 class LinuxLoadingState(context: Context) {
     private val hints = context.resources.getStringArray(R.array.linux_loading_hints)
-    private val startedAt = SystemClock.elapsedRealtime()
+    private var startedAt = SystemClock.elapsedRealtime()
     private var step = "Starting the session…"
     private var percent = -1
+
+    /** The newest milestone read from the log (whatever the overlay is doing). */
+    fun step(): String = step
+
+    /** A client restart within the session: the clock starts over with the screen. */
+    fun restartClock() { startedAt = SystemClock.elapsedRealtime() }
 
     /** Re-reads the end of the log and pushes the current line, bar, clock and hint. */
     fun update(log: File?) {

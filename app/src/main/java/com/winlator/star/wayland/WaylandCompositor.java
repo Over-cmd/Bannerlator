@@ -184,6 +184,10 @@ public final class WaylandCompositor {
      *  Set before the compositor starts. */
     public static native void nativeSetOutputRefreshRate(float hz);
 
+    /** Re-arm the first-frame callback: the Linux session restarts the Steam client once on a
+     *  first run and the loading screen goes back up for it; the callback dismisses it again. */
+    public static native void nativeResetFirstFrame();
+
     /** Show a single fullscreen window on its own Android layer (SurfaceControl) instead of blitting
      *  it into the compositor's swapchain. BANNER_WAYLAND_ZERO_COPY=1 in the container's environment
      *  variables is the launch default; see waylandcomp/ZERO_COPY_SPIKE.md.

@@ -10932,3 +10932,21 @@ TF2's launch options restored to `-condebug`; the autolaunch hook cleared.
 > gives the interface 15 s, and asks again by starting the client binary with the same URL - which
 > hands it to the running instance (steam.pid + steam.pipe) and exits. Shipped by the app's own copy
 > of the session scripts, so no runtime re-host.
+
+## 2026-09-22 — first run made fluid: the client restarts itself once when the layer lands
+
+> Retest of `7f411dbc` on a clean install: the sign-in re-request worked (18 s after sign-in the
+> ARM64 Proton was downloading, same session), but a game installed inside that download window
+> (FlatOut 2, 16 s later) got the client's own chain assigned - the client decides a title's tool
+> when the title is installed and keeps that decision for its run - and launching it failed (FEX
+> with no rootfs). No crash this time; relaunching the client, or picking our tool in the game's
+> Compatibility page, fixed it. That is not a first run a user should have to understand.
+>
+> Now: once `appmanifest_4427310.acf` reads fully installed, the session runs the registrar, logs
+> "compatibility layer installed: restarting the Steam client once", asks the client to shut down
+> (its `-shutdown` switch) and the existing restart loop brings it back - the same path as its
+> self-update, with the URL arguments dropped since they were acted on. The app sees that milestone,
+> puts the loading screen back ("Steam is restarting once…", clock reset) and re-arms the
+> compositor's first-frame signal (`nativeResetFirstFrame`, `vkp_reset_first_frame`), so the
+> restart is covered instead of black and the screen leaves on the first frame as before. Armed only
+> when the depot was missing at session start: a seeded device never sees it.
