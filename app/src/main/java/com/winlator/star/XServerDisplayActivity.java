@@ -8772,50 +8772,34 @@ public class XServerDisplayActivity extends AppCompatActivity {
     private volatile boolean linuxSessionWatchStop = false;
 
     /**
-     * Mirrors the session's "== STEP …" milestones onto the preloader while it is still up. A first
-     * run downloads the Steam client before anything can be drawn, which is a minute or two of black
-     * screen with no explanation - long enough that people close the app believing it hung, which is
-     * exactly what happened during testing. The session script already prints each milestone; this
-     * just puts the newest one where it can be seen. Best-effort: the log is the source of truth and
-     * nothing here affects the launch.
+     * The Linux session's loading screen, kept current until the client draws. A first run
+     * downloads the Steam client and then its update before anything can be drawn - three and a
+     * half minutes of black on the FIT, long enough that people close the app believing it hung,
+     * which is exactly what happened during testing. The overlay used to be force-closed two
+     * seconds after the guest started (a guard against a shm-only desktop that never presents),
+     * so this mirror had nothing left to write on. Now it drives the centered status screen every
+     * half second - milestone, download percentage, a clock, a hint - and the compositor's
+     * first-frame hook closes the overlay when there is a picture to show. Best-effort: the log is
+     * the source of truth and nothing here affects the launch. The deadline is the one guard left:
+     * a session that never presents is still uncovered eventually rather than hidden for good.
      */
     private void showLinuxFirstRunProgress(final File sessionLog) {
+        final com.winlator.star.linux.LinuxLoadingState loading =
+                new com.winlator.star.linux.LinuxLoadingState(this);
         Thread t = new Thread(() -> {
-            long offset = 0;
-            String last = null;
             long deadline = System.currentTimeMillis() + 10 * 60 * 1000L;
-            while (!linuxSessionWatchStop && System.currentTimeMillis() < deadline) {
-                try { Thread.sleep(1000); } catch (InterruptedException e) { return; }
-                if (!sessionLog.isFile()) continue;
-                long len = sessionLog.length();
-                if (len < offset) offset = 0;
-                if (len == offset) continue;
-                try (java.io.RandomAccessFile raf = new java.io.RandomAccessFile(sessionLog, "r")) {
-                    raf.seek(offset);
-                    byte[] buf = new byte[(int) Math.min(len - offset, 256 * 1024)];
-                    int got = raf.read(buf);
-                    offset = len;
-                    if (got <= 0) continue;
-                    for (String line : new String(buf, 0, got,
-                            java.nio.charset.StandardCharsets.UTF_8).split("\n")) {
-                        int at = line.indexOf("== STEP ");
-                        if (at < 0) continue;
-                        // drop the marker and its HH:MM:SS
-                        String msg = line.substring(at + 8).trim();
-                        int sp = msg.indexOf(' ');
-                        if (sp > 0) msg = msg.substring(sp + 1).trim();
-                        if (!msg.isEmpty()) last = msg;
-                    }
-                    // ONLY while the preloader is genuinely up. PreloaderState.step() re-creates a
-                    // hidden preloader ("_ui.value ?: PreloaderUi()") and forces phase=SETUP, so
-                    // stepping after it closed resurrects it permanently over the running session -
-                    // which is exactly what happened: Steam was up and audible behind a stuck
-                    // "starting the Steam client" card. Once it is gone, so is this watcher.
-                    if (preloaderDialog == null || !preloaderDialog.isShowing()) return;
-                    if (last != null) preloaderDialog.stepOnUiThread(2, last);
-                } catch (Throwable ignore) {}
+            while (!linuxSessionWatchStop) {
+                try { Thread.sleep(500); } catch (InterruptedException e) { return; }
+                // Once it is gone (first frame, cancel, teardown), so is this watcher.
+                if (preloaderDialog == null || !preloaderDialog.isShowing()) return;
+                if (System.currentTimeMillis() > deadline) {
+                    Log.w("XServerDisplayActivity", "Linux session: no first frame after 10 min; uncovering the session");
+                    runOnUiThread(() -> { if (!winStarted) preloaderDialog.closeOnUiThread(); });
+                    return;
+                }
+                try { loading.update(sessionLog); } catch (Throwable ignore) {}
             }
-        }, "LinuxFirstRunProgress");
+        }, "LinuxLoadingScreen");
         t.setDaemon(true);
         t.start();
     }
@@ -9377,19 +9361,32 @@ public class XServerDisplayActivity extends AppCompatActivity {
                     } catch (Exception e) {
                         Log.w("XServerDisplayActivity", "could not record ring stats", e);
                     }
+                    // A session that died before it ever drew would otherwise end as a flash of
+                    // black: leave its exit status and the log folder readable for a moment first.
+                    final File endedLogs = linuxSessionLogDir;
+                    if (!winStarted && status != 0 && endedLogs != null && preloaderDialog != null && preloaderDialog.isShowing()) {
+                        preloaderDialog.failOnUiThread("Linux session",
+                                "The session ended (" + status + ") before the client drew anything",
+                                "Its logs are in " + endedLogs, endedLogs.getPath(), true);
+                        new android.os.Handler(getMainLooper()).postDelayed(() -> {
+                            if (!isFinishing() && !isDestroyed()) exit();
+                        }, 4000L);
+                        return;
+                    }
                     exit();
                 }));
 
         preloaderDialog.step(4, "Launching Linux session…");
         environment.startEnvironmentComponents();
-        preloaderDialog.enterGuest("Waiting for gamescope to render…");
-        runOnUiThread(this::startLaunchTimers);
-        // The same unconditional overlay clear the Wayland path uses: the first-frame hook may never
-        // fire for this client, and the guest must not stay hidden behind a stuck spinner.
-        new android.os.Handler(getMainLooper()).postDelayed(() -> {
-            if (!winStarted) { winStarted = true; cancelLaunchTimers(); }
-            preloaderDialog.closeOnUiThread();
-        }, 2000L);
+        // The loading screen: the centered status card, driven from the session log by
+        // showLinuxFirstRunProgress until the compositor presents the client's first frame (the
+        // hook in startWaylandCompositor closes it). There is no 2 s force-close here any more: on
+        // this path the client presents through the compositor, so the hook fires, and the
+        // force-close is what left a first run staring at black for the whole client download.
+        // The watcher's 10-minute deadline covers a session that never presents.
+        // (No startLaunchTimers here: its shader-compile hints are for Wine launches, and the
+        // loading screen rotates its own.)
+        com.winlator.star.core.PreloaderState.show("Steam is starting…");
         winHandler.start();
     }
 

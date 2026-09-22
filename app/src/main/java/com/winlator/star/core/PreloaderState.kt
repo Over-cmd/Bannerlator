@@ -39,6 +39,8 @@ data class PreloaderUi(
     val failure: Failure? = null,      // set when phase == FAILED
     val cancellable: Boolean = false,  // true only during a game launch -> shows the Cancel button
     val centered: Boolean = false,     // true for the centered status/shutdown screen (no cover hero)
+    val percent: Int = -1,             // centered screen: a determinate bar when >= 0 (a download's progress)
+    val elapsed: String? = null,       // centered screen: the clock line, so a quiet log still shows time moving
 )
 
 /**
@@ -97,6 +99,18 @@ object PreloaderState {
     @JvmStatic fun enterGuest(tailLabel: String) {
         val cur = _ui.value ?: PreloaderUi(title = "")
         _ui.value = cur.copy(phase = Phase.GUEST, tailLabel = tailLabel)
+    }
+
+    /**
+     * The Linux session's loading screen, every half second while the client boots: the runtime's
+     * newest milestone (or a download's percentage) as the message, the clock, and a rotating hint.
+     * Updates ONLY an overlay that is up: re-creating a closed one here would resurrect it over a
+     * running session (the first-run mirror did exactly that once).
+     */
+    @JvmStatic fun linuxProgress(step: String, percent: Int, elapsed: String?, hint: String?) {
+        val cur = _ui.value ?: return
+        if (!cur.centered) return
+        _ui.value = cur.copy(tailLabel = step, percent = percent, elapsed = elapsed, hint = hint)
     }
 
     /** Set (or clear, with null) the not-frozen reassurance line. */

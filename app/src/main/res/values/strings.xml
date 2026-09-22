@@ -2513,6 +2513,14 @@ trying for speed, <b>notemplates</b> if you get driver crashes.
         <b>Game cores</b><br /><br />
         Chooses which CPU cores a <b>game launched from the Steam client</b> may run on. It reaches games only - the client and its menus keep the list above. Leaving every core ticked lets Android place the work itself, which is usually the best choice.
     ]]></string>
+    <!-- Rotating lines under the Linux session's loading screen, one every 8 s, while the client boots. -->
+    <string-array name="linux_loading_hints">
+        <item>The first run downloads the Steam client from Valve and then its update — a few minutes on a good connection.</item>
+        <item>The screen stays black until the client draws its first frame; nothing is stuck while this clock is moving.</item>
+        <item>Steam restarts itself once after updating. That is normal, and it comes back on its own.</item>
+        <item>A controller shows up in Steam as an Xbox 360 pad. Without one, the on-screen pad appears.</item>
+        <item>Games you install run through the ARM64 Proton the app set up; a Proton from Contents replaces it per game.</item>
+    </string-array>
     <string name="help_linux_draw_driver">"<b>Draw driver (Linux runtime)</b> — Linux Steam client only.\n\nThis is the Vulkan driver that <b>draws</b> inside the Linux runtime. Everything in the session uses it: gamescope\'s compositing, the Steam client\'s own interface (its OpenGL goes through the runtime\'s Zink to Vulkan) and every game the client launches (Direct3D goes through Proton\'s DXVK/VKD3D to Vulkan). One choice covers the client and its games.\n\n<b>Runtime default</b> is the Turnip the runtime was built with. Anything else is a driver you imported under Contents → Installed → Linux runtime drivers. Only <b>-Linux</b> Turnip zips can be imported: the client and its games are Linux processes and cannot load an Android or Wayland driver at all.\n\nNothing inside the runtime is modified — the Vulkan loader is simply pointed at the driver you picked, so switching back is instant. If an imported driver is deleted, the session quietly uses the runtime default again.\n\nThis is not the driver that puts the picture on the screen. That is <b>Display driver (Android side)</b> above, and both are always involved: this one draws the frame, that one shows it."</string>
     <string name="help_linux_display_driver"><![CDATA[
         <b>Display driver (Android side)</b><br /><br />
