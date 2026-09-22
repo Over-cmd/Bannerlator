@@ -343,13 +343,24 @@ BUSCONF
     # falls through to the host, and the guest shell dies on libreadline before the game is reached.
     # FEX_ROOTFS names it outright and is read whatever the config situation.
     [ -d /usr/share/guestos/fex-mesa ] && export FEX_ROOTFS=/usr/share/guestos/fex-mesa
+    steam_args=(-gamepadui -clientbeta publicbeta
+      -no-cef-sandbox -cef-force-gpu -cef-ozone-platform=x11
+      -cef-use-gl=angle -cef-use-angle=vulkan)
+    # SteamOS runs its own session as `steam -gamepadui -steamos3 -steamdeck`, which is the shape
+    # Valve tunes Big Picture for. Set BL_STEAMDECK=1 in Download/Bannerlator-LinuxSteam/
+    # linux-tuning.conf to try it. Off by default: it also makes the client expect Deck hardware
+    # (battery, TDP controls, a Deck input device) that is not here, and that cost is untested.
+    if [ "${BL_STEAMDECK:-0}" = 1 ]; then
+      steam_args+=(-steamdeck -steamos3)
+      echo "== steam: Deck mode on (-steamdeck -steamos3)"
+    fi
+    echo "== steam args: ${steam_args[*]}"
+
     # The client exits 42 when it has updated itself and wants a fresh start (steam.sh does this).
     while :; do
       rm -f "$HOME/.bl-restart-once"
       step "starting the Steam client"
-      "$steam_root/steamrtarm64/steam" -gamepadui -clientbeta publicbeta \
-        -no-cef-sandbox -cef-force-gpu -cef-ozone-platform=x11 \
-        -cef-use-gl=angle -cef-use-angle=vulkan "$@"
+      "$steam_root/steamrtarm64/steam" "${steam_args[@]}" "$@"
       rc=$?
       echo "== steam exited rc=$rc"
       collect_steam_logs
