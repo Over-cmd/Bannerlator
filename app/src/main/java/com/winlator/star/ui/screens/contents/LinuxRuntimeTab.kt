@@ -48,6 +48,13 @@ fun LinuxRuntimeTab() {
     val scope = rememberCoroutineScope()
 
     var installed by remember { mutableStateOf(LinuxRuntimeInstaller.installedVersion(context)) }
+    // The Steam entry belongs to the runtime's own settings now, not to a Wine container. A runtime
+    // installed before that was so still has its entry in a container, and the install path above
+    // only runs on a download - so make sure of the entry whenever the tab is opened on an
+    // installed runtime. Idempotent: it returns at once when the entry is already where it belongs.
+    LaunchedEffect(installed) {
+        if (installed != null) withContext(Dispatchers.IO) { addSteamEntry(context) }
+    }
     var release by remember { mutableStateOf<LinuxRuntimeInstaller.Release?>(null) }
     var checking by remember { mutableStateOf(true) }
     var busy by remember { mutableStateOf(false) }
