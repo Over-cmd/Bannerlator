@@ -362,6 +362,10 @@ jobs:
         cp "$SO" ../../../jniLibs/arm64-v8a/libblsteam.so
 
     - name: bl-steam-client host unit tests (informational, non-blocking)
+      # Bounded: one pubg job sat in this step for 25+ minutes on 2026-09-21 while its siblings
+      # finished it in 11 s, and with no limit it would have held the build to GitHub's six-hour
+      # job cap. Informational means it must never hold a build; a hang is a failure to report.
+      timeout-minutes: 8
       # The crate carries 224 #[test] functions that have never executed ANYWHERE. The build
       # step above cross-compiles for the device, and `cargo build` excludes #[cfg(test)] code
       # by design - so today those tests are neither run NOR compiled, and every one of them
