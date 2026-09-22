@@ -10850,3 +10850,26 @@ TF2's launch options restored to `-condebug`; the autolaunch hook cleared.
 >
 > Steam's logs used to be copied raw into Download, with the account's session token in
 > `connection_log.txt`, and only on a clean exit. Neither is true any more.
+
+### 2026-09-21 — 🔖 END OF DAY: the branch is ready; merge to main on 2026-09-22 after one test
+
+> **State:** `feat/linux-gamescope-runtime` at `8deba310`, APK `ca24163e…` installed and proven on the
+> FIT. Nothing merged. `main` is `fb7cfc99`.
+>
+> **Proven today, in order:** the glibc Turnip built and published from Banners-Turnip, imported and
+> loaded by the client; driver-import routing that keeps each kind in the list that can load it; the
+> Linux draw-driver row and an honest drawer/HUD for Linux sessions; six fixes taken from WinNative;
+> the client running with **no Wine container** (global settings, seeded from the old one); the
+> client on **all eight cores**; and session log bundles that match the SteamDeck app's, scrubbed.
+>
+> **The one test before merging:** a Wine game in a Wayland container. Two of the WinNative ports
+> changed the compositor - window-based frame counting and seat modifiers - and that compositor is
+> the shipped Wine/Wayland path, untested there since. Sane fps number, Shift works, no black screen
+> = merge. If not, revert only those two compositor hunks (`20b1236e`) and merge the rest.
+>
+> **Rollback:** `refs/backup/20260921/linux-pre-max-ports` (`17663f36`), APK `9ee955fa…`.
+>
+> **Carried over:** the idle-menu fps reading on the 8-core build; the Thor black-screen report
+> (device + bundle needed - the new bundle makes that a one-look diagnosis); proot's termios2 fix
+> via `build-proot.yml` and the GTK A/B, proot staying in the runtime; the WinNative features not
+> taken (non-Steam games through the client, Epic, client updates, logs manager, tap accuracy).
