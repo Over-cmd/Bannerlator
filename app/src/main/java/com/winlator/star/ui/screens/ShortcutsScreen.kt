@@ -6524,7 +6524,7 @@ internal fun ShortcutSettingsDialogScreen(
     // Emulator
     val emulatorEntries = remember { res.getStringArray(R.array.emulator_entries).toList() }
     var selectedEmulator by remember {
-        val id = shortcut.getExtra("emulator", shortcut.container.emulator)
+        val id = shortcut.getExtra("emulator", shortcut.container.emulator) ?: ""
         mutableStateOf(emulatorEntries.firstOrNull { StringUtils.parseIdentifier(it) == id }
             ?: emulatorEntries.firstOrNull() ?: id)
     }
@@ -6589,12 +6589,16 @@ internal fun ShortcutSettingsDialogScreen(
     }
 
     // Box64 / FEXCore / controls
+    // Both fall back to the container's value, and a container can have none: the Linux
+    // runtime's settings container carries no Box64 or FEX at all (a Linux session runs neither),
+    // and on a fresh install nothing seeds them. A null here reached .isEmpty() below and crashed
+    // the editor the moment it opened for the Steam (Linux) entry.
     var selectedBox64Version by remember {
-        mutableStateOf(shortcut.getExtra("box64Version", shortcut.container.getBox64Version()))
+        mutableStateOf(shortcut.getExtra("box64Version", shortcut.container.getBox64Version()) ?: "")
     }
     var selectedBox64PresetIndex by remember { mutableIntStateOf(0) }
     var selectedFexCoreVersion by remember {
-        mutableStateOf(shortcut.getExtra("fexcoreVersion", shortcut.container.getFEXCoreVersion()))
+        mutableStateOf(shortcut.getExtra("fexcoreVersion", shortcut.container.getFEXCoreVersion()) ?: "")
     }
     var selectedFexCorePresetIndex by remember { mutableIntStateOf(0) }
     var selectedControlsProfileIndex by remember { mutableIntStateOf(0) }
