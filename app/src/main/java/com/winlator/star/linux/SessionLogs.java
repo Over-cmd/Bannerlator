@@ -244,28 +244,49 @@ public final class SessionLogs {
     }
 
     private static final long TAIL_ABOVE_BYTES = 512L * 1024;
+    private static final int HEAD_LINES = 600;
     private static final int TAIL_LINES = 3000;
 
     /**
      * Copies {@code src} to {@code dst} line by line, through the redactor when {@code scrub},
-     * keeping only the last {@code tailLines} lines when that is above zero.
+     * keeping only the first {@link #HEAD_LINES} and the last {@code tailLines} lines when that is
+     * above zero.
+     *
+     * <p>The head is kept because a whole class of fault only ever shows at start-up and is gone
+     * from the tail by the time a session ends: the Steam client's GPU process dying on its way up
+     * writes its reason in the first hundreds of lines of {@code cef_log.txt} and nowhere else, and
+     * a tail-only bundle could not answer whether that had happened.
      */
     private static boolean copyLines(File src, File dst, boolean scrub, int tailLines) {
         try {
+            java.util.List<String> head = null;
             java.util.List<String> lines = null;
+            long total = 0;
             if (tailLines > 0) {
+                head = new java.util.ArrayList<>(HEAD_LINES);
                 java.util.ArrayDeque<String> tail = new java.util.ArrayDeque<>(tailLines + 1);
                 try (BufferedReader r = new BufferedReader(new FileReader(src))) {
                     String line;
                     while ((line = r.readLine()) != null) {
+                        total++;
+                        if (head.size() < HEAD_LINES) head.add(line);
                         tail.addLast(line);
                         if (tail.size() > tailLines) tail.removeFirst();
                     }
                 }
                 lines = new java.util.ArrayList<>(tail);
+                // Short enough that the two halves would overlap: the head already has all of it.
+                if (total <= HEAD_LINES + tailLines) { head = null; }
             }
             try (BufferedWriter w = new BufferedWriter(new FileWriter(dst))) {
                 if (lines != null) {
+                    if (head != null) {
+                        w.write("[first " + head.size() + " lines of " + src.length() + " bytes]");
+                        w.newLine();
+                        for (String line : head) { w.write(scrub ? LogRedactor.INSTANCE.redact(line) : line); w.newLine(); }
+                        w.write("[... " + (total - head.size() - lines.size()) + " lines omitted ...]");
+                        w.newLine();
+                    }
                     w.write("[last " + lines.size() + " lines of " + src.length() + " bytes]");
                     w.newLine();
                     for (String line : lines) { w.write(scrub ? LogRedactor.INSTANCE.redact(line) : line); w.newLine(); }

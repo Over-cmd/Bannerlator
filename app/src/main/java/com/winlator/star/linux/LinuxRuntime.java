@@ -174,12 +174,35 @@ public final class LinuxRuntime {
 
         // Android denies apps these; glibc, Steam and libcap read them at startup.
         File fakeProc = new File(root, "etc/bannerlator/proc");
+        // libpci picks its procfs backend on whether it can read the /proc/bus/pci directory, which
+        // the app can, then die()s - exit(1) on the calling process - on the devices file inside it,
+        // which the app cannot. Chromium loads libpci in its GPU process to name the video card, so
+        // that exit kills the process; after a few tries CEF gives up on hardware and draws the rest
+        // of the session on SwiftShader, which is the client's interface rendered on the CPU. An
+        // empty list is the truthful answer from in here: nothing the app can see is on a PCI bus.
+        // Created at session start rather than shipped in the rootfs so an installed runtime is
+        // fixed too, and the table's guard below binds it only when the real file cannot be read,
+        // so it can never stand in front of real data.
+        // (WinNative, maxjivi05, deff1ac6: 44 -> 85 fps scrolling the Big Picture library on a
+        // OnePlus 15, GPU-process crashes 12 -> 0.)
+        File pciDevices = new File(fakeProc, "pci_devices");
+        if (!pciDevices.isFile()) {
+            try {
+                //noinspection ResultOfMethodCallIgnored
+                pciDevices.getParentFile().mkdirs();
+                //noinspection ResultOfMethodCallIgnored
+                pciDevices.createNewFile();
+            } catch (IOException e) {
+                // It then fails the isFile() test below and the session runs as it did before.
+            }
+        }
         String[][] procFiles = {
                 {"stat", "/proc/stat"},
                 {"version", "/proc/version"},
                 {"loadavg", "/proc/loadavg"},
                 {"uptime", "/proc/uptime"},
                 {"vmstat", "/proc/vmstat"},
+                {"pci_devices", "/proc/bus/pci/devices"},
                 {"cap_last_cap", "/proc/sys/kernel/cap_last_cap"},
                 {"overflowuid", "/proc/sys/kernel/overflowuid"},
                 {"overflowgid", "/proc/sys/kernel/overflowgid"},
