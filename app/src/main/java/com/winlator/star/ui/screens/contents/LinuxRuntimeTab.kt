@@ -114,8 +114,9 @@ fun LinuxRuntimeTab() {
                     if (ChildProcessRestrictions.hasSwitch()) {
                         OutlinedButton(onClick = {
                             if (!ChildProcessRestrictions.openDeveloperOptions(context)) {
-                                message = "Could not open Developer options. Settings \u2192 About phone "
-                                    + "\u2192 tap Build number seven times, then Developer options."
+                                message = "Could not open Developer options. Settings \u2192 " +
+                                    "About phone \u2192 tap Build number seven times, then " +
+                                    "Developer options."
                             }
                         }) { Text("Open Developer options") }
                     } else {
