@@ -204,6 +204,29 @@ case $mode in
     if [ ! -f "$steam_root/steamapps/appmanifest_4427310.acf" ]; then
       step "asking the client to fetch the ARM64 Proton"
       set -- "$@" steam://install/4427310
+      # A client that starts signed out drops that request: on a clean install nobody has signed
+      # in yet, so the tool stayed incomplete, and the first game install then made the client
+      # fall back to its own four-app chain (Proton Experimental, SLR 4.0, FEX) - which it
+      # queued twice and segfaulted on (device-seen 2026-09-22, FlatOut). With no remembered
+      # sign-in, ask again once the sign-in has happened: the client binary started a second
+      # time with a URL hands it to the running instance (steam.pid + steam.pipe) and exits.
+      if ! grep -q '"RememberPassword"[[:space:]]*"1"' "$steam_root/config/loginusers.vdf" 2>/dev/null; then
+        (
+          _bl_conn="$steam_root/logs/connection_log.txt"
+          _bl_from=$(stat -c %s "$_bl_conn" 2>/dev/null || echo 0)
+          for _ in $(seq 1 180); do
+            sleep 10
+            [ -f "$steam_root/steamapps/appmanifest_4427310.acf" ] && exit 0
+            if tail -c +$((_bl_from + 1)) "$_bl_conn" 2>/dev/null | grep -q "RecvMsgClientLogOnResponse() : processing complete"; then
+              sleep 15
+              [ -f "$steam_root/steamapps/appmanifest_4427310.acf" ] && exit 0
+              echo "== STEP $(date -u +%H:%M:%S) signed in: asking the client again for the ARM64 Proton"
+              "$steam_root/steamrtarm64/steam" steam://install/4427310 >/dev/null 2>&1 || true
+              exit 0
+            fi
+          done
+        ) &
+      fi
     fi
     # The tool is registered before the client starts and finds the depot at launch time, so
     # nothing here waits for a download. What can still change under a running client is which

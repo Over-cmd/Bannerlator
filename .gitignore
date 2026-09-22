@@ -33,3 +33,4 @@ app/src/main/assets/dxvk-nvapi/*.dll
 app/src/main/assets/linuxfs/libfakeinput.so
 app/src/main/assets/linuxfs/libblsession.so
 app/src/main/assets/linuxfs/usr/local/bin/
+art*/

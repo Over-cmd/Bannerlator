@@ -10910,3 +10910,25 @@ TF2's launch options restored to `-condebug`; the autolaunch hook cleared.
 >
 > **Next:** repeat the clean-install flow on the `0904fa71` standard APK: wizard → Linux Runtime
 > download → Steam (Linux) launch → sign-in → open its settings → a game.
+
+## 2026-09-22 — new-user flow complete on `2cc25217`; one more first-run fault, fixed on the branch
+
+> Clean standard install → runtime download → Steam (Linux) → sign-in → FlatOut installed → FlatOut
+> running, on main `2cc25217` (both APKs staged and installed). Also added on the way: the Linux
+> session's loading screen (milestones, the client's download percentage, a clock, hints; uncovered
+> on the client's first frame - "timing is perfect now").
+>
+> **The fault:** the client segfaulted (rc=139, "Failed writing minidump") the moment the first game
+> install was confirmed. The session asks the client to fetch the ARM64 Proton depot (4427310) on
+> its command line at startup; on a clean install nobody is signed in yet and a signed-out client
+> drops the request - `content_log` was empty for six minutes. Our tool was the default but
+> incomplete, so the client fell back to its own chain (Proton Experimental → SLR 4.0 → FEX), queued
+> Proton Experimental twice ("same game folder as installed app 1493710"), and died in
+> "Reconfiguring". A relaunch signed in made the same request land: the "Proton Experimental
+> (ARM64)" install dialog, 1.94 GB, and FlatOut then installed and ran through our tool.
+>
+> **The fix** (`bannerlator-session`): with no remembered sign-in in `loginusers.vdf`, a background
+> watcher waits for the sign-in (a new "processing complete" logon line in `connection_log.txt`),
+> gives the interface 15 s, and asks again by starting the client binary with the same URL - which
+> hands it to the running instance (steam.pid + steam.pipe) and exits. Shipped by the app's own copy
+> of the session scripts, so no runtime re-host.
