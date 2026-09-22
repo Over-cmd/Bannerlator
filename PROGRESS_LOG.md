@@ -10798,3 +10798,35 @@ TF2's launch options restored to `-condebug`; the autolaunch hook cleared.
 > Container 8 is still there, untouched, until the user deletes it. Merge gate before `main`: a Wine
 > game in a Wayland container to confirm the two compositor ports (frame counting, seat modifiers)
 > did not regress the shipped path.
+
+### 2026-09-21 (evening) — what the container had been quietly holding, and the 90-vs-66 fps answer
+
+> **Container-level settings did not travel with the entry.** The shortcut's extras did (drivers,
+> LSFG engine, DirectAudio, the HUD's saved position); what the container carried did not, and the
+> first casualty was the HUD: its launch gate `container.isShowFPS()` is unchanged, but `container`
+> is now the Linux settings, created from the app's defaults, where `showFPS` is false. Diffed key by
+> key on the device: also HUD skin/opacity/scale, `lsfgAutoEnable`/performance mode, the container's
+> audio and display driver. Fix: the Linux settings are **seeded once from the container the entry
+> came out of** - its whole config copied over, keeping id/root/name/runtime, the source recorded.
+> The seed needs a source: on the FIT the entry had already moved and the container's other Linux
+> entry had been deleted, so the first version found nothing and did nothing, silently. The move now
+> records `linuxMovedFrom`, the lookup falls back through it and to any gamescope-marked container,
+> and a miss is logged. The FIT was seeded by hand over the bridge (backup at `.container.pre-seed`).
+>
+> **Two editor rows greyed out while the session honoured them.** DirectAudio was gated on the
+> container's Wine version (a Linux entry's DirectAudio is the relay driver, no layer of ours
+> involved) and frame generation on renderer/Wayland resolution (a Linux session always presents
+> through the Vulkan compositor). Both gates now pass for a Linux entry. The settings also reported
+> X11: `getDisplayBackend()` reads extras and the fresh-create wrote a top-level key - fixed.
+>
+> **The client-menu fps gap, measured rather than argued.** With only the client running, our
+> `steamwebhelper` sat on affinity **`0x7c`** - cores 2..6, five of eight, without core 7, the
+> fastest - because `BL_CLIENT_CPUS` was unset: my `cpuListOrEmpty` dropped the list whenever it
+> covered every core, and the session's re-pinning beat only runs when it is set. The standalone
+> SteamDeck app (our own code, same runtime, same driver) exports it and its webhelper sits on
+> **`0xff`**. Menus: 66 fps here, 90+ there. The client list is now always exported for a Linux
+> session (`61a41403`). The earlier 23.6 fps reading had HL2 running behind the menu - a confound.
+>
+> Also: the informational Rust unit-test step in CI hung 25 minutes on one flavour with no
+> timeout; capped at 8. And `com.steamdeck.launcher` on the device is OUR standalone app, recorded
+> under the Bannerlator index all along - I compared against it for an hour thinking it was Max's.
