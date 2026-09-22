@@ -112,11 +112,18 @@ internal sealed class XmbRow {
         val open: () -> XmbMenu,
     ) : XmbRow()
 
-    /** Runs something. [thumbnail] shows a small image instead of the icon (e.g. cover results). */
+    /**
+     * Runs something. [thumbnail] shows a small image instead of the icon.
+     *
+     * [thumbnailLarge] switches that image from the shared 32dp icon slot to a tall portrait tile
+     * and makes the row taller with it — for cover art, which is about 2:3 and unreadable squeezed
+     * into an icon square. Leave it false for anything that really is an icon.
+     */
     class Action(
         override val key: String, override val label: String, val icon: ImageVector,
         val subtitle: String? = null, val value: String? = null, val danger: Boolean = false,
         val disabledReason: String? = null, val thumbnail: ImageBitmap? = null,
+        val thumbnailLarge: Boolean = false,
         val onClick: () -> Unit,
     ) : XmbRow()
 

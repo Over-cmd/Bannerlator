@@ -415,6 +415,33 @@ public final class WaylandCompositor {
     /** Relative pointer motion by dx,dy scene pixels (the Relative Mouse / captured-mouse path):
      *  while a program holds a pointer lock this is what it receives as relative_motion; otherwise
      *  the compositor moves its pointer by the delta. */
+    /**
+     * The guest's pointer image, straight from wl_pointer.set_cursor.
+     * out = [serial, hidden, w, h, hotspotX, hotspotY, ARGB8888 pixels...]; returns the number of
+     * ints written, or 0 if {@code out} is too small. Poll [0] (the serial) and only rebuild when it
+     * changes; [1] = 1 means the guest asked for NO pointer, which is what a mouse-look game does.
+     */
+    public static int cursorSnapshot(int[] out) { return nativeCursorSnapshot(out); }
+
+    private static native int nativeCursorSnapshot(int[] out);
+
+    /** Enough for the header plus a 128x128 cursor, the largest the compositor snapshots. */
+    public static final int CURSOR_BUF_INTS = 6 + 128 * 128;
+
+    /** Touch actions for {@link #sendTouch}. */
+    public static final int TOUCH_DOWN = 0, TOUCH_MOVE = 1, TOUCH_UP = 2, TOUCH_CANCEL = 3;
+
+    /**
+     * One finger, as real wl_touch rather than a synthesised mouse: the guest sees fingers with
+     * their own ids, so multi-touch works. x/y are output-space (0..1919, 0..1079); a finger stays
+     * with the surface it went down on until it lifts, as the protocol requires.
+     */
+    public static void sendTouch(int action, int id, int x, int y) {
+        nativeSendTouch(action, id, x, y);
+    }
+
+    private static native void nativeSendTouch(int action, int id, int x, int y);
+
     public static void sendPointerDelta(int dx, int dy) {
         if (dx == 0 && dy == 0) return;
         nativeSendSceneInput(6, dx * 256, dy * 256);

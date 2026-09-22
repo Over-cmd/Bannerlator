@@ -1569,6 +1569,83 @@ public class XServerDisplayActivity extends AppCompatActivity {
     private com.winlator.star.wayland.WaylandClipboardSync waylandClipboard;
     private com.winlator.star.wayland.WaylandTextInput waylandTextInput;
     private float waylandCursorX = -1f, waylandCursorY = -1f; // touchpad cursor position (view px)
+    // The Wayland pointer is an app-drawn overlay (the compositor never draws one), so nothing was
+    // deciding when it should go away: any injected motion made it visible and only a pointer lock
+    // ever hid it again. It now hides on its own when idle, and stays hidden while a controller is
+    // the thing driving - physical pad or on-screen controls - because then the pointer is not what
+    // the player is looking at.
+    private static final long WAYLAND_CURSOR_IDLE_MS = 2500L;   // no pointer motion -> hide
+    private static final long WAYLAND_CURSOR_PAD_MS  = 1200L;   // recent pad input -> keep hidden
+    /** Session-scoped: on-screen controls live in InputControlsView, which has no activity handle. */
+    public static volatile long waylandLastPadInputMs = 0L;
+    private final android.os.Handler waylandCursorIdle =
+            new android.os.Handler(android.os.Looper.getMainLooper());
+    private final Runnable waylandCursorHideRunnable = () -> {
+        if (waylandCursorView != null && waylandCursorView.getVisibility() != View.GONE)
+            waylandCursorView.setVisibility(View.GONE);
+    };
+
+    // The guest's own pointer, from wl_pointer.set_cursor. Before this the app drew a fixed arrow and
+    // had no idea what the game wanted - X11 always knew, because its X server owns the cursor.
+    private final int[] waylandCursorBuf =
+            new int[com.winlator.star.wayland.WaylandCompositor.CURSOR_BUF_INTS];
+    private int waylandCursorSerial = -1;        // last snapshot applied
+    private boolean waylandGuestHidesCursor;     // the guest asked for NO pointer (mouse-look)
+    private int waylandCursorHotX, waylandCursorHotY;
+
+    /** Pull the guest's cursor if it changed. Cheap: usually just reads a serial. */
+    private void waylandSyncGuestCursor() {
+        if (waylandCursorView == null) return;
+        int n = com.winlator.star.wayland.WaylandCompositor.cursorSnapshot(waylandCursorBuf);
+        if (n < 6) return;
+        int serial = waylandCursorBuf[0];
+        // Serial 0 = the guest has not called set_cursor yet. That is NOT "hide": it just means we
+        // know nothing, so the idle/controller rules stay in charge and the fallback arrow is used.
+        if (serial == 0 || serial == waylandCursorSerial) return;
+        waylandCursorSerial = serial;
+        waylandGuestHidesCursor = waylandCursorBuf[1] != 0;
+        if (waylandGuestHidesCursor) return;
+        int w = waylandCursorBuf[2], h = waylandCursorBuf[3];
+        if (w <= 0 || h <= 0 || n < 6 + w * h) return;
+        waylandCursorHotX = waylandCursorBuf[4];
+        waylandCursorHotY = waylandCursorBuf[5];
+        try {
+            // wl_shm ARGB8888 is premultiplied; Android treats these ints as straight alpha. Hard-edged
+            // cursors are unaffected; only soft shadows would differ slightly.
+            android.graphics.Bitmap bmp = android.graphics.Bitmap.createBitmap(
+                    waylandCursorBuf, 6, w, w, h, android.graphics.Bitmap.Config.ARGB_8888);
+            waylandCursorView.setImageBitmap(bmp);
+        } catch (Exception e) {
+            Log.e("XServerDisplayActivity", "wayland: cursor bitmap failed", e);
+        }
+    }
+
+    /** A controller just produced input: hide the pointer now and keep it hidden while it keeps coming. */
+    public static void waylandNotePadInput() {
+        waylandLastPadInputMs = android.os.SystemClock.uptimeMillis();
+    }
+
+    /**
+     * Pointer motion happened. Show the overlay and re-arm the idle hide - unless a controller is
+     * driving, in which case keep it hidden. Main thread only.
+     */
+    private void waylandCursorPoke() {
+        if (waylandCursorView == null) return;
+        waylandSyncGuestCursor();
+        waylandCursorIdle.removeCallbacks(waylandCursorHideRunnable);
+        boolean padDriving =
+                android.os.SystemClock.uptimeMillis() - waylandLastPadInputMs < WAYLAND_CURSOR_PAD_MS;
+        // The guest asking for no pointer is authoritative - it is what X11 always had and Wayland
+        // never did. The idle/controller rules below are only a fallback for when it wants one.
+        if (waylandGuestHidesCursor || padDriving || waylandPointerLocked) {
+            if (waylandCursorView.getVisibility() != View.GONE)
+                waylandCursorView.setVisibility(View.GONE);
+            return;
+        }
+        if (waylandCursorView.getVisibility() != View.VISIBLE)
+            waylandCursorView.setVisibility(View.VISIBLE);
+        waylandCursorIdle.postDelayed(waylandCursorHideRunnable, WAYLAND_CURSOR_IDLE_MS);
+    }
     private volatile boolean waylandPointerLocked; // a program holds a pointer lock in the compositor
     private EnvVars overrideEnvVars;
 
@@ -8287,10 +8364,9 @@ public class XServerDisplayActivity extends AppCompatActivity {
                     float[] pos = waylandSceneToView(x, y, vw, vh);
                     waylandCursorX = pos[0];
                     waylandCursorY = pos[1];
-                    waylandCursorView.setX(waylandCursorX);
-                    waylandCursorView.setY(waylandCursorY);
-                    if (waylandCursorView.getVisibility() != View.VISIBLE)
-                        waylandCursorView.setVisibility(View.VISIBLE);
+                    waylandCursorView.setX(waylandCursorX - waylandCursorHotX);
+                    waylandCursorView.setY(waylandCursorY - waylandCursorHotY);
+                    waylandCursorPoke();
                 });
             }
             @Override public void onPointerButton(com.winlator.star.xserver.Pointer.Button button, boolean pressed) {
@@ -8342,6 +8418,40 @@ public class XServerDisplayActivity extends AppCompatActivity {
         waylandSurfaceView.setOnTouchListener((v, ev) -> {
             int vw = v.getWidth(), vh = v.getHeight();
             if (vw <= 0 || vh <= 0) return true;
+            // Touchscreen mode (the same "touchscreen_toggle" X11 uses): every finger goes to the
+            // guest as a real wl_touch sequence with its own id, so a game gets multi-touch instead
+            // of one synthesised mouse. The touchpad cursor is not used in this mode.
+            if (waylandTouchscreenMode()) {
+                int act = ev.getActionMasked();
+                if (waylandCursorView != null && waylandCursorView.getVisibility() != View.GONE)
+                    waylandCursorView.setVisibility(View.GONE);
+                switch (act) {
+                    case android.view.MotionEvent.ACTION_DOWN:
+                    case android.view.MotionEvent.ACTION_POINTER_DOWN: {
+                        int i = ev.getActionIndex();
+                        waylandSendFinger(com.winlator.star.wayland.WaylandCompositor.TOUCH_DOWN,
+                                ev.getPointerId(i), ev.getX(i), ev.getY(i), vw, vh);
+                        break;
+                    }
+                    case android.view.MotionEvent.ACTION_MOVE:
+                        for (int i = 0; i < ev.getPointerCount(); i++)
+                            waylandSendFinger(com.winlator.star.wayland.WaylandCompositor.TOUCH_MOVE,
+                                    ev.getPointerId(i), ev.getX(i), ev.getY(i), vw, vh);
+                        break;
+                    case android.view.MotionEvent.ACTION_UP:
+                    case android.view.MotionEvent.ACTION_POINTER_UP: {
+                        int i = ev.getActionIndex();
+                        waylandSendFinger(com.winlator.star.wayland.WaylandCompositor.TOUCH_UP,
+                                ev.getPointerId(i), ev.getX(i), ev.getY(i), vw, vh);
+                        break;
+                    }
+                    case android.view.MotionEvent.ACTION_CANCEL:
+                        com.winlator.star.wayland.WaylandCompositor.sendTouch(
+                                com.winlator.star.wayland.WaylandCompositor.TOUCH_CANCEL, 0, 0, 0);
+                        break;
+                }
+                return true;
+            }
             if (waylandCursorX < 0) { waylandCursorX = vw / 2f; waylandCursorY = vh / 2f; }
             switch (ev.getActionMasked()) {
                 case android.view.MotionEvent.ACTION_DOWN:
@@ -8558,12 +8668,25 @@ public class XServerDisplayActivity extends AppCompatActivity {
         android.view.Choreographer.getInstance().postFrameCallback(waylandVsyncCallback);
     }
 
+    /** Touchscreen mode: fingers go to the guest as wl_touch. Shared with X11's setting. */
+    private boolean waylandTouchscreenMode() {
+        SharedPreferences sp = preferences != null ? preferences
+                : PreferenceManager.getDefaultSharedPreferences(this);
+        return sp != null && sp.getBoolean("touchscreen_toggle", false);
+    }
+
+    /** One finger to the compositor, view pixels -> output space (the same mapping the pointer uses). */
+    private void waylandSendFinger(int action, int id, float x, float y, int vw, int vh) {
+        int ox = (int) (Math.max(0f, Math.min(vw, x)) / vw * 1920f);
+        int oy = (int) (Math.max(0f, Math.min(vh, y)) / vh * 1080f);
+        com.winlator.star.wayland.WaylandCompositor.sendTouch(action, id, ox, oy);
+    }
+
     private void updateWaylandCursor(int vw, int vh, int action) {
         if (waylandCursorView != null) {
-            waylandCursorView.setX(waylandCursorX);
-            waylandCursorView.setY(waylandCursorY);
-            if (waylandCursorView.getVisibility() != View.VISIBLE)
-                waylandCursorView.setVisibility(View.VISIBLE);
+            waylandCursorView.setX(waylandCursorX - waylandCursorHotX);
+            waylandCursorView.setY(waylandCursorY - waylandCursorHotY);
+            waylandCursorPoke();
         }
         int ox = (int) (waylandCursorX / vw * 1920f);
         int oy = (int) (waylandCursorY / vh * 1080f);
@@ -12323,6 +12446,15 @@ public class XServerDisplayActivity extends AppCompatActivity {
             super.dispatchGenericMotionEvent(event);
             return true;
         }
+        // A physical pad moving/pressing: the player is not using the pointer, so let the Wayland
+        // overlay cursor hide (see waylandCursorPoke).
+        if (waylandMode) {
+            int src = event.getSource();
+            if ((src & android.view.InputDevice.SOURCE_JOYSTICK) == android.view.InputDevice.SOURCE_JOYSTICK
+                    || (src & android.view.InputDevice.SOURCE_GAMEPAD) == android.view.InputDevice.SOURCE_GAMEPAD) {
+                waylandNotePadInput();
+            }
+        }
         if (isSteamControllerShadowEvent(event.getDevice())) return true;
         // Controller-test isolation: while the Players popup is open, a game-controller AXIS event
         // drives ONLY the throwaway visualizer snapshot and is swallowed here — it never reaches
@@ -12369,6 +12501,15 @@ public class XServerDisplayActivity extends AppCompatActivity {
         if (inGameControlsEditor != null) {
             super.dispatchKeyEvent(event);
             return true;
+        }
+        // A physical pad moving/pressing: the player is not using the pointer, so let the Wayland
+        // overlay cursor hide (see waylandCursorPoke).
+        if (waylandMode) {
+            int src = event.getSource();
+            if ((src & android.view.InputDevice.SOURCE_JOYSTICK) == android.view.InputDevice.SOURCE_JOYSTICK
+                    || (src & android.view.InputDevice.SOURCE_GAMEPAD) == android.view.InputDevice.SOURCE_GAMEPAD) {
+                waylandNotePadInput();
+            }
         }
         if (isSteamControllerShadowEvent(event.getDevice())) return true;
 

@@ -219,7 +219,7 @@ static void on_client_created(struct wl_listener *l, void *data) {
 
 /* ------------------------------------------------------------------ surfaces */
 
-enum surface_role { ROLE_NONE, ROLE_TOPLEVEL, ROLE_SUBSURFACE, ROLE_DESKTOP };
+enum surface_role { ROLE_NONE, ROLE_TOPLEVEL, ROLE_SUBSURFACE, ROLE_DESKTOP, ROLE_CURSOR };
 
 struct surface {
     struct wl_resource *resource;
@@ -459,11 +459,77 @@ static void release_buffer(struct surface *s, struct wl_resource *buffer, int64_
 /* Each Wine process is a separate client with its own wl_pointer / wl_keyboard. */
 struct seat_pointer { struct wl_resource *ptr; struct wl_resource *focus; };
 struct seat_keyboard { struct wl_resource *kb; struct wl_resource *focus; };
+struct seat_touch { struct wl_resource *touch; struct wl_resource *focus; };
 #define MAX_PTRS 32
 static struct seat_pointer g_ptrs[MAX_PTRS];
 static int g_nptrs;
 static struct seat_keyboard g_kbs[MAX_PTRS];
 static int g_nkbs;
+static struct seat_touch g_touches[MAX_PTRS];
+static int g_ntouches;
+
+/* ---- the guest's cursor (wl_pointer.set_cursor) ----------------------------------------------
+ * The compositor does not composite the cursor: under zero-copy the game's buffer goes straight to
+ * an Android layer and there is nothing to composite into, so a composited cursor would vanish
+ * exactly when the fast path is on. Instead the client's cursor surface is snapshotted here and the
+ * app draws it as its overlay - which sits above every present path. What this buys over guessing:
+ * the real cursor SHAPE, and an authoritative HIDE (a Wayland client hides the pointer by calling
+ * set_cursor with a NULL surface, which is what a mouse-look game does). */
+#define CURSOR_MAX_PX (128 * 128)
+static pthread_mutex_t g_cursor_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct surface *g_cursor_surface;     /* compositor thread only */
+static int g_cursor_hx, g_cursor_hy;         /* hotspot, surface-local */
+static uint32_t g_cursor_px[CURSOR_MAX_PX];  /* guarded by g_cursor_lock: ARGB8888 snapshot */
+static int g_cursor_w, g_cursor_h;           /* 0 = nothing to draw */
+static int g_cursor_hidden = 1;              /* the guest asked for no pointer */
+static int g_cursor_serial;                  /* bumped on every change; the app polls it */
+
+static void cursor_publish_hidden(void) {
+    pthread_mutex_lock(&g_cursor_lock);
+    if (!g_cursor_hidden) { g_cursor_hidden = 1; g_cursor_serial++; }
+    pthread_mutex_unlock(&g_cursor_lock);
+}
+
+/* Copy a committed cursor buffer out for the app. wl_shm only: Wine draws cursors in software. */
+static void cursor_publish_shm(struct wl_shm_buffer *shm, int hx, int hy) {
+    int32_t w = wl_shm_buffer_get_width(shm), h = wl_shm_buffer_get_height(shm);
+    int32_t stride = wl_shm_buffer_get_stride(shm);
+    if (w <= 0 || h <= 0 || w * h > CURSOR_MAX_PX) return;
+    wl_shm_buffer_begin_access(shm);
+    const unsigned char *src = (const unsigned char *)wl_shm_buffer_get_data(shm);
+    pthread_mutex_lock(&g_cursor_lock);
+    for (int y = 0; y < h; y++)
+        memcpy(&g_cursor_px[y * w], src + (size_t)y * stride, (size_t)w * 4);
+    g_cursor_w = w; g_cursor_h = h;
+    g_cursor_hx = hx; g_cursor_hy = hy;
+    g_cursor_hidden = 0;
+    g_cursor_serial++;
+    pthread_mutex_unlock(&g_cursor_lock);
+    wl_shm_buffer_end_access(shm);
+}
+
+/* Read by the app (UI thread). out = [serial, hidden, w, h, hotspotX, hotspotY, pixels...].
+ * Returns the number of ints written, or 0 if out is too small. */
+int banner_cursor_snapshot(int *out, int cap) {
+    int n = 0;
+    pthread_mutex_lock(&g_cursor_lock);
+    int need = 6 + (g_cursor_hidden ? 0 : g_cursor_w * g_cursor_h);
+    if (cap >= need) {
+        out[0] = g_cursor_serial; out[1] = g_cursor_hidden;
+        out[2] = g_cursor_w; out[3] = g_cursor_h;
+        out[4] = g_cursor_hx; out[5] = g_cursor_hy;
+        if (!g_cursor_hidden)
+            memcpy(out + 6, g_cursor_px, (size_t)g_cursor_w * g_cursor_h * 4);
+        n = need;
+    }
+    pthread_mutex_unlock(&g_cursor_lock);
+    return n;
+}
+/* Fingers currently down, so a move/up reaches the surface the finger went down on even if it
+ * later slides outside it (Wayland requires the whole sequence to go to the same surface). */
+#define MAX_FINGERS 10
+struct finger { int id; struct surface *target; int active; };
+static struct finger g_fingers[MAX_FINGERS];
 static struct surface *g_grab;              /* no-desktop fallback: surface holding the button */
 static struct surface *g_key_target;        /* no-desktop fallback: last clicked surface */
 static struct surface *g_ime_click;         /* last clicked program window: where text input goes */
@@ -907,8 +973,13 @@ static void surface_commit(struct wl_client *c, struct wl_resource *r) {
         s->pending_buffer = NULL;
         s->pending_attach = 0;
 
-        if (s->role == ROLE_NONE) {
-            /* Cursor or role-less surface: never drawn (the app draws its own pointer). */
+        if (s->role == ROLE_CURSOR) {
+            /* The guest's pointer image. Copied out for the app's overlay (see cursor_publish_shm)
+             * rather than composited, so it survives the zero-copy and HDR layer paths. */
+            if (shm) cursor_publish_shm(shm, g_cursor_hx, g_cursor_hy);
+            if (buffer) wl_buffer_send_release(buffer);
+        } else if (s->role == ROLE_NONE) {
+            /* Role-less surface: never drawn. */
             if (buffer) wl_buffer_send_release(buffer);
         } else if (db) {
             take_dmabuf(s, db, buffer);
@@ -984,6 +1055,11 @@ static void surface_resource_destroy(struct wl_resource *r) {
     if (!s) return;
     for (int i = 0; i < g_nptrs; i++) if (g_ptrs[i].focus == r) g_ptrs[i].focus = NULL;
     for (int i = 0; i < g_nkbs; i++) if (g_kbs[i].focus == r) g_kbs[i].focus = NULL;
+    for (int i = 0; i < g_ntouches; i++) if (g_touches[i].focus == r) g_touches[i].focus = NULL;
+    if (g_cursor_surface && g_cursor_surface->resource == r) { g_cursor_surface = NULL; cursor_publish_hidden(); }
+    for (int i = 0; i < MAX_FINGERS; i++)
+        if (g_fingers[i].active && g_fingers[i].target && g_fingers[i].target->resource == r)
+            g_fingers[i].active = 0;
     if (g_grab == s) g_grab = NULL;
     if (g_key_target == s) g_key_target = NULL;
     if (g_ime_click == s) g_ime_click = NULL;
@@ -2298,9 +2374,24 @@ static uint32_t now_ms(void) {
     return (uint32_t)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
 }
 
+/* wl_pointer.set_cursor: the client tells us its pointer image, or asks for none.
+ * A NULL surface means "no cursor" - what a game does for mouse-look - and is the authoritative
+ * signal the app never had before. The surface itself is snapshotted on its next commit. */
 static void pointer_set_cursor(struct wl_client *c, struct wl_resource *r, uint32_t serial,
                                struct wl_resource *surface, int32_t hx, int32_t hy) {
-    /* The app draws its own pointer; cursor surfaces stay role-less and aren't drawn. */
+    if (!surface) {
+        if (g_cursor_surface) g_cursor_surface->role = ROLE_NONE;
+        g_cursor_surface = NULL;
+        cursor_publish_hidden();
+        return;
+    }
+    struct surface *s = wl_resource_get_user_data(surface);
+    if (!s) return;
+    if (s->role != ROLE_NONE && s->role != ROLE_CURSOR) return;  /* already has another role */
+    s->role = ROLE_CURSOR;
+    g_cursor_surface = s;
+    g_cursor_hx = hx;
+    g_cursor_hy = hy;
 }
 static void pointer_release(struct wl_client *c, struct wl_resource *r) { wl_resource_destroy(r); }
 static const struct wl_pointer_interface pointer_impl = {
@@ -2350,9 +2441,15 @@ static void seat_get_keyboard(struct wl_client *c, struct wl_resource *r, uint32
     if (wl_resource_get_version(k) >= WL_KEYBOARD_REPEAT_INFO_SINCE_VERSION)
         wl_keyboard_send_repeat_info(k, 25, 500);
 }
+static void touch_res_destroy(struct wl_resource *r) {
+    for (int i = 0; i < g_ntouches; i++)
+        if (g_touches[i].touch == r) { g_touches[i] = g_touches[--g_ntouches]; break; }
+}
 static void seat_get_touch(struct wl_client *c, struct wl_resource *r, uint32_t id) {
     struct wl_resource *t = wl_resource_create(c, &wl_touch_interface, wl_resource_get_version(r), id);
-    if (t) wl_resource_set_implementation(t, &touch_impl, NULL, NULL);
+    if (!t) { wl_client_post_no_memory(c); return; }
+    wl_resource_set_implementation(t, &touch_impl, NULL, touch_res_destroy);
+    if (g_ntouches < MAX_PTRS) { g_touches[g_ntouches].touch = t; g_touches[g_ntouches].focus = NULL; g_ntouches++; }
 }
 static void seat_release(struct wl_client *c, struct wl_resource *r) { wl_resource_destroy(r); }
 static const struct wl_seat_interface seat_impl = {
@@ -2362,7 +2459,8 @@ static const struct wl_seat_interface seat_impl = {
 static void bind_seat(struct wl_client *c, void *data, uint32_t ver, uint32_t id) {
     struct wl_resource *r = wl_resource_create(c, &wl_seat_interface, ver, id);
     wl_resource_set_implementation(r, &seat_impl, NULL, NULL);
-    wl_seat_send_capabilities(r, WL_SEAT_CAPABILITY_POINTER | WL_SEAT_CAPABILITY_KEYBOARD);
+    wl_seat_send_capabilities(r, WL_SEAT_CAPABILITY_POINTER | WL_SEAT_CAPABILITY_KEYBOARD
+                                 | WL_SEAT_CAPABILITY_TOUCH);
     if (ver >= 2) wl_seat_send_name(r, "bannerlator-seat");
 }
 
@@ -2950,6 +3048,76 @@ static void deliver_pointer(const struct input_msg *m) {
     pointer_event(x, y, m->p1 == 1 ? 0 : BTN_LEFT, m->p1 == 0);
 }
 
+static struct seat_touch *touch_for(struct wl_client *client) {
+    for (int i = 0; i < g_ntouches; i++)
+        if (wl_resource_get_client(g_touches[i].touch) == client) return &g_touches[i];
+    return NULL;
+}
+
+/* Real multi-touch: one wl_touch sequence per finger, so a game sees fingers rather than a mouse.
+ * action 0=down 1=move 2=up 3=cancel; p1 = finger id, p2/p3 = INPUT_SPACE position.
+ * A finger stays bound to the surface it went down on until it lifts, as the protocol requires. */
+static void deliver_touch(const struct input_msg *m, int action) {
+    int w, h, ow, oh;
+    double x, y;
+    scene_size(&w, &h);
+    vkp_output_size(&ow, &oh);
+    if (ow <= 0 || oh <= 0 ||
+        !vkp_output_to_scene((double)m->p2 * ow / INPUT_SPACE_W, (double)m->p3 * oh / INPUT_SPACE_H, &x, &y)) {
+        x = (double)m->p2 * w / INPUT_SPACE_W;
+        y = (double)m->p3 * h / INPUT_SPACE_H;
+    }
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    if (x > w - 1) x = w - 1;
+    if (y > h - 1) y = h - 1;
+
+    int id = m->p1;
+    struct finger *f = NULL;
+    for (int i = 0; i < MAX_FINGERS; i++)
+        if (g_fingers[i].active && g_fingers[i].id == id) { f = &g_fingers[i]; break; }
+
+    if (action == 3) {  /* cancel: tell every client holding a finger, then forget them all */
+        for (int i = 0; i < g_ntouches; i++)
+            if (g_touches[i].focus) wl_touch_send_cancel(g_touches[i].touch);
+        for (int i = 0; i < MAX_FINGERS; i++) g_fingers[i].active = 0;
+        wl_display_flush_clients(g_display);
+        return;
+    }
+
+    if (action == 0) {
+        if (f) f->active = 0;                       /* stale id: start it again */
+        struct surface *target = g_desktop ? g_desktop : toplevel_at(x, y);
+        if (!target) return;
+        for (int i = 0; i < MAX_FINGERS && !f; i++)
+            if (!g_fingers[i].active) f = &g_fingers[i];
+        if (!f) return;                             /* more fingers than we track: ignore the extra */
+        f->id = id; f->target = target; f->active = 1;
+    }
+    if (!f || !f->active || !f->target) return;
+
+    struct surface *target = f->target;
+    struct seat_touch *st = touch_for(wl_resource_get_client(target->resource));
+    if (!st) return;
+    int tx = 0, ty = 0;
+    if (target != g_desktop && target->placed) { tx = target->x; ty = target->y; }
+    wl_fixed_t sx = wl_fixed_from_double(x - tx), sy = wl_fixed_from_double(y - ty);
+    uint32_t t = now_ms();
+
+    if (action == 0) {
+        st->focus = target->resource;
+        wl_touch_send_down(st->touch, wl_display_next_serial(g_display), t, target->resource, id, sx, sy);
+    } else if (action == 1) {
+        wl_touch_send_motion(st->touch, t, id, sx, sy);
+    } else {
+        wl_touch_send_up(st->touch, wl_display_next_serial(g_display), t, id);
+        f->active = 0;
+    }
+    if (wl_resource_get_version(st->touch) >= WL_TOUCH_FRAME_SINCE_VERSION)
+        wl_touch_send_frame(st->touch);
+    wl_display_flush_clients(g_display);
+}
+
 static void key_event(uint32_t evdev, int pressed);
 struct wl_resource *banner_ime_target(void);
 static void deliver_key(const struct input_msg *m) {
@@ -3023,6 +3191,10 @@ static int on_input_readable(int fd, uint32_t mask, void *data) {
         case 4: scroll_event(m.p1); break;
         case 5: on_vsync(((int64_t)m.p1 << 32) | (uint32_t)m.p2); break;
         case 6: pointer_delta(m.p1 / 256.0, m.p2 / 256.0); break; /* relative motion, 1/256 px */
+        case 7: deliver_touch(&m, 0); break;                     /* finger down */
+        case 8: deliver_touch(&m, 1); break;                     /* finger moved */
+        case 9: deliver_touch(&m, 2); break;                     /* finger up */
+        case 10: deliver_touch(&m, 3); break;                    /* touch cancelled */
         default: deliver_pointer(&m); break;
         }
     }
@@ -3034,6 +3206,16 @@ static int on_input_readable(int fd, uint32_t mask, void *data) {
 void banner_wayland_send_pointer(int action, int x, int y) {
     if (g_input_pipe[1] < 0) return;
     struct input_msg m = { 0, action, x, y };
+    ssize_t n = write(g_input_pipe[1], &m, sizeof(m));
+    (void)n;
+}
+
+/* Called from JNI (Android UI thread). Queues one finger's event; the compositor thread dispatches it.
+ * action 0=down 1=move 2=up 3=cancel, id = Android pointer id, x/y in INPUT_SPACE. */
+void banner_wayland_send_touch(int action, int id, int x, int y) {
+    if (g_input_pipe[1] < 0) return;
+    int type = action == 0 ? 7 : action == 1 ? 8 : action == 2 ? 9 : 10;
+    struct input_msg m = { type, id, x, y };
     ssize_t n = write(g_input_pipe[1], &m, sizeof(m));
     (void)n;
 }
