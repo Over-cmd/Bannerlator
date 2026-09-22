@@ -6504,8 +6504,12 @@ internal fun ShortcutSettingsDialogScreen(
     // Grey the option out off those layers and coerce a stale saved pick back to the default so the
     // dropdown never shows an unselectable value as selected.
     val audioDriverEntries = remember { res.getStringArray(R.array.audio_driver_entries).toList() }
+    // A Linux entry's DirectAudio is the relay driver inside the Linux runtime, wired to Valve's
+    // own ARM64 Proton by the session - no layer of ours is involved, so the container's Wine
+    // version says nothing about it. Its settings container has none, and gating on it greyed
+    // the option out (device-seen) for a driver that is device-proven on that path.
     val directAudioSupported = remember {
-        com.winlator.star.core.DirectAudioSupport.isSupported(shortcut.container.wineVersion)
+        isLinuxEntry || com.winlator.star.core.DirectAudioSupport.isSupported(shortcut.container.wineVersion)
     }
     val directAudioEntry = remember {
         audioDriverEntries.firstOrNull { StringUtils.parseIdentifier(it) == "directaudio" }
@@ -7969,7 +7973,9 @@ internal fun ShortcutSettingsDialogScreen(
                         // existing lsfg-DLL option gate. See ContainerDetailScreen for the rationale.
                         // On Wayland the renderer gate does not apply: FG runs inside the compositor
                         // (always Vulkan) and the drawer arms the engine picked here. See ContainerDetailScreen.
-                        val fgVulkan = effectiveWaylandShortcut || selectedRenderer == "Vulkan"
+                        // A Linux session always presents through the Vulkan compositor, whatever
+                        // its entry's renderer field says (gamescope is a Wayland client of it).
+                        val fgVulkan = effectiveWaylandShortcut || isLinuxEntry || selectedRenderer == "Vulkan"
                         val fgShown = fgLabels[fgIdx]
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             DpDrop(

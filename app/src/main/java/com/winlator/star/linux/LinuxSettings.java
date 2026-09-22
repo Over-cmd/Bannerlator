@@ -111,11 +111,14 @@ public final class LinuxSettings {
                 // gamescope is a Wayland client, and its output is sized by this: the client's own
                 // interface is the most expensive thing a session draws, so 720p to start.
                 data.put("screenSize", Container.DEFAULT_SCREEN_SIZE);
-                data.put("displayBackend", Container.DISPLAY_BACKEND_WAYLAND);
             }
             container.loadData(data);
-            // Always the Linux runtime, whatever the stored data says.
+            // Always the Linux runtime, whatever the stored data says. Both of these live in the
+            // container's extras - getDisplayBackend() reads extraData, not a top-level key, and a
+            // top-level "displayBackend" written here was silently ignored: the settings then
+            // reported X11, which greyed frame generation in the editor (device-seen).
             container.setRuntime(Container.RUNTIME_GAMESCOPE);
+            container.putExtra("displayBackend", Container.DISPLAY_BACKEND_WAYLAND);
             container.setName(NAME);
             if (fresh) {
                 container.saveData();
