@@ -325,7 +325,8 @@ jobs:
         mkdir -p "$M" mango-pkgs
         grep -v '^#' tools/mangoapp/packages.txt | while read -r sum url; do
           [ -n "$url" ] || continue
-          curl -fsSL --retry 3 -o mango-pkgs/pkg.tar.zst "$url"
+          # Valve's package servers sometimes reset a connection, and plain --retry does not retry that, so every error is retried.
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 -o mango-pkgs/pkg.tar.zst "$url"
           echo "$sum  mango-pkgs/pkg.tar.zst" | sha256sum -c -
           tar --use-compress-program=unzstd -xf mango-pkgs/pkg.tar.zst -C mango-pkgs
           rm mango-pkgs/pkg.tar.zst
