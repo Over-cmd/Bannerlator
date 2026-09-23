@@ -9137,6 +9137,13 @@ public class XServerDisplayActivity extends AppCompatActivity {
                 {"usr/bin/steamos-polkit-helpers/steamos-priv-write", "usr/bin/steamos-polkit-helpers/steamos-priv-write"},
                 {"usr/bin/steamos-polkit-helpers/steamos-set-timezone", "usr/bin/steamos-polkit-helpers/steamos-set-timezone"},
         };
+        // The patched gamescope (tools/gamescope): the runtime's own 3.16.29 rebuilt with the ARM64 client fixes, staged over /usr/local/bin so it comes first in the session's PATH.
+        // It is staged only when the apk carries it, which is only once a build of it has been published; otherwise the runtime's own copy is left alone.
+        if (linuxAssetPresent("usr/local/bin/gamescope")) {
+            String[][] withGamescope = java.util.Arrays.copyOf(sessionFiles, sessionFiles.length + 1);
+            withGamescope[sessionFiles.length] = new String[]{"usr/local/bin/gamescope", "usr/local/bin/gamescope"};
+            sessionFiles = withGamescope;
+        }
         // Android has no /dev/shm; a directory under the cache stands in for it, and unlike the real
         // thing it keeps whatever a session leaves. The client abandons some fifty megabytes of
         // streams each run; one runtime reached 22 GB. Cleared before a session starts.
@@ -13849,6 +13856,20 @@ return true;
         }
         Log.i("XServerDisplayActivity", "fake evdev: slots held " + held
                 + (removed.length() > 0 ? ", removed" + removed : ", nothing removed"));
+    }
+
+    /** Whether the apk carries this file under its linuxfs assets. */
+    private boolean linuxAssetPresent(String path) {
+        int slash = path.lastIndexOf('/');
+        String dir = "linuxfs" + (slash >= 0 ? "/" + path.substring(0, slash) : "");
+        String name = slash >= 0 ? path.substring(slash + 1) : path;
+        try {
+            String[] names = getAssets().list(dir);
+            if (names == null) return false;
+            for (String n : names) if (n.equals(name)) return true;
+        } catch (java.io.IOException ignored) {
+        }
+        return false;
     }
 
     private boolean hasConnectedGameController() {

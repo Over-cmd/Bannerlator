@@ -252,6 +252,8 @@ jobs:
     # launch instead of waiting on a ~790MB runtime release. Built from source here, never
     # committed, so it cannot drift from the bionic copy.
     - name: Build libfakeinput.so for the Linux runtime (glibc aarch64)
+      env:
+        GH_TOKEN: ${{ github.token }}
       run: |
         set -euo pipefail
         sudo apt-get update -qq
@@ -304,6 +306,19 @@ jobs:
         for f in tools/linuxfs/overlay/usr/bin/* tools/linuxfs/overlay/usr/bin/steamos-polkit-helpers/*; do
           [ -f "$f" ] && install -Dm644 "$f" "$D/${f#tools/linuxfs/overlay/}"
         done
+        # The patched gamescope, only once a build of it has been published: tools/gamescope/release.env names the release and the archive's sha256 (see tools/gamescope/PATCHES.md).
+        # Without that file nothing is fetched, the apk carries no gamescope, and sessions keep the runtime's own.
+        if [ -f tools/gamescope/release.env ]; then
+          . tools/gamescope/release.env
+          gh release download "${GAMESCOPE_TAG}" -R "${GITHUB_REPOSITORY}" -p gamescope.tzst -O gamescope.tzst
+          echo "${GAMESCOPE_SHA256}  gamescope.tzst" | sha256sum -c -
+          tar --use-compress-program=unzstd -xf gamescope.tzst -C "$D"
+          test -f "$D/usr/local/bin/gamescope"
+          rm gamescope.tzst
+          echo "patched gamescope staged from ${GAMESCOPE_TAG}"
+        else
+          echo "no tools/gamescope/release.env: the apk carries no gamescope of its own"
+        fi
         ls -l "$D/usr/local/bin/"
 
     # The PulseAudio sink that sends the Steam client's own sound through the DirectAudio relay (tools/aaudio-sink, from The412Banner/SteamDeck).
