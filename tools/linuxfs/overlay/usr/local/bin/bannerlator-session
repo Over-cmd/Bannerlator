@@ -351,7 +351,15 @@ BUSCONF
     # falls through to the host, and the guest shell dies on libreadline before the game is reached.
     # FEX_ROOTFS names it outright and is read whatever the config situation.
     [ -d /usr/share/guestos/fex-mesa ] && export FEX_ROOTFS=/usr/share/guestos/fex-mesa
-    steam_args=(-gamepadui -clientbeta publicbeta
+    # The client's update channel, from the entry's settings.
+    # publicbeta is what every session ran on before; steamdeck_publicbeta is the Deck's beta channel, which also carries an ARM64 client.
+    # Deck mode on publicbeta reinstalled the same client at every start, where steamdeck_publicbeta comes up clean on the second launch, so Deck mode takes the Deck channel unless one is chosen. (Seen on device in The412Banner/SteamDeck, 2026-09-23.)
+    # Only a channel known to carry an ARM64 client is accepted; anything else falls back to publicbeta, so a bad value cannot strand the client.
+    case "${BL_STEAM_CHANNEL:-}" in
+      publicbeta|steamdeck_publicbeta) steam_channel=$BL_STEAM_CHANNEL ;;
+      *) steam_channel=publicbeta ;;
+    esac
+    steam_args=(-gamepadui -clientbeta "$steam_channel"
       -no-cef-sandbox -cef-force-gpu -cef-ozone-platform=x11
       -cef-use-gl=angle -cef-use-angle=vulkan)
     # SteamOS runs its own session as `steam -gamepadui -steamos3 -steamdeck`, which is the shape Valve tunes Big Picture for.
@@ -378,9 +386,9 @@ BUSCONF
       # The branch on disk has to agree with the one forced on the command line, and it is checked before every start rather than once.
       # The client rewrites package/beta during its own run, and an rc=42 restart below would otherwise start it again on the branch it just wrote.
       # A disagreement is the restart loop described above, and it is silent apart from rc=42 in this log.
-      if [ -f "$steam_beta" ] && [ "$(cat "$steam_beta" 2>/dev/null)" != publicbeta ]; then
-        echo "== steam: client branch was $(cat "$steam_beta" 2>/dev/null), forcing publicbeta to match -clientbeta"
-        echo publicbeta > "$steam_beta"
+      if [ -f "$steam_beta" ] && [ "$(cat "$steam_beta" 2>/dev/null)" != "$steam_channel" ]; then
+        echo "== steam: client branch was $(cat "$steam_beta" 2>/dev/null), forcing $steam_channel to match -clientbeta"
+        echo "$steam_channel" > "$steam_beta"
       fi
       step "starting the Steam client"
       "$steam_root/steamrtarm64/steam" "${steam_args[@]}" "$@"

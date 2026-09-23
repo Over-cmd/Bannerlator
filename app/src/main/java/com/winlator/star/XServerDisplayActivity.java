@@ -8999,6 +8999,12 @@ public class XServerDisplayActivity extends AppCompatActivity {
         File relaySocket = new File(audioDir, "relay.sock");
         File micFifo = wantsMic ? new File(audioDir, "mic.fifo") : null;
 
+        // The battery the client reads, written from Android's battery API and bound over /sys/class/power_supply below.
+        // Without it the client's top bar and its Quick Access Menu show no battery at all.
+        File linuxBatteryDir = new File(getFilesDir(), "linux-session/sys/power_supply");
+        //noinspection ResultOfMethodCallIgnored
+        linuxBatteryDir.mkdirs();
+        environment.addComponent(new com.winlator.star.linux.LinuxBatteryComponent(linuxBatteryDir));
         guest.add("PULSE_SERVER=unix:" + rootPath + UnixSocketConfig.PULSE_SERVER_PATH);
         environment.addComponent(new PulseAudioComponent(
                 UnixSocketConfig.createSocket(rootPath, UnixSocketConfig.PULSE_SERVER_PATH),
@@ -9115,6 +9121,17 @@ public class XServerDisplayActivity extends AppCompatActivity {
                 {"usr/local/bin/bannerlator-seed-redists", "usr/local/bin/bannerlator-seed-redists"},
                 {"usr/local/bin/bannerlator-proton-extra", "usr/local/bin/bannerlator-proton-extra"},
                 {"usr/local/bin/bannerlator-netmanager", "usr/local/bin/bannerlator-netmanager"},
+                // The SteamOS helpers the client calls in Deck mode, all no-ops that answer "nothing to do".
+                // On device the client called four of them by their polkit-helpers path rather than /usr/bin, and the "Update Error" dialog was steamos-update missing there. (From The412Banner/SteamDeck.)
+                {"usr/bin/steamos-update", "usr/bin/steamos-update"},
+                {"usr/bin/steamos-select-branch", "usr/bin/steamos-select-branch"},
+                {"usr/bin/jupiter-biosupdate", "usr/bin/jupiter-biosupdate"},
+                {"usr/bin/steamos-polkit-helpers/steamos-update", "usr/bin/steamos-polkit-helpers/steamos-update"},
+                {"usr/bin/steamos-polkit-helpers/steamos-select-branch", "usr/bin/steamos-polkit-helpers/steamos-select-branch"},
+                {"usr/bin/steamos-polkit-helpers/jupiter-biosupdate", "usr/bin/steamos-polkit-helpers/jupiter-biosupdate"},
+                {"usr/bin/steamos-polkit-helpers/jupiter-dock-updater", "usr/bin/steamos-polkit-helpers/jupiter-dock-updater"},
+                {"usr/bin/steamos-polkit-helpers/steamos-priv-write", "usr/bin/steamos-polkit-helpers/steamos-priv-write"},
+                {"usr/bin/steamos-polkit-helpers/steamos-set-timezone", "usr/bin/steamos-polkit-helpers/steamos-set-timezone"},
         };
         // Android has no /dev/shm; a directory under the cache stands in for it, and unlike the real
         // thing it keeps whatever a session leaves. The client abandons some fifty megabytes of
@@ -9341,6 +9358,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // Apps may not list /dev/input; the fake evdev nodes the input rings back stand in for it.
         gameBinds = new ArrayList<>(gameBinds);
         if (fakeInputEnabled) gameBinds.add(fakeInputDir.getPath() + ":/dev/input");
+        gameBinds.add(linuxBatteryDir.getPath() + ":/sys/class/power_supply");
         // Back in front of the script, so `env -i` sets them instead of the script being handed
         // them as filenames to run.
         if (!lateEnv.isEmpty()) {

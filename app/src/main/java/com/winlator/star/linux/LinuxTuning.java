@@ -33,6 +33,16 @@ public final class LinuxTuning {
     /** Runs the client as Deck hardware, which is what puts the Quick Access Menu on screen. */
     public static final String EXTRA_STEAMDECK = "linuxSteamDeckMode";
 
+    /** The Steam client's update channel; unset follows Deck mode. */
+    public static final String EXTRA_STEAM_CHANNEL = "linuxSteamChannel";
+
+    /**
+     * The client update channels offered, the empty first entry meaning "follow Deck mode".
+     * Both carry an ARM64 client: publicbeta is what every session ran on before, and steamdeck_publicbeta is the Deck's beta channel.
+     * The session script accepts only these two, so a stale saved value can never leave the client without an update to install.
+     */
+    public static final String[] STEAM_CHANNELS = {"", "publicbeta", "steamdeck_publicbeta"};
+
     /** gamescope's upscaler type; unset leaves gamescope's own default. */
     public static final String EXTRA_SCALER = "linuxScaler";
     /** gamescope's upscaler filter; unset leaves gamescope's own default. */
@@ -69,6 +79,17 @@ public final class LinuxTuning {
         String v = shortcut != null ? shortcut.getExtra(extra, "") : "";
         if (v == null || v.isEmpty()) return defaultOn(extra);
         return "1".equals(v);
+    }
+
+    /**
+     * The client update channel this entry runs on.
+     * An explicit choice wins; otherwise Deck mode takes the Deck's channel and everything else takes publicbeta.
+     * Deck mode on publicbeta reinstalled the same client at every start, because the client read "installed version 0" against that manifest and exited 42 to apply it, while steamdeck_publicbeta comes up clean on the second launch. (Seen on device in The412Banner/SteamDeck, 2026-09-23.)
+     */
+    public static String steamChannel(Shortcut shortcut) {
+        String chosen = oneOf(shortcut, EXTRA_STEAM_CHANNEL, STEAM_CHANNELS);
+        if (!chosen.isEmpty()) return chosen;
+        return isOn(shortcut, EXTRA_STEAMDECK) ? "steamdeck_publicbeta" : "publicbeta";
     }
 
     /** The saved scaler, or "" when it is unset or not one gamescope accepts. */
@@ -108,6 +129,7 @@ public final class LinuxTuning {
             guest.add(e.getKey() + "=" + e.getValue());
         }
         guest.add("BL_STEAMDECK=" + (isOn(shortcut, EXTRA_STEAMDECK) ? "1" : "0"));
+        guest.add("BL_STEAM_CHANNEL=" + steamChannel(shortcut));
         // The session script checks these against the same lists before gamescope sees them.
         String sc = scaler(shortcut);
         if (!sc.isEmpty()) guest.add("BL_SCALER=" + sc);
@@ -131,6 +153,9 @@ public final class LinuxTuning {
             b.append(String.format("%-24s", row[0])).append(on ? "on" : "off")
              .append(set ? "" : " (default)").append('\n');
         }
+        String chosen = oneOf(shortcut, EXTRA_STEAM_CHANNEL, STEAM_CHANNELS);
+        b.append(String.format("%-24s", "Client update channel")).append(steamChannel(shortcut))
+         .append(chosen.isEmpty() ? " (follows Deck mode)" : "").append('\n');
         String sc = scaler(shortcut);
         b.append(String.format("%-24s", "Scaling mode")).append(sc.isEmpty() ? "(gamescope default)" : sc).append('\n');
         String fi = filter(shortcut);

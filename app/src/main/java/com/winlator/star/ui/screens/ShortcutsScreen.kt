@@ -6358,6 +6358,10 @@ internal fun ShortcutSettingsDialogScreen(
     // Scaling mode and scaling filter: gamescope's own controls, the same ones the Quick Access Menu offers.
     // LinuxTuning validates each against what this gamescope accepts, so a stale saved value reads as unset.
     var linuxScaler by remember { mutableStateOf(com.winlator.star.linux.LinuxTuning.scaler(shortcut)) }
+    // "" follows Deck mode; LinuxTuning.steamChannel says what that resolves to.
+    var linuxSteamChannel by remember {
+        mutableStateOf(shortcut.getExtra(com.winlator.star.linux.LinuxTuning.EXTRA_STEAM_CHANNEL, "").let { v -> if (v in com.winlator.star.linux.LinuxTuning.STEAM_CHANNELS) v else "" })
+    }
     var linuxFilter by remember { mutableStateOf(com.winlator.star.linux.LinuxTuning.filter(shortcut)) }
     // Deck mode is only turned on through a warning that says what it breaks.
     var confirmDeckMode by remember { mutableStateOf(false) }
@@ -6997,6 +7001,7 @@ internal fun ShortcutSettingsDialogScreen(
                 putExtra(com.winlator.star.linux.LinuxTuning.EXTRA_LAZY_DESCRIPTORS, if (linuxLazyDescriptors) "1" else "0")
                 putExtra(com.winlator.star.linux.LinuxTuning.EXTRA_NO_GL_ERROR, if (linuxNoGlError) "1" else "0")
                 putExtra(com.winlator.star.linux.LinuxTuning.EXTRA_STEAMDECK, if (linuxDeckMode) "1" else "0")
+                putExtra(com.winlator.star.linux.LinuxTuning.EXTRA_STEAM_CHANNEL, linuxSteamChannel.ifEmpty { null })
                 putExtra(com.winlator.star.linux.LinuxTuning.EXTRA_SCALER, linuxScaler.ifEmpty { null })
                 putExtra(com.winlator.star.linux.LinuxTuning.EXTRA_FILTER, linuxFilter.ifEmpty { null })
             }
@@ -7039,6 +7044,7 @@ internal fun ShortcutSettingsDialogScreen(
                     add(com.winlator.star.linux.LinuxTuning.EXTRA_LAZY_DESCRIPTORS)
                     add(com.winlator.star.linux.LinuxTuning.EXTRA_NO_GL_ERROR)
                     add(com.winlator.star.linux.LinuxTuning.EXTRA_STEAMDECK)
+                    add(com.winlator.star.linux.LinuxTuning.EXTRA_STEAM_CHANNEL)
                     add(com.winlator.star.linux.LinuxTuning.EXTRA_SCALER)
                     add(com.winlator.star.linux.LinuxTuning.EXTRA_FILTER)
                 }
@@ -7634,7 +7640,7 @@ internal fun ShortcutSettingsDialogScreen(
                             }
                             if (linuxDeckMode) {
                                 Text(
-                                    "Deck mode is on: games do not receive the controller, and the client shows a Steam Client update that cannot install. Do not press Apply on it.",
+                                    "Deck mode is on: games do not receive the controller. If a Steam Client update shows under System that will not install, do not press Apply on it.",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.error
                                 )
@@ -7648,7 +7654,7 @@ internal fun ShortcutSettingsDialogScreen(
                                             "Deck mode makes the Steam client behave as it does on a Steam Deck and adds the Quick Access Menu.\n\n"
                                                 + "Known problems, found on device:\n"
                                                 + "\u2022 Games stop receiving the controller. Steam's own menus still work, but in a game the pad does nothing.\n"
-                                                + "\u2022 The client shows a Steam Client update under System that cannot install. Pressing Apply restarts the client over and over.\n"
+                                                + "\u2022 The client may show a Steam Client update under System that will not install. Deck mode now uses the Steam Deck beta channel to avoid it, but if it appears, do not press Apply.\n"
                                                 + "\u2022 The Quick Access Menu's performance overlay cannot be turned on.\n\n"
                                                 + "The scaling controls below do the useful part without it, and the in-game drawer's FPS limit caps the frame rate. Turn Deck mode off again if a game stops responding to the controller."
                                         )
@@ -7661,6 +7667,20 @@ internal fun ShortcutSettingsDialogScreen(
                                     },
                                 )
                             }
+                            val channelLabels = com.winlator.star.linux.LinuxTuning.STEAM_CHANNELS.map {
+                                when (it) {
+                                    "" -> if (linuxDeckMode) "Automatic (Steam Deck beta, for Deck mode)" else "Automatic (public beta)"
+                                    "publicbeta" -> "Public beta"
+                                    else -> "Steam Deck beta"
+                                }
+                            }
+                            DpDrop(
+                                dp, com.winlator.star.linux.LinuxTuning.EXTRA_STEAM_CHANNEL,
+                                label = "Steam client update channel",
+                                options = channelLabels,
+                                selected = channelLabels[com.winlator.star.linux.LinuxTuning.STEAM_CHANNELS.indexOf(linuxSteamChannel).coerceAtLeast(0)],
+                                onSelect = { linuxSteamChannel = com.winlator.star.linux.LinuxTuning.STEAM_CHANNELS[channelLabels.indexOf(it).coerceAtLeast(0)] }
+                            )
                             val scalerLabels = com.winlator.star.linux.LinuxTuning.SCALERS.map { if (it.isEmpty()) "Default" else it.replaceFirstChar(Char::uppercase) }
                             DpDrop(
                                 dp, com.winlator.star.linux.LinuxTuning.EXTRA_SCALER,
