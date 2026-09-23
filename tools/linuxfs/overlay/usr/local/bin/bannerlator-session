@@ -349,20 +349,14 @@ BUSCONF
     # SteamOS runs its own session as `steam -gamepadui -steamos3 -steamdeck`, which is the shape Valve tunes Big Picture for.
     # The app sets BL_STEAMDECK from the Steam Deck mode switch in the entry's settings.
     # Only -steamdeck is passed, never -steamos3.
-    # -steamos3 makes the client manage itself as SteamOS does: it calls steamos-select-branch, which is not in this rootfs, and it opts the install into the steamdeck_stable client branch.
-    # That branch is written to package/beta and outlives the setting, and it then loses to the -clientbeta above on every launch.
+    # -steamos3 makes the client manage itself as SteamOS does, and it calls steamos-select-branch, which is not in this rootfs.
+    # Deck mode on its own still opts the install into the steamdeck_stable client branch, written to package/beta during the run (seen on device: publicbeta at start, steamdeck_stable after the client's own update restart).
+    # That branch outlives the setting, and it then loses to the -clientbeta above on every launch.
     # The updater reads the forced branch, finds "installed version 0" against a package set installed from the other one, marks an update pending and exits 42 to apply it - which never happens, so the client restarts for ever.
     # Each of those restarts tears the client down under a running game and takes Steam Input with it, which is a game left running with no controller.
     if [ "${BL_STEAMDECK:-0}" = 1 ]; then
       steam_args+=(-steamdeck)
       echo "== steam: Deck mode on (-steamdeck)"
-    fi
-    # Whatever wrote package/beta, the branch on disk has to agree with the one forced above.
-    # A disagreement is the restart loop described above, and it is silent apart from rc=42 in this log.
-    steam_beta=$steam_root/package/beta
-    if [ -f "$steam_beta" ] && [ "$(cat "$steam_beta" 2>/dev/null)" != publicbeta ]; then
-      echo "== steam: client branch was $(cat "$steam_beta" 2>/dev/null), forcing publicbeta to match -clientbeta"
-      echo publicbeta > "$steam_beta"
     fi
     echo "== steam args: ${steam_args[*]}"
 
@@ -370,8 +364,16 @@ BUSCONF
     # An update that cannot install asks for that restart every time, so the count is capped.
     # A session that keeps restarting looks to the user like a menu that opens and closes by itself, and the game it was launched over loses its controller each time.
     steam_updates=0
+    steam_beta=$steam_root/package/beta
     while :; do
       rm -f "$HOME/.bl-restart-once"
+      # The branch on disk has to agree with the one forced on the command line, and it is checked before every start rather than once.
+      # The client rewrites package/beta during its own run, and an rc=42 restart below would otherwise start it again on the branch it just wrote.
+      # A disagreement is the restart loop described above, and it is silent apart from rc=42 in this log.
+      if [ -f "$steam_beta" ] && [ "$(cat "$steam_beta" 2>/dev/null)" != publicbeta ]; then
+        echo "== steam: client branch was $(cat "$steam_beta" 2>/dev/null), forcing publicbeta to match -clientbeta"
+        echo publicbeta > "$steam_beta"
+      fi
       step "starting the Steam client"
       "$steam_root/steamrtarm64/steam" "${steam_args[@]}" "$@"
       rc=$?

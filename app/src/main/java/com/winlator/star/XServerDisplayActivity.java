@@ -9067,7 +9067,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
                .append(container != null ? container.id + " (" + container.getName() + ")" : "none").append('\n');
             // The tuning switches too.
             // A measurement is only worth keeping if the report beside it says what was set when it was taken.
-            eff.append("--- performance switches (linux-tuning.conf) ---\n")
+            eff.append("--- performance switches (entry settings) ---\n")
                .append(com.winlator.star.linux.LinuxTuning.report(shortcut));
             com.winlator.star.linux.SessionLogs.writeDeviceReport(this, new File(logDir, "device.txt"), eff.toString());
             com.winlator.star.linux.SessionLogs.writeNetworkReport(this, new File(logDir, "network.txt"));
