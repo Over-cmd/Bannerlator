@@ -108,10 +108,15 @@ bl_directaudio() {
   # mmdevapi only tries the drivers named in the registry; its built-in list is pulse, alsa, oss and
   # coreaudio and knows nothing about this one. The key is appended to the prefix's user.reg rather
   # than written with `wine reg`, which would start a wineserver here just to set one value.
+  # In user.reg a key's backslashes are written doubled. The key goes in through %s, which printf
+  # leaves as it is, because a backslash in printf's format is an escape and halves them. Earlier
+  # builds wrote the format form, so the value sat under a key named SoftwareWineDrivers that Wine
+  # never reads. The check below looks for the real key, so those prefixes are repaired on their
+  # next launch.
   reg="${STEAM_COMPAT_DATA_PATH:-}/pfx/user.reg"
   if [ -f "$reg" ]; then
-    if ! grep -q '"Audio"="directaudio"' "$reg" 2>/dev/null; then
-      printf '\n[Software\\\\Wine\\\\Drivers] %s\n"Audio"="directaudio"\n' "$(date +%s)" >> "$reg"
+    if ! grep -A3 -F '[Software\\\\Wine\\\\Drivers]' "$reg" 2>/dev/null | grep -q '"Audio"="directaudio"'; then
+      printf '\n[%s] %s\n"Audio"="directaudio"\n' 'Software\\\\Wine\\\\Drivers' "$(date +%s)" >> "$reg"
       echo "bannerlator-proton: DirectAudio selected in the prefix" >&2
     fi
   else
