@@ -1321,8 +1321,10 @@ private fun TopLevelFields(
             // (PulseAudio sink + ALSA player), so it's shown for either driver.
                         // Cog → adaptive audio presets & fine-tuning. Both engines honor the same presets/knobs
             // (PulseAudio sink + ALSA player), so it's shown for either driver.
+                        // Cog → adaptive audio presets & fine-tuning. Both engines honor the same presets/knobs
+            // (PulseAudio sink + ALSA player), so it's shown for either driver.
             val audioId = StringUtils.parseIdentifier(viewModel.selectedAudioDriver)
-            if (audioId == "pulseaudio" || audioId == "alsa" || audioId == "directaudio" || audioId == "nativeaudio") { // 🔥 CORREGIDO: Sumamos "nativeaudio"
+            if (audioId == "pulseaudio" || audioId == "alsa" || audioId == "directaudio" || audioId == "nativeaudio") { // 🚨 FIJADO: Añadido "nativeaudio"
                 IconButton(onClick = { showAudioSettings = true }) {
                     Icon(Icons.Default.Settings, contentDescription = "Audio settings", modifier = Modifier.size(18.dp))
                 }
@@ -1345,8 +1347,10 @@ private fun TopLevelFields(
                 scopeLabel = "this container",
                 latencyLive = true,
                 driverLabel = when (StringUtils.parseIdentifier(viewModel.selectedAudioDriver)) {
-                    "alsa" -> "ALSA"; "pulseaudio" -> "PulseAudio"; "directaudio" -> "DirectAudio"
-                    "nativeaudio" -> "Native Audio (Wrapper)" // 🌟 CORREGIDO: Etiqueta limpia de producción
+                    "alsa" -> "ALSA"
+                    "pulseaudio" -> "PulseAudio"
+                    "directaudio" -> "DirectAudio"
+                    "nativeaudio" -> "Native Audio (Wrapper)" // 🚨 SINCRO COMPILADOR: Formateado en cascada vertical limpia
                     else -> StringUtils.parseIdentifier(viewModel.selectedAudioDriver)
                 },
                 driverId = StringUtils.parseIdentifier(viewModel.selectedAudioDriver),
