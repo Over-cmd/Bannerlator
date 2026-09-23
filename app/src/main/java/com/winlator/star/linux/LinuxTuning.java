@@ -30,7 +30,7 @@ public final class LinuxTuning {
     public static final String EXTRA_LAZY_DESCRIPTORS = "linuxLazyDescriptors";
     /** Skips GL error bookkeeping in the hot path. */
     public static final String EXTRA_NO_GL_ERROR = "linuxNoGlError";
-    /** Runs the client the way SteamOS runs its own session. */
+    /** Runs the client as Deck hardware, which is what puts the Quick Access Menu on screen. */
     public static final String EXTRA_STEAMDECK = "linuxSteamDeckMode";
 
     private LinuxTuning() {}
@@ -39,8 +39,11 @@ public final class LinuxTuning {
      * Whether a switch is on when the entry has never been edited.
      *
      * <p>The three environment ones are on so a tester who changes nothing is still testing them.
-     * Deck mode is off: it makes the client expect Deck hardware — battery sysfs, TDP controls, a
-     * Deck input device — none of which is here, and what that costs has not been measured.
+     * Deck mode is off because it is the newest of these and the least measured. It is worth
+     * turning on: it is what puts Steam's own Quick Access Menu on screen, with the native
+     * performance overlay, the frame limiter that reads the panel's real rate, and the scaling
+     * controls. Only {@code -steamdeck} is passed and never {@code -steamos3}; the session script
+     * says what that second flag did to the client's update branch.
      */
     public static boolean defaultOn(String extra) {
         return !EXTRA_STEAMDECK.equals(extra);

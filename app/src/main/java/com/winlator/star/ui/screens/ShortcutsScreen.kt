@@ -7621,11 +7621,10 @@ internal fun ShortcutSettingsDialogScreen(
                                 com.winlator.star.linux.LinuxTuning.defaultOn(
                                     com.winlator.star.linux.LinuxTuning.EXTRA_STEAMDECK)) { linuxDeckMode = it }
                             Text(
-                                "Threaded GL is the likeliest of these to move the number: the menu is "
-                                    + "CPU-bound in exactly what it moves off the calling thread. Steam Deck "
-                                    + "mode runs the client the way SteamOS runs its own session, which is what "
-                                    + "Valve tunes Big Picture for \u2014 but it also makes the client expect Deck "
-                                    + "hardware that is not here, so it is off until someone measures it.",
+                                "Steam Deck mode puts Steam's own Quick Access Menu on screen: the native "
+                                    + "performance overlay, a frame limiter that reads this panel's real rate, and "
+                                    + "the scaling controls. The other three make the chain that draws the client's "
+                                    + "interface cheaper. None is proven on this device yet, so change one at a time.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )

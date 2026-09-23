@@ -348,14 +348,28 @@ BUSCONF
       -cef-use-gl=angle -cef-use-angle=vulkan)
     # SteamOS runs its own session as `steam -gamepadui -steamos3 -steamdeck`, which is the shape Valve tunes Big Picture for.
     # The app sets BL_STEAMDECK from the Steam Deck mode switch in the entry's settings.
-    # It is off by default: it also makes the client expect Deck hardware (battery, TDP controls, a Deck input device) that is not here, and that cost is untested.
+    # Only -steamdeck is passed, never -steamos3.
+    # -steamos3 makes the client manage itself as SteamOS does: it calls steamos-select-branch, which is not in this rootfs, and it opts the install into the steamdeck_stable client branch.
+    # That branch is written to package/beta and outlives the setting, and it then loses to the -clientbeta above on every launch.
+    # The updater reads the forced branch, finds "installed version 0" against a package set installed from the other one, marks an update pending and exits 42 to apply it - which never happens, so the client restarts for ever.
+    # Each of those restarts tears the client down under a running game and takes Steam Input with it, which is a game left running with no controller.
     if [ "${BL_STEAMDECK:-0}" = 1 ]; then
-      steam_args+=(-steamdeck -steamos3)
-      echo "== steam: Deck mode on (-steamdeck -steamos3)"
+      steam_args+=(-steamdeck)
+      echo "== steam: Deck mode on (-steamdeck)"
+    fi
+    # Whatever wrote package/beta, the branch on disk has to agree with the one forced above.
+    # A disagreement is the restart loop described above, and it is silent apart from rc=42 in this log.
+    steam_beta=$steam_root/package/beta
+    if [ -f "$steam_beta" ] && [ "$(cat "$steam_beta" 2>/dev/null)" != publicbeta ]; then
+      echo "== steam: client branch was $(cat "$steam_beta" 2>/dev/null), forcing publicbeta to match -clientbeta"
+      echo publicbeta > "$steam_beta"
     fi
     echo "== steam args: ${steam_args[*]}"
 
     # The client exits 42 when it has updated itself and wants a fresh start (steam.sh does this).
+    # An update that cannot install asks for that restart every time, so the count is capped.
+    # A session that keeps restarting looks to the user like a menu that opens and closes by itself, and the game it was launched over loses its controller each time.
+    steam_updates=0
     while :; do
       rm -f "$HOME/.bl-restart-once"
       step "starting the Steam client"
@@ -367,6 +381,12 @@ BUSCONF
       # compatibility layer landed. The URL arguments are not repeated: they were acted on.
       if [ -f "$HOME/.bl-restart-once" ]; then set --; continue; fi
       [ "$rc" -eq 42 ] || break
+      steam_updates=$((steam_updates + 1))
+      if [ "$steam_updates" -ge 3 ]; then
+        echo "== steam: asked to restart for an update $steam_updates times; it is not installing, so the session stops looping"
+        break
+      fi
+      set --
     done
     kill ${netmanager:-} ${system_bus:-} 2>/dev/null || true
     reap_orphans
