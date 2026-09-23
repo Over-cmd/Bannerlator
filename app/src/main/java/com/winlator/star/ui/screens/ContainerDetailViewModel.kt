@@ -447,39 +447,46 @@ class ContainerDetailViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun loadStaticResources() {
-        val res = context.resources
-        val prefs = PreferenceManager.getDefaultSharedPreferences(context)
+            val res = context.resources
+            val prefs = PreferenceManager.getDefaultSharedPreferences(context)
 
-        screenSizeEntries = res.getStringArray(R.array.screen_size_entries).toList()
+            screenSizeEntries = res.getStringArray(R.array.screen_size_entries).toList()
 
-        // Wine versions (base + downloaded profiles)
-        val wineList = res.getStringArray(R.array.wine_entries).toMutableList()
-        for (p in contentsManager.getProfiles(ContentProfile.ContentType.CONTENT_TYPE_WINE))
-            wineList.add(ContentsManager.getEntryName(p))
-        for (p in contentsManager.getProfiles(ContentProfile.ContentType.CONTENT_TYPE_PROTON))
-            wineList.add(ContentsManager.getEntryName(p))
-        wineVersionEntries = wineList
+            // Wine versions (base + downloaded profiles)
+            val wineList = res.getStringArray(R.array.wine_entries).toMutableList()
+            for (p in contentsManager.getProfiles(ContentProfile.ContentType.CONTENT_TYPE_WINE))
+                wineList.add(ContentsManager.getEntryName(p))
+            for (p in contentsManager.getProfiles(ContentProfile.ContentType.CONTENT_TYPE_PROTON))
+                wineList.add(ContentsManager.getEntryName(p))
+            wineVersionEntries = wineList
 
-        // Bundled entries + user-imported wrappers (issue #132 Step 2). Built via the SHARED
-        // WrapperManager.driverEntries helper so this list and the ShortcutsScreen one can never
-        // drift (the dynamic-dropdown drift is the feature's top-ranked risk).
-        graphicsDriverEntries = WrapperManager.driverEntries(
-            context, res.getStringArray(R.array.graphics_driver_entries)
-        )
-        dxWrapperEntries  = res.getStringArray(R.array.dxwrapper_entries).toList()
-        // (refreshGraphicsDriverEntries below re-reads the wrapper part after an import/delete.)
-        audioDriverEntries = res.getStringArray(R.array.audio_driver_entries).toList()
-        emulatorEntries   = res.getStringArray(R.array.emulator_entries).toList()
-        rendererEntries = listOf("OpenGL", "Vulkan", "SurfaceFlinger")
-        lcAllEntries      = res.getStringArray(R.array.some_lc_all).toList()
-        startupSelectionEntries = res.getStringArray(R.array.startup_selection_entries).toList()
-        mouseWarpEntries  = listOf(
-            context.getString(R.string.disable),
-            context.getString(R.string.enable),
-            context.getString(R.string.force)
-        )
-        primaryControllerEntries = res.getStringArray(R.array.xr_controllers).toList()
-        xrKeycodeNames = XKeycode.values().map { it.name }
+            // Bundled entries + user-imported wrappers (issue #132 Step 2). Built via the SHARED
+            // WrapperManager.driverEntries helper so this list and the ShortcutsScreen one can never
+            // drift (the dynamic-dropdown drift is the feature's top-ranked risk).
+            graphicsDriverEntries = WrapperManager.driverEntries(
+                context, res.getStringArray(R.array.graphics_driver_entries)
+            )
+            dxWrapperEntries  = res.getStringArray(R.array.dxwrapper_entries).toList()
+            // (refreshGraphicsDriverEntries below re-reads the wrapper part after an import/delete.)
+        
+            // 🚨 INYECCIÓN MULTIMEDIA ATÓMICA: 
+            // Pasamos el array a mutable e incluimos "nativeaudio" antes de guardarlo en audioDriverEntries.
+            val baseAudioEntries = res.getStringArray(R.array.audio_driver_entries).toMutableList()
+            baseAudioEntries.add("nativeaudio")
+            audioDriverEntries = baseAudioEntries
+
+            emulatorEntries   = res.getStringArray(R.array.emulator_entries).toList()
+            rendererEntries = listOf("OpenGL", "Vulkan", "SurfaceFlinger")
+            lcAllEntries      = res.getStringArray(R.array.some_lc_all).toList()
+            startupSelectionEntries = res.getStringArray(R.array.startup_selection_entries).toList()
+            mouseWarpEntries  = listOf(
+                context.getString(R.string.disable),
+                context.getString(R.string.enable),
+                context.getString(R.string.force)
+            )
+            primaryControllerEntries = res.getStringArray(R.array.xr_controllers).toList()
+            xrKeycodeNames = XKeycode.values().map { it.name }
+        }
 
         // Box64 presets
         val b64Presets = Box64PresetManager.getPresets("box64", context)
