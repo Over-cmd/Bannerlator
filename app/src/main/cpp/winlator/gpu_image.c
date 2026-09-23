@@ -188,3 +188,20 @@ Java_com_winlator_star_renderer_GPUImage_lockHardwareBuffer(JNIEnv *env, jobject
     }
     return buffer;
 }
+
+// JNI Enlace para inicializar el sumidero atómico desde Java/Kotlin
+JNIEXPORT void JNICALL
+Java_com_winlator_star_renderer_GPUImage_initNativeAudioWrapper(JNIEnv *env, jclass obj) {
+    // LLamada al inicializador del submódulo integrado en el controlador
+    wrapper_native_audio_init();
+}
+
+// Inyección directa de ráfagas de audio de Wine hacia el buffer circular de C
+JNIEXPORT void JNICALL
+Java_com_winlator_star_renderer_GPUImage_writeNativeAudioFrame(JNIEnv *env, jclass obj, jshortArray samples, jint count) {
+    jshort *pcm_data = (*env)->GetShortArrayElements(env, samples, NULL);
+    if (pcm_data) {
+        wrapper_native_audio_write((const int16_t *)pcm_data, count);
+        (*env)->ReleaseShortArrayElements(env, samples, pcm_data, JNI_ABORT);
+    }
+}
