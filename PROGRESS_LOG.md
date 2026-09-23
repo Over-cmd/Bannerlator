@@ -11066,3 +11066,18 @@ an unknown one stops the session from starting.
 D3D9 game that rebuilds its swapchain on focus loss, which is the moment
 `vk_wsi_force_swapchain_to_current_extent` pins it to a momentarily tiny surface. The launch-option test
 `vk_wsi_force_swapchain_to_current_extent=false %command%` is still to be run.
+
+### 2026-09-22 night — merged to main, and 3.1.3 pre-release 2 prepared (not tagged)
+
+`main` fast-forwarded `0e9b7cbc` → `4e904851` on the user's word, 16 commits, and `build-artifacts.yml`
+on main went green (run 35813529322). The working branch `feat/linux-gamescope-runtime` moved with it.
+
+**Correction to the entry above:** the frame limit it describes was removed again before the merge
+(`4e904851`), at the user's request — the in-game drawer's FPS limit already caps a Linux session. Only
+the scaling mode and filter stayed. `BL_FPS` is 0 again, as it was before.
+
+Prepared for **3.1.3 pre-release 2**, on the working branch only: versionCode 88 and versionName
+3.1.3-pre2 (a pre-release bumps it so "Include pre-releases" testers are offered the update, so the next
+stable is ≥ 89), `docs/releases/3.1.3-pre2.md` in the house layout with pre-release 1's changes collapsed
+underneath, and the README's pre-release section pointing at it. `release_notes.py 3.1.3-pre2
+--prerelease` passes. Nothing tagged or published: that waits on the user's go.

@@ -127,12 +127,12 @@ Every report gets its own **public discussion thread**. You can reply as the ori
 
 ## 🐧 Linux Steam Client — 3.1.3 pre-release (testers)
 
-**[3.1.3 pre-release 1](https://github.com/The412Banner/Bannerlator/releases/tag/3.1.3-pre1) runs Valve's own native ARM64 Linux Steam client inside Bannerlator** — sign in, install a game from your library and play it through Valve's ARM64 Proton, with no Wine container involved. It is a **tester pre-release**: the stable release is still **3.1.2**, and you are only offered it in-app with **Settings → Include pre-releases** switched on.
+**[3.1.3 pre-release 2](https://github.com/The412Banner/Bannerlator/releases/tag/3.1.3-pre2) runs Valve's own native ARM64 Linux Steam client inside Bannerlator** — sign in, install a game from your library and play it through Valve's ARM64 Proton, with no Wine container involved. Pre-release 2 puts the client's interface back on the GPU, where it runs at about twice the frame rate. It is a **tester pre-release**: the stable release is still **3.1.2**, and you are only offered it in-app with **Settings → Include pre-releases** switched on.
 
-> ⚠️ **Adreno GPUs only**, and it needs Android's **Disable child process restrictions** developer setting. Mali, Xclipse and PowerVR phones get sound over a black screen. Full caveats are in the [release notes](docs/releases/3.1.3-pre1.md).
+> ⚠️ **Adreno GPUs only**, and it needs Android's **Disable child process restrictions** developer setting. Mali, Xclipse and PowerVR phones get sound over a black screen. Leave the experimental **Steam Deck mode** off: it breaks game controllers. Full caveats are in the [release notes](docs/releases/3.1.3-pre2.md).
 
 <details>
-<summary><b>📖 Step-by-step in plain English — a brand-new install, or upgrading from the September 21 test build</b> (tap to expand)</summary>
+<summary><b>📖 Step-by-step in plain English — a brand-new install, or upgrading from pre-release 1 or the September 21 test build</b> (tap to expand)</summary>
 
 ### 🆕 New here? Installing for the first time
 
@@ -162,9 +162,11 @@ Every report gets its own **public discussion thread**. You can reply as the ori
 
 **Optional tweaks** — the ⚙️ next to the Steam (Linux) entry has resolution (720p by default, because Steam's own interface is expensive to draw), drivers, audio, frame generation and the HUD.
 
-### ⬆️ Already running the Linux Steam client? (the September 21 test build)
+### ⬆️ Already running the Linux Steam client?
 
-**Two steps. Nothing to re-download.**
+**From pre-release 1:** install this APK over your current install. That is all — nothing to re-download, and you stay signed in.
+
+**From the September 21 test build:** two steps. Nothing to re-download.
 
 1. **Install this APK over your current install.** Your data is kept — do not uninstall first.
 2. **Open Contents → Linux Runtime once.**
@@ -183,7 +185,7 @@ Then launch **Steam (Linux)** from your games list as usual.
 
 Post the **whole** session folder from `Download/Bannerlator-LinuxSteam/session-<date>-<time>/`. It is already scrubbed — tokens, Steam IDs and login files are masked or never copied, so it is safe to post.
 
-Known and already on the list, no need to report: **TF2 says "insecure"**, GTA V *Enhanced* does not run, Serious Sam Shatterverse is killed for memory, NFS Hot Pursuit Remastered faults. Everything was proven on one AYANEO Pocket FIT — reports from any other device are the single most useful thing right now.
+Known and already on the list, no need to report: **Steam Deck mode breaks game controllers**, **FlatOut shrinks to the corner after Guide → Resume**, **TF2 says "insecure"**, GTA V *Enhanced* does not run, Serious Sam Shatterverse is killed for memory, NFS Hot Pursuit Remastered faults. Everything was proven on one AYANEO Pocket FIT — reports from any other device are the single most useful thing right now.
 
 </details>
 
