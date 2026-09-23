@@ -9176,6 +9176,13 @@ public class XServerDisplayActivity extends AppCompatActivity {
             // /dev/input itself (see gameBinds below), so an unhooked opendir/readdir lists it and
             // no js* node or classic-scan hint is needed. Verified on device with the runtime's proot.
             com.winlator.star.inputcontrols.FakeInputWriter.prepareRingSlots(fakeInputDir, 4);
+            // The client sees one controller per event node in this directory, so a node with no device behind it is a pad that never moves.
+            // Four were always listed, one per ring, while one real pad fed ring0 and the other three rings were never written.
+            // A trip through the Quick Access Menu re-activates every listed pad for the game, and with four identical-looking pads nothing kept the real one on XInput slot 0.
+            // The game reads player one from slot 0, so it came back alive with no controller.
+            // Only the slots a device holds keep their node; with none yet, slot 0 is kept for the on-screen pad.
+            // The rings themselves all stay prepared, so a pad plugged in mid-session still has one: WinHandler creates its node when it takes the slot.
+            trimUnusedFakeInputNodes(fakeInputDir);
             Log.i("XServerDisplayActivity", "fake evdev nodes: "
                     + java.util.Arrays.toString(fakeInputDir.list()));
             guest.add("FAKE_EVDEV_DIR=" + fakeInputDir.getPath());
@@ -13793,6 +13800,37 @@ return true;
     // touch overlay at launch — if a real pad is already present there's no out-of-box need for a
     // phantom one, and seeding it would grab a player slot that defeats auto-hide. Reads the same live
     // slot data as updateAutoHideForControllers(); on-screen ("virtual") pads are excluded.
+    /**
+     * Removes the fake evdev nodes of slots no device holds, for a Linux session.
+     * Slot 0 is always kept, because the on-screen pad lands there when no physical one is connected.
+     */
+    private void trimUnusedFakeInputNodes(File fakeInputDir) {
+        java.util.Set<Integer> held = new java.util.HashSet<>();
+        held.add(0);
+        if (winHandler != null) {
+            for (WinHandler.PlayerSlotInfo s : winHandler.getPlayerSlotAssignments()) {
+                if (s.currentSlot >= 0) held.add(s.currentSlot);
+            }
+        }
+        File[] nodes = fakeInputDir.listFiles();
+        if (nodes == null) return;
+        StringBuilder removed = new StringBuilder();
+        for (File node : nodes) {
+            String name = node.getName();
+            if (!name.startsWith("event")) continue;
+            int slot;
+            try {
+                slot = Integer.parseInt(name.substring("event".length()));
+            } catch (NumberFormatException e) {
+                continue;
+            }
+            if (held.contains(slot)) continue;
+            if (node.delete()) removed.append(' ').append(name);
+        }
+        Log.i("XServerDisplayActivity", "fake evdev: slots held " + held
+                + (removed.length() > 0 ? ", removed" + removed : ", nothing removed"));
+    }
+
     private boolean hasConnectedGameController() {
         if (winHandler == null) return false;
         for (WinHandler.PlayerSlotInfo s : winHandler.getPlayerSlotAssignments()) {
