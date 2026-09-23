@@ -40,11 +40,47 @@ public final class LinuxTuning {
     /** gamescope's upscaler filter; unset leaves gamescope's own default. */
     public static final String EXTRA_FILTER = "linuxFilter";
 
+    /** The common caps offered on any panel, when they fit under its top rate. */
+    private static final int[] COMMON_FRAME_LIMITS = {30, 40, 45, 60};
+    /** Nothing below this is offered: under it a cap is a slideshow rather than a setting. */
+    private static final int MIN_FRAME_LIMIT = 24;
+    /** The highest cap accepted from a saved value; gamescope's nested refresh takes any rate at or above zero. */
+    private static final int MAX_FRAME_LIMIT = 1000;
+
     /**
-     * The caps offered, 0 meaning none.
-     * The cap is gamescope's nested refresh rate, so it is exact, and games read it as the display's refresh rate.
+     * The caps worth offering on this panel, ascending, with 0 first meaning none.
+     *
+     * <p>The cap is gamescope's nested refresh rate, so it is exact, and games read it as the display's refresh rate.
+     * Every cap is at most the panel's top rate, since a higher one does nothing.
+     * The list is the common caps, the panel's own modes, and the whole-number fractions of the top rate.
+     * A fraction paces evenly: at 72 on a 144 Hz panel each frame is shown for exactly two refreshes, while 60 would alternate two and three and judder.
+     *
+     * @param panelRates the refresh rates the display offers at its current resolution, from
+     *                   {@code XServerView.getSupportedRefreshRatesPrecise}; empty below API 30.
      */
-    public static final int[] FRAME_LIMITS = {0, 30, 40, 45, 60, 72, 90, 120};
+    public static int[] frameLimitOptions(float[] panelRates) {
+        int top = topRate(panelRates);
+        java.util.TreeSet<Integer> caps = new java.util.TreeSet<>();
+        for (int c : COMMON_FRAME_LIMITS) caps.add(c);
+        if (panelRates != null) for (float r : panelRates) caps.add(Math.round(r));
+        for (int d = 1; d <= 6; d++) if (top % d == 0) caps.add(top / d);
+        int[] out = new int[1 + (int) caps.stream().filter(c -> c >= MIN_FRAME_LIMIT && c <= top).count()];
+        int i = 1;
+        for (int c : caps) if (c >= MIN_FRAME_LIMIT && c <= top) out[i++] = c;
+        return out;
+    }
+
+    /** The panel's highest refresh rate at its current resolution, or 60 when it cannot be read. */
+    public static int topRate(float[] panelRates) {
+        float top = 0;
+        if (panelRates != null) for (float r : panelRates) top = Math.max(top, r);
+        return top > 1 ? Math.round(top) : 60;
+    }
+
+    /** Whether a cap shows every frame for the same number of refreshes on a panel running at {@code top}. */
+    public static boolean pacesEvenly(int cap, int top) {
+        return cap > 0 && top > 0 && top % cap == 0;
+    }
 
     /**
      * The scaler and filter values gamescope accepts, as its --help lists them for this build.
@@ -79,16 +115,19 @@ public final class LinuxTuning {
         return "1".equals(v);
     }
 
-    /** The session's frame cap in frames per second, 0 for none; an unknown saved value counts as none. */
+    /**
+     * The session's frame cap in frames per second, 0 for none.
+     * The offered list depends on the panel, so any whole number gamescope would accept is taken; anything else counts as none.
+     */
     public static int frameLimit(Shortcut shortcut) {
         String v = shortcut != null ? shortcut.getExtra(EXTRA_FRAME_LIMIT, "") : "";
         if (v == null || v.isEmpty()) return 0;
         try {
             int n = Integer.parseInt(v.trim());
-            for (int allowed : FRAME_LIMITS) if (allowed == n) return n;
+            return n > 0 && n <= MAX_FRAME_LIMIT ? n : 0;
         } catch (NumberFormatException ignored) {
+            return 0;
         }
-        return 0;
     }
 
     /** The saved scaler, or "" when it is unset or not one gamescope accepts. */

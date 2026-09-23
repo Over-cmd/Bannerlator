@@ -7664,13 +7664,33 @@ internal fun ShortcutSettingsDialogScreen(
                                     },
                                 )
                             }
-                            val frameLimitLabels = com.winlator.star.linux.LinuxTuning.FRAME_LIMITS.map { if (it == 0) "Off" else "$it fps" }
+                            // Built from this panel: nothing above its top rate, its own modes, and the whole-number fractions of the top rate.
+                            // A saved cap this panel would not offer (set on another device) is still listed, so it stays visible and changeable.
+                            val panelRatesPrecise = remember {
+                                com.winlator.star.widget.XServerView.getSupportedRefreshRatesPrecise(
+                                    if (android.os.Build.VERSION.SDK_INT >= 30) context.display
+                                    else (context.getSystemService(android.content.Context.WINDOW_SERVICE)
+                                            as android.view.WindowManager).defaultDisplay)
+                            }
+                            val topRate = remember { com.winlator.star.linux.LinuxTuning.topRate(panelRatesPrecise) }
+                            val frameLimitValues = remember(linuxFrameLimit) {
+                                val offered = com.winlator.star.linux.LinuxTuning.frameLimitOptions(panelRatesPrecise).toList()
+                                if (linuxFrameLimit in offered) offered else (offered + linuxFrameLimit).sorted()
+                            }
+                            val frameLimitLabels = frameLimitValues.map { cap ->
+                                when {
+                                    cap == 0 -> "Off"
+                                    cap == topRate -> "$cap fps \u00b7 full rate"
+                                    com.winlator.star.linux.LinuxTuning.pacesEvenly(cap, topRate) -> "$cap fps \u00b7 even pacing"
+                                    else -> "$cap fps"
+                                }
+                            }
                             DpDrop(
                                 dp, com.winlator.star.linux.LinuxTuning.EXTRA_FRAME_LIMIT,
-                                label = "Frame limit (whole session)",
+                                label = "Frame limit (whole session, panel $topRate Hz)",
                                 options = frameLimitLabels,
-                                selected = frameLimitLabels[com.winlator.star.linux.LinuxTuning.FRAME_LIMITS.indexOf(linuxFrameLimit).coerceAtLeast(0)],
-                                onSelect = { linuxFrameLimit = com.winlator.star.linux.LinuxTuning.FRAME_LIMITS[frameLimitLabels.indexOf(it).coerceAtLeast(0)] }
+                                selected = frameLimitLabels[frameLimitValues.indexOf(linuxFrameLimit).coerceAtLeast(0)],
+                                onSelect = { linuxFrameLimit = frameLimitValues[frameLimitLabels.indexOf(it).coerceAtLeast(0)] }
                             )
                             val scalerLabels = com.winlator.star.linux.LinuxTuning.SCALERS.map { if (it.isEmpty()) "Default" else it.replaceFirstChar(Char::uppercase) }
                             DpDrop(
@@ -7696,6 +7716,7 @@ internal fun ShortcutSettingsDialogScreen(
                             )
                             Text(
                                 "The frame limit holds the whole session to it, Steam's own interface included, and games read it as the display's refresh rate. "
+                                    + "Caps marked even pacing divide this panel's rate exactly, so every frame is shown for the same time; the others can judder. "
                                     + "Scaling mode and filter only matter when a game renders below the session's resolution. "
                                     + "FSR, NIS and SGSR upscale and sharpen; SGSR is Qualcomm's, made for Adreno.",
                                 style = MaterialTheme.typography.bodySmall,
