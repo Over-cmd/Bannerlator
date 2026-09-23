@@ -420,7 +420,15 @@ internal fun EnvVarsEditor(
     onValueChange: (String) -> Unit,
     modifier: Modifier = Modifier,
     gameDir: File? = null,
+    /**
+     * Help text for the "Prefer game-folder DLLs" toggle, shown behind a "?" beside it. Null (every
+     * caller but the Linux-entry shortcut editor) draws no button, so the toggle reads as it always has.
+     * Passed as text rather than a resource id because what it has to say depends on the caller.
+     */
+    preferDllsHelp: String? = null,
 ) {
+    var showPreferDllsHelp by remember { mutableStateOf(false) }
+    if (showPreferDllsHelp && preferDllsHelp != null) HelpTextDialog(preferDllsHelp) { showPreferDllsHelp = false }
     val idSource = remember { intArrayOf(0) }
     val nextId = { idSource[0]++ }
     val rows: SnapshotStateList<EnvRow> = remember { mutableStateListOf<EnvRow>().apply { addAll(parseRows(value, nextId)) } }
@@ -528,6 +536,15 @@ internal fun EnvVarsEditor(
                             "Some game-folder DLLs on — see below.",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                }
+                if (preferDllsHelp != null) {
+                    IconButton(onClick = { showPreferDllsHelp = true }) {
+                        Icon(
+                            Icons.Outlined.HelpOutline,
+                            contentDescription = "About Prefer game-folder DLLs",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
                 }

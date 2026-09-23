@@ -87,7 +87,7 @@ fun PreloaderOverlay() {
 
     // Centered status/shutdown screen — calm logo + message + slim indeterminate bar.
     if (ui.centered) {
-        CenteredStatus(ui.tailLabel.ifEmpty { ui.title }, ui.hint)
+        CenteredStatus(ui.tailLabel.ifEmpty { ui.title }, ui.hint, ui.elapsed, ui.percent)
         return
     }
 
@@ -295,7 +295,7 @@ private fun StepPips(stepIndex: Int, stepTotal: Int) {
  * message + slim indeterminate bar sit low so they clear the centered logo art above.
  */
 @Composable
-private fun CenteredStatus(message: String, subMessage: String? = null) {
+private fun CenteredStatus(message: String, subMessage: String? = null, elapsed: String? = null, percent: Int = -1) {
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -352,15 +352,38 @@ private fun CenteredStatus(message: String, subMessage: String? = null) {
                     Spacer(Modifier.height(16.dp))
                 }
             }
-            LinearProgressIndicator(
-                color = HeroAccent,
-                trackColor = Color.White.copy(alpha = 0.16f),
-                strokeCap = StrokeCap.Round,
-                modifier = Modifier
-                    .width(190.dp)
-                    .height(5.dp)
-                    .clip(RoundedCornerShape(4.dp)),
-            )
+            // Determinate while something measurable is happening (the Steam client's download,
+            // read out of the session log), the slim indeterminate bar otherwise.
+            val barModifier = Modifier
+                .width(190.dp)
+                .height(5.dp)
+                .clip(RoundedCornerShape(4.dp))
+            if (percent >= 0) {
+                LinearProgressIndicator(
+                    progress = { percent.coerceIn(0, 100) / 100f },
+                    color = HeroAccent,
+                    trackColor = Color.White.copy(alpha = 0.16f),
+                    strokeCap = StrokeCap.Round,
+                    modifier = barModifier,
+                )
+            } else {
+                LinearProgressIndicator(
+                    color = HeroAccent,
+                    trackColor = Color.White.copy(alpha = 0.16f),
+                    strokeCap = StrokeCap.Round,
+                    modifier = barModifier,
+                )
+            }
+            // The clock: a first run is minutes of nothing on screen, and a number that keeps
+            // moving is what separates "still working" from "hung" for the person watching.
+            AnimatedVisibility(visible = !elapsed.isNullOrEmpty()) {
+                Text(
+                    text = elapsed ?: "",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = HeroText.copy(alpha = 0.55f),
+                    modifier = Modifier.padding(top = 10.dp),
+                )
+            }
         }
     }
 }

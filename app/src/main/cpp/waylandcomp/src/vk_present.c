@@ -1779,6 +1779,13 @@ static int render_impl(int scene_w, int scene_h, const struct vkp_draw *draws, i
     return 0;
 }
 
+/* Re-arm the one-shot: the Linux session restarts the Steam client once on a first run (after the
+ * compatibility layer lands), and the app puts its loading screen back up for that restart. The
+ * screen is dismissed by the same first-frame signal, so it has to be able to fire again. */
+void vkp_reset_first_frame(void) {
+    g_first_frame_done = 0;
+}
+
 int vkp_render(int scene_w, int scene_h, const struct vkp_draw *draws, int n) {
     return render_impl(scene_w, scene_h, draws, n, NULL, NULL);
 }

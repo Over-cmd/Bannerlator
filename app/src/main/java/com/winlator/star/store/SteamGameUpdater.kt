@@ -640,6 +640,23 @@ object SteamGameUpdater {
         }
     }
 
+    /**
+     * Stamp an install whose build is already known rather than looked up - the Linux Steam client
+     * writes the build into its own manifest when it installs a game, and that is the build on
+     * disk whether or not it is the newest one. Without a stamp the launch check reads the
+     * installed build as 0 and offers an update for a game downloaded minutes earlier.
+     */
+    @JvmStatic
+    fun recordKnownBuild(installDir: File, branch: String, buildId: Long) {
+        try {
+            if (buildId <= 0L || !installDir.isDirectory) return
+            File(installDir, BUILD_MARKER_REL).writeText("$branch|$buildId")
+            Log.i(TAG, "stamped $installDir as $branch|$buildId")
+        } catch (t: Throwable) {
+            Log.w(TAG, "recordKnownBuild($installDir) failed: ${t.message}")
+        }
+    }
+
     /** Resolve the on-disk install dir: the stored install_dir when set, else the default derived path. */
     private fun installDirOf(ctx: Context, row: SteamDatabase.GameRow): File {
         val stored = row.installDir

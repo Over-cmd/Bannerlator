@@ -1,5 +1,383 @@
 # Star-Compose — Progress Log
 
+## 2026-09-17 — Linux runtime: gamescope + native ARM Steam, phase 1 (branch `feat/linux-gamescope-runtime`)
+
+> **What this is.** A second runtime beside Wine: a glibc aarch64 rootfs (`linuxfs`) run under proot, with Valve's **gamescope** as a Wayland client of our own compositor, Xwayland on Zink for X11 programs, and Valve's **native aarch64** Linux Steam client. No Wine, no box64, no FEX — the client is a real arm64 ELF. Modelled on Max's WinNative `feature/wayland-gamescope`; both repos are GPL-3.0, so his `tools/linuxfs` and preloads are adaptable with attribution.
+>
+> **Product shape (user's call).** `linuxfs` ships the way the Steam client does — a catalog row users opt into, which the app downloads, extracts and installs, leaving a permanent **Steam (Linux)** entry in the Games tab. It is a separate track from Wayland, but it runs on the Wayland compositor.
+>
+> **Phases.** 1 a Linux ELF runs as our uid · 2 gamescope composites into our surface · 3 the GPU (glibc Turnip, KGSL presented as a DRM node) · 4 Steam · 5 the download/install product.
+
+### 2026-09-18 — r4: the first runtime that installs without root
+
+> `linuxfs-r4` is live: sha256 `26cfa553...`, 789,167,503 B, catalog repointed, download URL
+> verified 200 with a matching content-length. Before publishing, the tarball was listed to confirm
+> it really carries `opt/android-host/{proot,loader,libtalloc.so.2}` with their exec bits.
+>
+> The proot in it is built by this project from the Termux fork `v5.1.107.92`. That closes a problem
+> that turned out to be older than this branch: the copy in the app comes from an old snapshot of
+> upstream proot 5.1.0 and cannot exec anything on a current Android, so **no released build has ever
+> been able to start the runtime** - every working install had been patched by hand. Two things had
+> to be true at once to see it. The workflow that builds the fork already existed and was already
+> right about the source, but it shipped talloc as `libtalloc.so` when the name recorded in NEEDED
+> comes from the SONAME, `libtalloc.so.2`; and nothing consumed its artifact, so the good binary was
+> built and discarded on every run while the apk compiled the dead tree.
+>
+> Carrying proot in the runtime rather than the apk also fixes the shape of the problem: it is no
+> longer the one binary an app update replaces, which is exactly how a working device was broken
+> earlier tonight.
+>
+> What this unblocks is the part that matters: a device nobody has touched can now install the
+> runtime and run it. That is the precondition for testing on a second device, which is the real
+> validation and has not happened yet.
+
+### 2026-09-18 — the _GNU_SOURCE theory was wrong; proot is still broken
+
+> `9e2b2c44` defined `_GNU_SOURCE` and made implicit declarations an error, on the theory that
+> undeclared `process_vm_readv`/`process_vm_writev` were having their 64-bit returns truncated. The
+> build came out clean - no "call to undeclared" warnings at all - and **the packaged proot fails
+> exactly as before**. The commit is worth keeping, because those functions should be declared, but
+> it is not the fix and the log should not pretend otherwise.
+>
+> This was caught by testing the binary in isolation, pulled straight out of the APK and run through
+> the bridge, before installing anything. That is the right order and it is how it should be done
+> from now on: the previous round installed first and cost an hour of recovery.
+>
+> What is actually established. Bisection puts the defect in **our proot binary, not our loader**: a
+> working proot paired with our loader runs fine, while our proot fails with either loader, so the
+> 2,416-byte loader is correct and judging it by size was a mistake. A verbose run shows proot
+> resolving its bindings, the executable and argv correctly and failing only at the execve step where
+> it injects the loader into the traced process. Our binary is 126,696 bytes against a working
+> 214,416, and our source tree has no `extension/` directory where the upstream one does, so the
+> CMake build compiles a subset of proot's sources - worth checking whether something the Android
+> execve path needs simply is not built in.
+>
+> Two ways forward, neither chosen: work out what Termux patches into proot for Android and apply it
+> here, or ship a known-good proot build instead of ours. The second is faster but is a licensing and
+> provenance decision rather than a technical one.
+
+### 2026-09-18 — the packaged proot is broken, and it blocks every fresh user
+
+> Installing the new APK on the test device stopped the runtime from starting at all: the session
+> activity opened and exited within a second, no session log, nothing in logcat. The reason only
+> appears in the **crash buffer**, which is worth remembering for any future "it exits instantly":
+>
+> ```
+> CANNOT LINK EXECUTABLE ".../libproot-real.so": library "libtalloc.so.2" not found
+> ```
+>
+> Behind that is the real problem. **`build-proot.yml` produces a broken proot**: its freestanding
+> loader comes out at 2,416 bytes where a working one is 18,136. proot starts, prints its banner and
+> dies. Every session that has ever worked on this device worked because the device was running a
+> hand-patched proot taken from Termux, and installing an APK overwrites it. Both the new APK and the
+> older one it was rolled back to ship the same broken pair, so this is not a regression from this
+> branch - it has been true all along and was masked by the patch.
+>
+> **No shipped APK can start the Linux runtime.** That makes it the first thing to fix, ahead of
+> anything else on this track: r3 and the automatic Proton selection cannot reach a fresh user until
+> proot builds correctly. The device patch and the exact restore steps are written down in memory,
+> including the two details that are easy to miss - Termux's proot is dynamically linked against
+> libtalloc, and Android's linker will not search the app's own library directory for a plain
+> executable, so the wrapper has to export LD_LIBRARY_PATH.
+
+### 2026-09-18 — r3 live, APK staged: the fresh-user path is complete
+
+> **`linuxfs-r3` is live and verified**: sha256 `38f116b4...`, 788,991,458 B, `linuxfs.json`
+> repointed at it, and the download URL returns 200 with a matching content-length. r3 is the first
+> runtime that selects the ARM64 Proton by itself, so a user no longer points each title at a
+> compatibility tool by hand.
+>
+> **The APK is built and staged** as `Bannerlator-3.1.2-linuxsteam-pubg.apk` (sha256 `a0187ec8...`,
+> versionCode 85, unchanged). It carries the frame-counter fix and the real
+> `-i Process.myUid()` proot invocation, which retires the hand-written `libproot.so` wrapper with a
+> hardcoded uid that had been sitting on the test device.
+>
+> That completes the path for someone starting from nothing: install the APK, install the Linux
+> Runtime from Contents, open Steam (Linux) from the Games tab, sign in, install a game, launch it.
+> **Neither artifact has been device-tested yet.** The two things to watch on the first run are the
+> frame counter reading real numbers on a Source title, and games starting without the Compatibility
+> box being touched. A game currently installed as a Linux build will re-download its Windows depot
+> once on that first session.
+>
+> The rootfs run that produced r3 reports as failed, and it is worth knowing why: the tarball built
+> and uploaded at step 6, and only the extra step that collects the guest shims failed afterwards,
+> because it looked for the rootfs in the workspace while the build script cds into RUNNER_TEMP. The
+> script now places those shims beside the tarball itself.
+
+### 2026-09-18 — picking Proton automatically, the frame counter, and where VAC stands
+
+> **Users should not have to tick the Compatibility box per game.** The `"0"` mapping is the
+> client's "Steam Play for all other titles" and only decides how a title is *installed*, so it
+> settles new downloads and leaves anything already installed as a Linux build running as one -
+> which is exactly why Half-Life stayed on `hl_linux` until that box was ticked by hand. Ticking it
+> writes a per-app entry at priority 250, and that is what moves a title across. So the registrar now
+> writes one per installed title, skipping the client's own tools and runtimes by app id. The first
+> session after this costs a Windows-depot download for each game currently installed as Linux.
+>
+> **The frame counter was blind, not broken.** The HUD read `0.0 fps / 1000.0ms` on the Source titles
+> while GPU load and power draw moved correctly. `take_dmabuf` only ever receives GPU buffers, so
+> every buffer reaching it is a presented frame - but the counter also asked whether the compositor
+> had imported the buffer or whether it carried a gralloc handle. That is a question about the copy
+> path, not about whether a frame happened, and a game whose buffers go straight to the display layer
+> satisfies neither. The surface-binding code four lines above already had the right rule written
+> down. Needs an APK to verify on device.
+>
+> **A packaging bug of my own broke the rootfs build**: the guest-shim loop wrote each shim to `$out`,
+> which already held the path of the tarball the script produces, so the final `zstd -o "$out"` wrote
+> a 1.31 GiB archive into `libblsysv-x86_64.so` while tar was reading that directory. Both shims had
+> compiled correctly; only packaging was broken.
+>
+> **VAC is open and instrumented.** Counter-Strike: Source launches but drops to insecure mode.
+> Nothing passes `-insecure` - `localconfig.vdf` had no launch options at all - and Steam integration
+> is healthy: the game reports `CClientSteamContext logged on = 1`, with Proton's real
+> `steamclient.dll` and `steamclient64.dll` in the prefix. So VAC itself is declining. `-condebug` is
+> now set for the app, and the log gave the verdict at connect: `Connecting to
+> 104.167.215.199:27015...` followed by `You are in insecure mode.  You must restart before you can
+> connect to secure servers.` "You must restart" means the session started insecure - VAC never
+> initialised at process start, before a server was ever chosen.
+>
+> Everything under our control is correct, so what is left is whether Valve's ARM Linux client can
+> hand a Proton game the Windows VAC module at all. That reads as a gap in the ARM client rather than
+> anything in this runtime, and it fits the app's SteamLite path working: that one runs the *Windows*
+> Steam client inside the same prefix, where a Windows VAC module loads natively, while here Steam is
+> an aarch64 Linux process outside it. Going further would mean reverse-engineering anti-cheat
+> plumbing, so this stops here; the answer is to offer both paths and send VAC-secured multiplayer to
+> SteamLite.
+>
+> The same log turned up something separate worth its own look: `Network: IP 127.0.0.1` - the game
+> enumerated only loopback as its local address. Not fatal, since the server browser works and it
+> reached the server, but that is the `net` preload's interface enumeration and it could bite real
+> multiplayer.
+
+### 2026-09-18 — four games playable, and what the screenshots prove
+
+> Brawlhalla, Stumble Guys, Half-Life and **Half-Life 2**, all through the native Linux Steam client.
+> HL2 is genuinely being played, not sitting on a menu: City 17, crowbar out, HEALTH 100 / SUIT 30,
+> Vulkan, GPU 62-71%.
+>
+> Two results worth more than the launches themselves. **Half-Life's server browser lists 153
+> internet servers with real latencies (29-144 ms)**, so networking works end to end through the
+> Linux client, proot and the `net` shim - these titles are multiplayer-capable, not just rendering.
+> And **Steam's in-game overlay works**, down to the official Half-Life 2 controller layout with a
+> full Xbox mapping, which means Steam Input is live too.
+>
+> Three rendering paths are now proven: DXVK (Brawlhalla, Stumble Guys), Wine WGL → Zink (Half-Life's
+> GoldSrc, which is OpenGL) and Vulkan (HL2).
+>
+> **One bug the screenshots exposed:** the perf HUD reads `0.0 fps / 1000.0ms` on every one of these
+> Source titles while GPU percentage and power draw move correctly - so the frame counter is not
+> hooking on this path, though it does for Brawlhalla. Cosmetic, but it makes the HUD useless for
+> exactly the games that just started working.
+
+### 2026-09-18 — Half-Life launches: three games, three rendering paths
+
+> `hl.exe` at 348 MB resident, `[Gamescope WSI] Executable name: hl.exe`, swapchain 13.88 ms, HUD
+> **OpenGL 66.9 fps / 14.9 ms**. GoldSrc renders in OpenGL, so it runs Wine WGL → Zink → Vulkan →
+> Turnip rather than DXVK — a third rendering path proven, alongside Brawlhalla and Stumble Guys
+> (both DXVK, ~72 fps).
+>
+> **It went through its Windows build, not the Linux one.** A native-Linux title that also ships a
+> Windows build can take the ordinary Proton path and skip every native-Linux problem — but the
+> platform switch is only reachable from the client UI: *Properties → Compatibility → Force the use
+> of a specific Steam Play compatibility tool → **Proton (ARM64)***. Setting a per-app
+> CompatToolMapping, writing `platform_override_source "windows"` into the app manifest, and driving
+> `steam://validate` and `steam://install` were all tried and measured: Steam honoured the Proton
+> mapping and built a `compatdata/70` prefix, but never fetched the Windows depot. Once the UI toggle
+> was used it downloaded `hl.exe`, `hlds.exe` and `hltv.exe` and launched straight away.
+>
+> The native-Linux work still matters for titles Valve ships only as Linux builds — CS:S and HL2
+> among them — and its last blocker is measured: `shmget`/`semget`/`msgget` return ENOSYS in the
+> guest, so the System V shim now builds for i686 and x86_64 as well.
+
+### 2026-09-18 — r1 uploaded, r2 cut and live; native-Linux games root-caused
+
+> **The runtime is downloadable.** The missing 789,000,670 B asset is uploaded to the `linuxfs-r1`
+> release, which is deliberately left a **draft** — r1 predates the launch fixes and would install
+> fine and then launch nothing. **`linuxfs-r2` is the first public runtime**: built by CI from
+> `9dc41739`, the exact commit proven to launch Brawlhalla end to end, sha256 `5d32a176…`,
+> 788,990,267 B. `linuxfs.json` is repointed at it and the URL that used to 404 now returns 200 with
+> a matching content-length.
+>
+> **The registrar needed a second half.** The client writes its own **per-app** CompatToolMapping
+> entry at priority 250, which outranks the `"0"` default — so setting that default alone changed
+> nothing. Every Proton the client can pick is one this runtime cannot start, so every Proton
+> mapping is now repointed and non-Proton tools are left alone. Proven from a clean state:
+> `compatibilitytools.d` emptied, the client's own `config.vdf` restored, and the session registered
+> the tool by itself and launched the game.
+>
+> **Native-Linux x86 titles (Half-Life, CS:S, HL2) are a different wall, now understood.** They
+> never touch the Proton path. Valve's `fex-compat-tool` dies before doing anything because Steam
+> launches it with fd 1 and 2 closed, so `sys.stdout` is `None` and `os.dup(sys.stdout.fileno())`
+> raises. Past that, **FEX cannot present its rootfs here at all**: with `FEX_ROOTFS` absolute, with
+> `FEX_PORTABLE`, as a name under `~/.fex-emu/RootFS/`, and with nothing set, the result is
+> byte-identical — `libc.so.6: cannot open shared object file` — though the guest tree holds that
+> libc. FEX serves its rootfs through a mount namespace, which an Android app does not get; the same
+> class of wall as pressure-vessel. Windows games are untouched by this because arm64ec Wine runs
+> FEX as a DLL inside the Wine process and never needs a rootfs — which is exactly why Proton works
+> here and native Linux does not.
+>
+> FEX itself is healthy: `FEX /usr/bin/uname -m` prints `x86_64` once `LD_LIBRARY_PATH` names the
+> guest libraries directly. With Valve's scout `i386` tree supplying the 32-bit set the Arch guest
+> lacks, Half-Life run by hand from its own directory loads every library, starts its breakpad
+> handler and reaches `SteamAPI_Init`. Launched through Steam with the same path wired into the
+> compat tool the library failures are gone, but the game still exits without output. Not solved,
+> and the compat-tool patches live in Valve's depot, so shipping them needs the symlink mirror used
+> for Proton.
+
+### 2026-09-18 — first game launch: Brawlhalla (`c3711182`)
+
+> **The x86-64 Windows build of Brawlhalla runs and presents** through the native Linux Steam
+> client: arm64ec Wine → FEX → DXVK → Turnip → gamescope's WSI layer → our Wayland compositor.
+> `Brawlhalla.exe` at 2.6 GB RSS, `[Gamescope WSI] Swapchain received new refresh cycle: 13.88ms`
+> (~72 fps presenting), and a clean shutdown afterwards — no crash signature.
+>
+> **The blocker was one line in a manifest.** Steam downloads a native aarch64 Proton as an ordinary
+> depot — `Proton Experimental (ARM64)` (4427310) and `Proton 11.0 (ARM64)` (4628740), both carrying
+> `files/bin-arm64/wine` — and both toolmanifests declare `require_tool_appid 4185400`, the Steam
+> Linux Runtime 4 for arm64. Steam therefore stacks **pressure-vessel** underneath, pressure-vessel
+> needs unprivileged **user namespaces**, and an Android app does not get them. Steam then dropped
+> the launch silently: no window, no log, straight back to the library. That silence is why no
+> compatibility tool ever appeared to run, and why the search through FEX rootfs and graphics
+> providers turned up nothing — nothing was being executed. ROCKNIX strips the same line.
+>
+> **`bannerlator-steam-compat` now re-registers Valve's own depot** as
+> `compatibilitytools.d/bannerlator-proton-arm64/`: every entry symlinked, so nothing is copied and
+> the client still updates the real depot, with our own `toolmanifest.vdf` minus
+> `require_tool_appid`. Proton takes its base directory from `dirname(sys.argv[0])` without
+> resolving it, so `files/` resolves back through the symlink. Zero extra download. The
+> FEX-under-Proton tool and `bannerlator-fex-rootfs` are gone — the ARM64 build drives the host's
+> Turnip directly and wants no graphics provider.
+>
+> **Two traps worth remembering.** Wine derives its server directory from `getuid()` and refuses any
+> prefix whose `st_uid` differs (`wine: '…/pfx' is not owned by you`); 547 paths inside `linuxfs`
+> had been left root-owned by debugging through the root bridge, so **nothing may be created in the
+> rootfs as root**. And an x86-64 prefix is wrong for arm64ec Wine, which wants
+> `files/share/default_pfx_arm64` — delete `compatdata/<appid>` and let it rebuild. Separately,
+> Steam rebuilds `LD_PRELOAD` for every game process and appended ours to its overlay entry without
+> a separator, so `libblsession.so` was silently dropped for everything it launched; the preload now
+> lives in the rootfs's `/etc/ld.so.preload`, which Steam cannot mangle.
+>
+> **Still open.** The 752 MB `linuxfs-r1.tar.zst` asset upload (`linuxfs.json` is live and points at
+> nothing), rootfs r2, a dedicated GameScope container, and the Runtime row in the container editor.
+
+### What was checked before writing anything
+
+> - `targetSdkVersion 28` keeps us in `untrusted_app_27`, the last SELinux domain allowed to exec a file out of `files/`. **Raising it ends this approach.**
+> - `abiFilters 'arm64-v8a'` with `useLegacyPackaging = true`, so `add_executable(lib*.so)` is packaged and extracted like any other jniLib — which is how proot and its loader ship.
+> - **Our compositor already advertises every global gamescope's Wayland backend demands** (it aborts if one is missing): `wl_compositor` 6, `wl_subcompositor`, `wl_shm`, `xdg_wm_base`, `zwp_linux_dmabuf_v1` 4, `wp_viewporter`, `wp_presentation` 2, relative-pointer, pointer-constraints, `wl_seat` 5, `wl_output` 2.
+> - **Two compositor gaps, both ones Max hit first.** `compositor.c:1154` has `.set_fullscreen = xdg_toplevel_noop_parent`, so we never send the configure gamescope waits for before dropping its libdecor frame; and `compositor.c:428` keeps one pointer resource per seat, where gamescope holds two pointer/keyboard pairs and reads input on the second. Both are correctness bugs in our xdg-shell and seat handling that any client could hit, so they belong on the Wayland line regardless. Phase 2.
+> - **The GPU situation on the Pocket FIT is the same as on his tablet.** `/dev/dri/card0` and `renderD128` exist at mode 0666 but are labelled `u:object_r:graphics_device:s0`, which stock policy does not grant `untrusted_app`; `/dev/kgsl-3d0` is `gpu_device`, which it does. So presenting KGSL as `/dev/dri/renderD<n>`, faking the `/sys/dev/char` entries libdrm reads, and keeping a PRIME handle table are needed here too. Phase 3.
+
+### Phases 2–5 in flight
+
+> **Phase 1 gate passed.** CI `35261996392` green on all three flavors: proot compiles, links its freestanding loader and packages as a jniLib.
+>
+> **Phase 2 (`594943c7`).** Both compositor fixes landed. `set_fullscreen`/`unset_fullscreen` now reconfigure with the fullscreen state (gamescope draws nothing until it sees it) and a toplevel's first configure goes through the same path. Every seat delivery — enter/leave, motion, buttons, axis, keys — walks all of a client's `wl_pointer`/`wl_keyboard` objects instead of the first; gamescope holds two pairs and reads input on the second. **This changes input delivery on the live Wayland path, so it wants a regression check on device.**
+>
+> **Phases 3–4 assets (`a8110ffa`).** `tools/linuxfs` ported and renamed (`bannerlator-session`, `libblsession.so`, `BL_*`, `/etc/bannerlator/`), carrying Max's corrected lsof answer. `build-linuxfs.yml` assembles the rootfs on an Ubuntu runner and fails the job if gamescope, Xwayland, the Turnip build, the preload, the session scripts or GTK 2 are missing. `workflow_dispatch` only works for a file already on the default branch, so while this lives on its own branch the job runs on pushes that touch it.
+>
+> First rootfs run resolved **297 packages**, extracted the base, applied the Turnip KGSL patch, and died at meson: Ubuntu ships 1.3.2 and Mesa 26.2 wants >= 1.4. Taking meson from pip instead.
+>
+> **Phase 4 wiring (`1a716976`).** `Container` carries a Runtime (`wine` / `gamescope`), overridable per shortcut. Choosing gamescope pins the backend to Wayland and **bypasses the Wayland layer check** — that check asks whether the selected Proton layer ships `winewayland.so`, and a gamescope session has no Wine in it at all. `setupXEnvironment` hands the session over before any Wine component is built.
+>
+> **Phase 5 (in progress).** `LinuxRuntimeInstaller` downloads the rootfs from a catalog row, checks its sha256, unpacks to a staging directory and swaps it in, so a failed install cannot leave a half runtime that `isInstalled()` would launch. It carries its own extractor rather than the shared one: a distribution rootfs is full of **hard links**, which the shared extractor writes as empty files.
+
+### Second pass over the WinNative diff (`ebe412d7`)
+
+> Going back over his compositor diff hunk by hunk after the first port turned up **three misses in one hunk**, all hard blockers:
+>
+> - `wl_output` advertised **2**; libdecor, which gamescope links, binds it at **4**, and binding above the advertised version is a protocol error that kills the client on connect. Now 4, with the `name`/`description` events that version adds, sent before `done`.
+> - `wl_seat` advertised **5**; gamescope's Wayland backend refuses a seat older than **8**. Now 9.
+> - a version-9 seat means a version-9 pointer, and from 8 `axis_discrete` is replaced by `axis_value120` and **must not be sent**. The scroll fan-out I had written still sent `axis_discrete` — a protocol error on the very pointers this work adds. Now sends whichever the pointer's version allows.
+>
+> Lesson recorded: when porting from a proven tree, diff the *whole* file, not the parts the commit message names.
+>
+> **Runtime layout, for the record:** `files/linuxfs` is one shared rootfs per app install, beside `imagefs` — not per container. A gamescope session uses its container only for screen size, audio driver, fps cap and as the shortcut's home; none of the Wine settings apply. Steam's login and library live inside the rootfs, so they are app-wide. Updating or removing the runtime affects every gamescope entry at once.
+>
+> **Rootfs build:** four host-toolchain failures in a row, each one step further — meson 1.3.2 (pip), `glslangValidator` (`glslang-tools`), `wayland-scanner`/cmake/`wayland-protocols` (host tools + target `.pc` files), then Mesa asking the *sysroot's* pkg-config for `wayland-scanner` and getting the aarch64 binary (a Meson native file). Then one transient mirror 500 out of ~300 fetches; every curl now retries.
+
+### Gates passing (late 2026-09-17)
+
+> - **APK `35267143258` green at `39c11fa3`** — the full branch compiles: proot, compositor changes, activity wiring, installer, Linux Runtime tab. Checked the artifact itself rather than trusting the colour: `libproot.so` (126 KB) and `libproot-loader.so` (2.4 KB) are in `lib/arm64-v8a/`, and the loader is a static `EXEC` with one `LOAD` at `0x2000000000` (= arm64 `LOADER_ADDRESS`), no `INTERP`, no `DYNAMIC` — the freestanding flat binary proot execs, not a disguised shared object.
+> - **Rootfs build reached the end.** The wall that mattered was version, not path: Mesa 26.2's Wayland module demands `wayland-scanner` **>= 1.26** on the build machine and Ubuntu 24.04 ships 1.22, so the scanner is now built alone from the pinned 1.26.0 release (seconds) and handed to Meson through a native file. Then: **298 packages, Mesa `[725/725]`, `libvulkan_freedreno.so` 15.7 MB** — Turnip with the KGSL backend, cross-built. The run died on the last line because the script `cd`s into its work dir and the workflow passed a relative output path; pinned absolute on both sides.
+> - Hand-off APK dispatched at head `8072b875` → run `35268263770`.
+> - One warning to keep an eye on from the qemu hook pass: `gdk-pixbuf-query-loaders` could not create `loaders.cache` — the loaders dir is missing in the aarch64 package layout. Cosmetic for Steam (pcmanfm icons at worst); not blocking.
+
+### Hand-off APK staged
+
+> Run `35268263770` at `8072b875` green → `pubg` artifact staged as **`/sdcard/Download/Bannerlator-gamescope-final-pubg.apk`** (534,905,742 bytes, sha256 `21e23a011702b5a5a64af0b577bbd88184d19ba2df5336f931f08f8e245ed036`; both proot libs confirmed inside). **Test order:** a normal Wayland game launch first (the seat fan-out and the `wl_seat` 9 / `wl_output` 4 bumps changed the live Wayland path), then Contents → Linux Runtime → Install (needs `linuxfs.json` published), then the Steam (Linux) entry.
+
+### First device run (2026-09-17 evening) — the app-side chain works; our old proot did not
+
+> Rootfs r1 published as a **local copy** (`/sdcard/Download/linuxfs-r1.tar.zst`, 789,000,670 B, sha256 `7002a594…a38b`; the 752 MB GitHub upload 500'd and is deferred to better internet — **`linuxfs.json` is already live and points at an asset that is not there yet**), unpacked with GNU tar (hard links kept, 76,069 entries, 3.2 GB) and swapped into `files/linuxfs` as the app uid with `.version` r1. Valve's arm64 client (933 MB) fetched from here and copied in, `.steam` links recreated with in-rootfs targets. `Steam (Linux)` and a `Linux Desktop` shortcut written into container 8.
+>
+> **Launch by intent (`container_id 8`, `shortcut_path`) → the whole app-side chain fired:** runtime resolved to gamescope, `linuxSessionArgs` = `[desktop]`, `LinuxLauncher` exec'd `libproot.so --kill-on-exit -r …/files/linuxfs …` with `PROOT_LOADER`/`PROOT_TMP_DIR`. Then proot died in 56 ms: `execve("/usr/bin/env"): Function not implemented`, `ptrace(PEEKDATA): I/O error`, `can't chmod …: Bad address`.
+>
+> **Diagnosis, not a guess:** as root it fails identically with seccomp on *and* off (`PROOT_NO_SECCOMP=1`) → not the sandbox. Under Termux's known-good proot the *same* rootfs runs `/usr/bin/env` → not the rootfs. Our proot was an older base whose `loader.c`/`assembly-arm64.h` differ from WinNative's (which never touched them) — the loader does not work on this kernel. **Fix `d4b538ab`: our proot tree replaced wholesale with WinNative's proven one** (carries everything hand-ported plus `#!` interpreters and `execveat`, and handles `setresuid`). Cloud build `35274984079`; the hand-ported `45fe2a8a` is superseded.
+>
+> Also shipped: per-launch debug logs under `Downloads/Bannerlator-LinuxSteam/` (`e3cc9695`) — the script half is in `tools/linuxfs`, so it lands in rootfs **r2**, not the installed r1; patch on device for now.
+>
+> Max's five new commits reviewed: the two proot fixes (now in via the swap); a fake evdev input layer for controllers, `steam-library`/`steam-compat` scripts and a Proton compat tool for running Windows games through Proton+FEX inside the session — all follow-ups, none needed for the client to come up.
+
+### ⏸️ CHECKPOINT 2026-09-17 ~17:20 — paused until the user is home (no Wi-Fi at work)
+
+> **State of the branch** `feat/linux-gamescope-runtime` @ `d4b538ab` (+ log commits), all pushed. Cloud build **`35274984079`** = the APK with **WinNative's proot tree swapped in wholesale** — the fix for the only blocker found on device. It builds without us; the artifact is downloaded when there is internet again.
+>
+> **On the device right now:** APK `8072b875` installed (old proot — will fail at the first exec until the new APK is staged); rootfs r1 at `files/linuxfs` as the app uid with the Valve client (933 MB) inside and `.steam` links fixed; session script already patched with the Downloads logging; shortcuts `Steam (Linux)` + `Linux Desktop` in container 8; `/sdcard/Download/Bannerlator-LinuxSteam/` exists.
+>
+> **Update 17:27:** run `35274984079` green; APK **staged** at `/sdcard/Download/Bannerlator-gamescope-proot3-pubg.apk` (534,905,828 B, sha256 `6107345bae4161caa9e7701614b9dbc4238739c1df71af966fc91b247e9b5d21`, headSha `d4b538ab`; both proot libs in, loader `EXEC` at `0x2000000000`). Not installed yet — **no internet needed to resume.**
+>
+> **Resume sequence:**
+> 1. Install that APK → confirm sha over the bridge.
+> 2. `am start -n com.tencent.ig/com.winlator.star.XServerDisplayActivity --ei container_id 8 --es shortcut_path "/data/data/com.tencent.ig/files/imagefs/home/xuser-8/.wine/drive_c/users/xuser/Desktop/Linux Desktop.desktop"` → expect pcmanfm under gamescope. Log: `/sdcard/Download/Bannerlator-LinuxSteam/session-*.log`; proot stderr is in the session pid's logcat under `System.out`.
+> 3. Same with `Steam (Linux).desktop` → client updates itself (exit 42 loop) → gamepad UI → sign in.
+> 4. Upload the 752 MB asset: `gh release create linuxfs-r1 /sdcard/Download/linuxfs-r1.tar.zst#linuxfs.tar.zst -R The412Banner/winlator-contents …` — **`linuxfs.json` is already live and points at it**, so the in-app Install fails for everyone else until this lands.
+>
+> **Then, in order:** dedicated GameScope container the way Max does it (normal creation from the newest Proton, then `runtime=gamescope`); rootfs **r2** (session-script logging is only in the repo, not r1); shared Steam library (bind our downloads into `steamapps/`); controllers (fake evdev); Runtime row in the container editor.
+
+### Evening, home: the proot blocker bisected to the NDK
+
+> New-proot APK (`d4b538ab`, WinNative's tree) installed and launched: **identical failure** — `execve("/usr/bin/env"): Function not implemented`, `ptrace(PEEKDATA): I/O error`, `Bad address`. So the source was never the problem.
+>
+> **Bisect as root, cross-pairing binaries:** Termux's proot + **our** loader → runs. **Our** proot + Termux's loader → fails. Termux + Termux → runs. The loader is fine; **our `libproot.so` binary is what's broken.** Same source, different build: **we build with NDK 29 (`29.0.14206865`), WinNative with NDK 27 (`27.3.13750724`)**; CMake flags otherwise identical. Our binary also has no `process_vm_*` linked (Termux's does), so every tracee memory access goes through `PTRACE_PEEKDATA` — exactly the path that dies. The symptom triple reads as a mangled syscall number at `execve` (ENOSYS), then garbage register/memory reads (EIO, EFAULT).
+>
+> **Fix in flight:** `build-proot.yml` builds proot on its own with NDK 27 (`nttld/setup-ndk r27c`, android-26, arm64-v8a) → run `35280875827`. A/B plan: drop the built `libproot.so`/loader into the installed app's `lib/arm64/` as root (dir is root-writable, `system:system` 755, `apk_data_file`) and relaunch — minutes per iteration instead of a 30-minute app build. If it runs, proot ships as prebuilt jniLibs pinned to NDK 27 and leaves the app's CMake.
+>
+> Max's `main`-branch CI artifacts predate the gamescope branch (no proot in them), so no shortcut from his APK.
+
+### ✅ 2026-09-17 ~18:35 — gamescope session RUNS on device; Steam client self-updating
+
+> **pcmanfm rendered under gamescope**, HUD reading Adreno 750 / Vulkan / Wayland, and then the native arm64 Steam client launched and pulled its own 665 MB update (Steam dir 933 MB → 3.9 GB). proot → gamescope → Xwayland (glamor on Zink) → GTK app → Valve's client, all on the device.
+>
+> **Two real blockers, both now understood:**
+>
+> 1. **Our proot binary was broken, not our proot source.** Bisected by cross-pairing: Termux's proot + *our* loader runs; *our* proot + Termux's loader does not. Same for the NDK-27 rebuild, so it was never the toolchain either — the tree in `cpp/proot` is an old snapshot of the Termux fork, thousands of lines behind in the ptrace/exec core (`syscall/enter.c` alone differs by ~2,500 lines). Termux's binary of the fork at v5.1.107.92 runs the rootfs; that is what `build-proot.yml` now builds.
+> 2. **`-i uid:gid` is required.** Xwayland's `Popen()` does `setgid(getgid()); setuid(getuid())` in the child and `_exit(127)`s if either fails; Android's app seccomp policy traps both, so xkbcomp never exec'd and Xwayland died with "XKB: Failed to compile keymap". Proved by instrumenting `/usr/bin/xkbcomp` — the log stayed empty (never invoked), then with `-i` it was invoked and returned warnings only. **Note the earlier `setpriv` A/B that seemed to clear `-i` was invalid: it ran in a root shell, which carries no app seccomp filter.** Also needed: `xkeyboard-config` (the closure never pulled it; `/usr/share/X11/xkb` was empty) — seeded for rootfs r2, hand-installed on r1.
+>
+> **Confirmed we are not missing any Wayland work of Max's:** across his whole gamescope branch the only compositor file touched is `compositor.c` (166 lines), and all ten markers of it are present in ours — fullscreen configure, seat fan-out, `wl_output` 4 + name/description, `wl_seat` 9, `axis_value120`.
+
+### 🏁 2026-09-17 18:41 — NATIVE ARM STEAM CLIENT FULLY WORKING ON DEVICE
+
+> Signed in as The412Banner, **Online**, Big Picture interactive: real library (Battlefield, Brawlhalla, Half-Life, Crystal Clash), game pages with Install / space required / playtime / controller support, friends list live, account settings. **60–67 fps, Vulkan, Adreno 750, Wayland**, 15 ms frametime, 3–9 W.
+>
+> The full chain, device-proven: proot → gamescope 3.16.29 → Xwayland (glamor on Zink) → Valve's native aarch64 client → steamwebhelper (6 CEF processes) → gamepad UI, compositing through our own Wayland compositor on Turnip.
+>
+> **The `WebUITransport` peer check never appeared in the log** — the `net.c` shim answering Steam's `lsof` with both address halves worked first try, so the thing that blocked Max for a day never surfaced for us.
+>
+> **Not shippable yet — one gap:** the proot on the device is Termux's *binary*, hand-dropped into the APK's `lib/arm64/` (originals saved in `.orig-ndk29/`, `libproot.so` is a shebang wrapper adding `-i`). `build-proot.yml` must go green so proot ships as prebuilt jniLibs and `add_subdirectory(proot)` can be dropped. Rootfs **r2** also owed: `xkeyboard-config` (hand-installed on r1) and the Downloads logging script.
+
+### Phase 1 — proot in the build (`ba0a5786`)
+
+> The tree had been sitting in `cpp/proot` unused since the old Xvfb Steam attempt, absent from `CMakeLists.txt`. Our copy is an older base than his and is CRLF/tab-formatted, so his diffs do not apply; the changes were ported by hand.
+>
+> - `add_subdirectory(proot)`, and the loader relinked as a **freestanding flat binary** at `LOADER_ADDRESS` (`0x2000000000` on arm64, matching `--image-base`), named `libproot-loader.so` so the installer places it beside `libproot.so`.
+> - `statx` translated like the other `*at` syscalls — glibc stats through it — with the wrinkle that its `AT_` flags are in arg 3, not arg 4, and kept off the seccomp fast path so it reaches the tracer at all.
+> - The **whole `set*id` family** answered inside proot. Android's app seccomp policy traps them; our tree already answered `setresuid`/`setresgid`, but not `setuid`/`setgid`/`setreuid`/`setregid`/`setfsuid`/`setfsgid`, which Xwayland's xkbcomp and the X access control call. Without privileges a process may only take an id it already holds, so the answer is known without the kernel.
+> - `PROOT_NO_SECCOMP` disables the accelerator, which otherwise hides syscalls from the tracer while debugging.
+>
+> CI run `35261996392`, headSha verified `ba0a5786`. This gate is *compiles*, nothing more — no rootfs exists yet, so nothing has been run on device.
+
+
 ## 2026-09-16 — Fix: a physical stick bound to mouse movement now moves the cursor (branch `fix/physical-lane-mouse-move`)
 
 > **Bug (user):** in the drawer's *Physical Controller Test / Bind*, binding the right stick to mouse up/down/left/right did not move the Windows mouse or the on-screen cursor.
@@ -8604,3 +8982,2102 @@ Not yet: Steamworks Shared 228980 download; auto-resume without the "Finish" tap
 - 🔖🌊 2026-09-14 03:10 — **ROLLBACK CHECKPOINT written (user ask): [[project_bannerlator_wayland_checkpoint_20260914_pre6]]**. Restore point = main **`8fc2f5ce`** / branch `feat/wayland-phase2` **`0a52cd7a`** (code `7caa8e98`) / proton-wine **`33d96b02`** / Turnip **`05dcce18`** / wcp **v7** `436edf62d00bef2f…` (`Proton-11.0-2.1-arm64ec-7`) / APK `48377d135e542464…` = `3.1.2-wayland-pre6` installed / container 7 on layer 7 (layer 6 still installed for a one-line revert) / share folder = pre6 APK + v7 wcp + README / Desktop = the user's six shortcuts (Wizardry carries `envVars=GALLIUM_THREAD=0`, backup `/sdcard/Download/wayland-backup/wizardry.desktop.bak`). Deck on Pages is one cut stale (says pre-release 5) — refresh at the next approved public cut. Known issues carried forward: silent GL-game death (gallium threaded context), two-layer CLIENT composition until the game layer is rebuilt, the shortcut-vs-container `matchRefreshRate` resolution bug, AIO sweep unproven on v7 (harness), SELinux-enforcing devices unproven for the new EGL DRM path.
 - ✅🌊 2026-09-14 05:40 — **Phase 5 merged (`f2adbaeb`, from `feat/wayland-phase5` code `217efe9e`, CI 34825893993 green, pubg `207154ce…` installed on the device).** No wcp change (layer stays `-7`), **no release** (user's gate). (a) **OpenGL safe mode PROVEN as an A/B/A on one shortcut with no hand-typed env var**: ON (default) → `wayland: OpenGL safe mode on - exporting GALLIUM_THREAD=0` + `302 frames on screen (30.2 fps) | 300 GPU frames` for 90 s; OFF from the drawer (writes `waylandGlSafeMode=0` to the **same owner the resolver reads**, so the toggle can never be inert — the `matchRefreshRate` bug is not reproduced) → `05:26:10.832 presenting GPU frames` → `05:26:11.141 program disconnected` = **309 ms, one frame**; ON again → 30 fps steady. (b) **HDR reporting PROVEN**: first line of every session log — `HDR capability of "Built-in Screen" (display 0, Android API 34): formats none | luminance max 500 nits… | HDR/SDR headroom not available -- SDR only: an HDR layer here would be tone-mapped and dropped to GPU composition`; Task Manager CONTAINER shows `HDR  none · panel 500 nits`. (d) HL2 zero-copy unchanged (seven windows of `600 frames | 600 GPU frames | 600 zero-copy frames`). ⚠️ **(c) display-layer composition recovery is CODE-ONLY, UNPROVEN**: the game+overlay pair never came up (fullscreen HL2 minimises itself when Wine's Task Manager takes guest focus → `window moved to -32000,-32000` → `layers hidden`; the windowed retry hung). `DEVICE/CLIENT`, the recovery log line and the return to `DEVICE/DEVICE` are all unobserved — re-test recipe is in the branch's log. Also unproven: the HDR re-read when a display is attached (nothing plugged in), effects applied live, and an X11 regression launch. 📌 **Wizardry's `envVars=GALLIUM_THREAD=0` is now redundant AND harmful** — the launch path leaves an explicit user value alone, so while that line is on the shortcut the in-game safe-mode toggle cannot turn it off for that game. Remove it when the device is free (user was driving). Device left on the phase-5 build, NOT the released pre6; share folder still holds pre6.
 - ✅🌊 2026-09-14 07:05 — **Overlay layer now GATED on the display's transform+scale; merged (`3320b192`, code `5334b3d3`, CI 34834608772 green, pubg `5be0ea93…` installed).** The phase-4 premise was wrong and is corrected in `sc_layer.h`: a second display layer flips the frame to `DEVICE/CLIENT` **for the rest of the session** on this panel, and rebuilding the game layer does NOT bring it back (reproduced 3×, also at +8/+16/+24 s, and after dropping the layer path entirely; the earlier "HOME+resume fixes it" reading was wrong because HOME+resume re-creates the app's whole window and SurfaceView, `VRI[XServerDisplayActivity]#0` → `#4`). Control: the drawer alone does not cause it. **Gate (prediction, not measure-then-back-out — the composition type is not readable by an app: it lives in the Composer HAL, `ASurfaceTransactionStats` carries only latch time + fences, and the `dumpsys` copy needs `android.permission.DUMP` and would arrive a frame late):** rotation from `VkSurfaceCapabilitiesKHR::currentTransform` (`vkp_surface_rotation_degrees()`, so it follows panel install orientation + session orientation on any device, no allowlist) and scale from the game layer's own src→dst rects, decided in `render_scene()` **before** the game is committed to a layer (deciding inside `sc_layer_present_overlay()` showed/hid the game layer every frame). Proven: `overlay layer declined: this display rotates every layer 90° and the game layer is scaled 1280x720 -> 1920x1080 …` + `zero-copy paused: … whole scene on the copy path`; composer dump shows **no AHardwareBuffer layers**, `SurfaceView … z=0 DEVICE/DEVICE t=90`; picture identical, no black frame; fps not worse (30.5/27.6/30.6/30.8/30.5 with the window up vs 30.5/30.8 on the two-layer path); closing the window → `zero-copy resumed: the game is back on its own display layer`, `267 layer frames`, still `DEVICE/DEVICE`. **The session never leaves DEVICE/DEVICE now**, where before it lost it permanently. Regressions: layer path with no window above `300 frames | 300 GPU | 300 layer frames` `DEVICE/DEVICE`; effects live `13 passes` keeping the layer; X11 untouched (no safe-mode/overlay lines, no session log, Insane 2 `D3D9 · DXVK · 202.4 fps · X11`). The fresh-SurfaceControl swap stays for displays where the overlay IS raised. ⏳ Still code-only: the HDR re-read when a display is attached (nothing can be plugged into USB-C; a simulated display was correctly de-duplicated because the game stayed on the built-in panel).
+
+### 2026-09-18 — controllers for the Steam client: the reader works, the client's SDL3 is the wall
+
+**What the user reported.** The Steam client had no gamepad at all. Neither the on-screen controls
+nor a physical GameSir G8+ over Bluetooth reached it.
+
+**One cause for both.** `WinHandler.sendGamepadState()` never went through Wine: it writes the pad
+state into shared-memory rings, and `libfakeinput.so` turns those into a real `/dev/input/eventN`.
+That interposer fakes the whole evdev and udev surface in userspace, so it was never Wine-specific —
+it was only ever *preloaded* into Wine. A gamescope session has no Wine, so the rings had a writer
+and no reader.
+
+**Why the built-in pad on the Pocket FIT works and the Fold's Bluetooth pad does not.** The FIT is
+SELinux **Permissive**: its own logcat shows `avc: denied { open } for /dev/input/event9 ...
+permissive=1`, logged and not enforced, so the session reads the real kernel node — and
+`/dev/input/event8` there is literally `045e:028e  Microsoft X-Box 360 pad`, the best-mapped GUID in
+SDL's database. Nothing of ours is involved. On an enforcing device the same `open()` fails. The
+nodes are `crw-rw-r-x root:input`, so ordinary permissions allow it and SELinux is the only gate.
+Direct passthrough is therefore not shippable; it works on the FIT by accident of a permissive kernel.
+
+**Built.** `fakeinput.cpp` now compiles against glibc too — the only blocker was `ioctl`'s request
+type (bionic `int`, glibc `unsigned long`). Linked `-static-libstdc++ -static-libgcc`, because it is
+preloaded into every Steam process and Steam ships its own libstdc++ while rewriting
+`LD_LIBRARY_PATH`. It ships as a 1.4MB **APK asset** staged into the runtime at launch, not baked
+into the rootfs image, so an already installed runtime gains it on the next launch instead of waiting
+on a ~790MB re-host. `FAKE_EVDEV_IDENTITY=xbox360` gives it `045E:028E`, vendor/product deliberately
+**not** offset per slot, since a real pad reports the same ids on every port and offsetting produces
+a GUID no database knows. That is WinNative PR #727's change, taken scoped: the Wine path keeps the
+generic identity until it is proven on device.
+
+**Three bugs of mine, in order.**
+1. The preload was added to `bannerlator-session`, which lives *inside the rootfs image* — it could
+   never have reached an installed runtime. The app sets `LD_PRELOAD` in the session env instead.
+2. `FAKE_EVDEV_DIR` was empty when the client scanned. `open()` only serves a ring when a file of
+   that name exists, and it **rewrites** the path rather than falling back, so a missing node gives
+   ENOENT. `onCreate` deletes `event0..3` and the **Wine** launcher is what normally recreates
+   `event0`; the Linux path never did. Writers create their node when a slot is claimed, long after
+   the client has finished scanning. Now `event0` is created before the session starts — one node
+   only, since each extra file is another pad the client would list.
+3. The SDL hint was the SDL2 spelling. The client ships **SDL3**, which wants
+   `SDL_JOYSTICK_LINUX_CLASSIC`. Also `libudev.so.1` is present so SDL3 prefers
+   `udev_enumerate_scan_devices`, which enumerates from `/sys/class/input` where the synthetic pad
+   has no entry and never will — hence `SDL_JOYSTICK_DISABLE_UDEV=1`.
+
+**A bench rig that needs no Steam, no app and no controller.** Two aarch64 glibc probes, run on the
+FIT by invoking the rootfs loader directly (`ld-linux-aarch64.so.1 --library-path`), so proot is out
+of the picture. A valid ring is 98368 bytes with a four-word header. `evprobe` mimics an evdev scan;
+`sdlprobe` dlopens the client's own `libSDL3.so.0` and lists gamepads. `FAKE_EVDEV_LOG=1` writes to
+stderr, so the redirect has to be inside the bridge quotes.
+
+**Proven.** `evprobe` against the real interposer: `scandir(/dev/input)=event0`, `OPENED`,
+`id=045e:028e bus 0003 ver 0110`, `name=Xbox 360 Controller (0)`, the gamepad bits all set, so a
+client applying SDL's own test would accept it.
+
+**The wall.** `sdlprobe` on the client's SDL3 finds exactly one joystick by default — `PS4
+Controller`, the real G8+ — and it reaches it through **hidraw**, which the interposer does not hook.
+With `SDL_JOYSTICK_HIDAPI=0` it finds **zero**, with an empty `SDL_GetError` and **not one
+interposer log line**, while `evprobe` in the same configuration emits seven. So the client's SDL3
+never opens, stats or scans anything under `/dev/input`. The Linux backend is compiled in
+(`SDL_JOYSTICK_LINUX_DEADZONES`, `_HAT_DEADZONES`, `_DIGITAL_HATS`, `_CLASSIC` are all in the
+binary), so this is not a missing driver.
+
+**Where that points.** SDL's `LINUX_CLASSIC` selects the old `/dev/input/js*` interface rather than
+evdev, and the fake directory has no `js0`. `SDL_EnumerateDirectory` also walks a directory with
+`opendir`/`readdir`, which the interposer does not hook — it hooks `scandir` only — so a walk sees the
+real `/dev/input`. Next: add `js0`, hook `opendir`/`readdir`, re-run `sdlprobe`.
+
+**One correction worth carrying.** Because `open()` rewrites the path, the interposer **masks** the
+real `/dev/input` — so the Pocket FIT *is* a valid test platform once the preload is active, and
+permissive versus enforcing stops mattering. hidraw is not masked, which is exactly how the real G8+
+still reached SDL3.
+
+**Solved, on this device, without Steam or a controller.** A path-tracing preload alongside the
+interposer showed the client's SDL doing `opendir(/sys/class/input/)`, then
+`scandir(/dev/input)` returning **one** entry, then `open(/dev/input/js0)`. **It enumerates `js*`
+nodes and ignores `event*` entirely.** With only `event0` present it found nothing — that, not udev
+and not the hint spelling, is why no pad ever appeared. With `js0` there, SDL reports
+`Xbox 360 Controller`, applies its own mapping
+(`03005e615e0400008e02000010010000,...,a:b0,...,leftx:a0,...`) with no configuration, and a BTN_A
+plus ABS_X written straight into the ring with `dd` read back through SDL's gamepad API as
+`pad:SOUTH=1 pad:LEFTX=-20000`. That mapping arriving for free is the xbox360 identity earning its
+keep.
+
+**And a translation written on a wrong inference, thrown away on evidence.** `js*` nodes speak the
+old joystick protocol, so I taught the interposer to convert. It made things worse: SDL's read buffer
+is 768 bytes, exactly 32 `input_event`s, so it wants evdev structs even from a js node. Two
+`js_event`s are 16 bytes against one `input_event`'s 24, so every read became a short read SDL threw
+away — `read(fd=10) = 16` and `SOUTH` stayed 0. Reverted, and the pre-translation library produced the
+result above on the first run. Serving evdev on a `js*` node looks wrong and is what this consumer
+wants; there is a note in the file now so it is not re-added.
+
+**Working configuration.** Node `js0`, with `event0` kept beside it for anything scanning evdev
+directly — SDL's own filter skips it, so no duplicate pad — plus `SDL_JOYSTICK_DISABLE_UDEV=1`,
+`SDL_JOYSTICK_LINUX_CLASSIC=1` and `FAKE_EVDEV_IDENTITY=xbox360`. Stale `js*` nodes are cleared at
+launch with `event*`, so a Linux session cannot leave a phantom pad behind for a Wine session.
+
+**Still unproven:** all of the above is the interposer and SDL in isolation. Nothing has yet run in a
+real session, where the writer is `WinHandler` rather than `dd`, and where gamescope and the client
+are in the picture. Build `35410420407` (`596f8991`) is the first with the node.
+
+### 2026-09-19 — Max's fork explains the Fold: two session-killers and the games step
+
+**Where the work lives.** Not in `WinNative-Emu/WinNative` — the `feature/wayland-gamescope`
+branch is on Max's personal fork, `maxjivi05/WinNative`. Searching the org repo found nothing,
+which was the wrong conclusion drawn from the wrong place.
+
+**What was on the Fold, in his commit messages.** `7d41c135` (Sep 18): the sandbox denies the
+`NETLINK_KOBJECT_UEVENT` socket, so libudev cannot create a monitor, `SDL_hid_init()` fails, and
+the Steam client retries it hundreds of times a second until its main loop stalls and it asserts
+out. That is the Fold's `socket(): Function not implemented` storm, the `wl_client_create failed`
+that follows on a stale errno, and the `rc=1` / `rc=139` a second after login. The Pocket FIT is
+permissive, gets its netlink socket, and never sees any of it — which is the whole FIT/Fold split
+of the last six hours. His answer is `preload/udevmon.c`: one end of a datagram socketpair stands
+in for the netlink socket, its peer held open, `bind`/`getsockname`/`setsockopt` answered, the real
+socket tried first. `79aa7f68`: Steam forks while other threads are inside the interposer's hooks,
+the child inherits a held mutex and blocks on its first `open()`, the client's watchdog fires
+(`BMainLoop appears to have stalled > 15 seconds`) and gamescope is torn down about two minutes
+in — fixed with `pthread_atfork` handlers on every lock the preloads take.
+
+**The "spoof to a specific device" he mentioned.** `29d93f13`: Steam Input claims the pad, lists
+its id in `SDL_GAMECONTROLLER_IGNORE_DEVICES`, and its overlay refuses the game's `open()` with
+ENODEV; the game is meant to get Steam's uinput virtual pad, which cannot exist on Android. So
+under `FAKE_EVDEV_STEAM_VIRTUAL=1` the fake pad answers as that virtual pad — `28de:11ff`,
+"Microsoft X-Box 360 pad N" — for every process except the client. `f1f34cd7` moves the triggers
+to `ABS_Z`/`ABS_RZ` under that identity, because Wine places axes by advertised order.
+
+**Two design points where his is right and mine is not.** He binds the ring directory *as*
+`/dev/input` in proot, so unhooked `opendir`/`readdir` simply see it; I rewrite paths inside the
+interposer and hook only `scandir`, which is the whole reason the `js0` node was needed. And his
+comment on the launch: the Steam client rebuilds `LD_PRELOAD` for every process it starts and
+appends its overlay without a separator, silently dropping whatever was there. So the
+`LD_PRELOAD` I put in the guest environment reaches the client — the FIT proved it held the ring —
+and is lost for every game the client launches. He names both shims in `/etc/ld.so.preload`
+instead, ships them as app assets, and syncs them into the runtime at every launch, which is also
+how a fix like `udevmon.c` reaches a runtime that is already installed.
+
+**Port plan, in order.** (1) `udevmon.c` and the atfork handlers into our preload set, and ship
+`libblsession.so` as an app asset synced at launch — the Fold's crash, with no runtime re-host.
+(2) Bind the rings as `/dev/input`, move both shims to `ld.so.preload`, drop the env `LD_PRELOAD`.
+(3) Take his `fakeinput.cpp` — mutex, atfork, `shared_ptr` map, `ioctl_request_t`, the virtual
+identity, Z/RZ — and re-apply the opt-in Xbox 360 identity and the static C++ runtime on top.
+(4) `FAKE_EVDEV_STEAM_VIRTUAL=1` for games. Each stage verified on the FIT bench and in a real
+session before it goes near the Fold.
+
+**Ported, all four stages, in `15aeade5` and `ee8b7b19`.** The session shim gained Max's
+`udevmon.c` (the netlink stand-in) and fork handlers on its locks, and is now built into the APK
+and staged into the runtime at every launch, so the Fold gets it on r9 with no runtime re-host.
+The interposer is Max's file whole — locking, fork handlers, `shared_ptr` table, the Steam
+virtual identity, Z/RZ triggers — with the opt-in Xbox 360 identity re-applied on top. The
+ring directory is bound in as `/dev/input`; `LD_PRELOAD` is gone from the session environment
+and both shims are named in `/etc/ld.so.preload`, which the app writes by rename each launch;
+`FAKE_EVDEV_STEAM_VIRTUAL=1` and Max's three SDL hints are set; the `js0` node and the
+classic-scan hints are removed. Bench first, with the runtime's own proot on the FIT: with the
+rings bound as `/dev/input`, `event0` alone and no hints at all finds the pad; adding the
+classic hint without `js0` finds nothing, which is why the two had to go together and why they
+are both gone now.
+
+**Scope worth knowing.** `fakeinput.cpp` is one file built twice — bionic for Wine, glibc for
+the Linux runtime — so the hardening (locks, fork safety, the safer device table) is now live
+for Windows games as well. That is the code WinNative has shipped for Windows games since
+mid-September, and its behaviour toward Wine is unchanged because everything new is gated on
+variables only the Linux session sets. It has not been re-tested under Wine tonight.
+
+**Where this stands, for whoever resumes.** Test build `ee8b7b19` (run 35420566622), building at
+the time of writing; nothing in it has run on a device yet. On the Pocket FIT — r8 and then r9 —
+the pre-port chain was proven end to end: the client held our ring with no hidraw descriptors,
+identified the pad as an Xbox 360 controller, rendered Xbox prompts, and navigated Big Picture
+from injected input and then from real on-screen touches. The Fold never got that far because
+its sandbox denies udev's netlink socket, which is what the port fixes. The Fold protocol is:
+the **standard** artifact, GameHub force-stopped first (it takes the Steam login within seconds
+and has done so twice tonight), GameSir connected, optionally an empty
+`Download/bannerlator-fake-input-log` for the interposer trace, then zip
+`/sdcard/Download/Bannerlator-LinuxSteam/` and read `fake-input-<stamp>.txt` before anything
+else: it lists both staged libraries, the `ld.so.preload` contents, the nodes and rings, whether
+a pad was connected, every variable handed to the session, and — appended when the session ends
+— how many events the app wrote into the ring. `Download/bannerlator-no-fake-input` turns the
+whole feature off for a true baseline.
+
+**Still open.** The device test itself. One run on the FIT under r9 produced the same ENOSYS
+storm once and never again, which may be the same netlink denial under seccomp rather than
+SELinux and should be re-checked with the stand-in in place. The Wine path has not been
+re-tested since the interposer swap. Every commit from 2026-09-18 carries an attribution trailer
+that the repo rule forbids; the branch is unmerged, and rewriting those messages is offered and
+waiting on a yes. Not started: the on-screen segfault seen once on the Fold, if it survives the
+port at all — its timing suggested it was the same assert, not the overlay.
+
+**2026-09-19, confirmed on the Fold.** With `ee8b7b19` (standard flavour, r9, SELinux enforcing)
+both the on-screen controls and the GameSir G8+ work in the native Steam client. That closes the
+gap that ran all night: the client stayed alive because the session shim now answers udev's
+netlink socket instead of letting SDL's HID init fail until the client asserts, and the pad
+reached it through the rings bound in as `/dev/input`. Not yet re-run on the Pocket FIT — the
+install there did not take (package still the previous build), and the ported test is staged
+to run the moment it does.
+
+**2026-09-19, confirmed on the Pocket FIT as well.** `ee8b7b19` installed (hash `37a89dcb…`
+verified first), Steam launched with the trace on and GameHub stopped: both libraries staged
+(26,928 and 1,434,960 bytes), `ld.so.preload` naming both, nodes `event0..3` and no `js0`, zero
+socket or memfd ENOSYS, Steam alive with no `LD_PRELOAD` in its environment and all three SDL
+hints present, holding the rings with no hidraw descriptors; 137 interposer trace lines of it
+opening and probing the pads. Driven from the ring, the D-pad navigated and A opened an item —
+the bottom bar switched to `STORE PAGE / CLOSE`. Both devices now work on the same build. The
+one leftover was cosmetic: the diagnostics file's variable filter did not print
+`SDL_HIDAPI_JOYSTICK_DISABLE_UDEV`, which was nonetheless set; fixed.
+
+**Two corrections to the open items above.** The attribution trailers never reached the repo:
+a global `commit-msg` hook (`core.hooksPath` in the Termux git config, dated June) deletes any
+`Co-Authored-By` line naming Claude and any line carrying the anthropic address, so the branch was
+clean all along and the rewrite on 2026-09-19 changed nothing — 113 commits above `origin/main`,
+zero matches, identical tree. And the Pocket FIT is now confirmed in real use as well, not just
+by driven input: the built-in pad and the on-screen controls both work in the client on
+`ee8b7b19`. That leaves one open item, the Wine-path re-test after the interposer swap.
+
+### 2026-09-19 — a fresh client never listed Bannerlator Proton until restarted
+
+**What the user saw on the Fold.** After a fresh install of the client, Brawlhalla's Compatibility
+list held only Valve's two ARM64 entries; a download-then-launch failed; quitting and relaunching
+the client made "Bannerlator Proton (ARM64)" appear and the launch work.
+
+**Both halves proven.** Our tool was a symlink mirror of Valve's ARM64 Proton depot, so it could
+not exist before that depot was downloaded, and the client downloads it only as a dependency of
+its own chosen tool on a title's first launch — a launch that dies under the Steam Linux Runtime
+container. And a running client does not rescan `compatibilitytools.d`: on the FIT, with the
+client live, a probe tool dropped into that directory produced no log line in 45 seconds. So the
+watcher that registered ours seconds after the depot landed was invisible until the next start.
+On this device it only ever worked because the depot already existed when the registrar ran.
+
+**Fix, `0309ed5e`.** The tool is written at the start of every session with no depot required —
+its own manifests and a launcher that finds whichever ARM64 Proton depot the client has at launch
+time and runs its `proton` directly. Its manifest names that depot (appid 4427310) as the tool's
+dependency, so the client fetches it before a first launch the way its own entries pull in their
+runtime, but not the depot's own dependency on the arm64 Steam Linux Runtime. The default and
+every installed title map to ours from session one, and the session re-runs the registrar every
+fifteen seconds so a title installed later is remapped too. The session scripts now ship as app
+assets refreshed at every launch, alongside the preload libraries, which is how this reaches a
+runtime that is already installed.
+
+**Not settled.** Whether the client composes the depot's own runtime dependency onto our tool
+transitively. If it does, the launch is wrapped in the container's entry point and dies before our
+launcher runs; the compat log of the first launch will show a dependency on 4185400 or a
+`_v2-entry-point` command prefix, and the fallback is to drop the dependency line and keep the
+old seed as the download trigger.
+
+### 2026-09-19 — the rest of Max's session stack, and the two libraries meeting in the middle
+
+**Why now.** The Fold's Brawlhalla sat at "Loading Game Files 99%". Max's own words on it
+("I didn't have all the networking stuff set up for Gamescope like I did Proton") and his
+`f76a5c4a` describe it exactly: the sandbox refuses `getifaddrs`, `if_nameindex`, the
+hardware-address ioctl and every `/proc/net` table; Wine builds its adapter tables from those;
+Brawlhalla enumerates its adapters at the end of loading and never returns. This device never
+showed it because its sandbox is permissive — the same split as every other Fold-only failure
+tonight. His `a78c4601` is a second Brawlhalla killer: proot is a ptrace tracer, the client took
+the `TracerPid` for a debugger, closed descriptor 1 on every failed assert, and the game found
+its Steam socket dead at its first call.
+
+**Ported, `a49806e8` and `e92e37da`.** Into the app-shipped session shim: `netif.c`, `tracer.c`,
+`lock.c` (FUSE cannot lock; the client read ENOSYS as failure and walked downloads backwards),
+`opens.c` (O_NOATIME refused on shared storage; the client called the file corrupt),
+`inputudev.c` (the pads described to Wine's HID bus, for controllers inside games), and
+`connect()` keeping EINPROGRESS. Into the session: the log rolls at 8 MB; shared
+redistributables are marked as already run so their x86 installers never start under emulation;
+the ARM64 Proton depot is asked for on the command line the first time a client lacks it, which
+replaces the dependency declaration in the morning's registrar — a dependency composes its own
+dependencies, and that depot's is the runtime container that cannot exist here; the launcher
+drops the overlay library, which stood in front of `/dev/input` reads and left a pad that never
+reported; what a game leaves under gamescope's reaper is killed when the client exits. In the
+app: a component publishes the device's active link to `etc/bannerlator-net` and follows it
+while the session runs, with a stable locally administered MAC seeded from the device id; the
+`/dev/shm` stand-in is emptied before a session; the client's games get the container's FEX
+preset instead of FEX's bare defaults; manifests are reconciled by build id so a title the
+client updated is adopted rather than reverted; and every game the client installed for itself
+gets a Games-tab entry that launches through it.
+
+**Left out, deliberately.** His proot change (we ship Termux's proot, not that tree), the
+storage-move UI, the compositor blend and the Turnip timestamp change — none bear on the client.
+
+**Process note.** Two editing passes aborted on a mis-typed anchor and the surrounding shell
+went on to commit and push regardless, which produced one build with the pieces present but
+not wired (cancelled, `a49806e8`). The final state was proved by counting the wired call sites
+and balancing braces, not by exit codes. Not yet run on a device.
+
+**Caught before the first two-way test.** The user began downloading a title through the app's
+store to see it appear in the Linux client. On this device the store's games live in containers
+3, 6 and 7 — twenty installed titles — while the Linux client's entry is in container 8, whose
+prefix holds no store installs at all, and the library sync read only the launching container.
+The client would have been shown nothing, and the test would have failed for a reason unrelated
+to any of tonight's work. `77d947b7` scans every container, takes a title present in more than one
+from the first that has it complete, offers only complete installs (StateFlags 4 — a bind of one
+still downloading would hand the client half a game), and reconciles the client's manifest back
+into the container that owns the title. The `e92e37da` build staged minutes earlier was withdrawn
+before it was installed.
+
+**And a second gap behind it.** The store leaves only a link under the prefix's
+`steamapps/common`, pointing at wherever it put the files — the app's own storage, or a card the
+user chose (on this device, Brawlhalla lives on a removable card at `/storage/7B7F-E3AA/…`). The
+sync bound the link itself, and a card is not among the trees bound into the runtime, so inside the
+client the link resolved to nothing: through the runtime's own proot, binding the link showed an
+empty folder and binding the resolved path showed all 580 files. `d71739fe` binds the real folder.
+
+**The user was right to push on this.** "Why read containers and not the original folders?"
+The library sync had been built on the links the store leaves under each container's prefix,
+and two rounds of patching — scanning every container, then chasing links that had gone stale
+after a game was moved to a card — were symptoms of the wrong shape. `9ce0cf67` replaces it:
+the store's database is the source of truth, one row per game with the folder it actually lives
+in, kept current on a move; the original folder is what gets bound into the client, wherever it
+is; and a folder the database does not know still counts if it identifies itself, by the
+`steam_appid.txt` a launch leaves behind or by the downloader's journal mapped back through the
+database. The one thing that cannot be skipped is the manifest: the client will not treat a bare
+folder as a game, so each gets the manifest the app already wrote where one exists, or one
+written from its row. Nothing is copied; the client reads the same files Steam delivered.
+
+**`9ce0cf67` failed session setup on the first launch here** — "Attempt to get length of null
+array" while building the environment. The trace pointed at the folder-identity fallback:
+`FileUtils.readString` throws on a file that is not there rather than returning null, and the
+fallback read `steam_appid.txt` from every folder under the store's roots, so the first folder
+that had never been launched — the user's fresh FlatOut download — ended the setup. `15952f1a`
+checks each file exists before reading it and skips one bad folder instead of losing the
+session. The staged `9ce0cf67` build was withdrawn. The unified-library design the user approved
+— the app's two roots registered as the client's own library folders, so client downloads land
+where the app's would and are adopted into the store's database — is the next change, on top of
+this fix.
+
+**Unified libraries, written and held (`3613ba0a`).** The app's two game roots — its own
+`steam_games` and `bannerlator/steam_games` on the chosen card — are bound in whole as the
+`common/` folder of two Steam libraries the client sees, registered by name even when empty, so
+the client offers the same two install locations the store does and a download made in the client
+lands exactly where the app would have put it. Nothing is copied. Manifests are still written on
+the runtime side of each library, since the client will not treat a bare folder as a game: the
+app's own manifest for a title the database knows, reconciled by build both ways, else one
+written from what the folder says about itself. In the other direction, a game the client
+installs into either library is recorded in the store's database as installed there — at session
+start and again at exit — so the store shows it and the app can launch it; a game in the client's
+private library keeps only its Games-tab entry, because the app cannot run files that live
+inside the runtime. Pushed but deliberately not built yet, so the crash fix before it can be
+tested on its own; the next dispatch carries both. One caveat stands: the client's default
+install location is still its own library unless the user picks ours in the install dialog.
+
+**Main library = internal storage (`67bb8249`), on top of the held unified change.** The user's
+call: "main will always be internal storage by default like the app side." The client always has
+a main library it installs to by default and cannot remove, so instead of adding a third
+`/mnt/bannerlator` folder beside it, its own `steamapps/common` is bound over with the app's
+internal `steam_games`; the card is the one extra library. The install dialog now offers exactly
+the store's two locations with internal storage preselected, and there is no private folder for
+a forgotten choice to land in. Whatever the client had already installed into its own folder
+(Brawlhalla on the Fold) is renamed into internal storage once, before the bind — same
+filesystem, no copy; a name present in both is left in place and logged. The client's tools
+(228980/1493710/3127680/4183110/4427310/4185400, Proton/SLR/Steamworks/FEX by name) share that
+library and are never adopted as games; the app deletes only manifests it wrote itself. The
+Games-tab `syncClientGames` path is gone — a client install is adopted into the store's database.
+Dispatching `build-artifacts.yml` on `67bb8249` + the log commit; crash-fix `15952f1a` remains
+staged and untested on device.
+
+**Saves and Steam Cloud, checked against the change (2026-09-19).** Nothing that holds a save
+moves. Client-side saves live under the library's `steamapps/compatdata/<appid>/pfx` and the
+client's `userdata/`, both in the runtime root — the bind covers only `common/`, and Steam Cloud
+in the client is keyed by appid, not by folder. App-side saves live in each container's Wine
+prefix and sync through `SteamCloudSaveManager`; the change never touches a container. The one
+leftover was `bannerlator-seed-redists`, still seeding the retired `/mnt/bannerlator` library's
+prefixes — now `/mnt/bannerlator-sd`; the dead `GUEST_ROOT` constant is gone (`2b1f3163`). The
+`cc237b45` run was cancelled and `build-artifacts.yml` re-dispatched on `2b1f3163`
+(run 35426952192, headSha verified).
+
+**"Anything missing?" audit of the unified libraries — four gaps closed (2026-09-19).**
+(1) Every device that ran an earlier build has `/mnt/bannerlator` registered in the client's
+`libraryfolders.vdf`; it is not bound any more, so the client would keep offering a location
+that is not there. `bannerlator-steam-library` now removes that entry (block-wise edit, unit-tested
+on a sample), and the app's `retireOldLibrary` moves the prefixes/shader caches games made in that
+library into the main one (rename, same fs) and deletes the rest. (2) A game uninstalled from the
+store kept its client manifest; now any fully-installed manifest whose folder is gone is removed,
+tools excluded, downloads in progress kept. (3) The card library downloaded into the runtime root
+(internal) and then had to cross filesystems into the card: `<card>/bannerlator/steam_downloading`
+is now bound as that library's `steamapps/downloading`, so finishing a download is a rename;
+prefixes stay internal where symlinks and locks work. (4) A game the client uninstalls is marked
+not installed in the store's database, but only when its library is present — a missing card
+proves nothing. Run 35426952192 cancelled; rebuilt on the commit below. Needs device proof: card
+download in the client, retired-library cleanup on the Fold, store launch of an adopted game.
+
+**FlatOut would not launch: the input interposer killed Proton (2026-09-19).** The client mapped
+6220 to our ARM64 Proton correctly, spawned `reaper` → `proton waitforexitandrun FlatOut.exe`,
+and the process was gone in the same second with `exit code -1`; the session log also carried a
+`Segmentation fault  bannerlator-steam-compat` every 15 s from the refresh loop. Both are one
+fault. Proton is a Python script and the registrar is a Python script, and **`libfakeinput.so`
+segfaults glibc Python the moment it is preloaded** - proven on the FIT with the rootfs loader,
+no Steam involved: `bash` under the preload runs, `python3.14 -S -c 'print(1)'` dies rc=139.
+`LD_DEBUG=files` gives the mechanism: for bash the loader prints `calling init: libfakeinput.so`
+before transferring control, for Python the init list ends at `libpython3.14.so.1.0` - libpython's
+own initialiser runs first and calls `close()`/`read()`, which land in our hooks, which take
+`controller_mutex` and look in `controller_map` **before either object has been constructed**.
+`LD_DEBUG=symbols` confirms it: the last symbol bound is the `_Hashtable<...FakeController...>::find`.
+`python -I` survives because its startup takes a different path to the first hooked call.
+
+The fix (ours, not from Max - his version and ours before it share the pattern): nothing with a
+constructor stays at file scope. `controller_mutex`, `controller_map`, `ring_paths`, `ff_effects`
+and the env-derived config are accessors that build on first use and never destroy, which also
+closes the mirror-image window after static destructors at exit. `library_init` now only warms
+them. Host syntax check clean. NOT yet device-proven: the game still has to run under FEX once
+Proton starts.
+
+**Fix proven on the FIT before install (`2afae914`, run 35428880736 green, staged
+`Bannerlator-pyfix-2afae914-pubg.apk` sha `ae50423ea3cba7f3…`).** Old interposer vs new, same
+loader, same rootfs python: old `rc=139` on both `python -S -c print` and a normal import set,
+new `rc=0` on both. `bash` still fine, both shims together fine, and the interposer still serves
+its nodes (`/dev/input` lists event0..event5 under the preload). The registrar - the script that
+was segfaulting every fifteen seconds - now runs to completion: "default and 9 installed title(s)
+set to bannerlator-proton-arm64". The launch chain is therefore unblocked; whether FlatOut then
+runs under FEX is the next unknown and is not proven by any of this.
+
+**The Steam button was never wired into a Linux session (2026-09-19).** FlatOut runs on
+`2afae914`; the Home/Guide button does not open the client's in-game menu. Not a regression -
+the press never left the app. Three links were missing and the evidence is unambiguous at each:
+`ExternalController.getButtonIdxByKeyCode(KEYCODE_BUTTON_MODE)` returned -1, so
+`updateStateFromKeyEvent` returned false and `WinHandler.onKeyEvent` never called
+`sendGamepadState`; `GamepadState` had no bit for it and said so in a comment;
+`FakeInputWriter.BUTTON_MAP` held ten buttons with no `BTN_MODE`, and `fakeinput.cpp` said
+"e.g. BTN_MODE, which the writer never presses". The session's `fake-input-*.txt` confirms it:
+zero code-316 events all session. Meanwhile Steam is ready for it - the mapping it wrote for our
+pad is `...back:b6,guide:b8,start:b7...` and the interposer already advertises `BTN_MODE` in the
+key bits at exactly the position SDL reads as b8.
+
+Wired end to end: `IDX_BUTTON_MODE = 12` (10 and 11 are the triggers-as-buttons) mapped from
+`KEYCODE_BUTTON_MODE`; snapshot bit 10 in both `FakeInputWriter.BUTTON_MAP` and the interposer's
+`kSnapshotButtons` (hardcoded `i < 10` loops replaced by `kSnapshotButtonCount`); the Steam
+Controller backend sets the same bit from its `B_GUIDE`; and the activity's Home/Select block no
+longer computes a result and drops it - each of those keys is offered to the bindings, then the
+pad, then the keyboard, and is still kept from Android. `prevButtonStates` was already 12 wide.
+The compositing half was already right: gamescope runs with `-e` and the client with `-gamepadui`.
+NOT device-proven: whether the client opens its menu over a Proton game once it sees the press.
+
+**DEVICE-PROVEN 2026-09-19 (FIT, `428fac48`): the Steam button opens the client's in-game menu
+over FlatOut.** User: "works". That closes the chain in full - the unified libraries present the
+app's games to the client, our ARM64 Proton launches a Windows title, and the client draws its
+menu over it. Still to prove: a download to the card from inside the client, the retired-library
+cleanup on the Fold, store-side launch/Verify of a client-installed game, and the Fold's on-screen
+controls, which have no Steam-button element yet.
+
+**Two-way visibility read off the device, and a StateFlags bug it exposed (2026-09-19).** The
+app's seven installed titles are all present to the client: Brawlhalla, FlatOut, Half-Life,
+Half-Life 2, Lossless Scaling and Stumble Guys in the main library, Team Fortress 2 in the card
+library, which `libraryfolders.vdf` lists as `/mnt/bannerlator-sd` with apps 440 and 550. The
+reverse direction is live too - Left 4 Dead 2 was installed by the client onto the card and
+appears there - but it is **not** in the store's database, and that is our bug, not a delay.
+`StateFlags` is a bit field and adoption compared the whole field to "4". L4D2 reads 6 (installed
++ update available) and TF2 reads 516 (installed + update paused), so a game that is fully on
+disk but a version behind was read as "still downloading" and never adopted. Replaced both
+equality tests with `isInstalled()`: bit 4 set, bit 2048 (being removed) clear, and a manifest
+with no StateFlags still counts, which is how the app's own manifests read.
+
+**Brawlhalla now exists twice** - `imagefs/steam_games/Brawlhalla` and the card's copy, ~1.5 GB
+duplicated, with a manifest in each library. `migratePrivateLibrary` only checks the destination
+root for a name collision, and the app's copy was on the card, so the client's private copy moved
+in beside it instead of being recognised as the same game. Flagged to the user rather than
+deleted; the collision check should consult the database's install dir for the app id, not just
+the destination folder.
+
+**Delete-reflection test passed on `f9dae5c2` (FIT, 2026-09-19).** The user removed Brawlhalla and
+Team Fortress 2 from the store - both Brawlhalla copies went, so the duplicate resolved itself -
+and relaunched the client. Both stale manifests were cleaned: the card library now holds only
+`appmanifest_550`. On the build before this one Team Fortress 2 would have survived, because the
+sweep compared its StateFlags (516) to "4"; the bit test removes it. The reverse direction landed
+in the same pass - Left 4 Dead 2, installed by the client onto the card at StateFlags 38, is now
+`is_installed` in the store's database.
+
+Side effect worth a decision: the Half-Life 2 episodes (340/380/420) were adopted too. Their
+manifests carry bit 4 and their `installdir` is the Half-Life 2 folder, which is present, so they
+are installed by every test we have - but the client's own Installed filter does not list them,
+so the store now shows three entries the client does not. Correct by the data, noisy in the UI.
+
+**Skeleton manifests made the client re-fetch games it already had (2026-09-19).** Left 4 Dead 2
+sat re-verifying 13.4 GB on the card with 2h23m to run, restarting the loop each time it was
+suspended, and Lossless Scaling had queued its whole 54.5 MB download beside 177 MB of its own
+files. Same cause for both: where the app had no manifest of its own to hand over, we synthesised
+one through `RealSteamLauncher.writeAppManifest`, which writes `InstalledDepots { }` empty with
+`SizeOnDisk 0` and `buildid 0`. That tells the client the game is installed without saying which
+files or which build, and the only safe reading of that is to verify everything and fetch what is
+missing. FlatOut, whose manifest the app's own downloader wrote, has a real depot list and has
+never misbehaved.
+
+The app already knows the answer: `depot_manifests` holds every depot with the manifest id it was
+installed from - L4D2's 551 and 552 sum to ~15 GB against 13.4 GB on the card. `writeManifest`
+now fills a manifest from that table, and also repairs one already on disk whose `InstalledDepots`
+is empty, which is what L4D2 and Lossless Scaling both need since their stubs already exist. With
+no depots recorded there is nothing better to write, so the old skeleton stays rather than
+replacing something with nothing. `SizeOnDisk` is the depot total, matching what Steam writes
+itself. NOT yet proven: whether the client accepts the repaired manifest and stops verifying.
+
+**Depot-aware manifests on device (`fbf5d4fb`): fixed for Lossless Scaling, inconclusive for
+Left 4 Dead 2 (2026-09-19).** Lossless Scaling now reads `StateFlags 4` with a real depot and
+manifest id, and Steam has since rewritten it itself - pruning to the one depot that applies and
+setting `SizeOnDisk` to that depot's size - which is what accepting an install looks like. Its
+phantom download is gone.
+
+Left 4 Dead 2 did not settle, and the session logged no `wrote ... depot(s)` line for it. The
+regex and the data both check out: the current manifest matches the empty-depot pattern and the
+database holds both depots, so a repair would fire now. The likeliest reading is that at session
+setup the manifest still carried the depots Steam wrote during its earlier verification, so
+nothing looked broken, and Steam emptied them again at 13:38 when it re-queued the update - the
+file's mtime is after session start and the content log shows Update Queued/Running from then.
+
+Worth saying plainly: this install is a poor test. Steam has flagged FilesMissing on it, there is
+no `.bl_depot` journal, so the app never downloaded it, and the folder is ~500 MB short of the
+depot total. Steam wanting to repair it may simply be correct, and no manifest we write should
+override that. The case that proves the fix is Lossless Scaling, which the app did install.
+
+Also adopted this session: Half-Life 2's episodes (340/380/420), all pointing at the Half-Life 2
+folder they share. Correct by every test we have, but the client does not list them, so the store
+now shows three entries the client does not.
+
+**Card cleared for the user's clean slate (2026-09-19).** Left 4 Dead 2 (~12.9 GB) and the
+2 MB Apex Legends stub removed from `/storage/<card>/bannerlator/steam_games`, along with the
+client's stale `appmanifest_550`. The card library now holds no manifests at all. Free space went
+from 273 GB to 286 GB. The first attempt was cut off partway - a delete that size over the card's
+FUSE layer outlives the bridge connection - so it was re-run detached and polled to completion.
+The store's database still records 550 as installed; `releaseClientUninstalls` corrects that on
+the next session, which is the path worth watching when the user next launches.
+
+Cleared the card's `steam_downloading/550` as well: 7.9 GB of Left 4 Dead 2's partial fetch.
+That also answers the open question about that install - Steam held nearly eight gigabytes of
+download scratch for it, so it genuinely was mid-fetch and was right to keep asking for files.
+Card free space 273 GB -> 293 GB, both card folders now empty.
+
+**The last untested direction is proven (2026-09-19, `fbf5d4fb`).** With Left 4 Dead 2's files
+deleted, the session logged `Left 4 Dead 2 (550) is gone from ...; no longer installed` and the
+store's row flipped to not-installed without being asked. All four directions now hold on device:
+the app's installs reach the client, the client's installs reach the store, an app-side delete
+cleans the client's manifest, and files vanishing clears the store's record.
+
+The client now lists four and the store eight, and the whole difference is accounted for. The
+three Half-Life 2 episodes share the Half-Life 2 folder, so they are installed and the store is
+right to say so; Big Picture simply does not list them separately. Lossless Scaling is an
+application rather than a game, so the client's game filters exclude it - it has never appeared
+there, including before any of today's work, so its absence is not a regression, and its manifest
+is now correct, which is what stopped it asking to download itself again.
+
+**Install dialog is right; the card's free space is not (2026-09-19).** The client offers exactly
+two locations - "Local Drive (/)" starred as the default and "Bannerlator (card)" - which is the
+behaviour the user asked for: the store's two places, internal preselected, no third location to
+fall into. But both rows read 279.64 GB free, and only internal has that: the card has 293 GB.
+
+The card library's root directory still lives in internal storage; only its `steamapps/common`
+and `steamapps/downloading` are bound to the card. Steam measures the library root, so it reports
+internal's free space for a library whose contents are on the card. Files still go to the right
+place - just the number is wrong. It matters once the two diverge, because Steam gates an install
+on that figure and could refuse a card install that would fit, or accept one that would not. The
+fix is to bind the library root itself to a folder on the card and layer `common` over it, which
+also moves the manifests the app writes onto the card. Not done yet.
+
+**Naming the two install locations (2026-09-19).** The user could not tell from the install
+dialog which row was the phone and which was the card, and they were right: the client writes its
+own library entry with an empty label and falls back to showing the mount point, so the default
+read "Local Drive (/)". Both libraries are now labelled every session - "Internal Storage" and
+"SD Card" - rather than only at first registration, since a library registered on an earlier run
+keeps whatever label it was given then, which is why this device still showed "Bannerlator
+(card)". Unit-tested against a sample `libraryfolders.vdf`. Whether the client honours a label on
+its own library the way it does on an added one is unproven; the card row already proves labels
+are used for added libraries.
+
+**Half the labelling worked, and the half that did not explained itself (2026-09-19).** The
+session applied both names - the log carries `labelled /root/.local/share/Steam 'Internal
+Storage'` and `labelled /mnt/bannerlator-sd 'SD Card'` - and the install dialog now reads
+"Internal Storage" with the star on it. The card row still said "Bannerlator (card)".
+
+A library carries its own `libraryfolder.vdf` beside its steamapps folder, and the client takes
+the label from there back into `libraryfolders.vdf`, so editing the list alone is undone. The
+card's marker still held the name it was first registered with; the client's own library has no
+marker at all, which is exactly why that one kept the new name. Both files are now written.
+The prediction going in was the opposite - that the client's own library would be the stubborn
+one - and the card row was what made the real mechanism visible.
+
+**Both libraries now named, device-proven (2026-09-19, `dd270900`).** The card's marker reads
+"SD Card", the list agrees, and the client did not put the old name back:
+`/root/.local/share/Steam` is "Internal Storage" and `/mnt/bannerlator-sd` is "SD Card". Writing
+the label in both files is what it took. The install dialog no longer asks the user to guess
+which of the two places is the phone.
+
+State of the Linux client at the end of the day: FlatOut runs through Proton, the Steam button
+opens the client's in-game menu, library sync holds in all four directions, games install to the
+app's own two folders with internal as the default, and manifests carry real depot data so the
+client stops re-fetching what is already on disk. Two known issues remain, both understood and
+neither blocking: the card library reports internal's free space, and Half-Life 2's three
+episodes appear in the store but not in the client. Nothing on this branch is merged to main.
+
+**The card library's free space, answered where the games are (2026-09-19).** The install dialog
+quoted the same figure against both places - 275.97 GB, which is the phone's - while the card had
+293 GB. The library's `steamapps/common` is bound to the card, but the folder naming the library
+belongs to the runtime image, and that folder is what the client measures. Not only cosmetic: the
+client refuses an install it believes will not fit, so once the phone filled up it would turn
+down a card install with room to spare and give no reason.
+
+Binding the whole library onto the card was the obvious fix and is the wrong one - the prefixes
+under `steamapps/compatdata` want symlinks and file locks, and the card is served over FUSE,
+which gives neither. That is why they live in the runtime image, and moving them would trade a
+wrong number for broken prefixes. So the question is answered where the content is: `space.c` in
+the session shim serves a statfs of a library root named in `BL_LIBRARY_SPACE` from its
+`steamapps/common`, the bind that points at the card, and passes every other path through. Ten
+cases unit-tested on the host, including the near-miss `/mnt/bannerlator-sd-other` and the case
+with the variable unset. The game size and internal storage's figure were already correct and are
+untouched.
+
+**The free-space hook was right; the variable never arrived - and neither had the FEX preset
+(2026-09-19).** The dialog still quoted one figure for both places after `868dc007`. The hook
+itself was fine: with the shim loaded and `BL_LIBRARY_SPACE` set, a statvfs of a library root
+whose `steamapps/common` pointed at the card returned the card's 300,311 MB rather than internal's.
+But `BL_LIBRARY_SPACE` was absent from every process in the session, Steam included.
+
+The session command is `/usr/bin/env -i VAR=VAL ... <script> <args>`, and the script and its
+arguments are appended at line 8822. Two blocks then add to the same list: the FEX preset's
+environment and, as of the last build, this variable. Everything added after the script becomes
+an argument to it. A running Steam process carries every `BL_` and `FAKE_EVDEV_` name set before
+line 8822 and **not one FEX one** - so the FEX preset has never reached a Linux session, which
+makes the store-ordering it configures dead the whole time, the thing meant to stop a
+multithreaded x86 title sitting at its loading screen. Both are now collected and inserted in
+front of the script. Worth watching after this lands: client-launched games get the FEX preset
+applied for the first time, so their behaviour can change.
+
+**Both now reach the session (`98d38931`, device-proven 2026-09-19).** A live Steam process
+carries six FEX variables - `FEX_TSOENABLED`, `FEX_MULTIBLOCK`, `FEX_X87REDUCEDPRECISION` among
+them - and `BL_LIBRARY_SPACE=/mnt/bannerlator-sd`, and the app logs `session env: 17 late
+variable(s) placed before the script`. The FEX count was zero on every build before this one, so
+the preset is configuring a Linux session for the first time. The free-space figure should follow,
+since the hook was already proven to redirect correctly once the variable is set.
+
+**Portal 2 downloaded correctly and then went missing from the store (2026-09-19).** It landed
+where it should - `imagefs/steam_games/Portal 2`, 12,218 MB, internal, nothing on the card - and
+Steam wrote it a proper manifest: StateFlags 4, `SizeOnDisk` 12,788,841,660, buildid 23973718,
+three real depots. Nothing there needed today's manifest repair, which is the point: a game the
+client downloads describes itself correctly.
+
+The store never recorded it. The session-end callback did run - `Linux session [steam] ended:
+137` - and threw nothing, but nothing was adopted and the app process that logged it was gone
+afterwards. Adoption takes the install size by walking the folder, and Portal 2 was the only game
+with a stale row, so it was the only one to reach that walk: twelve gigabytes of files, measured
+synchronously while the activity was being torn down, and the process did not survive it. The
+manifest states the size, so it is read from there now and the walk is only a fallback. The pass
+also logs its result even when it adopts nothing, because a pass that ran and found nothing looked
+exactly like one that never finished - which is what cost the time here.
+
+Also worth recording: reopening the app does not adopt anything. Adoption runs on Linux session
+start and end only, so a game downloaded in the client stays invisible to the store until a
+session runs. Launching the client again is enough, because the start-of-session pass is not
+racing a teardown.
+
+**Round trip closed (`37d4f62a`, device-proven 2026-09-19).** Portal 2 is in the store's database
+as installed at `imagefs/steam_games/Portal 2`, the library shows nine, and the pass logged
+`adopted Portal 2 (620)` followed by `adoption pass: 1 game(s) taken into the store` one
+millisecond apart - the same work that previously outlived the process, now that the size is read
+from the manifest instead of counted. A game downloaded in the Linux client lands in internal
+storage, is taken into the store, and is playable from either side.
+
+Where the Linux client stands at the end of the day, all device-proven on the Pocket FIT: FlatOut
+runs through ARM64 Proton, the Steam button opens the client's in-game menu, library sync holds
+in all four directions, the install dialog names its two places and reports each one's real free
+space, manifests carry real depot data, and the FEX preset reaches a session for the first time.
+Nothing on `feat/linux-gamescope-runtime` is merged to main. Open and cosmetic: Half-Life 2's
+three episodes appear in the store but not the client, and a client download is only taken into
+the store when a session starts or ends rather than while it runs.
+
+**And it plays from the app side (2026-09-19).** Portal 2, downloaded by the Linux Steam client,
+launches through the app's own chain. That is the half of the round trip worth having: the store
+row proved the app had been told about the game, this proves the files themselves are shared -
+one install, either launcher, no copy.
+
+**An adopted game offered an update it did not need (2026-09-19).** Portal 2 launched from the
+app side but asked to update first, twenty minutes after the client downloaded it. The app decides
+that by reading a marker it writes into the install dir when it downloads a game - `<branch>|<buildId>`
+in `.bannerlator_build` - and compares it with the live build. The Linux client naturally writes
+no such marker, so `readInstalledBuild` returned 0 and `SteamGameUpdater.computeStatus` fell to
+its else branch: anything is newer than nothing. The game was current at build 23973718.
+
+Adoption now stamps the marker, taking the build and the branch from the client's own manifest
+rather than from the live catalogue - Steam records what it installed, and on a beta branch that
+is deliberately not the newest build, so looking the answer up would record a lie. The format
+stays in `SteamGameUpdater` behind a new `recordKnownBuild`. This affects every game downloaded
+in the client, so it would have met the user on their first EA title too.
+
+**The stamp reached the new game and not the old one (2026-09-19).** After the fix, Need for
+Speed - adopted on that same pass - carried `public|10351185`, matching its manifest exactly,
+while Portal 2 still had no marker at all. Adoption skips a game whose row already says what it
+should, and the stamp sat after that skip, so anything adopted by an earlier run would never be
+stamped however many sessions ran. The same shortcut would have kept a stale stamp on a game the
+client updated. The stamp is taken before the row is considered now, on every pass, so it follows
+the manifest rather than the adoption.
+
+**Confirmed by hand (2026-09-19).** Writing `public|23973718` into Portal 2's install dir - the
+same fifteen bytes the app writes for its own downloads - removed the update prompt and the game
+launched. The shortcut was never involved: the check reads the game's folder, not the shortcut,
+so recreating it would have cost the user their settings and changed nothing. Need for Speed,
+adopted after the fix, was stamped automatically with `public|10351185`. The marker had to be
+chowned to the app; a root-written one would not have been readable.
+
+**The Steam client's interposer was also every Wine game's interposer (2026-09-19).** The user's
+controller stopped working in Insane 2, and asked the right question: why was Max's work not kept
+to the Linux client in the first place. It was not, and it should have been. One source file,
+`winlator/fakeinput.cpp`, is compiled twice - against bionic for Wine, against glibc for the
+client - so taking his version wholesale put every change written for the Steam client into every
+Windows game. Re-testing the Wine path after that swap was on the list from the morning and never
+happened.
+
+Split now. `winlator/fakeinput.cpp` is restored to the version that shipped before the swap and
+remains the bionic build preloaded into Wine; `winlator/fakeinput_steam.cpp` carries Max's version
+plus today's work on it, and only the two glibc builds point at it. Both compile clean. The Java
+writer publishes the Steam button in snapshot bit 10, which the restored reader simply ignores -
+it loops over ten buttons - so the ring's layout is unchanged for Wine.
+
+What the evidence did and did not show: the app side is healthy - ring 0 carried a live write
+sequence and a published snapshot - but no process in the Wine prefix holds an fd on a ring,
+which is what an opened fake device looks like, so nothing there had a controller open. Identity
+and the trigger remap were ruled out directly: both are gated on FAKE_EVDEV_STEAM_VIRTUAL, which
+the live Wine process does not carry. The ring header layout is byte-identical between the two
+versions, ExternalController's 825-line diff was line endings around a five-line change, and the
+branch is level with main. So the specific mechanism is NOT proven - the separation is right on
+its own terms, and restores a known-good file to the path that regressed.
+
+**Confirmed: the split restored Wine's controllers (2026-09-19, `28922e7c`).** Insane 2 has its
+pad back. So the shared interposer was the cause after all - the uncertainty recorded above was
+honest at the time, and the separation is what proved it. Verified in the shipped APK rather than
+trusted from the build: the Wine copy is 930,632 bytes with no Steam-virtual code in it, the
+client's is 1,426,720 bytes and keeps it.
+
+Still unknown, and now deliberately unimportant: which specific change in the client's version
+broke a Windows game. It stays in `fakeinput_steam.cpp`, where the client wants it and where no
+Wine game can reach it. Worth a sanity check that the client's own controllers still behave, since
+that side kept the code it had rather than changing.
+
+**Both devices clear on `28922e7c` (2026-09-19).** The FIT has its pad back in Insane 2 and still
+has it in the Linux client; the Fold - the device the client's controller problems started on -
+is fine too. The split holds on the flavour that device runs, and nothing the client kept has
+regressed on it.
+
+---
+
+## Linux/gamescope runtime — where 2026-09-19 ended
+
+Branch `feat/linux-gamescope-runtime`, **nothing merged to main**. Last build run 35468909193
+(`28922e7c`); the Fold takes the standard flavour of the same run.
+
+**Proven on device (the Pocket FIT unless noted).** FlatOut runs through ARM64 Proton. The Steam
+button opens the client's in-game menu. Library sync holds in all four directions: the app's games
+reach the client, the client's reach the store, an app-side delete cleans the client's manifest,
+and files vanishing clears the store's record. The install dialog offers "Internal Storage" and
+"SD Card" by name, each with its own real free space, and internal is the default so there is no
+choice to get wrong. Manifests carry real depot data, so the client stops re-fetching what is
+already on disk. The FEX preset reaches a session for the first time. A game downloaded in the
+client lands in internal storage, is taken into the store, and launches from the app side -
+Portal 2, end to end. Controllers work again in Wine on both devices after the interposer split.
+
+**Three things that will bite whoever comes next.** `fakeinput.cpp` is compiled twice, against
+bionic for Wine and against glibc for the client, and one file serving both is what killed Wine's
+controllers today - the client's copy is `fakeinput_steam.cpp` now and must stay separate.
+Adoption runs only when a Linux session starts or ends, so reopening the app does nothing and a
+game downloaded in the client stays invisible until a session runs. And a client-downloaded game
+needs its `.bannerlator_build` marker, owned by the app's uid, or the app offers an update that
+would re-download the whole game.
+
+**Next.** Need for Speed Most Wanted, 6,649 MB in internal storage, stamped and recorded. Its
+folder carries both `Core/ActivationUI.exe` - the bundled EA client the other NFS titles already
+activate through - and `EAappInstaller_installScript.vdf`, which is Steam's instruction to install
+the EA App. So the app side runs `NFS13.exe` and the known-good chain, while the client would hand
+off to the EA App bootstrapper, which nothing here has exercised. App side first. Still open and
+cosmetic: Half-Life 2's episodes appear in the store but not the client, adoption is not live
+during a session, and the on-screen pad has no Steam button.
+
+**EA Desktop works. Need for Speed Most Wanted runs from the Linux client (2026-09-19).** The
+heavy path nobody here had exercised turned out to work end to end. Steam does not launch the
+game's exe: the tracked process is `bannerlator-proton waitforexitandrun
+'steam2ea://launchgame/1262560?platform=steam&theme=nfsmw'`, EA's handoff URL. A fresh prefix was
+made for 1262560, our redist markers were seeded into it, and the app was mapped to
+`bannerlator-proton-arm64` at priority 250. EA Desktop then installed itself into that prefix -
+`EASteamLauncher`, `EASteamAuthHelper`, `EADesktop`, `EABackgroundService`, `EALocalHostSvc`,
+and a Visual C++ redistributable - registered the `steam2ea://` handler, drew its own onboarding
+screen at 101 fps, authenticated, and handed off to `NFS13.exe`.
+
+The game reached its title screen at 63 fps and then the full front end with the user's own online
+profile loaded - Online Speed Level 1, their gamertag, 15,780 SP - rendering at 48 fps with the
+GPU at 84%. An online EA profile means authentication and EA's servers both worked from inside
+the runtime.
+
+Two readings corrected along the way, both recorded because the reasoning was wrong rather than
+merely incomplete. `EAappInstaller_installScript.vdf` in the install was read as a sign Steam
+would install the EA App at launch; it only names a file to delete on uninstall. Then, seeing the
+`steam2ea://` URL, the prediction was that nothing would handle it and the launch would die - EA
+Desktop was already installing itself as that was being written. The `terminate called without an
+active exception` storm and the `KeyboardInterrupt` in Proton's `waitpid` were the shutdown, not a
+crash: they landed seconds after the last screenshot and the launch wrapper exited 0.
+
+**Queued for testing after Most Wanted (2026-09-19).** Grand Theft Auto V Enhanced (3240220) is
+installed in internal storage at build 25261616, and Need for Speed Payback (1262580) has finished
+its 21.9 GB download. Neither is in the store's database yet: adoption runs when a Linux session
+starts or ends, and none has since they arrived, so they will be taken in on the next launch.
+
+These are two different third-party chains, not two of the same. Payback is a second reading of
+the EA route Most Wanted just proved - and a useful one, because on the app side Payback activates
+through its own bundled `Core/ActivationUI.exe` rather than EA Desktop, so the client is likely to
+take it down the `steam2ea://` road instead and show whether Most Wanted was representative or
+lucky. GTA V Enhanced is a different vendor entirely: Rockstar's launcher and Social Club, which
+nothing here has ever exercised, on a title far larger and more modern than anything tested so
+far.
+
+Each game builds its own prefix, so EA Desktop will install itself again for Payback rather than
+reusing Most Wanted's - only 1262560 carries it today. First launches will be slow for that
+reason, which is worth knowing before mistaking it for a hang: Most Wanted took about two and a
+half minutes from Play to its title screen.
+
+**The redist seeder never covered a prefix created mid-session, and that is a hang not a delay
+(2026-09-19).** Need for Speed Payback sat on "Running install script" with `vcredist_x86.exe`
+blocked in `pipe_read` - no disk reads, a tenth of a second of CPU across six, nothing written
+anywhere in the prefix for three minutes, and a five-minute watch that saw no process change at
+all. That is precisely the failure `bannerlator-seed-redists` was written to prevent, and its own
+header describes it: the x86 bundle's main thread exits while a helper stays blocked on a pipe it
+also holds the write end of, so the process never reaps and the client waits for ever.
+
+The seeder marks the shared redistributables as already run in every prefix that exists, and it
+ran once at session start. A game's prefix is not created until the client launches it, so a title
+played for the first time in a session was never covered and its install scripts ran for real.
+Most Wanted escaped only because its prefix was built in an earlier session and seeded in this
+one. The seeder now runs every five seconds alongside the registrar's own refresh, because it is
+racing the gap between the client creating a prefix and running that title's install scripts; it
+stamps each prefix it covers and skips it afterwards, so the extra passes cost almost nothing.
+
+**A soft keyboard could not type any shifted symbol into a session (2026-09-19).** An EA sign-in
+inside Need for Speed Payback took the user's address without its `@` and rejected it. The Wayland
+key path maps an Android key code to an evdev one through a table that holds letters, digits and
+plain punctuation, and falls back to the hardware scan code; a soft keyboard's symbol keys are in
+neither, so `@`, and every other shifted character, reached the session as nothing at all.
+
+Rather than adding twenty more key codes, the character itself is now the way in: work out which
+key carries it and whether Shift is what puts it there, then hold Shift around the key. `@` is
+Shift and `2`, `A` is Shift and `a`, and the same for `! # $ % ^ & * ( ) _ + { } | : " < > ? ~`
+and every capital. Two index-aligned tables hold the pairing, verified to line up.
+
+Worth separating from that: the user's actual complaint was that no keyboard appears by itself.
+Steam's own on-screen keyboard is for Steam's own fields, and an EA activation window is a Wine
+window it knows nothing about, so none is offered and the app's manual keyboard is the only way
+in - which is where the missing `@` then bit. Steam's keyboard can still be summoned over a game
+with the Steam button and X, now that the Steam button reaches the client.
+
+Also learned: Payback does NOT take the `steam2ea://` road Most Wanted did. It reached its own
+bundled `Core/ActivationUI.exe` Qt window instead, which is what memory recorded for it on the
+app side - so the two EA titles tested take different routes, and Most Wanted's EA Desktop path
+is not the only one.
+
+**Both fixes proven on device (2026-09-19, `31834421`).** The redist seeder covering a prefix
+created mid-session took Payback from six minutes wedged on "Running install script" to seven
+seconds from Play to EA's handler, and about thirty to the game process - the install scripts were
+skipped outright. And the sign-in field now reads the user's whole address, `@` included, where
+before it silently dropped every shifted character.
+
+Payback's route is its own: `link2ea://` rather than Most Wanted's `steam2ea://`, handled by
+`Link2EA.exe`, which then brings up EA Desktop and `ActivationUI.exe` beside the game. So the two
+EA titles differ in entry point but both end at EA Desktop - the earlier note that Payback skipped
+EA Desktop entirely was drawn from a run where the chain had already wedged, and is wrong.
+
+**Capitals still came out lowercase, and the first fix was why (2026-09-19).** `@` worked but a
+capital `I` did not. The fallback that rescued the symbols only ran when the key code was missing
+from the table, and a capital uses a key that is in it - `KEYCODE_I` resolves, so the fallback was
+never reached and the key went out without a modifier.
+
+The distinction that matters is not which key it is but where Shift lives. A soft keyboard reports
+Shift in the event's meta state and sends no Shift key of its own, so this side has to make one; a
+hardware keyboard sends its own, and a second would release the modifier while the key is still
+physically held. So Shift is now synthesised whenever the character needs it and the event came
+from a virtual device, whether or not the key code was already known.
+
+**Need for Speed Payback runs from the Linux client (2026-09-19).** Second EA title, second route:
+`link2ea://` to `Link2EA.exe` to EA Desktop and `ActivationUI.exe`, then the game. It reached its
+loading art, its title screen, and Steam's in-game menu opens over it, so the Steam button works
+there too. The sign-in that blocked it went through once the keyboard could type an `@` and a
+capital, which makes both keyboard fixes proven in use rather than just in theory.
+
+Noted for when it is played: Steam's own database says this title has no controller support, so
+Steam Input is off and the game is left to read the pad itself. Ours presents as an Xbox 360 pad
+and may well be read, but if it is not, the Enable Steam Input button on that same screen is the
+answer.
+
+**GTA V Enhanced reaches its loading screen under BattlEye, and the session was killed by
+watching it (2026-09-19).** The whole Rockstar chain worked: `PlayGTAV.exe` to the Rockstar
+launcher, which installed itself, pulled in Social Club and its redistributables, updated itself,
+connected to Rockstar's services and signed in, then started `GTA5_Enhanced.exe` alongside
+`GTA5_Enhanced_BE.exe`. The game took its own rendering surface and drew its loading bar to about
+three quarters. BattlEye did not refuse it.
+
+It then stopped, and not because of anticheat: every process was dropped at 23:49:42, the moment
+the user backgrounded the app to read this session's messages. The Linux session cannot survive
+the app losing foreground when the terminal and the app share a device, which is a hazard already
+recorded here. The narration of each monitor event is what invited the switch - the watching
+killed the thing being watched. Nothing about the launch was rejected; it was interrupted.
+
+Also hit on the way: the Rockstar launcher runs its own `vc_redist.x86.exe`, which wedged in
+`pipe_read` exactly as Steam's copies do. The seeder cannot help there - it marks Steam's shared
+redistributables, and this one is Rockstar's. It cleared, though whether the TERM sent to it
+landed or it finished by itself is not known: the bridge dropped before the result came back.
+
+**GTA V Enhanced: the Rockstar chain works, the client's D3D12 does not (2026-09-19).** With
+`PROTON_LOG=1 VKD3D_DEBUG=warn` set as the game's launch options, the log named it plainly:
+`Feature level 0xc100 is not supported` and `0xc200 is not supported` - VKD3D on Valve's ARM64
+Proton Experimental cannot offer D3D feature level 12_1 or 12_2, which this title wants. The game
+reached its intro and aborted at the same moment every run.
+
+`VKD3D_FEATURE_LEVEL=12_1` did not rescue it: the same crash at the same point. So the game is not
+merely checking for the level, and the answer is not a flag. Everything around it worked - the
+launcher, Social Club, the sign-in, and BattlEye, which never objected - so what is missing is
+translation-layer capability, not anticheat and not the device. The user's own point is the
+practical one: the app side runs this game on its own 11.x bionic Proton layers, whose VKD3D
+manages what the client's cannot. For this title the client is the weaker path.
+
+## Where a Linux-client game's components come from (established 2026-09-19)
+
+Everything but the graphics driver is Valve's, and arrives as a Steam depot the client downloads
+(appid 4427310, `Proton Experimental (ARM64)`, version `experimental-11.0-20260910b-arm64`).
+Inside it: Wine, DXVK as the `d3d9/10/11` DLLs, vkd3d-proton as `d3d12.dll` (917 KB) and
+`d3d12core.dll` (589 KB), and FEX for both widths - `libarm64ecfex` for 64-bit and `libwow64fex`
+for 32-bit, with its config under `files/share/fex-emu`. There is no box64 or wowbox64 in that
+stack at all; Valve's is FEX only. The one component that is ours is the GPU driver: Turnip,
+`usr/lib/libvulkan_freedreno.so`, Mesa 26.2.2, in the runtime we build.
+
+The app's own Wine games use none of that. Every piece is ours and versioned under
+`files/contents/`: DXVK (1.10.3, 1.11.0-async, 1.11.0-async-arm64ec, 2.4.1-gplasync), VKD3D
+(3.0.1, 3.0.1-gamesir, 3.1.0-wave64-relax), FEXCore (2507, 2608, 2609 nightlies), WOWBox64
+(0.4.1, 0.4.5-Hybrid), Box64, our Proton layers (11.0-2-arm64ec, 11.0-2.1-arm64ec,
+11.0-20260703-arm64ec) and Wine 9.5.
+
+So for a client game we choose exactly one thing, the graphics driver, and for an app game we
+choose all of it. That is the whole of the GTA result: app-side it can run on our VKD3D 3.1.0,
+while the client hands it Valve's, which refuses feature level 12_1, and nothing in the client
+lets the user pick otherwise.
+
+**A possible way through, for a later session.** Our VKD3D packages are laid out as
+`system32/d3d12.dll` and `system32/d3d12core.dll` - the same two files Valve's Proton carries -
+so ours could in principle be dropped into that Proton in place of Valve's, the way the app
+already swaps components into its own layers. What has to be checked first is the binary flavour:
+Valve's are arm64ec PEs, and our DXVK packages carry an explicit `arm64ec` tag while the VKD3D
+ones do not. If they are not arm64ec they will not load and the idea stops there. Nothing has
+been tried yet.
+
+**The transplant idea is dead as stated, and what replaces it is better (2026-09-19).** Reading
+the PE headers settles it: Valve's `d3d12.dll`, `d3d12core.dll` and `d3d11.dll` are ARM64EC, with
+the hybrid CHPE marker. Every one of our VKD3D packages - 3.0.1, 3.0.1-gamesir and
+3.1.0-wave64-relax - is plain x86-64. They cannot be dropped into that Proton, and forcing it
+would put the D3D12 translation layer itself under emulation, which is the opposite of the point.
+
+Two things follow. The app side runs GTA with the whole stack emulated, game and translator
+together, on our x86-64 VKD3D 3.1.0 - and that version manages feature level 12_1 where Valve's
+bundled one refuses it. Both sides sit on the same GPU and the same Turnip driver, so the
+difference is the vkd3d-proton version, not the hardware.
+
+So the real route is to build VKD3D as ARM64EC and drop that in. It is not speculative that we
+can: `contents/DXVK/1.11.0-async-arm64ec-0` is x86-64 with the hybrid marker, so the toolchain
+and the practice already exist here for DXVK. Nobody has done it for VKD3D. That would likely
+serve every D3D12 title in the client rather than GTA alone.
+
+**Correction: the ARM64EC VKD3D already exists, and the transplant is feasible (2026-09-19).**
+The entry above is wrong and is left in place only so the mistake is legible. It rested on a
+hand-rolled PE header read that misidentified the machine field; `llvm-readobj` is authoritative
+and says otherwise. `Nightlies` carries a dedicated `build-vkd3d-arm64ec` job in both
+`new-All-in-one-nightly+zips-latest-stable.yml` and `vkd3dProtons-standalone-nightly.yml`, and the
+artifact it produces - `VKD3D-Proton-arm64ec-3.0.1-5d0db741` - reads as `Format: COFF-ARM64EC`,
+`Machine: IMAGE_FILE_MACHINE_ARM64EC (0xA641)`, with CHPE metadata present. The DXVK ARM64EC
+package checks out the same way.
+
+So ours and Valve's are the same architecture and the same two filenames, and dropping ours into
+`Proton Experimental (ARM64)` in place of `d3d12.dll` and `d3d12core.dll` is a real thing to try.
+What is not yet known is whether 3.0.1 does what this needs: the version that runs GTA on the app
+side is 3.1.0-wave64-relax, which is built x86-64 only, so the ARM64EC line is a version behind
+it. If 3.0.1 also refuses feature level 12_1 then the answer is to build 3.1.0 for ARM64EC, which
+the same job already knows how to do.
+
+**The VKD3D swap removed the feature-level blocker (2026-09-19).** Valve's `d3d12.dll` and
+`d3d12core.dll` in `Proton Experimental (ARM64)` were replaced with the ARM64EC build from
+Nightlies, `VKD3D-Proton-arm64ec-3.0.1-5d0db741`, with the originals kept in
+`files/.vkd3d-valve-backup/`. The i386 pair was swapped from the package's `syswow64` too.
+Valve's core is 589 KB against ours at 5.1 MB, which is the difference between a stub and the
+real implementation.
+
+The run after the swap carries **no feature-level complaint at all** - the
+`Feature level 0xc100 is not supported` lines that preceded every earlier crash are simply absent
+- and the game rendered Rockstar's logo animation in engine, bloom and all, which it had never
+reached before. That settles the diagnosis: the refusal was a vkd3d-proton version gap in Valve's
+ARM64 Proton, not the GPU, the Turnip driver, or anticheat.
+
+It still ends in an abort, six signatures and the game stopped, but later and with a different
+cause. One blocker is gone and a new one is exposed; the next step is another `VKD3D_DEBUG=warn`
+run to name it.
+
+**With the feature level out of the way, GTA V fails on address space (2026-09-19).** The run
+after the swap, logged with `VKD3D_DEBUG=warn`, ends at
+`err:virtual:allocate_virtual_memory out of memory for allocation, size 0x14a00000000` - a request
+for about 1.3 TB of virtual address space. The game reserves an enormous range up front, which is
+ordinary on a desktop and refused here. That is also what exhausted the device: RAM went to 93 MB
+free of 15.2 GB with a load average over 10, and the session had to be force-stopped to recover.
+
+Alongside it, `RtlpWaitForCriticalSection` timed out waiting sixty seconds on a lock held by
+another thread, and `d3d12_pipeline_state_init_compute` failed eleven times. Feature-level
+complaints are down from dozens to two, which is the optional 12_2 probe rather than the blocker
+that was there before. The OpenXR, OpenVR and PenDevice errors are noise - absent VR and tablet
+APIs that nothing here wants.
+
+So the swap did what it was meant to and the remaining fault is of a different kind: an address
+space limit under FEX and Wine rather than anything in the graphics path. The swapped DLLs
+survived the crash and Steam has not re-verified the depot; Valve's originals are still in
+`files/.vkd3d-valve-backup/`. The debug log cost 151 MB and should be cleared with the launch
+option when that run is no longer wanted.
+
+**Two more attempts, and the wall is memory (2026-09-19).** The x86-64 VKD3D 3.0.1 was swapped in
+place of the ARM64EC one, on the thought that the app side runs its translator emulated and that
+configuration is known to work, and `-nobattleye` was added so the game would run
+`GTA5_Enhanced.exe` rather than the BattlEye-wrapped build. Neither moved it: the game froze at
+the Rockstar intro with 94 MB free of 15.2 GB and a load average of 11.6, and the session had to
+be force-stopped again.
+
+That also corrects something said earlier. Debug logging was off for this run, so the 151 MB log
+was never the cause of the exhaustion - the game does it on its own, at the same point, whichever
+translator is in place and with or without anticheat. It is the 1.3 TB reservation showing up as
+real memory pressure.
+
+Left in place afterwards: the ARM64EC VKD3D, because it is the better of the three and clears the
+feature-level refusal for every D3D12 title, not only this one. The launch options are cleared,
+the staging folders and the debug log are gone, and Valve's originals remain in
+`files/.vkd3d-valve-backup/` beside the ARM64EC copy in `files/.vkd3d-arm64ec-kept/`.
+
+Four runs, in order: Valve's VKD3D refused the feature level; the ARM64EC build cleared it and
+reached further; the x86-64 build with anticheat skipped froze the same way. The Rockstar chain -
+launcher, Social Club, sign-in - worked every time, and BattlEye never objected once.
+
+**Correction: that swap never took effect, and the result attributed to it was an artefact
+(2026-09-19).** Valve's ARM64 Proton keeps its real translators in their own directories -
+`files/lib/wine/dxvk/` holding DXVK v3.1-12-g8759acd1 and `files/lib/wine/vkd3d-proton/` holding
+vkd3d-1.1-5576-g0bd10357 - and installs those into a game's prefix. What was replaced instead was
+`files/lib/wine/aarch64-windows/d3d12.dll`, which is Wine's builtin. GTA's prefix settles it: its
+`d3d12.dll` is 229,376 bytes and its `d3d12core.dll` 9,277,440, matching Valve's vkd3d-proton
+exactly, while the swapped files are 147,456 and 5,148,672 and were never loaded.
+
+The claim that the swap cleared the feature-level refusal is therefore wrong, and the way it was
+reached is worth recording. Those messages come from vkd3d and only reach the Proton log, which
+exists only when `PROTON_LOG=1` is set. The run after the swap had logging off, so the session log
+was grepped instead and returned nothing - and nothing was read as "fixed" rather than "not
+logged". The later run with logging restored still carried `Feature level ... is not supported`,
+which is what a swap with no effect looks like.
+
+So nothing has yet been proven about substituting components into Valve's Proton. The correct
+target is `files/lib/wine/vkd3d-proton/aarch64-windows/`, the experiment is still worth running,
+and any future comparison has to be logged-run against logged-run.
+
+## Third-party Protons selectable in the Linux client (2026-09-19)
+
+Rather than keep substituting single DLLs into Valve's ARM64 depot, whole Protons can now be
+installed beside it. Both projects the user asked about publish native ARM64 builds, and both
+unpack to an ordinary Proton tree - a python entry point beside `files/` carrying Wine, DXVK and
+VKD3D - which is the same shape as the depot, so this runtime can run them the same way.
+
+| Build | Asset | Bytes |
+| --- | --- | --- |
+| GE-Proton11-7 | `GE-Proton11-7-aarch64.tar.gz` | 645,786,140 |
+| proton-cachyos cachyos-11.0-20260703-slr | `proton-cachyos-11.0-20260703-slr-arm64.tar.xz` | 339,912,088 |
+
+Both are already on the device under `compatibilitytools.d/.bannerlator-download/`, and both were
+checked against the projects' published `.sha512sum` files rather than trusted on size alone:
+
+```
+GE     741cf70256f13b20d44952b590defd68b115814097f911c9ec053a64d33795267e2a982a5ce939407e8b649613eb3943bb2e2ebf4794d302ff96b83b61457cdd
+Cachy  54514fc117f2f74cfbc8e9a321a0432513fd44d875ce1c0c48c72af0518d683f3d16ff755d213c0fb42d6e8a1db2a290e9ab883e3505baccc4f43e5e9e692a09
+```
+
+`bannerlator-proton-extra` installs one: it resolves the newest release that actually carries an
+ARM64 asset (neither project builds one for every tag), downloads it resumably, verifies the
+published sha512, unpacks it and hands over to the registrar. A tarball already on the device is
+taken by path instead, which is how these two will be used - a session that has to pull 646 MB down
+first shows nothing on screen for ten minutes. `~/.bl-proton-extra` holds one request per line and
+is processed before the client starts; a line is dropped on success and kept for a retry on
+failure. The request file is already written with both local paths.
+
+`bannerlator-steam-compat` gained `adopt_extras()`, which is what makes an installed tool
+launchable. Their own manifests declare `require_tool_appid`, so Steam would stack pressure-vessel
+underneath, and pressure-vessel wants unprivileged user namespaces an Android app does not get -
+the same silent failure Valve's own ARM64 depot has here. The shipped manifest is copied once to
+`toolmanifest.vdf.bannerlator-orig` and stays the source of the entry point, so re-running cannot
+wrap the wrapper; the live manifest names `bannerlator-proton-wrap`, which drops the client's
+overlay library from `LD_PRELOAD` for the same reason `bannerlator-proton` does and then execs the
+tool's own entry point in place, since Proton takes its base directory from `dirname(sys.argv[0])`.
+
+One bug was worth the trouble of finding before it shipped. `register_default()` repointed every
+mapping whose tool name began with "proton", and the registrar re-runs every fifteen seconds during
+a session - so picking GE-Proton for a game would have been undone a few seconds later, looking
+like the dropdown simply did not work. Adopted tools are now exempt. proton-cachyos needed this
+specifically: its internal tool name is `proton-cachyos`, which the old prefix test caught. The
+client's own ARM64 and x86_64 Protons are still repointed, because none of them can start anything
+here.
+
+Verified on the host against a fake GE-Proton tree and a fake CachyOS tree with a config.vdf that
+had GTA V deliberately mapped to GE-Proton: both mappings survived, Valve's was repointed, the
+manifests lost `require_tool_appid`, and a second run did not wrap the wrapper. Also tested
+end to end from a tarball. **Nothing is device-proven yet.**
+
+Why this is the right experiment for GTA V: the named blocker is
+`allocate_virtual_memory out of memory, size 0x14a00000000`, about 1.3 TB of address space, which is
+in Wine's memory manager. Substituting a graphics component cannot touch it. A whole Proton
+replaces Wine itself.
+
+Staged for the device: `Bannerlator-1.0-test-pubg.apk`
+sha256 `a74a5294eb95cc1a01f0a4b3c5cd4111f6cfccf15901108fc1b578aa162acab1`, run 35482455341,
+headSha `0386765669a39c2f38a55342789b2e1e86653b0f`. The APK carries the new script as an asset, so
+it reaches the installed rootfs without a runtime re-host.
+
+## Proton builds as a catalog download (2026-09-19)
+
+Tonight's two builds were placed on the device by hand, which is no use to anyone else. They are
+now a catalog row like the runtime itself: `linux-protons.json` in winlator-contents
+(`d03046a`), read by `LinuxProtons`, shown as a "Proton builds" card in the Linux runtime tab.
+
+Two kinds of row, because two different things exist:
+
+| Kind | What it is | What the button does |
+| --- | --- | --- |
+| tarball | a build published as a file (GE-Proton, proton-cachyos) | app downloads it, checks the project's own sha512, queues it |
+| depot | one of Valve's, which is not a file anywhere | asks the Steam client to fetch it |
+
+Unpacking stays in the session. That is where `bannerlator-proton-extra` and the registrar already
+live, and a build cannot run until it has been adopted anyway. So a downloaded row reads "unpacked
+next time you open the Steam client" rather than claiming an install that has not happened. On the
+device that step took twelve seconds. The session gained `~/.bl-steam-urls` for the depot rows:
+steam:// URLs handed to the client at next start, then cleared, because the client either acts on a
+URL or it does not and re-asking every session would never stop.
+
+Only ARM64 builds are listed - an x86_64 Proton cannot start here, so offering one would be
+offering a download that can only fail.
+
+**Valve's two ARM64 rows were reworded almost immediately, and the reason is worth keeping.** The
+user pointed out that the only entry labelled ARM64 that ever worked was ours. That is exactly
+right: Valve's "Proton Experimental (ARM64)" and "Proton 11.0 (ARM64)" fail silently when picked,
+because their manifests ask for the Steam Linux Runtime container. They are the most misleading
+entries in that dropdown precisely because they say ARM64, and listing them as ordinary choices
+repeated the trap in our own UI. They are now "engine only", with notes saying not to pick them in
+Steam: their real job is that `bannerlator-proton-arm64` has nothing to run without one of those
+depots on disk.
+
+The list cannot be filtered from our side - the client builds it from the account's licences, not
+from anything on disk. Two mitigations already exist: Steam's own "Show all compatibility tools"
+toggle sits in the same dialog, and the registrar repoints any mapping aimed at a Proton that is
+neither ours nor an adopted build, so a wrong pick self-corrects within fifteen seconds.
+
+### GTA V Enhanced under GE-Proton — the first swap that actually took effect
+Launched three times. Timeline from `session-20260919-221027.log`:
+
+- both builds installed in 22 s (02:10:28 → 02:10:50)
+- first GE attempt: stopped before the game
+- second GE attempt: **`GTA5_Enhanced.exe` itself ran**, created nine Vulkan swapchains, five
+  reported `pEngineName: DXVK` and four `vkd3d` - so it started both its D3D11 and D3D12 renderers
+- CachyOS attempt: reached `Launcher.exe` and `SocialClubHelper.exe`; the game binary never created
+  a surface
+
+**Proof the swap took, unlike the DLL attempt:** GTA's prefix `d3d12core.dll` is now 8,847,360
+bytes, matching GE-Proton's own vkd3d-proton exactly. Valve's is 9,277,440.
+
+Both runs ended with the Proton script raising `KeyboardInterrupt` inside `os.waitpid`, which is an
+interruption rather than a crash. **Why is unknown and stays unknown**: the runs had no
+`PROTON_LOG`, and Wine's channels never reached the session log - it contains zero `err:` lines of
+any kind, and no `steam-3240220.log` was written. The absence of the 1.3 TB
+`allocate_virtual_memory` message therefore means nothing. Same trap as before, not repeated.
+
+`PROTON_LOG=1 %command%` has now been written into `userdata/2932373/config/localconfig.vdf` for
+3240220 with the client closed (backup at `localconfig.vdf.bak-setlaunch`; brace balance checked,
+772/772). One correction during that edit: the first pass also inserted the key into the
+`controller_config` section, where it does not belong, and that was removed.
+
+## Swapping FEX across Proton trees does not work (2026-09-19)
+
+Four GTA V Enhanced runs on GE-Proton, each logged, each a different outcome:
+
+| Run | Translator | Outcome |
+| --- | --- | --- |
+| 1 | GE's own, `FEX_SMCCHECKS` default (`mtrack`) | `GTA5_Enhanced.exe` ran ~2 min, then jumped to address 0 |
+| 2 | GE's own, `FEX_SMCCHECKS=full` | launcher only; the game binary never started |
+| 3 | ours, FEX-2609+96-Nightly-48d71752e | never loaded (my error, see below) |
+| 4 | ours, permissions fixed | loaded, died dispatching its first exception |
+
+**Run 2 - full SMC checking is not a fix and the missing crash is not good news.** The address-zero
+fault is absent from that log only because the game never reached the code that caused it. It got
+*less* far than the default. Full checking is expensive and the launcher stage is .NET doing a lot
+of JIT, so slow-enough-to-fall-over-earlier is as good an explanation as anything the checking
+revealed. Inconclusive, leaning negative; reverted.
+
+**Run 3 was my mistake, and it is the kind that reads like a result.** The log said
+
+```
+err:module:load_arm64ec_module could not load L"C:\windows\system32\libarm64ecfex.dll", status c0000022
+```
+
+`c0000022` is STATUS_ACCESS_DENIED. `chown --reference` and `chmod --reference` silently do nothing
+through the root bridge, so the file landed `root:root` with no execute bit and the app could not
+read its own file. **Always chown/chmod with explicit numbers (uid 10249) and compare `ls -la`
+against a file that already worked.** Nothing was learned about the translator in that run.
+
+**Run 4 is the real answer.** With permissions fixed it loaded, then:
+
+```
+err:seh:call_seh_handlers invalid frame 1000ffcd0 (0000000000022000-0000000000120000)
+err:seh:NtRaiseException Exception frame is not in stack limits => unable to dispatch exception.
+```
+
+Our build and GE's Wine disagree about where exception frames sit on the stack, and the first
+exception Wine tries to dispatch is unrecoverable. That is an interface mismatch, not a fault in
+either piece alone: we build that translator against our own bionic ARM64EC Wine, and GE-Proton
+carries its own Wine 11 tree. **A whole Proton swaps cleanly because everything inside it matches;
+one piece does not travel between trees.** Reverted, checksums verified against the backup.
+
+Worth recording for any future swap: GTA's prefix does **not** hold its own copy of the translator.
+Those `system32` entries are symlinks into the Proton tree, so replacing the tree file is the whole
+job - the opposite of vkd3d-proton, where the prefix holds real copies and the earlier swap was
+never loaded.
+
+Best result of the night remains run 1, and its crash is still unexplained. Next: GTA V Legacy
+(appid 271590, D3D11) on GE-Proton, which takes vkd3d out of the picture.
+
+## Where things stand, end of 2026-09-19
+
+Branch `feat/linux-gamescope-runtime`, nothing merged. Staged APK
+`80ab76a8da6a97702b7281f387fd5762f7afccec113a94d08561d4fcbe0b0234` (run 35486662947).
+
+**Shipped and device-proven today:** third-party Protons are selectable in the client and are now
+an ordinary catalog download - `linux-protons.json` in winlator-contents, a "Proton builds" card in
+the Linux runtime tab, the app fetching and checksumming, the session unpacking and registering in
+about twelve seconds. Both GE-Proton 11-7 and proton-cachyos are installed and appear in Steam's
+Compatibility list. The card listed Valve's own ARM64 depots for about an hour until the user
+pointed out they were two entries nobody should pick sitting beside two they should; they are gone
+and the warning moved into the card's description.
+
+One regression shipped and was fixed within the hour: the card crashed the app for anyone whose
+runtime had never been asked for a Proton, because `FileUtils.readString` throws on a missing file
+rather than returning null.
+
+**What we now know about GTA V Enhanced, and what we were wrong about.**
+
+Two long-held theories died today. The 1.3 TB `allocate_virtual_memory` failure is not the blocker:
+it is a backing-off ladder of 1.3 TB, 512 GB and 256 GB, all failing inside the first thirty
+seconds, after which the game ran for another two and a half minutes. And the D3D feature-level
+refusal is simply gone under GE-Proton - every "not supported" line in that log is a DLSS warning.
+
+The best run reached `GTA5_Enhanced.exe` itself, with DXVK and vkd3d both initialised, and ended
+with an execute access violation at address zero: `rip=0000000000000000`, no stack frame, no module
+name. That is a call through a null function pointer, not a data dereference.
+
+**The live lead is a Turnip bug in our own driver, not FEX.** Max's branch carries a fix for
+exactly this: the KGSL build advertises `VK_EXT_present_timing` while withholding
+`VK_KHR_calibrated_timestamps`, so vkd3d-proton enables present timing and calls the entry point
+through a null pointer - his report is Monster Hunter Rise dying a minute into every run. We build
+the same KGSL Turnip and apply every patch in `tools/linuxfs/turnip/`; he has two patches there and
+we have one. The one we lack is the fix. It is saved at `/home/claude-user/max-port/` along with a
+list of his twenty newest commits.
+
+It is a hypothesis, not a proven cause: our run carried `PROTON_LOG=1` only, so the log has nothing
+to say about present timing either way.
+
+Two other commits of his are worth taking. Seeding the redistributable markers into Proton's prefix
+template is strictly better than the five-second racing seeder we shipped this morning, and
+shipping Turnip with the app and refreshing it at session start is what would let the Turnip fix
+reach a device by APK rather than a whole runtime re-host.
+
+**Next, at the user's direction:** delete GTA V Enhanced (96 GB, and only 106 GB free so the two
+cannot coexist) and test GTA V Legacy, appid 271590, on GE-Proton. Legacy is D3D11 and therefore
+goes through DXVK rather than vkd3d, so a clean run there would neither prove nor disprove the
+present-timing theory. Legacy will arrive mapped to `bannerlator-proton-arm64` with no launch
+options, so it needs GE chosen by hand and `PROTON_LOG=1 %command%` added.
+
+## GTA V Legacy plays from the Linux Steam client (2026-09-20)
+
+Appid 271590 on GE-Proton 11-7, Direct3D 11 through DXVK. The whole chain ran unattended: Rockstar
+launcher, Social Club, "Entering Story Mode", then into the Ludendorff prologue heist and playing.
+No crash and no intervention. This is the first time GTA V has run from the client side at all.
+
+From the on-screen HUD, mid-gameplay:
+
+| | |
+| --- | --- |
+| FPS | 32 |
+| CPU | 58% at 90 °C |
+| GPU | 77% at 69 °C |
+| RAM | 4.6 GB |
+| Battery | 78% |
+
+The CPU temperature is the number worth looking at twice. 90 °C is throttling territory, so 32 fps
+is a throttled figure rather than a ceiling - worth a second run from cold, and worth pointing the
+FPS limiter and big-core affinity work at.
+
+This is consistent with the Turnip present-timing theory without proving it. Legacy is D3D11 and
+therefore DXVK; the bug Max found is vkd3d-proton enabling `VK_EXT_present_timing` without the
+extension it depends on. Enhanced, which is vkd3d, died on a call through a null pointer. Legacy,
+which is not, plays. The pattern fits, but only Enhanced can test it and it has been deleted - at
+96 GB against 106 GB free, the two cannot coexist.
+
+No Proton log exists for this run: the launch happened before `PROTON_LOG=1 %command%` was added for
+this appid. That costs nothing while it works and everything if it later misbehaves.
+
+Proven from the client so far: NFS Most Wanted via `steam2ea://` at 48 fps, NFS Payback via
+`link2ea://`, Portal 2, FlatOut, and now GTA V Legacy at 32 fps. GTA V Enhanced remains unsolved.
+
+### The proven-from-the-client list, audited (2026-09-20)
+
+A `compatdata/<appid>` prefix only exists if the client actually launched that title through
+Proton, so the prefix directory is the evidence rather than anyone's memory of it. On that basis:
+
+| appid | title | |
+| --- | --- | --- |
+| 291550 | Brawlhalla | prefix plus a 229 MB Proton log; the game itself was later deleted |
+| 6220 | FlatOut | the first client launch we had to fix |
+| 620 | Portal 2 | proved the client-download to app-launch round trip |
+| 70 | Half-Life | |
+| 1262560 | NFS Most Wanted | `steam2ea://` into EA Desktop, 48 fps |
+| 1262580 | NFS Payback | `link2ea://` into Link2EA and EA Desktop |
+| 271590 | GTA V Legacy | 32 fps, plays |
+| 3240220 | GTA V Enhanced | launched, never completed |
+
+Two entries could not be confirmed, and both are worth stating precisely rather than rounding up.
+
+**Half-Life 2 has no prefix, and that is not evidence against it.** HL2 and the Orange Box titles
+beside it - Lost Coast, Episode One, Episode Two, all installed - ship native Linux x86 builds.
+Steam runs those through Valve's FEX compatibility tool, which is installed here, rather than
+through Proton, so no prefix is created. If HL2 ran, it ran by that route, which is a different
+capability from the Windows path and arguably a more interesting one. It needs a run to confirm.
+
+**Dead Space has no evidence on hand at all.** It is not in the internal library's app list. It is
+either on the card library, which is only mounted inside a session and therefore invisible from
+outside one, or it is app-side only. Worth checking inside a session before it goes on the list.
+
+### Correction: GTA V Legacy ran on Valve's Proton, not GE (2026-09-20)
+
+I recorded Legacy as running on GE-Proton 11-7. That was an assumption, not a reading. The
+CompatToolMapping in `config.vdf` maps 271590 to `bannerlator-proton-arm64`, which is Valve's ARM64
+depot through our own wrapper; only 3240220, the Enhanced build, is mapped to
+`GE-Proton11-7-aarch64`. GE was chosen for Enhanced and I carried that assumption across to Legacy
+without checking.
+
+The corrected result is a better one: **Valve's own ARM64 Proton plays GTA V Legacy at 32 fps.** GE
+was never needed for it.
+
+### The registrar forces Proton onto native Linux titles
+
+Found while preparing a Half-Life 2 run. `register_default()` writes a priority-250 mapping to
+`bannerlator-proton-arm64` for every installed appid, and `config.vdf` confirms 220, 340, 380, 420
+and 70 are all mapped to it. Those are native Linux x86 titles which would otherwise run through
+Valve's FEX compatibility tool with no Wine involved at all.
+
+Worse, clearing such a mapping by hand does not stick. The registrar runs every fifteen seconds
+during a session and its skip condition is whether an app already has an entry, not whether it
+should have one, so it puts the mapping straight back.
+
+The behaviour was correct while the only goal was getting Windows games to launch. It now needs a
+way to leave a native title alone - an exclusion list of appids, or detecting a Linux launcher in
+the install directory at session time. Not yet fixed, and it means the native path cannot currently
+be tested without changing the registrar.
+
+### Retraction: the registrar mapping every appid is not a bug (2026-09-20)
+
+I wrote up the registrar forcing Proton onto native Linux titles as a defect needing a fix. That
+was wrong, and the SteamDeck session caught it by asking the right question: has a native Linux x86
+title ever actually launched through Valve's FEX tool in this runtime?
+
+It has not, and the reason is worse than a namespace wall. The session script reads
+
+```sh
+[ -d /usr/share/guestos/fex-mesa ] && export FEX_ROOTFS=/usr/share/guestos/fex-mesa
+```
+
+and **nothing in the build ever creates that directory**. There is no reference to `guestos` in
+`build-linuxfs.sh`, in the overlay, or anywhere in the app - only the guard itself - and it does not
+exist on the device. So `FEX_ROOTFS` is never set and the guard silently does nothing. The native
+path fails exactly as it did on 2026-09-18: FEX starts with no rootfs, every x86_64 library lookup
+falls through to the host, and the guest shell dies on `libreadline.so.8: cannot open` before the
+game is reached.
+
+Which means the blanket mapping is load-bearing. It is what makes Half-Life 2, Lost Coast, both
+episodes and Half-Life playable here, by putting them on the Windows build instead. An exclusion
+list or launcher detection would have sent all five back to a dead end, and I would have shipped
+that as a fix.
+
+The real defect is the missing rootfs. Build or ship `/usr/share/guestos/fex-mesa` first; only once
+a native x86 title actually launches does it make sense to teach the registrar to leave such titles
+alone. Until then the mapping stays exactly as it is.
+
+Worth keeping as a general lesson: a guard of the form `[ -d X ] && export …` fails silently when X
+is never created. It reads as working code and it is a no-op. Check the thing exists before
+trusting the mechanism built on it.
+
+### Half-Life 2 runs from the client at 79 fps (2026-09-20)
+
+Appid 220, the Windows build, on `bannerlator-proton-arm64` - Valve's ARM64 depot through our own
+wrapper - and running off the card library rather than internal storage, which proves that second
+library works end to end. A `compatdata/220` prefix now exists, so it is on the confirmed list by
+the same standard as the rest.
+
+At 79 fps it is the fastest title measured from the client so far, better than twice GTA V Legacy's
+throttled 32.
+
+It did not take the native Linux route, and could not have: the retraction above explains why that
+path is dead. The blanket Proton mapping is precisely what made this run possible.
+
+### Linux shortcut editor stripped and explained — device-proven (2026-09-20)
+
+`dd4cbb9a` hides every setting that does nothing on the gamescope path, and `e429caf1` gives each
+remaining one a "?" saying what it controls and whether it affects the Steam client, the games the
+client launches, or both. Installed and checked on the FIT, APK
+`8f643f1f12a93e3eda2d0edb672ae517280d0955f1973ec7d218febb3d5296ca`: a GOG game's tabs behave
+normally, and the Linux entry's help buttons work.
+
+The GOG check was the one that mattered. Dropping a whole tab meant separating "which tab is
+selected" from "which position it occupies", and that code runs for every shortcut rather than only
+the Linux one. It is the only part of this that could have reached a normal game, and it did not.
+
+Scope recorded in the help text, from tracing each one:
+
+| Setting | Affects |
+| --- | --- |
+| Screen size, alignment, fullscreen mode, HDR, FPS limiter | both |
+| Environment variables | both |
+| Controls profile, touchscreen mode, auto-hide, player slots, motion aim | both |
+| Processor affinity | both |
+| Audio driver | both, but only PulseAudio carries sound; anything else is silence |
+| FEXCore preset | games only - the client is native ARM64 and never goes through FEX |
+| Prefer game-folder DLLs | games only, and session-wide rather than per-game |
+| Microphone | games only, and does nothing on this path yet |
+
+Hidden: the whole Win Components tab, Wine layer, DXVK/VKD3D, DX wrapper, box64/WOWBox64, renderer,
+render scale, graphics and compositor driver, display backend, MIDI, exec args, storage, executable,
+and the XInput/DInput options.
+
+⚠️ One live setting is now invisible: the **compositor driver**. It is not inert - the compositor
+uses it to import the session's frames, and "System" there is a black screen. A Linux entry carries
+no per-game override so the container's value governs, which is why hiding it changes nothing
+today. Worth putting back if a per-game override is ever wanted.
+
+⚠️ Frame generation is kept and honoured, but `prepareLsfgNative()` sits past the gamescope early
+return, so the lsfg-native engine specifically may not work in a Linux session. Not yet tested, and
+deliberately not claimed in the help text.
+
+## DirectAudio for the Linux client — checkpoint (2026-09-20)
+
+Three commits in, one to go. Branch `feat/linux-gamescope-runtime`.
+
+| | |
+| --- | --- |
+| `0e85efad` | PulseAudio wired unconditionally; driver + helper ship as app assets, staged each session |
+| `8a7aae0f` | PulseAudio gained an optional microphone fed from a pipe |
+| `6e265fd9` | both Proton wrappers offer DirectAudio to a game, and refuse when it would be silent |
+
+**The silence bug is fixed and stands on its own.** A Linux session used to wire audio only when the
+container's driver said "pulseaudio"; anything else launched the client mute, which read as
+"DirectAudio broke the client" when nothing had been set up at all. PulseAudio now runs for every
+Linux session. On this path the two were never alternatives: the client is a native Linux program
+and DirectAudio replaces the audio driver *inside Wine*, so it changes games and leaves the client
+alone.
+
+**Two microphone paths, one stream.** The other session added `--mic-fifo` to the helper
+(directaudio `565c879e`, restaged, sha `599f769f…`, now our `libdirectaudiorelay.so`). A game gets
+the mic through Wine and the relay; the Steam client gets it through `module-pipe-source`, which we
+already shipped and had never loaded. The helper fans one Android input stream out to both. Format
+is fixed at s16le/48000/mono - it resamples when the device grants another rate, so the daemon is
+never told a rate the bytes are not. If PulseAudio suspends an idle source and stops reading, the
+helper releases its share of the mic after 2 s (Android's recording indicator goes off) and probes
+until reads resume.
+
+**The version gate is the point, not a nicety.** The mmdevapi interface the driver implements is
+private and unversioned, so pairing it with the wrong Wine does not fail - it goes quiet, which is
+indistinguishable from us having broken the sound. The wrapper reads the Proton's own Wine version
+and leaves DirectAudio off unless it matches, and says why.
+
+### Still to do
+- Nothing sets `BL_DIRECTAUDIO`, so the wrapper takes its early return on every launch today.
+- Nothing starts the helper. It needs to run under the app's uid, before the client, with
+  `--socket` and `--mic-fifo`, and PulseAudio needs the fifo path passed to it.
+- First launch of a game creates the prefix *after* the wrapper runs, so the registry key lands on
+  the second launch. Logged out loud rather than left looking like a fault; worth improving.
+
+### Verified on the host, not yet on a device
+Registrar still adopts a tool; both generated wrappers pass `bash -n`; the gate exports
+`WINEDLLPATH` on a Wine 11 tree and returns cleanly with no driver directory. A rendering bug was
+caught here and fixed: splicing the shell function into the adopted-tool wrapper added a second
+`%s`, which would have crashed the registrar at runtime. It is now spliced after the formatting,
+as the Valve launcher already did.
+
+## DirectAudio in the Linux client — end of session, 2026-09-20
+
+**Working and device-proven: DirectAudio for games.** With it selected on the Linux shortcut, the
+helper runs under the app's uid, the socket and pipe are created, the wrapper passes its Wine 11
+check, and the registry key is written into the game's prefix. The session log says
+`DirectAudio ready (Wine 11)` and `DirectAudio selected in the prefix`. The Steam client keeps
+PulseAudio throughout, as intended - DirectAudio replaces the audio driver inside Wine, so it
+changes games and leaves the client alone.
+
+**Not yet proven: the microphone for the Steam client.** Three faults stacked behind it, all three
+now fixed, none of them tested together.
+
+| | |
+| --- | --- |
+| `ac_cv_func_mkfifo=no` in our PulseAudio build | a bionic override carried from an older script. bionic has had mkfifo since API 21 and we build at 26, so PulseAudio dropped module-pipe-sink and module-pipe-source from the build entirely |
+| the bundle carried a 17.0 pipe-source | with nothing building one at 13.0, a foreign copy filled the gap. PulseAudio refuses a module from another release on sight, with nothing in any log |
+| the bundle was never refreshed on device | it unpacks only when the app's version code changes, and dev builds freeze that - so the correct module shipped twice and the device kept using the one unpacked months ago |
+
+That last one is why two rounds of fixing this changed nothing on the device. Confirmed directly:
+the APK carried a 20,272-byte 13.0 module while the phone held a 68,056-byte 17.0 one.
+
+**Staged and untested: `acbfc4943cb8c78f5e152d8f2966d21098b45b9bd70bd25b4697c8103d9e619f`**
+(run 35498185408, `980c4220`).
+
+### First thing next session
+1. Install it, launch the Linux client once with DirectAudio and the microphone on.
+2. **Before testing anything**, check the module on the device: it must be about 20 KB and report
+   13.0. If it is still 68 KB / 17.0 the refresh did not work and Steam's audio page will tell you
+   nothing.
+3. If it is right, open Steam's Audio settings. "No input devices detected" becoming a microphone
+   is the whole result.
+
+### Still open
+- The three ARM64 driver files stage every session; the PulseAudio bundle now does too. Neither is
+  version-checked, they are simply copied. Fine, but worth knowing.
+- A game's prefix is created after the wrapper runs, so on a game's **first** launch under
+  DirectAudio the registry key lands too late and it takes effect on the second. Logged out loud.
+- Frame generation is honoured on this path but `prepareLsfgNative()` sits past the gamescope early
+  return, so lsfg-native specifically may not work. Untested, and deliberately not claimed in the
+  help text.
+- The compositor driver row is hidden but not inert; the container's value governs.
+
+## The Steam client has a microphone (2026-09-20, afternoon) — DEVICE-PROVEN
+
+Steam's Audio page now shows a **Voice** section with a level slider and
+**Input Device: Default (DirectAudioMic)**, where it had said "No input devices detected" since the
+Linux client first existed. The daemon's own log agrees: source created, set as default, pipe held
+open, `Daemon startup complete`, no errors. Sound is back as well.
+
+Behind that one line sat **five** separate faults, each invisible in the only place anyone would
+look, fixed in this order:
+
+| | fault | fix |
+| --- | --- | --- |
+| 1 | `ac_cv_func_mkfifo=no` in our PulseAudio build | bionic has had mkfifo since API 21; the flag now tells the truth, so the pipe modules build |
+| 2 | bundle carried a 17.0 pipe-source against a 13.0 daemon | swapped only the two modules into the existing 74-file bundle |
+| 3 | bundle never refreshed on a frozen versionCode | re-extracted every Linux session |
+| 4 | module refuses an existing pipe (EEXIST) and ours persisted | deleted before the daemon starts |
+| 5 | helper's mkfifo raced the daemon's | helper waits for the daemon to make the pipe |
+
+And one that was not a fault in the build at all: **my by-hand diagnostics ran as root** and left a
+root-owned `.config/pulse/` in the app's audio directory, so the app's own daemon died on EACCES at
+startup with no log. That was the "no sound" on the last three builds - the builds were fine and I
+had broken the phone underneath them. Ownership repaired; recorded as a standing rule.
+
+The daemon now writes `pulse.log` beside its config on every start, so none of this can be
+invisible again.
+
+Installed build `e14a6e4db27d7be361df720177a919826cd0cd8d93e97e8db963e7f28d2b56b3` (run 35527019006,
+`6db75ca9`). Whole chain: one Android microphone owned by the relay helper, fanned out to games
+through Wine/DirectAudio and to the Steam client through PulseAudio's pipe source.
+
+Not yet done: an actual voice test (Steam's mic test, or TF2 `voice_loopback 1`) to hear it.
+
+### Voice proven end to end (2026-09-20)
+Team Fortress 2 runs from the client and **voice works in Steam's voice chat tester** - the
+microphone owned by the relay helper, fanned out through PulseAudio to the client, heard back. So
+"shows a microphone" is now "hears you". Games' own capture through Wine/DirectAudio uses the same
+helper and the same stream.
+
+## Where to pick this up (2026-09-20, end of session)
+
+### Done and device-proven today
+DirectAudio for games; the Steam client's microphone (`Input Device: DirectAudioMic`); **voice
+proven in Steam's own voice chat tester with TF2 running**; GTA V Legacy and Half-Life 2 playing
+from the client; the Linux shortcut editor stripped to settings that work, each with a "?" saying
+whether it affects the client, its games, or both.
+
+### VAC / insecure — where we actually are
+**Not an evasion problem and should not be treated as one.** What the evidence says:
+- TF2 carries **no launch options**, so nothing is forcing insecure mode.
+- Steam launched it through its own `steam-launch-wrapper`, registered the processes against app
+  440 (`SSGL: change [440] ...`), tracked and released them. Steam's supervision is intact - our
+  wrapper is not taking the game out from under it.
+- **Nothing in any log mentions VAC, secure or insecure** - not the session log, not any of Steam's
+  own logs under `logs/`.
+- The `gameoverlayrenderer.so` preload errors are for the **32-bit** path, which does not exist on
+  ARM64. Normal, unrelated to our stripping.
+
+So the insecure state is TF2's own report and we were not capturing anything TF2 says. **`-condebug`
+is now set on 440**, which makes Source write its console to `console.log` in the game folder. Next
+session: run TF2, read that file, and let the game say why.
+
+This is the same shape as the SteamLite "VAC issue", which turned out to be **our own diagnostics
+reading the wrong log** and reporting a false INSECURE - the client had been secure all along.
+The user's plan is to start from a known-good secure connection on the app side with SteamLite and
+compare behaviour from there.
+
+⛔ Boundary held throughout: making Valve's own anti-cheat **run** (fixing missing libraries, paths,
+components that fail with an ordinary error) is ordinary compatibility work. Working out what VAC
+checks in order to make the client present it is not, and was declined.
+
+### Also outstanding
+- GTA V entries still show installed on both sides. Two fixes now: release a row whose folder is a
+  shell, and run that check at session start rather than only at a clean shutdown. The second fix
+  (`fe03c0ec`) widens "shell" to ignore dotfiles and `.cache` - the real folder held
+  `vkd3d-proton.cache`. **Not yet verified: needs one Linux session start after installing it.**
+- GameHub (`com.xiaoji.egggame`) has four boot receivers, restarts itself, and steals the Steam
+  login. The app should force-stop it when a Linux session starts.
+- A game's first launch under DirectAudio gets the registry key one launch late.
+- Frame generation: `prepareLsfgNative()` sits past the gamescope early return, so lsfg-native may
+  not work in a Linux session. Untested.
+
+## 🔖 KNOWN-GOOD ROLLBACK POINT — 2026-09-20
+
+Everything below is working on the device. If something later breaks, come back here.
+
+```
+branch  feat/linux-gamescope-runtime
+commit  44b6d914          (code identical to fe03c0ec; 44b6d914 is docs only)
+ref     refs/backup/20260920/linux-gamescope-known-good   (pushed)
+APK     36768d1cc57c4e1abf4dba3804bdd1071a137631e949b772d1b38f8d64fa874d
+        run 35530176867 - staged AND installed, verified equal
+```
+
+### Proven on the device at this point
+- **Games play from the Linux Steam client:** Half-Life 2 (79 fps, Windows build off the card
+  library), GTA V Legacy (32 fps), NFS Most Wanted (48 fps), NFS Payback, Portal 2, FlatOut,
+  Half-Life, Brawlhalla, TF2.
+- **Third-party Protons** are a catalog download and selectable per game; GE-Proton 11-7 and
+  proton-cachyos installed and adopted. GE ran the GTA V Enhanced binary further than anything else.
+- **DirectAudio for games**, wrapper gate on Wine 11, registry key written into the prefix.
+- **Microphone for the Steam client** - `Input Device: DirectAudioMic` - and **voice proven in
+  Steam's own voice chat tester with TF2 running**. One Android mic owned by the relay helper,
+  fanned out to games through Wine and to the client through PulseAudio's pipe source.
+- **Session teardown** asks proot to stop and sweeps what it leaves, instead of orphaning a tree
+  that spins on ENOSYS.
+- **Library sync** releases a game the client uninstalled even though its folder remains, and runs
+  at session start rather than only at a clean shutdown. Both GTA entries verified cleared.
+- **The Linux shortcut editor** shows only settings that do something, each with a "?" saying
+  whether it affects the client, its games, or both. A GOG game's editor verified unchanged.
+
+### Known-not-working, deliberately
+- **VAC:** TF2 reports `You are in insecure mode.` at connect. Everything around it is correct -
+  logged on, tracked by Steam, no insecure flag anywhere, nothing failing with an error. The cause
+  sits in engine startup before the console log begins. **Not an evasion problem to solve; the
+  honest paths are environment fidelity (restore the overlay, close the gap to Valve's launch path)
+  or requirements from Valve.** Games not gated on VAC are online and fine - Brawlhalla, Stumble
+  Guys - and BattlEye did not block GTA V, so the runtime is not hostile to anti-cheat generally.
+- GameHub restarts itself at boot (four boot receivers) and steals the Steam login.
+- A game's first launch under DirectAudio gets its registry key one launch late.
+- lsfg-native frame generation may not work on this path; untested.
+
+### If you need to roll back
+```
+git reset --hard refs/backup/20260920/linux-gamescope-known-good
+```
+and reinstall APK `36768d1c…`. Nothing in this state depends on an unmerged change elsewhere; the
+relay helper binary and the driver files are committed in-tree.
+
+## Autonomous run: overlay restored, GameHub stopped, VAC still open (2026-09-20)
+
+Installed build `76319254e73fe9b61d28747ed25a04adb968b9b58bb4e37cac42d3038a74f63c`
+(`334955ea`, run 35531625164), driven and tested on the device without the user present.
+
+### ✅ Steam's overlay is back, and we were stripping a working one
+`.steam/bin64` → `steamrtarm64`, which holds a genuine **ELF arm64** `gameoverlayrenderer.so`.
+`.steam/bin32` does not exist, so the bin32 entry in Steam's LD_PRELOAD fails harmlessly - that is
+the "cannot be preloaded" noise in every log, and it is normal on ARM64. The overlay we were
+dropping was real and functioning.
+
+It was dropped because it landed in front of `open()`/`read()` on `/dev/input` and answered every
+read of the session's pad with nothing. That was the wrong cure for an ordering problem: **glibc
+reads `LD_PRELOAD` before `/etc/ld.so.preload`**, and the interposer lives in the latter. Both
+wrappers now prepend the interposer to `LD_PRELOAD` instead of removing the overlay.
+
+**Verified on the device, in a live TF2 process:** `gameoverlayrenderer` and `libfakeinput` both
+mapped into the game, and a Wine process holding four fake-input ring fds - so the interposer is
+serving the pad with the overlay loaded. The deviation is closed and input survived it.
+
+### ✅ GameHub is stopped when a session starts
+`ActivityManager.killBackgroundProcesses` on the competing client, with
+`KILL_BACKGROUND_PROCESSES` in the manifest. The old comment said an app cannot force-stop another
+without root; that is true of Settings' force-stop but not of background processes, which is
+exactly GameHub's case - it declares boot receivers, so it runs from power-on having never been
+opened, and takes the Steam login seconds after every sign-in.
+
+### ❌ VAC: unchanged, and my test was inconclusive by construction
+Confirmed along the way: the game's own command line is `tf_win64.exe -steam -condebug` - **no
+insecure flag from anyone** - Proton's Steam integration in the prefix is complete (steam.exe,
+steamclient.dll, steamclient64.dll, Steam.dll, GameOverlayRenderer64.dll), and TF2 reaches
+`Connection to game coordinator established`.
+
+I drove TF2 with `+connect 127.0.0.1:27015` to exercise the secure check locally. The console shows
+`Connecting…`, four retries, `Connection failed after 4 retries` and **no insecure notice** - but
+that proves nothing: with nothing listening, the secure negotiation never happens. Only a live
+secure server produces the verdict, which is a normal in-game connect and takes ten seconds.
+
+The remaining difference from Valve's official path is the **Steam Linux Runtime container**, which
+we skip because Android denies apps the user namespaces pressure-vessel needs. That is the largest
+gap and it is not mine to close.
+
+TF2's launch options restored to `-condebug`; the autolaunch hook cleared.
+
+### 2026-09-20 — The third driver: a glibc Turnip for the Linux runtime, and a row that picks it
+
+> Every Turnip we ship came in two builds and **both are bionic**: the AdrenoTools zip
+> (`-Dplatforms=android`, the only one with the Android surface WSI, so the only one that can hand a
+> frame to SurfaceFlinger) and the `-Wayland` zip for Wine containers. The Linux runtime could use
+> neither: the Steam client and every game it launches are glibc processes and cannot load a bionic
+> object at all. So a Linux session drew with whatever Turnip the runtime *image* was built with, and
+> a driver fix could not reach an installed runtime without a new ~790 MB image.
+>
+> **Banners-Turnip now builds a third leg per driver** (branch `feat/linux-driver`, commit
+> `8f1f91d`, **not merged to `A8xx`**): `Turnip-<tag>[-variant]-Linux.zip`.
+> `build_turnip_linux.sh` cross-builds with `aarch64-linux-gnu-*` against a sysroot assembled from
+> the **same Arch Linux ARM packages the runtime itself is made of** — a 44-package dependency
+> closure over the core/extra/alarm databases, the resolver lifted from `build-linuxfs.sh` — so the
+> `libdrm` / `wayland` / `libxcb` it links against are the ones on the device. KGSL backend,
+> `-Dplatforms=wayland,x11`: both WSIs are in the chain, because gamescope reaches the app with
+> `--backend wayland` while the client and its games are X11 clients of gamescope's own Xwayland.
+> `patches/linux/` carries the two KGSL fixes (DRM-node report, and gating calibrated timestamps and
+> present timing on the kernel interface actually implementing the counter read), both verified to
+> apply to Mesa main `366b006c` with offsets only.
+>
+> **Why no distro build would do.** Mesa's `meson.options` defaults `freedreno-kmds` to `['msm']`
+> and every distro package takes that default, so a stock Arch/Fedora Turnip finds no GPU on an
+> Android kernel (`/dev/kgsl-3d0`, not a DRM node). The two fixes are not upstream either. Nobody
+> publishes a KGSL-capable aarch64 Linux Turnip; that is the gap.
+>
+> First CI run built all three and failed one check: Arch's `libc.so` is a linker script naming
+> `ld-linux-aarch64.so.1` AS_NEEDED, which my allow-list did not know. Everything else passed on the
+> real binary — **26 `wl_` and 99 `xcb_` symbols** (both WSIs compiled in), **minimum glibc 2.38**
+> read back out of the ELF, both KGSL patch markers present, nothing bionic linked.
+>
+> **App side:** `LinuxVulkanDriverManager` imports a `-Linux` zip into
+> `files/linux_vulkan_drivers/<id>/`; the check that separates the three kinds is the libc soname in
+> the driver's `.dynstr` (glibc's is versioned, bionic's is not), so a bionic zip is refused with a
+> reason rather than loading into nothing. The shortcut editor gains **Draw driver (Linux runtime)**
+> beneath the display-driver row, Contents → Installed gains a **Linux runtime drivers** section, and
+> the session is handed `BL_VK_DRIVER` and points the loader at it with `VK_DRIVER_FILES`. Nothing
+> inside the runtime is modified, so switching back is instant. `VK_DRIVER_FILES` *replaces* the
+> loader's search, so an unreadable manifest or library would leave the session with no Vulkan at
+> all — both are checked in `bannerlator-session` before it is set, and ignored loudly otherwise
+> (tested against absolute and relative `library_path`).
+>
+> **A claim I made here earlier and then disproved, recorded so it is not believed twice:** I said
+> nothing in `proton-wine` reads `BANNER_WAYLAND_VK_ICD`, so importing a Wayland game driver had no
+> effect. That came from grepping the wrong worktree (`p10-2c-aio-refresh`). It **is** implemented -
+> `dlls/winewayland.drv/waylanddrv_main.c` `use_bundled_drivers`, commit `ccc31af185f` on the Wayland
+> layer line - it takes the path when it is absolute and readable, prefers it over the bundled
+> variant, and logs `winewayland: Vulkan driver <manifest>` either way. Device-verified in the
+> INSTALLED layer `Proton/11.0-2.1-arm64ec-16`: both strings are in its `winewayland.so` and it ships
+> all eight bundled variant manifests. So the Wayland side needed no work; only the log line is
+> untested with a real imported zip.
+>
+> Untested on device. App build `35549635663` (sha `e1701623`), Turnip dry run `35549416109`.
+
+### 2026-09-21 — 🔖 ROLLBACK POINT, and what the ports from WinNative cost
+
+> **Go here if the Linux client will not start:** commit **`17663f36`**, ref
+> `refs/backup/20260921/linux-pre-max-ports` (pushed), APK **`9ee955fab660ab7e4c3b0b6e33cc2f94a1ea5c7bece8111fd55f4c3e4dc2f974`**
+> (run 35577699317). That build is **device-proven**: the imported glibc Turnip loads
+> (`== vulkan driver: imported …`, and it is mapped in `gamescope-wl`, `steam` and `steamwebhelper`
+> with the runtime's own at zero), the client logs in, and the in-game drawer names both drivers.
+> `git reset --hard refs/backup/20260921/linux-pre-max-ports`, then install that APK.
+>
+> `ba8851cb` (the HUD API label for Linux sessions) is one commit later and looks safe - it only
+> changes which resolver a Linux session uses - but it was staged (`3b676086…`) and **never
+> confirmed installed**, so it is not the rollback target.
+>
+> **What came after, and what it did to the device.** Six fixes were taken from WinNative
+> (maxjivi05, `feature/wayland-gamescope`) in `20b1236e` and `ba07c7c7`: the HUD's frame counter
+> (`f467345c`), the seat's modifiers and the session's time zone (`cb52935c`), a NetworkManager
+> stand-in so the client stops showing no connection (`e7a224ae`), a seccomp probe (`2e8b31a8`),
+> and a bundled-driver fallback in our own shape (`c01a89f0`). Five of those are quiet. The
+> **seccomp probe broke every Linux session, twice**:
+>
+> - First as `ba07c7c7`: the probe execs proot from the app's data directory with a plain
+>   ProcessBuilder, which Android refuses (W^X), and I had written "could not run" as "this kernel
+>   is broken". `PROOT_NO_SECCOMP` went on, `getcwd`/`mkdir`/`statx` all returned **ENOSYS**, and
+>   gamescope threw `filesystem error: status: Function not implemented [/etc/gamescope/scripts]`
+>   before the client existed. The good log for comparison has **zero** "Function not implemented".
+> - Then again as `ecb8c093`: with the exec fixed, proot died in the **linker** instead -
+>   `CANNOT LINK EXECUTABLE … library "libtalloc.so.2" not found` - because the probe did not set
+>   `LD_LIBRARY_PATH`, which the session has always set. My "ran and said nothing" branch took that
+>   as the same broken kernel. Same ENOSYS storm.
+> - `8d5ac999` runs proot the way the session does and makes silence inconclusive: only output
+>   showing an exec refused under the filter disables seccomp.
+>
+> **The lesson, written down because it cost two installs:** a probe that fails for its own reasons
+> must never be read as a verdict about the machine. Both times the log said exactly what had
+> happened and both times the code had already decided.
+>
+> Also this session: the proot termios2 fix (`c347fac8`, terminals under glibc 2.42+ - our rootfs is
+> **2.43**, so it is live for us) was applied to `app/src/main/cpp/proot` and **reverted**: that tree
+> is the dead 5.1.0 snapshot, while the shipped binary is built by `build-proot.yml` from a fresh
+> download of termux/proot. Delivering it means patching in that workflow and then settling the open
+> question of whether our own build still aborts GTK - the prebuilts are Termux's deliberately.
+
+### 2026-09-21 — ✅ The Linux client runs without a Wine container (device-proven, `db10530b`)
+
+> **What a user does now:** install the app, download the runtime under Contents, launch
+> `Steam (Linux)`. No container is created, touched or needed. The entry lives in the runtime's own
+> settings - a `Container` with the reserved id **-7** rooted at `files/linux/`, no prefix beneath
+> it, its config in `files/linux/.container` (720p, Wayland, gamescope). `ContainerManager` hands it
+> out by id, so the activity, the editors and every launch intent work on it unchanged; it is never in
+> `getContainers()`, so no container screen offers to copy, back up or delete it. Global on purpose:
+> one Steam client, one set of settings, which is how Steam itself thinks.
+>
+> **Proven on the FIT** (APK `a100e62d…`, run 35673470153): the runtime tab moved the entry out of
+> container 8 as it was (its extras are the user's settings), `Final Container ID: -7`, session
+> `210249` 472 lines with 0 ENOSYS, imported Turnip loaded, NetworkManager stand-in up, logged in at
+> 21:03:07. Library sync is unaffected: app→client scans every REAL Wine container's steamapps
+> (`prepare(…, getContainers(), …)`), client→app reads the runtime's manifests into the store
+> database; neither ever touched the entry's container. `syncClientGames` has no caller.
+>
+> **Three things it took to get there, each found on the device, not guessed:**
+> 1. The migration only ran from the install-success path, so an already-installed runtime kept its
+>    entry in container 8 (`getLinuxContainer()` built the settings file, nothing moved). The tab now
+>    runs the idempotent step on open.
+> 2. "Preparing Wine & graphics driver" writes the display driver into the prefix's `user.reg` and
+>    runs BEFORE the Linux branch - `WineRegistryEditor.getValueLocation` NPE'd on a prefix that does
+>    not exist. Container 8's unused prefix had absorbed the whole stage all along. Skipped in
+>    `gamescopeMode`; nothing in it is read by a Linux session.
+> 3. One pubg CI job hung 25+ min in the informational Rust unit-test step (siblings: 11 s) with no
+>    timeout - it would have held the build to GitHub's 6-hour cap. Capped at 8 min.
+>
+> Container 8 is still there, untouched, until the user deletes it. Merge gate before `main`: a Wine
+> game in a Wayland container to confirm the two compositor ports (frame counting, seat modifiers)
+> did not regress the shipped path.
+
+### 2026-09-21 (evening) — what the container had been quietly holding, and the 90-vs-66 fps answer
+
+> **Container-level settings did not travel with the entry.** The shortcut's extras did (drivers,
+> LSFG engine, DirectAudio, the HUD's saved position); what the container carried did not, and the
+> first casualty was the HUD: its launch gate `container.isShowFPS()` is unchanged, but `container`
+> is now the Linux settings, created from the app's defaults, where `showFPS` is false. Diffed key by
+> key on the device: also HUD skin/opacity/scale, `lsfgAutoEnable`/performance mode, the container's
+> audio and display driver. Fix: the Linux settings are **seeded once from the container the entry
+> came out of** - its whole config copied over, keeping id/root/name/runtime, the source recorded.
+> The seed needs a source: on the FIT the entry had already moved and the container's other Linux
+> entry had been deleted, so the first version found nothing and did nothing, silently. The move now
+> records `linuxMovedFrom`, the lookup falls back through it and to any gamescope-marked container,
+> and a miss is logged. The FIT was seeded by hand over the bridge (backup at `.container.pre-seed`).
+>
+> **Two editor rows greyed out while the session honoured them.** DirectAudio was gated on the
+> container's Wine version (a Linux entry's DirectAudio is the relay driver, no layer of ours
+> involved) and frame generation on renderer/Wayland resolution (a Linux session always presents
+> through the Vulkan compositor). Both gates now pass for a Linux entry. The settings also reported
+> X11: `getDisplayBackend()` reads extras and the fresh-create wrote a top-level key - fixed.
+>
+> **The client-menu fps gap, measured rather than argued.** With only the client running, our
+> `steamwebhelper` sat on affinity **`0x7c`** - cores 2..6, five of eight, without core 7, the
+> fastest - because `BL_CLIENT_CPUS` was unset: my `cpuListOrEmpty` dropped the list whenever it
+> covered every core, and the session's re-pinning beat only runs when it is set. The standalone
+> SteamDeck app (our own code, same runtime, same driver) exports it and its webhelper sits on
+> **`0xff`**. Menus: 66 fps here, 90+ there. The client list is now always exported for a Linux
+> session (`61a41403`). The earlier 23.6 fps reading had HL2 running behind the menu - a confound.
+>
+> Also: the informational Rust unit-test step in CI hung 25 minutes on one flavour with no
+> timeout; capped at 8. And `com.steamdeck.launcher` on the device is OUR standalone app, recorded
+> under the Bannerlator index all along - I compared against it for an hour thinking it was Max's.
+
+### 2026-09-21 — ✅ Session log bundles, device-proven (`8deba310`, APK `ca24163e…`)
+
+> One folder per Linux session, the SteamDeck app's shape: `device.txt`, `network.txt`,
+> `session.log`, `fake-input.txt`, `app.log` (launch-logging only), `audio.log`, `crash.log`,
+> `steam/` scrubbed. Proven on the FIT: 45 of 45 Steam logs, 60 `Using JWT` lines redacted and none
+> raw, SteamIDs masked, `loginusers.vdf`/`config.vdf`/`ssfn*` never copied, six multi-megabyte logs
+> reduced to their last 3000 lines with a header saying so.
+>
+> Two rounds to get the teardown right, both found on the device. The collection first ran from the
+> exit callback - which fires from the monitor thread after `stopEnvironmentComponents()` kills the
+> session, while `exit()` carries on to finish the process: one of forty-five files landed. Moved to
+> the close path, before the components stop, on a worker with a bounded wait. Then forty-five files
+> through ten regexes a line took longer than the wait: twenty-five landed and neither the crash
+> buffer nor the audio log. Crash buffer and audio log now go first, Steam's logs smallest-first, and
+> anything over 512 KB by its tail. Nothing in this costs a frame: everything runs before the
+> session starts or after it ends, and `app.log` is gated on the launch-logging switch.
+>
+> Steam's logs used to be copied raw into Download, with the account's session token in
+> `connection_log.txt`, and only on a clean exit. Neither is true any more.
+
+### 2026-09-21 — 🔖 END OF DAY: the branch is ready; merge to main on 2026-09-22 after one test
+
+> **State:** `feat/linux-gamescope-runtime` at `8deba310`, APK `ca24163e…` installed and proven on the
+> FIT. Nothing merged. `main` is `fb7cfc99`.
+>
+> **Proven today, in order:** the glibc Turnip built and published from Banners-Turnip, imported and
+> loaded by the client; driver-import routing that keeps each kind in the list that can load it; the
+> Linux draw-driver row and an honest drawer/HUD for Linux sessions; six fixes taken from WinNative;
+> the client running with **no Wine container** (global settings, seeded from the old one); the
+> client on **all eight cores**; and session log bundles that match the SteamDeck app's, scrubbed.
+>
+> **The one test before merging:** a Wine game in a Wayland container. Two of the WinNative ports
+> changed the compositor - window-based frame counting and seat modifiers - and that compositor is
+> the shipped Wine/Wayland path, untested there since. Sane fps number, Shift works, no black screen
+> = merge. If not, revert only those two compositor hunks (`20b1236e`) and merge the rest.
+>
+> **Rollback:** `refs/backup/20260921/linux-pre-max-ports` (`17663f36`), APK `9ee955fa…`.
+>
+> **Carried over:** the idle-menu fps reading on the 8-core build; the Thor black-screen report
+> (device + bundle needed - the new bundle makes that a one-look diagnosis); proot's termios2 fix
+> via `build-proot.yml` and the GTK A/B, proot staying in the runtime; the WinNative features not
+> taken (non-Steam games through the client, Epic, client updates, logs manager, tap accuracy).
+
+### 2026-09-22 — ✅ MERGED TO MAIN: `af360838`
+
+> `feat/linux-gamescope-runtime` at `60f3a166` merged into `main` (from `eb5812d3`, the 3.1.2
+> stable), no-ff, ~270 commits. Gate before merging: DiRT Showdown on the Wayland/Wine path presented
+> zero-copy with no compositor errors (proving the frame-counting change on the shipped path), the
+> Linux client came up container-free on all eight cores. Three of Max's last-day fixes went in first:
+> the seccomp probe removed outright, the account's owned games (132 here) and the BattlEye/EAC
+> runtimes mapped to the ARM64 tool before the client can fetch anything x86 - verified on the FIT as
+> "default and 134 app(s) set to bannerlator-proton-arm64".
+>
+> **Next:** a fresh-install end-to-end test as a new user on the STANDARD flavour
+> (`com.winlator.banner`, its own package, so it sits beside the pubg install and starts from nothing):
+> setup wizard, Contents → Linux Runtime download, Steam (Linux) launch with no container ever
+> created, sign-in, a game. Both APKs from the main build are staged in Download.
+
+## 2026-09-22 — the new-user test found two blockers; both fixed in main `0904fa71`
+
+> A clean install of the standard flavour (`com.winlator.banner`, from nothing) downloaded the
+> runtime and launched the client to **sound over a black screen**, and **opening the Steam (Linux)
+> entry's settings crashed the app**. Neither shows on a seeded device, which is the whole point of
+> the test.
+>
+> **Black screen** — no draw driver had ever been picked, so the launch fallback took the first
+> bundled entry the GPU supports: `v819`, the proprietary `vulkan.ad8191.so`. The compositor imports
+> every frame as a dma-buf and the blob has no `VK_EXT_external_memory_dma_buf` /
+> `VK_EXT_image_drm_format_modifier` (compositor log: `vkCreateDevice failed`); only Turnip carries
+> them. `LinuxSettings.defaultDrawDriver()` now prefers a supported Turnip entry (turnip-sdk36); a
+> fresh settings container stores it so the editor shows the real default, and the launch fallback
+> uses the same choice.
+>
+> **Crash** — the editor's `selectedBox64Version` / `selectedFexCoreVersion` / emulator id were
+> initialised from the container's value, and the Linux runtime's settings container has none (a
+> Linux session runs no Box64, no FEX). Null reached `.isEmpty()`. Now `?: ""`.
+>
+> **Next:** repeat the clean-install flow on the `0904fa71` standard APK: wizard → Linux Runtime
+> download → Steam (Linux) launch → sign-in → open its settings → a game.
+
+## 2026-09-22 — new-user flow complete on `2cc25217`; one more first-run fault, fixed on the branch
+
+> Clean standard install → runtime download → Steam (Linux) → sign-in → FlatOut installed → FlatOut
+> running, on main `2cc25217` (both APKs staged and installed). Also added on the way: the Linux
+> session's loading screen (milestones, the client's download percentage, a clock, hints; uncovered
+> on the client's first frame - "timing is perfect now").
+>
+> **The fault:** the client segfaulted (rc=139, "Failed writing minidump") the moment the first game
+> install was confirmed. The session asks the client to fetch the ARM64 Proton depot (4427310) on
+> its command line at startup; on a clean install nobody is signed in yet and a signed-out client
+> drops the request - `content_log` was empty for six minutes. Our tool was the default but
+> incomplete, so the client fell back to its own chain (Proton Experimental → SLR 4.0 → FEX), queued
+> Proton Experimental twice ("same game folder as installed app 1493710"), and died in
+> "Reconfiguring". A relaunch signed in made the same request land: the "Proton Experimental
+> (ARM64)" install dialog, 1.94 GB, and FlatOut then installed and ran through our tool.
+>
+> **The fix** (`bannerlator-session`): with no remembered sign-in in `loginusers.vdf`, a background
+> watcher waits for the sign-in (a new "processing complete" logon line in `connection_log.txt`),
+> gives the interface 15 s, and asks again by starting the client binary with the same URL - which
+> hands it to the running instance (steam.pid + steam.pipe) and exits. Shipped by the app's own copy
+> of the session scripts, so no runtime re-host.
+
+## 2026-09-22 — first run made fluid: the client restarts itself once when the layer lands
+
+> Retest of `7f411dbc` on a clean install: the sign-in re-request worked (18 s after sign-in the
+> ARM64 Proton was downloading, same session), but a game installed inside that download window
+> (FlatOut 2, 16 s later) got the client's own chain assigned - the client decides a title's tool
+> when the title is installed and keeps that decision for its run - and launching it failed (FEX
+> with no rootfs). No crash this time; relaunching the client, or picking our tool in the game's
+> Compatibility page, fixed it. That is not a first run a user should have to understand.
+>
+> Now: once `appmanifest_4427310.acf` reads fully installed, the session runs the registrar, logs
+> "compatibility layer installed: restarting the Steam client once", asks the client to shut down
+> (its `-shutdown` switch) and the existing restart loop brings it back - the same path as its
+> self-update, with the URL arguments dropped since they were acted on. The app sees that milestone,
+> puts the loading screen back ("Steam is restarting once…", clock reset) and re-arms the
+> compositor's first-frame signal (`nativeResetFirstFrame`, `vkp_reset_first_frame`), so the
+> restart is covered instead of black and the screen leaves on the first frame as before. Armed only
+> when the depot was missing at session start: a seeded device never sees it.
+
+## 2026-09-22 — merged to main `856ff6dd`: the clean-install flow proven end to end
+
+> Clean standard install → runtime → Steam (Linux) → sign-in → the layer downloads on its own →
+> the client restarts itself once → FlatOut installed → FlatOut running. Nothing chosen by hand.
+> Main is a fast-forward of the branch; both APKs from main's build staged.
+
+## 2026-09-22 — checkpoint: 3.1.3 pre-release 1 published (the Linux Steam client)
+
+> **Known-good point.** main `0e9b7cbc` = tag `3.1.3-pre1` = backup ref
+> `refs/backup/20260922/linux-313-pre1-known-good`. versionCode 87. Release page live, pre-release,
+> Latest stays 3.1.2; `update.json` offers it to "Include pre-releases" testers only. The released
+> APKs were staged from the page itself (standard `1123c802…`, pubg `88baff42…`).
+>
+> **Proven today, from a clean standard install:** runtime download → client (self-download,
+> self-update) → sign-in → the ARM64 Proton fetched on its own → the client's one-time restart →
+> FlatOut installed and running through our tool; the loading screen covers every wait and leaves on
+> the first frame; the Steam (Linux) settings open; Turnip is the fresh-install default. On the
+> seeded device: FlatOut 2 as well, and the app's Installed list, its database and the client's
+> manifests agree exactly (11 games).
+>
+> **Found and fixed today, in order:** v819 default → black screen; editor crash on a fresh Linux
+> entry; the client segfault on a first game install (request made before sign-in → Valve's chain →
+> "Reconfiguring" crash) → re-ask after sign-in → one-time restart when the layer lands; the
+> loading screen's 5 s grace over the start-up chime.
+>
+> **Lessons that cost time:** `git add -A` in the worktree swept four 535 MB APKs (stager download
+> folders) into a commit and a 12-minute "push" — `art*/` is ignored now and the stagers download
+> into the scratchpad; `git gc --auto` on the handheld repacks 2 GB and cooks the device (auto-gc
+> off); a `timeout 90` on a push of this repo is too short. A cancelled release run leaves a DRAFT
+> release behind — delete it. Published pre-releases now bump versionCode (87) so the updater can
+> offer them; the next stable must be ≥ 88.
+>
+> **Open, in the order the notes promise:** the process-limit ("Disable child process
+> restrictions") warning card + root/Shizuku fix; a non-Adreno gate; closing the first-run window
+> (Valve's chain pulled in when a game is installed before the layer lands); TF2 "insecure";
+> then custom games and GOG / Epic / Amazon titles inside the client's library.
+
+### 2026-09-22 evening — `fix/linux-proot-and-gates`: the Steam UI was never on the GPU
+
+Branch off `feat/linux-gamescope-runtime`, tip `38996ea1`, every build green, **nothing
+device-proven yet**. Staged `Bannerlator-deckfix-38996ea1-pubg.apk` sha `527a0197…`.
+
+**The big one — Chromium's GPU process was dying, ported from WinNative (maxjivi05, `deff1ac6`).**
+libpci picks its procfs backend on whether it can read the `/proc/bus/pci` directory, which the app
+can, then opens the devices file inside it, which Android denies. libpci's error path is `die()`, so
+the process calling it `exit(1)`s — and Chromium loads libpci in its GPU process to name the video
+card. The GPU process therefore died on the way up, and after a few tries CEF gave up on hardware and
+drew the rest of the session on SwiftShader: the client's interface rendered on the CPU. One row in
+the fake-`/proc` table binding an empty file over it answers the scan truthfully. His measured A/B on
+a OnePlus 15, same rootfs and same library scroll: **~44 → ~85 fps, `pcilib:` messages 6 → 0,
+GPU-process deaths 12 → 0.** Our own HUD read 117–138 fps on the Steam UI afterwards, which is
+promising but was not an A/B. This also corrects the earlier diagnosis in this log: the menu was not
+bound in Chromium→ANGLE→Zink translation cost, it was not on the GPU at all.
+
+**Steam Deck mode, and the restart loop it first shipped with.** A Steam Deck mode switch was added
+to the entry's settings, and on device it gives Steam's own Quick Access Menu: the native performance
+overlay, a frame limiter reading `144 FPS (144 Hz)` from the panel, scaling mode and filter, battery
+and wattage. It first passed `-steamdeck` and `-steamos3` together. `-steamos3` makes the client
+manage itself the way SteamOS does: it calls `steamos-select-branch`, which this rootfs has not got
+(30 failures in one session), and it opts the install into the `steamdeck_stable` client branch,
+written to `package/beta`. That file outlives the setting and then loses to the `-clientbeta
+publicbeta` the session has always forced, so the updater found `installed version 0` against a
+package set installed from the other branch, marked an update pending and exited 42 to apply it —
+every launch, for ever. On device that was four client restarts in one session, the side menu opening
+and closing by itself, and FlatOut 2 left running with no controller because Steam Input goes away
+with each restart. Deck mode now passes only `-steamdeck`; `package/beta` is forced to agree with the
+command line before the client starts; the rc=42 loop is capped at three and says why it stopped.
+**That beta file is sticky — turning the switch off does not undo it.**
+
+**Also on the branch.** The apk's own proot was being handed `-i uid:gid`, which only the runtime's
+build takes: its option table is `-r`/`-b`/`-w`/`--kill-on-exit`/`-v`/`-V`/`-h`, and an unknown option
+is fatal in `cli.c` before a guest process starts, so any session that fell back to it died instantly
+with no window and nothing in the log. The apk copy answers `set*id` from its own seccomp handler and
+never needed the flag. proot also reads and writes the tracee's memory in one `process_vm_readv` or
+`process_vm_writev` instead of a word per ptrace call, and untags arm64 pointers first (maxjivi05,
+`290c5314` + `0c71304a`). Contents → Linux Runtime now warns before the 755 MB download when Android's
+phantom-process limit is on (with the Developer-options button, or the adb line where there is no
+switch) and when the GPU is not an Adreno. Session logs keep the first 600 lines of a big log as well
+as the last 3000, because the GPU-process deaths above only ever write their reason on the way up and
+a tail-only `cef_log.txt` could not answer whether they had happened.
+
+**Still open.** None of it is device-proven: the libpci gain has no A/B on our hardware, the proot
+fallback needs a device with no runtime installed, and the non-Adreno gate needs a non-Adreno device.
+The three GL switches beside Deck mode tune a path a SwiftShader session never took, so they are
+worth measuring only now that the client is on the GPU.
+
+### 2026-09-22 late — Deck mode behind a warning, and gamescope's own frame limit and scaling
+
+Branch `fix/linux-proot-and-gates`, tip `7443b667`, CI green, pubg staged as
+`Bannerlator-scaling-7443b667-pubg.apk` sha `03805ef5…`. Not device-tested.
+
+**Deck mode breaks games, and why.** A clean A/B on device, with only the real pad listed both times:
+Deck mode off, FlatOut 2 plays; on, it sits on its title screen at 101 fps while the pad still drives
+Steam's own menus. Steam's `controller.txt` shows the switch — `mapping uses xinput : false` off,
+`uses xinput : true` on. With Deck mode, Steam Input takes the pad the way it does on a real Deck, hides
+it from the game and hands the game a virtual one, and that virtual pad never arrives here. Where it dies
+is not proven: nothing mentions `uinput` in any log. Fixing it is **parked** by the user; the first step
+when it is picked up is to press "Enable Steam Input" with Deck mode off and see whether every game breaks.
+
+**Also found on the way.** `-steamdeck` on its own, not only `-steamos3`, opts the install into the
+`steamdeck_stable` client branch during a run, so the branch guard now runs before every client start
+rather than once (`252edc01`). And the session only lists the pads a device holds now (`d59c78c9`) —
+four were listed with one real, though that turned out not to be the Deck-mode cause.
+
+**What the user chose.** Deck mode stays, off by default, and is only turned on through a dialog that
+lists what it breaks. The useful half of the Quick Access Menu is gamescope's, so it is offered on the
+entry itself: a frame limit (gamescope's nested refresh — exact, where `--framerate-limit` would turn
+60 into 72 on a 144 Hz panel), a scaling mode and a scaling filter including FSR, NIS and SGSR. Every
+value is checked against this gamescope's own `--help` in both the app and the session script, because
+an unknown one stops the session from starting.
+
+**FlatOut shrinks to the top-left after the Steam menu → Resume; FlatOut 2 does not.** FlatOut is a
+D3D9 game that rebuilds its swapchain on focus loss, which is the moment
+`vk_wsi_force_swapchain_to_current_extent` pins it to a momentarily tiny surface. The launch-option test
+`vk_wsi_force_swapchain_to_current_extent=false %command%` is still to be run.
+
+### 2026-09-22 night — merged to main, and 3.1.3 pre-release 2 prepared (not tagged)
+
+`main` fast-forwarded `0e9b7cbc` → `4e904851` on the user's word, 16 commits, and `build-artifacts.yml`
+on main went green (run 35813529322). The working branch `feat/linux-gamescope-runtime` moved with it.
+
+**Correction to the entry above:** the frame limit it describes was removed again before the merge
+(`4e904851`), at the user's request — the in-game drawer's FPS limit already caps a Linux session. Only
+the scaling mode and filter stayed. `BL_FPS` is 0 again, as it was before.
+
+Prepared for **3.1.3 pre-release 2**, on the working branch only: versionCode 88 and versionName
+3.1.3-pre2 (a pre-release bumps it so "Include pre-releases" testers are offered the update, so the next
+stable is ≥ 89), `docs/releases/3.1.3-pre2.md` in the house layout with pre-release 1's changes collapsed
+underneath, and the README's pre-release section pointing at it. `release_notes.py 3.1.3-pre2
+--prerelease` passes. Nothing tagged or published: that waits on the user's go.

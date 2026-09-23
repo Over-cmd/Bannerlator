@@ -111,6 +111,7 @@ Every report gets its own **public discussion thread**. You can reply as the ori
 - [🤖 AI Disclaimer](#-ai-disclaimer)
 - [ℹ️ Information](#ℹ️-information)
 - [🐛 Report a Mali GPU Issue](#-report-a-mali-gpu-game-issue)
+- [🐧 Linux Steam Client (3.1.3 pre-release)](#-linux-steam-client--313-pre-release-testers)
 - [🆕 What's New in 3.1.2](#-whats-new-in-312)
 - [🎞️ Frame Generation & Present Modes](#-frame-generation--present-modes)
 - [✨ Full Features](#-full-features)
@@ -121,6 +122,72 @@ Every report gets its own **public discussion thread**. You can reply as the ori
 - [🙏 Credits](#-credits)
 - [⚖️ Disclaimer](#️-disclaimer)
 - [📄 License](#-license)
+
+---
+
+## 🐧 Linux Steam Client — 3.1.3 pre-release (testers)
+
+**[3.1.3 pre-release 2](https://github.com/The412Banner/Bannerlator/releases/tag/3.1.3-pre2) runs Valve's own native ARM64 Linux Steam client inside Bannerlator** — sign in, install a game from your library and play it through Valve's ARM64 Proton, with no Wine container involved. Pre-release 2 puts the client's interface back on the GPU, where it runs at about twice the frame rate. It is a **tester pre-release**: the stable release is still **3.1.2**, and you are only offered it in-app with **Settings → Include pre-releases** switched on.
+
+> ⚠️ **Adreno GPUs only**, and it needs Android's **Disable child process restrictions** developer setting. Mali, Xclipse and PowerVR phones get sound over a black screen. Leave the experimental **Steam Deck mode** off: it breaks game controllers. Full caveats are in the [release notes](docs/releases/3.1.3-pre2.md).
+
+<details>
+<summary><b>📖 Step-by-step in plain English — a brand-new install, or upgrading from pre-release 1 or the September 21 test build</b> (tap to expand)</summary>
+
+### 🆕 New here? Installing for the first time
+
+**Before you start — check two things:**
+
+- **Your phone needs an Adreno GPU** (Snapdragon). Mali, Xclipse and PowerVR phones will get sound over a black screen. There is no warning for this yet, so please do not install it to "see what happens".
+- **Turn on one Android setting first:** go to **Settings → Developer options → Disable child process restrictions** and switch it **on**. Do not see Developer options? Go to **Settings → About phone** and tap **Build number** seven times, then it appears.
+  Without this switch, Android randomly kills the Steam client and your session just dies for no visible reason. Some phones do not have the switch at all — on those, this build will not work yet.
+
+**Then:**
+
+1. **Download and install the APK.** There are three — just take **standard** unless you specifically use the pubg or ludashi build already.
+2. **Open the app and go to Contents → Linux Runtime → Download.** This is about **755 MB**, once. It is not in the APK, so this step is required.
+3. When it finishes, a **Steam (Linux)** entry appears in your games list. **Tap it.**
+4. **First launch takes a few minutes.** You will see a loading screen — Steam is downloading and updating itself. There is a clock on screen so you know it is alive. It may restart itself once; that is normal.
+5. **Sign in** with your Steam account. Password, or the QR code with the Steam mobile app — both work.
+6. **⏳ Now wait. Do not install a game yet — this is the part people get wrong.**
+
+   Steam fetches Valve's ARM64 Proton by itself. **It may not start downloading on its own** — watch for an install box for **Proton Experimental (ARM64)** (about 2 GB). If your phone has an SD card, Steam will ask **where to put it: internal storage or the SD card**. Pick one and tap **Install**. If nothing appears, check the **Downloads** page — it may be sitting there waiting on that choice.
+
+   **When the download finishes, still do not touch anything.** The loading screen comes back saying **"Steam is restarting once…"** — **the client restarts itself automatically.** That restart is what makes every game you install run properly. Let it happen; Steam reopens on its own, still signed in.
+
+   ⚠️ **Installing a game before that restart breaks it.** Steam grabs the wrong set of tools — about 1.7 GB you will never use — and the game just fails to launch with no error message. Wait for the restart. It is a minute or two.
+7. **Once Steam has come back on its own — now install a game from your library and play it.** Nothing to configure, nothing to pick.
+
+**That's it.** Your existing Wine containers and games are completely untouched by any of this.
+
+**Optional tweaks** — the ⚙️ next to the Steam (Linux) entry has resolution (720p by default, because Steam's own interface is expensive to draw), drivers, audio, frame generation and the HUD.
+
+### ⬆️ Already running the Linux Steam client?
+
+**From pre-release 1:** install this APK over your current install. That is all — nothing to re-download, and you stay signed in.
+
+**From the September 21 test build:** two steps. Nothing to re-download.
+
+1. **Install this APK over your current install.** Your data is kept — do not uninstall first.
+2. **Open Contents → Linux Runtime once.**
+   In the old build, Steam (Linux) lived inside a Wine container. It now stands on its own with its own settings. Just opening that tab moves your entry out of the container and carries your settings over (HUD, LSFG, audio, drivers).
+
+Then launch **Steam (Linux)** from your games list as usual.
+
+- ✅ You stay signed in. Your games, Valve's ARM64 Proton and your downloads are all still there.
+- ❌ **Do not remove or re-download the Linux Runtime.**
+- 🗑️ If you made a container *only* for Steam and nothing else lives in it, you can delete it afterwards. (The **Linux Desktop** entry stays in the container — leave that one alone if you use it.)
+- If you skip step 2 it still launches, but it will keep using the old container's settings until you open that tab.
+
+**In-app updates:** you will not be offered this automatically unless you turn on **Settings → Include pre-releases**. Stable users are never offered pre-releases.
+
+### 🐞 If something goes wrong (both groups)
+
+Post the **whole** session folder from `Download/Bannerlator-LinuxSteam/session-<date>-<time>/`. It is already scrubbed — tokens, Steam IDs and login files are masked or never copied, so it is safe to post.
+
+Known and already on the list, no need to report: **Steam Deck mode breaks game controllers**, **FlatOut shrinks to the corner after Guide → Resume**, **TF2 says "insecure"**, GTA V *Enhanced* does not run, Serious Sam Shatterverse is killed for memory, NFS Hot Pursuit Remastered faults. Everything was proven on one AYANEO Pocket FIT — reports from any other device are the single most useful thing right now.
+
+</details>
 
 ---
 

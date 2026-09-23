@@ -3170,7 +3170,15 @@ internal suspend fun supportedBundledDriverVersions(context: Context): List<Stri
 
 /** Imported adrenotools driver ids (enumarateInstalledDrivers excludes the bundled ones). */
 internal fun importedDriverVersions(context: Context): List<String> =
-    runCatching { AdrenotoolsManager(context).enumarateInstalledDrivers().toList() }.getOrDefault(emptyList())
+    runCatching {
+        val m = AdrenotoolsManager(context)
+        // Only drivers AdrenoTools can actually be handed: meta.json must name a library, because
+        // setDriverById sets nothing without one and the compositor then silently stays on the
+        // system Vulkan - a black screen under a driver's name. Zips of the other two kinds used to
+        // install here (a "-Linux" glibc ICD or a "-Wayland" one), so an existing bad import is
+        // filtered out here as well as refused at import time.
+        m.enumarateInstalledDrivers().toList().filter { m.getLibraryName(it).isNotEmpty() }
+    }.getOrDefault(emptyList())
 
 /**
  * What the Wayland "Compositor driver" picker offers: the config dialog's version list
