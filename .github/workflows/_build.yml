@@ -306,6 +306,43 @@ jobs:
         done
         ls -l "$D/usr/local/bin/"
 
+    # The PulseAudio sink that sends the Steam client's own sound through the DirectAudio relay (tools/aaudio-sink, from The412Banner/SteamDeck).
+    # It is compiled against upstream PulseAudio 13 headers and the app's own libpulse*, and added to the audio bundle the apk carries.
+    # Only module-directaudio-sink is added: the bundle's own module-aaudio-sink stays as it is, so a session without DirectAudio sounds exactly as before.
+    # build.sh compiles both sinks, as a check.
+    - name: Cache PulseAudio 13.0 source
+      id: pa-src
+      uses: actions/cache@v4
+      with:
+        path: pa13
+        key: pulseaudio-src-13.0
+
+    - name: Fetch PulseAudio 13.0 source
+      if: steps.pa-src.outputs.cache-hit != 'true'
+      run: |
+        set -euo pipefail
+        curl -fsSL -o pa.tar.gz https://github.com/pulseaudio/pulseaudio/archive/refs/tags/v13.0.tar.gz
+        mkdir -p pa13 && tar -xzf pa.tar.gz -C pa13 --strip-components=1 && rm pa.tar.gz
+
+    - name: Build the DirectAudio sink into the audio bundle
+      run: |
+        set -euo pipefail
+        export NDK="${ANDROID_NDK_HOME:-${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_ROOT}}"
+        tools/aaudio-sink/build.sh "$PWD/pa13" "$PWD/sink-out"
+        rm -rf pa-bundle && mkdir -p pa-bundle
+        tar --use-compress-program=unzstd -xf app/src/main/assets/pulseaudio.tzst -C pa-bundle
+        before=$(tar --use-compress-program=unzstd -tf app/src/main/assets/pulseaudio.tzst | grep -vc '/$')
+        test -f pa-bundle/modules/arm64/module-aaudio-sink.so
+        install -m755 sink-out/module-directaudio-sink.so pa-bundle/modules/arm64/module-directaudio-sink.so
+        (cd pa-bundle && tar --use-compress-program='zstd -19' -cf ../pulseaudio.tzst .)
+        mv pulseaudio.tzst app/src/main/assets/pulseaudio.tzst
+        after=$(tar --use-compress-program=unzstd -tf app/src/main/assets/pulseaudio.tzst | grep -vc '/$')
+        echo "audio bundle: $before files before, $after after"
+        # Exactly one entry more, counted the same way on both sides: the whole bundle is never swapped, only the sink added to it.
+        test "$after" -eq $((before + 1))
+        tar --use-compress-program=unzstd -tf app/src/main/assets/pulseaudio.tzst | grep -q 'module-directaudio-sink.so'
+        rm -rf pa-bundle sink-out
+
     - name: Cache LSFG native library
       id: cache-lsfg
       uses: actions/cache@v4

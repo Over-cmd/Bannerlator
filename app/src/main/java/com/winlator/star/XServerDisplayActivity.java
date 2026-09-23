@@ -9006,9 +9006,13 @@ public class XServerDisplayActivity extends AppCompatActivity {
         linuxBatteryDir.mkdirs();
         environment.addComponent(new com.winlator.star.linux.LinuxBatteryComponent(linuxBatteryDir));
         guest.add("PULSE_SERVER=unix:" + rootPath + UnixSocketConfig.PULSE_SERVER_PATH);
-        environment.addComponent(new PulseAudioComponent(
+        PulseAudioComponent linuxPulse = new PulseAudioComponent(
                 UnixSocketConfig.createSocket(rootPath, UnixSocketConfig.PULSE_SERVER_PATH),
-                micFifo != null ? micFifo.getAbsolutePath() : null));
+                micFifo != null ? micFifo.getAbsolutePath() : null);
+        // With DirectAudio chosen, the client's own sound goes through the relay too, not only its games'.
+        // The daemon fills the relay's ring and the relay, outside proot, drives the device; this is what cures the choppy client sound.
+        if (wantsDirectAudio) linuxPulse.setRelaySocket(relaySocket.getAbsolutePath());
+        environment.addComponent(linuxPulse);
 
         if (wantsDirectAudio) {
             environment.addComponent(new com.winlator.star.xenvironment.components
