@@ -9144,6 +9144,23 @@ public class XServerDisplayActivity extends AppCompatActivity {
             withGamescope[sessionFiles.length] = new String[]{"usr/local/bin/gamescope", "usr/local/bin/gamescope"};
             sessionFiles = withGamescope;
         }
+        // Valve's mangoapp (tools/mangoapp), which draws Deck mode's performance overlay, with the five libraries the runtime lacks beside it and the wrapper on PATH that points it at them.
+        // Each file is staged only when the apk carries it. (From The412Banner/SteamDeck.)
+        String[] mangoapp = {
+                "usr/local/bin/mangoapp",
+                "usr/local/lib/mangoapp/mangoapp",
+                "usr/local/lib/mangoapp/libfmt.so.10",
+                "usr/local/lib/mangoapp/libspdlog.so.1.13",
+                "usr/local/lib/mangoapp/libglfw.so.3",
+                "usr/local/lib/mangoapp/libtraceevent.so.1",
+                "usr/local/lib/mangoapp/libtracefs.so.1",
+        };
+        for (String path : mangoapp) {
+            if (!linuxAssetPresent(path)) continue;
+            String[][] withFile = java.util.Arrays.copyOf(sessionFiles, sessionFiles.length + 1);
+            withFile[sessionFiles.length] = new String[]{path, path};
+            sessionFiles = withFile;
+        }
         // Android has no /dev/shm; a directory under the cache stands in for it, and unlike the real
         // thing it keeps whatever a session leaves. The client abandons some fifty megabytes of
         // streams each run; one runtime reached 22 GB. Cleared before a session starts.
