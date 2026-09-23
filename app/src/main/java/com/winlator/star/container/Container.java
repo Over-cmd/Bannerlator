@@ -67,6 +67,13 @@ public class Container {
      */
     public static final String GRAPHICS_DRIVER_GAMENATIVE = "wrapper-gamenative";
     public static final String DEFAULT_AUDIO_DRIVER = "pulseaudio";
+
+    /**
+     * 🚨 EL SELLO DEL SONIDO NATIVO BAJA LATENCIA:
+     * Identificador de texto plano único para saltarse los servidores locales de Android.
+     * Mapeado en consistencia con el condicional de inyección en caliente de C.
+     */
+    public static final String AUDIO_DRIVER_NATIVE = "nativeaudio";
     public static final String DEFAULT_EMULATOR = "FEXCore";
     public static final String DEFAULT_DXWRAPPER = "dxvk+vkd3d";
     public static final String DEFAULT_DXWRAPPERCONFIG = "version=" + DefaultVersion.getVegasDefault() + ",framerate=0,async=0,asyncCache=0" + ",vkd3dVersion=2.8" + ",vkd3dLevel=12_1" + ",ddrawrapper=" + Container.DEFAULT_DDRAWRAPPER + ",csmt=3" + ",gpuName=NVIDIA GeForce GTX 480" + ",videoMemorySize=2048" + ",strict_shader_math=1" + ",OffscreenRenderingMode=fbo" + ",renderer=gl";
