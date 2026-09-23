@@ -10987,3 +10987,52 @@ TF2's launch options restored to `-condebug`; the autolaunch hook cleared.
 > restrictions") warning card + root/Shizuku fix; a non-Adreno gate; closing the first-run window
 > (Valve's chain pulled in when a game is installed before the layer lands); TF2 "insecure";
 > then custom games and GOG / Epic / Amazon titles inside the client's library.
+
+### 2026-09-22 evening — `fix/linux-proot-and-gates`: the Steam UI was never on the GPU
+
+Branch off `feat/linux-gamescope-runtime`, tip `38996ea1`, every build green, **nothing
+device-proven yet**. Staged `Bannerlator-deckfix-38996ea1-pubg.apk` sha `527a0197…`.
+
+**The big one — Chromium's GPU process was dying, ported from WinNative (maxjivi05, `deff1ac6`).**
+libpci picks its procfs backend on whether it can read the `/proc/bus/pci` directory, which the app
+can, then opens the devices file inside it, which Android denies. libpci's error path is `die()`, so
+the process calling it `exit(1)`s — and Chromium loads libpci in its GPU process to name the video
+card. The GPU process therefore died on the way up, and after a few tries CEF gave up on hardware and
+drew the rest of the session on SwiftShader: the client's interface rendered on the CPU. One row in
+the fake-`/proc` table binding an empty file over it answers the scan truthfully. His measured A/B on
+a OnePlus 15, same rootfs and same library scroll: **~44 → ~85 fps, `pcilib:` messages 6 → 0,
+GPU-process deaths 12 → 0.** Our own HUD read 117–138 fps on the Steam UI afterwards, which is
+promising but was not an A/B. This also corrects the earlier diagnosis in this log: the menu was not
+bound in Chromium→ANGLE→Zink translation cost, it was not on the GPU at all.
+
+**Steam Deck mode, and the restart loop it first shipped with.** A Steam Deck mode switch was added
+to the entry's settings, and on device it gives Steam's own Quick Access Menu: the native performance
+overlay, a frame limiter reading `144 FPS (144 Hz)` from the panel, scaling mode and filter, battery
+and wattage. It first passed `-steamdeck` and `-steamos3` together. `-steamos3` makes the client
+manage itself the way SteamOS does: it calls `steamos-select-branch`, which this rootfs has not got
+(30 failures in one session), and it opts the install into the `steamdeck_stable` client branch,
+written to `package/beta`. That file outlives the setting and then loses to the `-clientbeta
+publicbeta` the session has always forced, so the updater found `installed version 0` against a
+package set installed from the other branch, marked an update pending and exited 42 to apply it —
+every launch, for ever. On device that was four client restarts in one session, the side menu opening
+and closing by itself, and FlatOut 2 left running with no controller because Steam Input goes away
+with each restart. Deck mode now passes only `-steamdeck`; `package/beta` is forced to agree with the
+command line before the client starts; the rc=42 loop is capped at three and says why it stopped.
+**That beta file is sticky — turning the switch off does not undo it.**
+
+**Also on the branch.** The apk's own proot was being handed `-i uid:gid`, which only the runtime's
+build takes: its option table is `-r`/`-b`/`-w`/`--kill-on-exit`/`-v`/`-V`/`-h`, and an unknown option
+is fatal in `cli.c` before a guest process starts, so any session that fell back to it died instantly
+with no window and nothing in the log. The apk copy answers `set*id` from its own seccomp handler and
+never needed the flag. proot also reads and writes the tracee's memory in one `process_vm_readv` or
+`process_vm_writev` instead of a word per ptrace call, and untags arm64 pointers first (maxjivi05,
+`290c5314` + `0c71304a`). Contents → Linux Runtime now warns before the 755 MB download when Android's
+phantom-process limit is on (with the Developer-options button, or the adb line where there is no
+switch) and when the GPU is not an Adreno. Session logs keep the first 600 lines of a big log as well
+as the last 3000, because the GPU-process deaths above only ever write their reason on the way up and
+a tail-only `cef_log.txt` could not answer whether they had happened.
+
+**Still open.** None of it is device-proven: the libpci gain has no A/B on our hardware, the proot
+fallback needs a device with no runtime installed, and the non-Adreno gate needs a non-Adreno device.
+The three GL switches beside Deck mode tune a path a SwiftShader session never took, so they are
+worth measuring only now that the client is on the GPU.
