@@ -6355,9 +6355,8 @@ internal fun ShortcutSettingsDialogScreen(
         mutableStateOf(com.winlator.star.linux.LinuxTuning.isOn(
             shortcut, com.winlator.star.linux.LinuxTuning.EXTRA_STEAMDECK))
     }
-    // Frame limit, scaling mode and scaling filter: gamescope's own controls, the same ones the Quick Access Menu offers.
+    // Scaling mode and scaling filter: gamescope's own controls, the same ones the Quick Access Menu offers.
     // LinuxTuning validates each against what this gamescope accepts, so a stale saved value reads as unset.
-    var linuxFrameLimit by remember { mutableStateOf(com.winlator.star.linux.LinuxTuning.frameLimit(shortcut)) }
     var linuxScaler by remember { mutableStateOf(com.winlator.star.linux.LinuxTuning.scaler(shortcut)) }
     var linuxFilter by remember { mutableStateOf(com.winlator.star.linux.LinuxTuning.filter(shortcut)) }
     // Deck mode is only turned on through a warning that says what it breaks.
@@ -6998,7 +6997,6 @@ internal fun ShortcutSettingsDialogScreen(
                 putExtra(com.winlator.star.linux.LinuxTuning.EXTRA_LAZY_DESCRIPTORS, if (linuxLazyDescriptors) "1" else "0")
                 putExtra(com.winlator.star.linux.LinuxTuning.EXTRA_NO_GL_ERROR, if (linuxNoGlError) "1" else "0")
                 putExtra(com.winlator.star.linux.LinuxTuning.EXTRA_STEAMDECK, if (linuxDeckMode) "1" else "0")
-                putExtra(com.winlator.star.linux.LinuxTuning.EXTRA_FRAME_LIMIT, if (linuxFrameLimit > 0) linuxFrameLimit.toString() else null)
                 putExtra(com.winlator.star.linux.LinuxTuning.EXTRA_SCALER, linuxScaler.ifEmpty { null })
                 putExtra(com.winlator.star.linux.LinuxTuning.EXTRA_FILTER, linuxFilter.ifEmpty { null })
             }
@@ -7041,7 +7039,6 @@ internal fun ShortcutSettingsDialogScreen(
                     add(com.winlator.star.linux.LinuxTuning.EXTRA_LAZY_DESCRIPTORS)
                     add(com.winlator.star.linux.LinuxTuning.EXTRA_NO_GL_ERROR)
                     add(com.winlator.star.linux.LinuxTuning.EXTRA_STEAMDECK)
-                    add(com.winlator.star.linux.LinuxTuning.EXTRA_FRAME_LIMIT)
                     add(com.winlator.star.linux.LinuxTuning.EXTRA_SCALER)
                     add(com.winlator.star.linux.LinuxTuning.EXTRA_FILTER)
                 }
@@ -7653,7 +7650,7 @@ internal fun ShortcutSettingsDialogScreen(
                                                 + "\u2022 Games stop receiving the controller. Steam's own menus still work, but in a game the pad does nothing.\n"
                                                 + "\u2022 The client shows a Steam Client update under System that cannot install. Pressing Apply restarts the client over and over.\n"
                                                 + "\u2022 The Quick Access Menu's performance overlay cannot be turned on.\n\n"
-                                                + "The frame limit and scaling controls below do the useful part without it. Turn Deck mode off again if a game stops responding to the controller."
+                                                + "The scaling controls below do the useful part without it, and the in-game drawer's FPS limit caps the frame rate. Turn Deck mode off again if a game stops responding to the controller."
                                         )
                                     },
                                     confirmButton = {
@@ -7664,34 +7661,6 @@ internal fun ShortcutSettingsDialogScreen(
                                     },
                                 )
                             }
-                            // Built from this panel: nothing above its top rate, its own modes, and the whole-number fractions of the top rate.
-                            // A saved cap this panel would not offer (set on another device) is still listed, so it stays visible and changeable.
-                            val panelRatesPrecise = remember {
-                                com.winlator.star.widget.XServerView.getSupportedRefreshRatesPrecise(
-                                    if (android.os.Build.VERSION.SDK_INT >= 30) context.display
-                                    else (context.getSystemService(android.content.Context.WINDOW_SERVICE)
-                                            as android.view.WindowManager).defaultDisplay)
-                            }
-                            val topRate = remember { com.winlator.star.linux.LinuxTuning.topRate(panelRatesPrecise) }
-                            val frameLimitValues = remember(linuxFrameLimit) {
-                                val offered = com.winlator.star.linux.LinuxTuning.frameLimitOptions(panelRatesPrecise).toList()
-                                if (linuxFrameLimit in offered) offered else (offered + linuxFrameLimit).sorted()
-                            }
-                            val frameLimitLabels = frameLimitValues.map { cap ->
-                                when {
-                                    cap == 0 -> "Off"
-                                    cap == topRate -> "$cap fps \u00b7 full rate"
-                                    com.winlator.star.linux.LinuxTuning.pacesEvenly(cap, topRate) -> "$cap fps \u00b7 even pacing"
-                                    else -> "$cap fps"
-                                }
-                            }
-                            DpDrop(
-                                dp, com.winlator.star.linux.LinuxTuning.EXTRA_FRAME_LIMIT,
-                                label = "Frame limit (whole session, panel $topRate Hz)",
-                                options = frameLimitLabels,
-                                selected = frameLimitLabels[frameLimitValues.indexOf(linuxFrameLimit).coerceAtLeast(0)],
-                                onSelect = { linuxFrameLimit = frameLimitValues[frameLimitLabels.indexOf(it).coerceAtLeast(0)] }
-                            )
                             val scalerLabels = com.winlator.star.linux.LinuxTuning.SCALERS.map { if (it.isEmpty()) "Default" else it.replaceFirstChar(Char::uppercase) }
                             DpDrop(
                                 dp, com.winlator.star.linux.LinuxTuning.EXTRA_SCALER,
@@ -7715,9 +7684,7 @@ internal fun ShortcutSettingsDialogScreen(
                                 onSelect = { linuxFilter = com.winlator.star.linux.LinuxTuning.FILTERS[filterLabels.indexOf(it).coerceAtLeast(0)] }
                             )
                             Text(
-                                "The frame limit holds the whole session to it, Steam's own interface included, and games read it as the display's refresh rate. "
-                                    + "Caps marked even pacing divide this panel's rate exactly, so every frame is shown for the same time; the others can judder. "
-                                    + "Scaling mode and filter only matter when a game renders below the session's resolution. "
+                                "Scaling mode and filter only matter when a game renders below the session's resolution. "
                                     + "FSR, NIS and SGSR upscale and sharpen; SGSR is Qualcomm's, made for Adreno.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant

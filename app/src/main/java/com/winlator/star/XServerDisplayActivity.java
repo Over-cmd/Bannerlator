@@ -9017,12 +9017,11 @@ public class XServerDisplayActivity extends AppCompatActivity {
         }
         guest.add("BL_WIDTH=" + xServer.screenInfo.width);
         guest.add("BL_HEIGHT=" + xServer.screenInfo.height);
-        // A Linux session is never capped by the container's frame limiter.
-        // gamescope's rate is set once for the whole session, so a cap meant for a Wine game also held the client's menus to it.
+        // A Linux session is never capped through gamescope.
+        // gamescope's rate is set once for the whole session, so a cap there also holds the client's menus to it.
         // A limiter left at 60 ran Big Picture at 60 on a 144 Hz panel, which read as the client being sluggish rather than as a setting doing its job.
-        // The only cap is the entry's own Frame limit, off unless the user picks one, and it is labelled as holding the whole session.
-        // With none, the panel's own highest mode is used instead (BL_REFRESH below).
-        guest.add("BL_FPS=" + com.winlator.star.linux.LinuxTuning.frameLimit(shortcut));
+        // The panel's own highest mode is used instead (BL_REFRESH below), and a cap is the in-game drawer's FPS limit.
+        guest.add("BL_FPS=0");
         // gamescope advertises this as the session's refresh rate, and a game reads it as the
         // display's: without it gamescope falls back to 60, so a 120 Hz panel offers only 60 Hz in
         // game settings and titles cap themselves there. The panel's highest mode is the honest
