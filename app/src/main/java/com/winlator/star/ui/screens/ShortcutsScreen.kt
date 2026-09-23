@@ -6355,6 +6355,13 @@ internal fun ShortcutSettingsDialogScreen(
         mutableStateOf(com.winlator.star.linux.LinuxTuning.isOn(
             shortcut, com.winlator.star.linux.LinuxTuning.EXTRA_STEAMDECK))
     }
+    // Frame limit, scaling mode and scaling filter: gamescope's own controls, the same ones the Quick Access Menu offers.
+    // LinuxTuning validates each against what this gamescope accepts, so a stale saved value reads as unset.
+    var linuxFrameLimit by remember { mutableStateOf(com.winlator.star.linux.LinuxTuning.frameLimit(shortcut)) }
+    var linuxScaler by remember { mutableStateOf(com.winlator.star.linux.LinuxTuning.scaler(shortcut)) }
+    var linuxFilter by remember { mutableStateOf(com.winlator.star.linux.LinuxTuning.filter(shortcut)) }
+    // Deck mode is only turned on through a warning that says what it breaks.
+    var confirmDeckMode by remember { mutableStateOf(false) }
     // HDR output override (per-game, same extra name as the container's): "" = the container's,
     // "1" on, "0" off. Only shown when the effective backend is Wayland; see display.WaylandHdr.
     var waylandHdrOverride by remember { mutableStateOf(com.winlator.star.display.WaylandHdr.shortcutChoice(shortcut)) }
@@ -6991,6 +6998,9 @@ internal fun ShortcutSettingsDialogScreen(
                 putExtra(com.winlator.star.linux.LinuxTuning.EXTRA_LAZY_DESCRIPTORS, if (linuxLazyDescriptors) "1" else "0")
                 putExtra(com.winlator.star.linux.LinuxTuning.EXTRA_NO_GL_ERROR, if (linuxNoGlError) "1" else "0")
                 putExtra(com.winlator.star.linux.LinuxTuning.EXTRA_STEAMDECK, if (linuxDeckMode) "1" else "0")
+                putExtra(com.winlator.star.linux.LinuxTuning.EXTRA_FRAME_LIMIT, if (linuxFrameLimit > 0) linuxFrameLimit.toString() else null)
+                putExtra(com.winlator.star.linux.LinuxTuning.EXTRA_SCALER, linuxScaler.ifEmpty { null })
+                putExtra(com.winlator.star.linux.LinuxTuning.EXTRA_FILTER, linuxFilter.ifEmpty { null })
             }
             saveData()
         }
@@ -7031,6 +7041,9 @@ internal fun ShortcutSettingsDialogScreen(
                     add(com.winlator.star.linux.LinuxTuning.EXTRA_LAZY_DESCRIPTORS)
                     add(com.winlator.star.linux.LinuxTuning.EXTRA_NO_GL_ERROR)
                     add(com.winlator.star.linux.LinuxTuning.EXTRA_STEAMDECK)
+                    add(com.winlator.star.linux.LinuxTuning.EXTRA_FRAME_LIMIT)
+                    add(com.winlator.star.linux.LinuxTuning.EXTRA_SCALER)
+                    add(com.winlator.star.linux.LinuxTuning.EXTRA_FILTER)
                 }
                 if (effectiveWaylandShortcut || isLinuxEntry) add(com.winlator.star.display.WaylandHdr.EXTRA)
                 if (!effectiveWaylandShortcut && !isLinuxEntry) { add("gfxWrapper"); add("gfxConfig") } // hidden on Wayland (X11 shims/tuning)
@@ -7619,12 +7632,79 @@ internal fun ShortcutSettingsDialogScreen(
                             PerfEditRow(dp, com.winlator.star.linux.LinuxTuning.EXTRA_STEAMDECK,
                                 "Steam Deck mode (-steamdeck)", linuxDeckMode,
                                 com.winlator.star.linux.LinuxTuning.defaultOn(
-                                    com.winlator.star.linux.LinuxTuning.EXTRA_STEAMDECK)) { linuxDeckMode = it }
+                                    com.winlator.star.linux.LinuxTuning.EXTRA_STEAMDECK)) { on ->
+                                if (on) confirmDeckMode = true else linuxDeckMode = false
+                            }
+                            if (linuxDeckMode) {
+                                Text(
+                                    "Deck mode is on: games do not receive the controller, and the client shows a Steam Client update that cannot install. Do not press Apply on it.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.error
+                                )
+                            }
+                            if (confirmDeckMode) {
+                                OutlinedAlertDialog(
+                                    onDismissRequest = { confirmDeckMode = false },
+                                    title = { Text("Turn on Steam Deck mode?") },
+                                    text = {
+                                        Text(
+                                            "Deck mode makes the Steam client behave as it does on a Steam Deck and adds the Quick Access Menu.\n\n"
+                                                + "Known problems, found on device:\n"
+                                                + "\u2022 Games stop receiving the controller. Steam's own menus still work, but in a game the pad does nothing.\n"
+                                                + "\u2022 The client shows a Steam Client update under System that cannot install. Pressing Apply restarts the client over and over.\n"
+                                                + "\u2022 The Quick Access Menu's performance overlay cannot be turned on.\n\n"
+                                                + "The frame limit and scaling controls below do the useful part without it. Turn Deck mode off again if a game stops responding to the controller."
+                                        )
+                                    },
+                                    confirmButton = {
+                                        TextButton(onClick = { linuxDeckMode = true; confirmDeckMode = false }) { Text("Turn on anyway") }
+                                    },
+                                    dismissButton = {
+                                        TextButton(onClick = { confirmDeckMode = false }) { Text("Keep it off") }
+                                    },
+                                )
+                            }
+                            val frameLimitLabels = com.winlator.star.linux.LinuxTuning.FRAME_LIMITS.map { if (it == 0) "Off" else "$it fps" }
+                            DpDrop(
+                                dp, com.winlator.star.linux.LinuxTuning.EXTRA_FRAME_LIMIT,
+                                label = "Frame limit (whole session)",
+                                options = frameLimitLabels,
+                                selected = frameLimitLabels[com.winlator.star.linux.LinuxTuning.FRAME_LIMITS.indexOf(linuxFrameLimit).coerceAtLeast(0)],
+                                onSelect = { linuxFrameLimit = com.winlator.star.linux.LinuxTuning.FRAME_LIMITS[frameLimitLabels.indexOf(it).coerceAtLeast(0)] }
+                            )
+                            val scalerLabels = com.winlator.star.linux.LinuxTuning.SCALERS.map { if (it.isEmpty()) "Default" else it.replaceFirstChar(Char::uppercase) }
+                            DpDrop(
+                                dp, com.winlator.star.linux.LinuxTuning.EXTRA_SCALER,
+                                label = "Scaling mode",
+                                options = scalerLabels,
+                                selected = scalerLabels[com.winlator.star.linux.LinuxTuning.SCALERS.indexOf(linuxScaler).coerceAtLeast(0)],
+                                onSelect = { linuxScaler = com.winlator.star.linux.LinuxTuning.SCALERS[scalerLabels.indexOf(it).coerceAtLeast(0)] }
+                            )
+                            val filterLabels = com.winlator.star.linux.LinuxTuning.FILTERS.map {
+                                when (it) {
+                                    "" -> "Default"
+                                    "fsr", "nis", "sgsr" -> it.uppercase()
+                                    else -> it.replaceFirstChar(Char::uppercase)
+                                }
+                            }
+                            DpDrop(
+                                dp, com.winlator.star.linux.LinuxTuning.EXTRA_FILTER,
+                                label = "Scaling filter",
+                                options = filterLabels,
+                                selected = filterLabels[com.winlator.star.linux.LinuxTuning.FILTERS.indexOf(linuxFilter).coerceAtLeast(0)],
+                                onSelect = { linuxFilter = com.winlator.star.linux.LinuxTuning.FILTERS[filterLabels.indexOf(it).coerceAtLeast(0)] }
+                            )
                             Text(
-                                "Steam Deck mode puts Steam's own Quick Access Menu on screen: the native "
-                                    + "performance overlay, a frame limiter that reads this panel's real rate, and "
-                                    + "the scaling controls. The other three make the chain that draws the client's "
-                                    + "interface cheaper. None is proven on this device yet, so change one at a time.",
+                                "The frame limit holds the whole session to it, Steam's own interface included, and games read it as the display's refresh rate. "
+                                    + "Scaling mode and filter only matter when a game renders below the session's resolution. "
+                                    + "FSR, NIS and SGSR upscale and sharpen; SGSR is Qualcomm's, made for Adreno.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                "Threaded GL, lazy descriptors and skipped GL error checks make the chain that draws the client's interface cheaper. "
+                                    + "None is proven on this device yet, so change one at a time.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )

@@ -83,6 +83,14 @@ if [ -z "${BL_INSIDE:-}" ]; then
   elif [ "${BL_REFRESH:-0}" -gt 0 ]; then
     args+=(-r "$BL_REFRESH")
   fi
+  # Scaling, from the entry's settings: the same controls as the Quick Access Menu's Scaling Mode and Scaling Filter.
+  # Only values this gamescope lists in --help are passed, because an unknown one stops the session from starting.
+  case "${BL_SCALER:-}" in
+    auto|integer|fit|fill|stretch) args+=(-S "$BL_SCALER") ;;
+  esac
+  case "${BL_FILTER:-}" in
+    linear|nearest|pixel|fsr|nis|sgsr) args+=(-F "$BL_FILTER") ;;
+  esac
   [ "$mode" = steam ] && args+=(-e)
   export BL_INSIDE=1
   exec gamescope "${args[@]}" -- "$0" "$mode" "$@"
