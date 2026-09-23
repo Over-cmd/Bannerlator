@@ -9124,6 +9124,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
                 {"usr/local/bin/bannerlator-steam-library", "usr/local/bin/bannerlator-steam-library"},
                 {"usr/local/bin/bannerlator-seed-redists", "usr/local/bin/bannerlator-seed-redists"},
                 {"usr/local/bin/bannerlator-proton-extra", "usr/local/bin/bannerlator-proton-extra"},
+                {"usr/local/bin/bannerlator-steam-shortcuts", "usr/local/bin/bannerlator-steam-shortcuts"},
                 {"usr/local/bin/bannerlator-netmanager", "usr/local/bin/bannerlator-netmanager"},
                 // The SteamOS helpers the client calls in Deck mode, all no-ops that answer "nothing to do".
                 // On device the client called four of them by their polkit-helpers path rather than /usr/bin, and the "Update Error" dialog was steamos-update missing there. (From The412Banner/SteamDeck.)
@@ -9370,6 +9371,16 @@ public class XServerDisplayActivity extends AppCompatActivity {
         gameBinds = new ArrayList<>(gameBinds);
         if (fakeInputEnabled) gameBinds.add(fakeInputDir.getPath() + ":/dev/input");
         gameBinds.add(linuxBatteryDir.getPath() + ":/sys/class/power_supply");
+        // The app's own games, for the runtime's shortcuts writer to put in the client's library before the client starts (see LinuxAppGames and bannerlator-steam-shortcuts).
+        // The list is written every session, empty or not, so games that are gone or turned off leave the client's library too.
+        try {
+            com.winlator.star.linux.LinuxAppGames.Session appGames =
+                    com.winlator.star.linux.LinuxAppGames.INSTANCE.prepare(this, containerManager, shortcut);
+            gameBinds.addAll(appGames.getBinds());
+            lateEnv.add("BL_APP_GAMES=" + appGames.getListing().getPath());
+        } catch (Throwable t) {
+            Log.w("XServerDisplayActivity", "could not list the app's games for the client", t);
+        }
         // Back in front of the script, so `env -i` sets them instead of the script being handed
         // them as filenames to run.
         if (!lateEnv.isEmpty()) {
