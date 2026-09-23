@@ -11036,3 +11036,33 @@ a tail-only `cef_log.txt` could not answer whether they had happened.
 fallback needs a device with no runtime installed, and the non-Adreno gate needs a non-Adreno device.
 The three GL switches beside Deck mode tune a path a SwiftShader session never took, so they are
 worth measuring only now that the client is on the GPU.
+
+### 2026-09-22 late — Deck mode behind a warning, and gamescope's own frame limit and scaling
+
+Branch `fix/linux-proot-and-gates`, tip `7443b667`, CI green, pubg staged as
+`Bannerlator-scaling-7443b667-pubg.apk` sha `03805ef5…`. Not device-tested.
+
+**Deck mode breaks games, and why.** A clean A/B on device, with only the real pad listed both times:
+Deck mode off, FlatOut 2 plays; on, it sits on its title screen at 101 fps while the pad still drives
+Steam's own menus. Steam's `controller.txt` shows the switch — `mapping uses xinput : false` off,
+`uses xinput : true` on. With Deck mode, Steam Input takes the pad the way it does on a real Deck, hides
+it from the game and hands the game a virtual one, and that virtual pad never arrives here. Where it dies
+is not proven: nothing mentions `uinput` in any log. Fixing it is **parked** by the user; the first step
+when it is picked up is to press "Enable Steam Input" with Deck mode off and see whether every game breaks.
+
+**Also found on the way.** `-steamdeck` on its own, not only `-steamos3`, opts the install into the
+`steamdeck_stable` client branch during a run, so the branch guard now runs before every client start
+rather than once (`252edc01`). And the session only lists the pads a device holds now (`d59c78c9`) —
+four were listed with one real, though that turned out not to be the Deck-mode cause.
+
+**What the user chose.** Deck mode stays, off by default, and is only turned on through a dialog that
+lists what it breaks. The useful half of the Quick Access Menu is gamescope's, so it is offered on the
+entry itself: a frame limit (gamescope's nested refresh — exact, where `--framerate-limit` would turn
+60 into 72 on a 144 Hz panel), a scaling mode and a scaling filter including FSR, NIS and SGSR. Every
+value is checked against this gamescope's own `--help` in both the app and the session script, because
+an unknown one stops the session from starting.
+
+**FlatOut shrinks to the top-left after the Steam menu → Resume; FlatOut 2 does not.** FlatOut is a
+D3D9 game that rebuilds its swapchain on focus loss, which is the moment
+`vk_wsi_force_swapchain_to_current_extent` pins it to a momentarily tiny surface. The launch-option test
+`vk_wsi_force_swapchain_to_current_extent=false %command%` is still to be run.
