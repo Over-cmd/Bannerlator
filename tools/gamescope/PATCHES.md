@@ -19,3 +19,10 @@ library list, before anything is published.
 
 Sixteen more of Armada's patches are DRM/lease/HDR-on-KMS work for a native display, which this
 app's Wayland-hosted gamescope never reaches, or need a newer gamescope than the runtime has.
+
+## Where the published copy lives
+
+The apk build fetches the archive named in `release.env` from **The412Banner/winlator-contents**, next to the Linux runtime it belongs to, and checks its sha256 before packing it in.
+The copy there is SteamDeck's own `gamescope-3.16.29-p1` build, moved unchanged, so both apps share one file.
+It is a pre-release that is never marked Latest, and it is not part of the runtime download (`linuxfs-r9` is untouched).
+`build-gamescope.yml` here builds the same recipe on every change to `tools/gamescope`; to replace the published copy, build it, upload the result to winlator-contents as a new tag, and update `release.env`.

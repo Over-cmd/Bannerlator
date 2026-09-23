@@ -310,7 +310,7 @@ jobs:
         # Without that file nothing is fetched, the apk carries no gamescope, and sessions keep the runtime's own.
         if [ -f tools/gamescope/release.env ]; then
           . tools/gamescope/release.env
-          gh release download "${GAMESCOPE_TAG}" -R "${GITHUB_REPOSITORY}" -p gamescope.tzst -O gamescope.tzst
+          curl -fsSL -o gamescope.tzst "${GAMESCOPE_URL}"
           echo "${GAMESCOPE_SHA256}  gamescope.tzst" | sha256sum -c -
           tar --use-compress-program=unzstd -xf gamescope.tzst -C "$D"
           test -f "$D/usr/local/bin/gamescope"
