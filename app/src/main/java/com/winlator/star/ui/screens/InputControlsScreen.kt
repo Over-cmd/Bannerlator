@@ -1437,7 +1437,6 @@ private fun GlobalPlayerSlotsSection() {
     }
 }
 
-// ── 1. Componente FieldSet (El que me acabas de mandar) ──
 @Composable
 private fun FieldSet(content: @Composable () -> Unit) {
     Column(
@@ -1450,7 +1449,6 @@ private fun FieldSet(content: @Composable () -> Unit) {
     }
 }
 
-// ── 2. Las Opciones estáticas para los botones traseros del mando ──
 private fun steamPaddleOptions(): List<Pair<String, com.winlator.star.inputcontrols.Binding>> {
     val b = com.winlator.star.inputcontrols.Binding::class.java
     return b.enumConstants.map { 
@@ -1459,7 +1457,6 @@ private fun steamPaddleOptions(): List<Pair<String, com.winlator.star.inputcontr
     }
 }
 
-// ── 3. Array de Nombres de los Paddles de Steam ──
 private val STEAM_PADDLE_NAMES = listOf(
     "Back Left Paddle (Upper)", "Back Right Paddle (Upper)",
     "Back Left Paddle (Lower)", "Back Right Paddle (Lower)", "More Button"
