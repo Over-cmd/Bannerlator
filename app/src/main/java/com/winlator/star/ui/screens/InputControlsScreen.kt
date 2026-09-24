@@ -1268,15 +1268,14 @@ private fun SteamControllerSection() {
             label = "Steam Controller support",
             options = onOff,
             selectedOption = if (enabled) onOff[0] else onOff[1],
-            onSelect = {
-                enabled = it == onOff[0]
+            onSelect = { pickedStatus -> // 🌟 SINCRO KOTLIN: Declarado explícito
+                enabled = pickedStatus == onOff[0]
                 com.winlator.star.ui.components.GlobalControllerPrefs.setSteamControllerEnabled(context, enabled)
                 if (enabled) requestBluetooth()
             },
         )
         if (enabled) {
             Spacer(Modifier.height(8.dp))
-            // Order = the labels; values are SteamControllerBackend.TRACKPAD_MOUSE_*.
             val trackpadLabels = listOf("Right trackpad", "Left trackpad", "Both trackpads", "Off")
             val trackpadModes = listOf(
                 SteamControllerBackend.TRACKPAD_MOUSE_RIGHT, SteamControllerBackend.TRACKPAD_MOUSE_LEFT,
@@ -1286,8 +1285,8 @@ private fun SteamControllerSection() {
                 label = "Trackpad mouse",
                 options = trackpadLabels,
                 selectedOption = trackpadLabels[trackpadModes.indexOf(trackpadMode).coerceAtLeast(0)],
-                onSelect = {
-                    trackpadMode = trackpadModes[trackpadLabels.indexOf(it).coerceAtLeast(0)]
+                onSelect = { pickedMode -> // 🌟 SINCRO KOTLIN: Declarado explícito
+                    trackpadMode = trackpadModes[trackpadLabels.indexOf(pickedMode).coerceAtLeast(0)]
                     com.winlator.star.ui.components.GlobalControllerPrefs.setSteamTrackpadMouseMode(context, trackpadMode)
                 },
             )
