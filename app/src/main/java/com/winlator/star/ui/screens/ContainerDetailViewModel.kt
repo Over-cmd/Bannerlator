@@ -486,7 +486,6 @@ class ContainerDetailViewModel(app: Application) : AndroidViewModel(app) {
             )
             primaryControllerEntries = res.getStringArray(R.array.xr_controllers).toList()
             xrKeycodeNames = XKeycode.values().map { it.name }
-        }
 
         // Box64 presets
         val b64Presets = Box64PresetManager.getPresets("box64", context)
