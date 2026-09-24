@@ -4578,15 +4578,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
         if ("alsa".equals(d)) return "ALSA";
         if ("pulseaudio".equals(d)) return "PulseAudio";
         if ("directaudio".equals(d)) return "DirectAudio";
-        
-        // 🚨 SINCRO COMPILADOR MALI-G52:
-        // Añadimos la regla de retorno estricta para tu motor nativo.
-        // Esto le da coherencia al formateador de hilos y destruye el bache de Gradle.
-        if ("nativeaudio".equals(d)) {
-            com.winlator.star.renderer.GPUImage.initNativeAudioWrapper();
-            return "Native Audio (Wrapper)";
-        }
-        
+        if ("nativeaudio".equals(d)) return "Native Audio (Wrapper)"; // 🚨 SINCRO LIMPIA: Solo retorna el letrero
         return d == null ? "" : d;
     }
 
