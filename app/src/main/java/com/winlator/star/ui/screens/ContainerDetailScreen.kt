@@ -6402,8 +6402,6 @@ private fun ContentInstallGear(
     }
 }
 
-
-
 // ─── VEGAS HUD toggle row ───────────────────────────────────────────────────
 
 @Composable
@@ -6414,7 +6412,6 @@ private fun HudToggleRow(label: String, checked: Boolean, onCheckedChange: (Bool
         Text(label, modifier = Modifier.weight(1f))
     }
 }
-
 
 // ─── VEGAS stock config download sheet ──────────────────────────────────────────
 @Composable
