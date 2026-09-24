@@ -43,6 +43,13 @@ public final class LinuxTuning {
      */
     public static final String[] STEAM_CHANNELS = {"", "publicbeta", "steamdeck_publicbeta"};
 
+    /** Puts the Games tab's own games in the client's library as non-Steam shortcuts; on unless turned off. */
+    public static final String EXTRA_APP_GAMES = "linuxAppGamesInSteam";
+    /** Links those games' save folders to their containers' own, so both sides share progress; on unless turned off. */
+    public static final String EXTRA_SHARE_SAVES = "linuxAppGamesShareSaves";
+    /** Folders whose subfolders are games to add as well, joined with {@link LinuxAppGames#FOLDER_SEPARATOR}. */
+    public static final String EXTRA_GAMES_FOLDERS = "linuxGamesFolders";
+
     /** gamescope's upscaler type; unset leaves gamescope's own default. */
     public static final String EXTRA_SCALER = "linuxScaler";
     /** gamescope's upscaler filter; unset leaves gamescope's own default. */
@@ -144,6 +151,8 @@ public final class LinuxTuning {
                 {"Lazy descriptors", EXTRA_LAZY_DESCRIPTORS},
                 {"Skip GL error checks", EXTRA_NO_GL_ERROR},
                 {"Steam Deck mode", EXTRA_STEAMDECK},
+                {"App games in Steam", EXTRA_APP_GAMES},
+                {"Share saves with app", EXTRA_SHARE_SAVES},
         };
         StringBuilder b = new StringBuilder();
         for (String[] row : rows) {

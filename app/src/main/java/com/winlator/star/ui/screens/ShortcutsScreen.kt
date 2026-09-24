@@ -6363,6 +6363,27 @@ internal fun ShortcutSettingsDialogScreen(
         mutableStateOf(shortcut.getExtra(com.winlator.star.linux.LinuxTuning.EXTRA_STEAM_CHANNEL, "").let { v -> if (v in com.winlator.star.linux.LinuxTuning.STEAM_CHANNELS) v else "" })
     }
     var linuxFilter by remember { mutableStateOf(com.winlator.star.linux.LinuxTuning.filter(shortcut)) }
+    // The app's own games in the client's library, their shared saves, and any Games folders (LinuxAppGames).
+    var linuxAppGames by remember {
+        mutableStateOf(com.winlator.star.linux.LinuxTuning.isOn(
+            shortcut, com.winlator.star.linux.LinuxTuning.EXTRA_APP_GAMES))
+    }
+    var linuxShareSaves by remember {
+        mutableStateOf(com.winlator.star.linux.LinuxTuning.isOn(
+            shortcut, com.winlator.star.linux.LinuxTuning.EXTRA_SHARE_SAVES))
+    }
+    var linuxGamesFolders by remember { mutableStateOf(com.winlator.star.linux.LinuxAppGames.folders(shortcut)) }
+    val gamesFolderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        val path = uri?.let { runCatching { FileUtils.getFilePathFromUri(context, it) }.getOrNull() }
+        when {
+            uri == null -> {}
+            path.isNullOrEmpty() || !File(path).isDirectory ->
+                Toast.makeText(context, "That folder cannot be used: pick one on internal storage or an SD card", Toast.LENGTH_LONG).show()
+            path.contains(com.winlator.star.linux.LinuxAppGames.FOLDER_SEPARATOR) ->
+                Toast.makeText(context, "Folder names with | cannot be used", Toast.LENGTH_LONG).show()
+            path !in linuxGamesFolders -> linuxGamesFolders = linuxGamesFolders + path
+        }
+    }
     // Deck mode is only turned on through a warning that says what it breaks.
     var confirmDeckMode by remember { mutableStateOf(false) }
     // HDR output override (per-game, same extra name as the container's): "" = the container's,
@@ -7004,6 +7025,10 @@ internal fun ShortcutSettingsDialogScreen(
                 putExtra(com.winlator.star.linux.LinuxTuning.EXTRA_STEAM_CHANNEL, linuxSteamChannel.ifEmpty { null })
                 putExtra(com.winlator.star.linux.LinuxTuning.EXTRA_SCALER, linuxScaler.ifEmpty { null })
                 putExtra(com.winlator.star.linux.LinuxTuning.EXTRA_FILTER, linuxFilter.ifEmpty { null })
+                putExtra(com.winlator.star.linux.LinuxTuning.EXTRA_APP_GAMES, if (linuxAppGames) "1" else "0")
+                putExtra(com.winlator.star.linux.LinuxTuning.EXTRA_SHARE_SAVES, if (linuxShareSaves) "1" else "0")
+                putExtra(com.winlator.star.linux.LinuxTuning.EXTRA_GAMES_FOLDERS,
+                    linuxGamesFolders.joinToString(com.winlator.star.linux.LinuxAppGames.FOLDER_SEPARATOR).ifEmpty { null })
             }
             saveData()
         }
@@ -7047,6 +7072,10 @@ internal fun ShortcutSettingsDialogScreen(
                     add(com.winlator.star.linux.LinuxTuning.EXTRA_STEAM_CHANNEL)
                     add(com.winlator.star.linux.LinuxTuning.EXTRA_SCALER)
                     add(com.winlator.star.linux.LinuxTuning.EXTRA_FILTER)
+                    add(com.winlator.star.linux.LinuxTuning.EXTRA_APP_GAMES)
+                    if (linuxAppGames) add(com.winlator.star.linux.LinuxTuning.EXTRA_SHARE_SAVES)
+                    linuxGamesFolders.forEach { add("linuxGamesFolderRemove:$it") }
+                    add("linuxGamesFolderAdd")
                 }
                 if (effectiveWaylandShortcut || isLinuxEntry) add(com.winlator.star.display.WaylandHdr.EXTRA)
                 if (!effectiveWaylandShortcut && !isLinuxEntry) { add("gfxWrapper"); add("gfxConfig") } // hidden on Wayland (X11 shims/tuning)
@@ -7706,6 +7735,48 @@ internal fun ShortcutSettingsDialogScreen(
                             Text(
                                 "Scaling mode and filter only matter when a game renders below the session's resolution. "
                                     + "FSR, NIS and SGSR upscale and sharpen; SGSR is Qualcomm's, made for Adreno.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Spacer(Modifier.height(8.dp))
+
+                            // The app's own games in the client's library (LinuxAppGames and the runtime's bannerlator-steam-shortcuts).
+                            Text("Your games in Steam", style = MaterialTheme.typography.titleSmall)
+                            Spacer(Modifier.height(4.dp))
+                            PerfEditRow(dp, com.winlator.star.linux.LinuxTuning.EXTRA_APP_GAMES,
+                                "Show my Games-tab games in Steam", linuxAppGames,
+                                com.winlator.star.linux.LinuxTuning.defaultOn(
+                                    com.winlator.star.linux.LinuxTuning.EXTRA_APP_GAMES)) { linuxAppGames = it }
+                            if (linuxAppGames) {
+                                PerfEditRow(dp, com.winlator.star.linux.LinuxTuning.EXTRA_SHARE_SAVES,
+                                    "Share saves with the app", linuxShareSaves,
+                                    com.winlator.star.linux.LinuxTuning.defaultOn(
+                                        com.winlator.star.linux.LinuxTuning.EXTRA_SHARE_SAVES)) { linuxShareSaves = it }
+                            }
+                            Text(
+                                "Games you added in the Games tab show in Steam's library under Non-Steam and run with Steam's Proton. "
+                                    + "Steam's own games are already there, and Epic and Amazon games need the app's own launch, so those are left out. "
+                                    + "Shared saves: the game's Documents, AppData and Saved Games folders are the same ones its container uses, so progress carries over both ways. "
+                                    + "Do not run the same game in the app and in Steam at the same time.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            Text("Games folders", fontSize = 13.sp)
+                            for (folder in linuxGamesFolders) {
+                                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                                    Text(folder, fontSize = 12.sp, modifier = Modifier.weight(1f))
+                                    DpButton(dp, "linuxGamesFolderRemove:$folder",
+                                        onActivate = { linuxGamesFolders = linuxGamesFolders - folder }) {
+                                        TextButton(onClick = { linuxGamesFolders = linuxGamesFolders - folder }) { Text("Remove") }
+                                    }
+                                }
+                            }
+                            DpButton(dp, "linuxGamesFolderAdd", onActivate = { gamesFolderPicker.launch(null) }) {
+                                TextButton(onClick = { gamesFolderPicker.launch(null) }) { Text("Add a games folder\u2026") }
+                            }
+                            Text(
+                                "Each folder inside a games folder is one game; the app picks the program to start in it. They show in Steam the same way.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
