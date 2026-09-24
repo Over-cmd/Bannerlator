@@ -1007,11 +1007,11 @@ private fun LayoutPreviewFrame(profile: ControlsProfile?, onTap: (() -> Unit)?) 
             AndroidView(
                 modifier = Modifier.fillMaxSize(),
                 factory = { ctx ->
-                    com.winlator.star.widget.InputControlsView(ctx).apply {
+                    // 🚨 CORRECCIÓN RUTA WIDGET: Apuntamos al paquete real inputcontrols de tu repositorio
+                    com.winlator.star.inputcontrols.InputControlsView(ctx).apply {
                         setEditMode(false)            // plain overlay: no grid / edit handles
                         setShowTouchscreenControls(true)
                         setOverlayOpacity(0.9f)       // crisp thumbnail
-                        // Read-only thumbnail: never interactive on the view itself.
                         isClickable = false
                         isFocusable = false
                         isFocusableInTouchMode = false
@@ -1022,7 +1022,6 @@ private fun LayoutPreviewFrame(profile: ControlsProfile?, onTap: (() -> Unit)?) 
                     view.invalidate()
                 },
             )
-            // Transparent tap-catcher ON TOP: swallows taps (keeps the render static) and, when given, acts.
             Box(
                 modifier = Modifier
                     .matchParentSize()
