@@ -462,7 +462,6 @@ fun ContainerDetailScreen(
             onContentChanged = { dxvkRefreshKey++ }
         )
     }
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Parse the semicolon-separated Vulkan settings string ("native=..;presentMode=..;..") into a map.
