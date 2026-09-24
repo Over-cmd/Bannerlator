@@ -10004,6 +10004,12 @@ public class XServerDisplayActivity extends AppCompatActivity {
             // by changeWineAudioDriver(); route changes are handled inside the driver.
             overlayDirectAudioDriver();   // ensure a supported layer (any 11.0-x / 10.0-4) has the bundled driver before the guest loads it
             applyDirectAudioConfig(envVars);
+        } else if (audioDriver.equals("nativeaudio")) {
+            /* 🚨 BYPASS MULTIMEDIA MALI-G52 DEFINITIVO:
+               Nos saltamos los servidores Pulse/ALSA y las capas intermedias de Android.
+               Usamos la ruta raíz correcta 'com.winlator.renderer' para despertar el buffer circular
+               en C de tu Wrapper de forma asíncrona justo en el preludio del arranque de Wine. */
+            com.winlator.renderer.GPUImage.initNativeAudioWrapper();
         }
 
         // Turnip TU_DEBUG composition (per-container + per-game). Runs AFTER every env source is
