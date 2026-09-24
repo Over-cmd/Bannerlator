@@ -38,6 +38,7 @@ add_library(winlator SHARED
         winlator/vulkan.c
         winlator/perf_turbo.c
         winlator/ring_fence.c
+        winlator/wrapper_native_audio.c
 )
 
 target_compile_options(winlator PRIVATE -Wall -Wextra)
