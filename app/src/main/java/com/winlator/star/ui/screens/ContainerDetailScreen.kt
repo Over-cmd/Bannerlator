@@ -1350,7 +1350,7 @@ private fun TopLevelFields(
                     "alsa" -> "ALSA"
                     "pulseaudio" -> "PulseAudio"
                     "directaudio" -> "DirectAudio"
-                    "nativeaudio" -> "Native Audio (Wrapper)" // 🚨 SINCRO COMPILADOR: Formateado en cascada vertical limpia
+                    "nativeaudio" -> "Native Audio (Wrapper)" // El carril vertical limpio que ya compila
                     else -> StringUtils.parseIdentifier(viewModel.selectedAudioDriver)
                 },
                 driverId = StringUtils.parseIdentifier(viewModel.selectedAudioDriver),
