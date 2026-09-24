@@ -9000,10 +9000,20 @@ public class XServerDisplayActivity extends AppCompatActivity {
         File relaySocket = new File(audioDir, "relay.sock");
         File micFifo = wantsMic ? new File(audioDir, "mic.fifo") : null;
 
+        // The battery the client reads, written from Android's battery API and bound over /sys/class/power_supply below.
+        // Without it the client's top bar and its Quick Access Menu show no battery at all.
+        File linuxBatteryDir = new File(getFilesDir(), "linux-session/sys/power_supply");
+        //noinspection ResultOfMethodCallIgnored
+        linuxBatteryDir.mkdirs();
+        environment.addComponent(new com.winlator.star.linux.LinuxBatteryComponent(linuxBatteryDir));
         guest.add("PULSE_SERVER=unix:" + rootPath + UnixSocketConfig.PULSE_SERVER_PATH);
-        environment.addComponent(new PulseAudioComponent(
+        PulseAudioComponent linuxPulse = new PulseAudioComponent(
                 UnixSocketConfig.createSocket(rootPath, UnixSocketConfig.PULSE_SERVER_PATH),
-                micFifo != null ? micFifo.getAbsolutePath() : null));
+                micFifo != null ? micFifo.getAbsolutePath() : null);
+        // With DirectAudio chosen, the client's own sound goes through the relay too, not only its games'.
+        // The daemon fills the relay's ring and the relay, outside proot, drives the device; this is what cures the choppy client sound.
+        if (wantsDirectAudio) linuxPulse.setRelaySocket(relaySocket.getAbsolutePath());
+        environment.addComponent(linuxPulse);
 
         if (wantsDirectAudio) {
             environment.addComponent(new com.winlator.star.xenvironment.components
@@ -9115,8 +9125,27 @@ public class XServerDisplayActivity extends AppCompatActivity {
                 {"usr/local/bin/bannerlator-steam-library", "usr/local/bin/bannerlator-steam-library"},
                 {"usr/local/bin/bannerlator-seed-redists", "usr/local/bin/bannerlator-seed-redists"},
                 {"usr/local/bin/bannerlator-proton-extra", "usr/local/bin/bannerlator-proton-extra"},
+                {"usr/local/bin/bannerlator-steam-shortcuts", "usr/local/bin/bannerlator-steam-shortcuts"},
                 {"usr/local/bin/bannerlator-netmanager", "usr/local/bin/bannerlator-netmanager"},
+                // The SteamOS helpers the client calls in Deck mode, all no-ops that answer "nothing to do".
+                // On device the client called four of them by their polkit-helpers path rather than /usr/bin, and the "Update Error" dialog was steamos-update missing there. (From The412Banner/SteamDeck.)
+                {"usr/bin/steamos-update", "usr/bin/steamos-update"},
+                {"usr/bin/steamos-select-branch", "usr/bin/steamos-select-branch"},
+                {"usr/bin/jupiter-biosupdate", "usr/bin/jupiter-biosupdate"},
+                {"usr/bin/steamos-polkit-helpers/steamos-update", "usr/bin/steamos-polkit-helpers/steamos-update"},
+                {"usr/bin/steamos-polkit-helpers/steamos-select-branch", "usr/bin/steamos-polkit-helpers/steamos-select-branch"},
+                {"usr/bin/steamos-polkit-helpers/jupiter-biosupdate", "usr/bin/steamos-polkit-helpers/jupiter-biosupdate"},
+                {"usr/bin/steamos-polkit-helpers/jupiter-dock-updater", "usr/bin/steamos-polkit-helpers/jupiter-dock-updater"},
+                {"usr/bin/steamos-polkit-helpers/steamos-priv-write", "usr/bin/steamos-polkit-helpers/steamos-priv-write"},
+                {"usr/bin/steamos-polkit-helpers/steamos-set-timezone", "usr/bin/steamos-polkit-helpers/steamos-set-timezone"},
         };
+        // The patched gamescope (tools/gamescope): the runtime's own 3.16.29 rebuilt with the ARM64 client fixes, staged over /usr/local/bin so it comes first in the session's PATH.
+        // It is staged only when the apk carries it, which is only once a build of it has been published; otherwise the runtime's own copy is left alone.
+        if (linuxAssetPresent("usr/local/bin/gamescope")) {
+            String[][] withGamescope = java.util.Arrays.copyOf(sessionFiles, sessionFiles.length + 1);
+            withGamescope[sessionFiles.length] = new String[]{"usr/local/bin/gamescope", "usr/local/bin/gamescope"};
+            sessionFiles = withGamescope;
+        }
         // Android has no /dev/shm; a directory under the cache stands in for it, and unlike the real
         // thing it keeps whatever a session leaves. The client abandons some fifty megabytes of
         // streams each run; one runtime reached 22 GB. Cleared before a session starts.
@@ -9342,6 +9371,17 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // Apps may not list /dev/input; the fake evdev nodes the input rings back stand in for it.
         gameBinds = new ArrayList<>(gameBinds);
         if (fakeInputEnabled) gameBinds.add(fakeInputDir.getPath() + ":/dev/input");
+        gameBinds.add(linuxBatteryDir.getPath() + ":/sys/class/power_supply");
+        // The app's own games, for the runtime's shortcuts writer to put in the client's library before the client starts (see LinuxAppGames and bannerlator-steam-shortcuts).
+        // The list is written every session, empty or not, so games that are gone or turned off leave the client's library too.
+        try {
+            com.winlator.star.linux.LinuxAppGames.Session appGames =
+                    com.winlator.star.linux.LinuxAppGames.INSTANCE.prepare(this, containerManager, shortcut);
+            gameBinds.addAll(appGames.getBinds());
+            lateEnv.add("BL_APP_GAMES=" + appGames.getListing().getPath());
+        } catch (Throwable t) {
+            Log.w("XServerDisplayActivity", "could not list the app's games for the client", t);
+        }
         // Back in front of the script, so `env -i` sets them instead of the script being handed
         // them as filenames to run.
         if (!lateEnv.isEmpty()) {
@@ -13834,6 +13874,20 @@ return true;
         }
         Log.i("XServerDisplayActivity", "fake evdev: slots held " + held
                 + (removed.length() > 0 ? ", removed" + removed : ", nothing removed"));
+    }
+
+    /** Whether the apk carries this file under its linuxfs assets. */
+    private boolean linuxAssetPresent(String path) {
+        int slash = path.lastIndexOf('/');
+        String dir = "linuxfs" + (slash >= 0 ? "/" + path.substring(0, slash) : "");
+        String name = slash >= 0 ? path.substring(slash + 1) : path;
+        try {
+            String[] names = getAssets().list(dir);
+            if (names == null) return false;
+            for (String n : names) if (n.equals(name)) return true;
+        } catch (java.io.IOException ignored) {
+        }
+        return false;
     }
 
     private boolean hasConnectedGameController() {

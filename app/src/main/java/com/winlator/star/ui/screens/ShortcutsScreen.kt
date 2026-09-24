@@ -6358,7 +6358,32 @@ internal fun ShortcutSettingsDialogScreen(
     // Scaling mode and scaling filter: gamescope's own controls, the same ones the Quick Access Menu offers.
     // LinuxTuning validates each against what this gamescope accepts, so a stale saved value reads as unset.
     var linuxScaler by remember { mutableStateOf(com.winlator.star.linux.LinuxTuning.scaler(shortcut)) }
+    // "" follows Deck mode; LinuxTuning.steamChannel says what that resolves to.
+    var linuxSteamChannel by remember {
+        mutableStateOf(shortcut.getExtra(com.winlator.star.linux.LinuxTuning.EXTRA_STEAM_CHANNEL, "").let { v -> if (v in com.winlator.star.linux.LinuxTuning.STEAM_CHANNELS) v else "" })
+    }
     var linuxFilter by remember { mutableStateOf(com.winlator.star.linux.LinuxTuning.filter(shortcut)) }
+    // The app's own games in the client's library, their shared saves, and any Games folders (LinuxAppGames).
+    var linuxAppGames by remember {
+        mutableStateOf(com.winlator.star.linux.LinuxTuning.isOn(
+            shortcut, com.winlator.star.linux.LinuxTuning.EXTRA_APP_GAMES))
+    }
+    var linuxShareSaves by remember {
+        mutableStateOf(com.winlator.star.linux.LinuxTuning.isOn(
+            shortcut, com.winlator.star.linux.LinuxTuning.EXTRA_SHARE_SAVES))
+    }
+    var linuxGamesFolders by remember { mutableStateOf(com.winlator.star.linux.LinuxAppGames.folders(shortcut)) }
+    val gamesFolderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        val path = uri?.let { runCatching { FileUtils.getFilePathFromUri(context, it) }.getOrNull() }
+        when {
+            uri == null -> {}
+            path.isNullOrEmpty() || !File(path).isDirectory ->
+                Toast.makeText(context, "That folder cannot be used: pick one on internal storage or an SD card", Toast.LENGTH_LONG).show()
+            path.contains(com.winlator.star.linux.LinuxAppGames.FOLDER_SEPARATOR) ->
+                Toast.makeText(context, "Folder names with | cannot be used", Toast.LENGTH_LONG).show()
+            path !in linuxGamesFolders -> linuxGamesFolders = linuxGamesFolders + path
+        }
+    }
     // Deck mode is only turned on through a warning that says what it breaks.
     var confirmDeckMode by remember { mutableStateOf(false) }
     // HDR output override (per-game, same extra name as the container's): "" = the container's,
@@ -6997,8 +7022,13 @@ internal fun ShortcutSettingsDialogScreen(
                 putExtra(com.winlator.star.linux.LinuxTuning.EXTRA_LAZY_DESCRIPTORS, if (linuxLazyDescriptors) "1" else "0")
                 putExtra(com.winlator.star.linux.LinuxTuning.EXTRA_NO_GL_ERROR, if (linuxNoGlError) "1" else "0")
                 putExtra(com.winlator.star.linux.LinuxTuning.EXTRA_STEAMDECK, if (linuxDeckMode) "1" else "0")
+                putExtra(com.winlator.star.linux.LinuxTuning.EXTRA_STEAM_CHANNEL, linuxSteamChannel.ifEmpty { null })
                 putExtra(com.winlator.star.linux.LinuxTuning.EXTRA_SCALER, linuxScaler.ifEmpty { null })
                 putExtra(com.winlator.star.linux.LinuxTuning.EXTRA_FILTER, linuxFilter.ifEmpty { null })
+                putExtra(com.winlator.star.linux.LinuxTuning.EXTRA_APP_GAMES, if (linuxAppGames) "1" else "0")
+                putExtra(com.winlator.star.linux.LinuxTuning.EXTRA_SHARE_SAVES, if (linuxShareSaves) "1" else "0")
+                putExtra(com.winlator.star.linux.LinuxTuning.EXTRA_GAMES_FOLDERS,
+                    linuxGamesFolders.joinToString(com.winlator.star.linux.LinuxAppGames.FOLDER_SEPARATOR).ifEmpty { null })
             }
             saveData()
         }
@@ -7039,8 +7069,13 @@ internal fun ShortcutSettingsDialogScreen(
                     add(com.winlator.star.linux.LinuxTuning.EXTRA_LAZY_DESCRIPTORS)
                     add(com.winlator.star.linux.LinuxTuning.EXTRA_NO_GL_ERROR)
                     add(com.winlator.star.linux.LinuxTuning.EXTRA_STEAMDECK)
+                    add(com.winlator.star.linux.LinuxTuning.EXTRA_STEAM_CHANNEL)
                     add(com.winlator.star.linux.LinuxTuning.EXTRA_SCALER)
                     add(com.winlator.star.linux.LinuxTuning.EXTRA_FILTER)
+                    add(com.winlator.star.linux.LinuxTuning.EXTRA_APP_GAMES)
+                    if (linuxAppGames) add(com.winlator.star.linux.LinuxTuning.EXTRA_SHARE_SAVES)
+                    linuxGamesFolders.forEach { add("linuxGamesFolderRemove:$it") }
+                    add("linuxGamesFolderAdd")
                 }
                 if (effectiveWaylandShortcut || isLinuxEntry) add(com.winlator.star.display.WaylandHdr.EXTRA)
                 if (!effectiveWaylandShortcut && !isLinuxEntry) { add("gfxWrapper"); add("gfxConfig") } // hidden on Wayland (X11 shims/tuning)
@@ -7634,7 +7669,7 @@ internal fun ShortcutSettingsDialogScreen(
                             }
                             if (linuxDeckMode) {
                                 Text(
-                                    "Deck mode is on: games do not receive the controller, and the client shows a Steam Client update that cannot install. Do not press Apply on it.",
+                                    "Deck mode is on: games do not receive the controller. If a Steam Client update shows under System that will not install, do not press Apply on it.",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.error
                                 )
@@ -7648,7 +7683,7 @@ internal fun ShortcutSettingsDialogScreen(
                                             "Deck mode makes the Steam client behave as it does on a Steam Deck and adds the Quick Access Menu.\n\n"
                                                 + "Known problems, found on device:\n"
                                                 + "\u2022 Games stop receiving the controller. Steam's own menus still work, but in a game the pad does nothing.\n"
-                                                + "\u2022 The client shows a Steam Client update under System that cannot install. Pressing Apply restarts the client over and over.\n"
+                                                + "\u2022 The client may show a Steam Client update under System that will not install. Deck mode now uses the Steam Deck beta channel to avoid it, but if it appears, do not press Apply.\n"
                                                 + "\u2022 The Quick Access Menu's performance overlay cannot be turned on.\n\n"
                                                 + "The scaling controls below do the useful part without it, and the in-game drawer's FPS limit caps the frame rate. Turn Deck mode off again if a game stops responding to the controller."
                                         )
@@ -7661,6 +7696,20 @@ internal fun ShortcutSettingsDialogScreen(
                                     },
                                 )
                             }
+                            val channelLabels = com.winlator.star.linux.LinuxTuning.STEAM_CHANNELS.map {
+                                when (it) {
+                                    "" -> if (linuxDeckMode) "Automatic (Steam Deck beta, for Deck mode)" else "Automatic (public beta)"
+                                    "publicbeta" -> "Public beta"
+                                    else -> "Steam Deck beta"
+                                }
+                            }
+                            DpDrop(
+                                dp, com.winlator.star.linux.LinuxTuning.EXTRA_STEAM_CHANNEL,
+                                label = "Steam client update channel",
+                                options = channelLabels,
+                                selected = channelLabels[com.winlator.star.linux.LinuxTuning.STEAM_CHANNELS.indexOf(linuxSteamChannel).coerceAtLeast(0)],
+                                onSelect = { linuxSteamChannel = com.winlator.star.linux.LinuxTuning.STEAM_CHANNELS[channelLabels.indexOf(it).coerceAtLeast(0)] }
+                            )
                             val scalerLabels = com.winlator.star.linux.LinuxTuning.SCALERS.map { if (it.isEmpty()) "Default" else it.replaceFirstChar(Char::uppercase) }
                             DpDrop(
                                 dp, com.winlator.star.linux.LinuxTuning.EXTRA_SCALER,
@@ -7686,6 +7735,48 @@ internal fun ShortcutSettingsDialogScreen(
                             Text(
                                 "Scaling mode and filter only matter when a game renders below the session's resolution. "
                                     + "FSR, NIS and SGSR upscale and sharpen; SGSR is Qualcomm's, made for Adreno.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Spacer(Modifier.height(8.dp))
+
+                            // The app's own games in the client's library (LinuxAppGames and the runtime's bannerlator-steam-shortcuts).
+                            Text("Your games in Steam", style = MaterialTheme.typography.titleSmall)
+                            Spacer(Modifier.height(4.dp))
+                            PerfEditRow(dp, com.winlator.star.linux.LinuxTuning.EXTRA_APP_GAMES,
+                                "Show my Games-tab games in Steam", linuxAppGames,
+                                com.winlator.star.linux.LinuxTuning.defaultOn(
+                                    com.winlator.star.linux.LinuxTuning.EXTRA_APP_GAMES)) { linuxAppGames = it }
+                            if (linuxAppGames) {
+                                PerfEditRow(dp, com.winlator.star.linux.LinuxTuning.EXTRA_SHARE_SAVES,
+                                    "Share saves with the app", linuxShareSaves,
+                                    com.winlator.star.linux.LinuxTuning.defaultOn(
+                                        com.winlator.star.linux.LinuxTuning.EXTRA_SHARE_SAVES)) { linuxShareSaves = it }
+                            }
+                            Text(
+                                "Games you added in the Games tab show in Steam's library under Non-Steam and run with Steam's Proton. "
+                                    + "Steam's own games are already there, and Epic and Amazon games need the app's own launch, so those are left out. "
+                                    + "Shared saves: the game's Documents, AppData and Saved Games folders are the same ones its container uses, so progress carries over both ways. "
+                                    + "Do not run the same game in the app and in Steam at the same time.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            Text("Games folders", fontSize = 13.sp)
+                            for (folder in linuxGamesFolders) {
+                                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                                    Text(folder, fontSize = 12.sp, modifier = Modifier.weight(1f))
+                                    DpButton(dp, "linuxGamesFolderRemove:$folder",
+                                        onActivate = { linuxGamesFolders = linuxGamesFolders - folder }) {
+                                        TextButton(onClick = { linuxGamesFolders = linuxGamesFolders - folder }) { Text("Remove") }
+                                    }
+                                }
+                            }
+                            DpButton(dp, "linuxGamesFolderAdd", onActivate = { gamesFolderPicker.launch(null) }) {
+                                TextButton(onClick = { gamesFolderPicker.launch(null) }) { Text("Add a games folder\u2026") }
+                            }
+                            Text(
+                                "Each folder inside a games folder is one game; the app picks the program to start in it. They show in Steam the same way.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
