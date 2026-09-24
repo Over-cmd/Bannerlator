@@ -11,6 +11,13 @@
 #include <jni.h>
 #include <unistd.h>
 #include <stdlib.h>
+#include <stdint.h>
+
+/* 🚨 CABECERAS MULTIMEDIA ATÓMICAS EN C:
+   Declaramos las firmas nativas del Wrapper de sonido para que Clang 
+   sepa que existen en el enlazador dinámico y no aborte la build. */
+extern void wrapper_native_audio_init(void);
+extern void wrapper_native_audio_write(const int16_t *data, int count);
 
 #define LOG_TAG "GPUImage"
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
