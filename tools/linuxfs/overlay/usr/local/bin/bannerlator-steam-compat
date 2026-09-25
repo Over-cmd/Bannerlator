@@ -92,6 +92,22 @@ bl_game_cpus() {
 BL_DIRECTAUDIO_SETUP = """
 bl_directaudio() {
   base=$1
+  # PulseAudio is named after DirectAudio as its fallback. mmdevapi keeps the first driver in the
+  # list that loads unless a later one ranks higher, and both rank Preferred when they work, so
+  # DirectAudio still wins wherever it loads. Where it cannot - a Proton that finds no build of it
+  # for the game's architecture (Valve's ARM64 Proton looks in x86_64-windows for a 64-bit game),
+  # or DirectAudio switched off, which leaves it off WINEDLLPATH - the game gets PulseAudio instead
+  # of no audio device at all, which crashed Titanfall 2 in xaudio2_7. A prefix that already holds
+  # the DirectAudio-only value from earlier builds gets the list, whether or not DirectAudio is on.
+  # What Wine will read is the last Audio value under that key: an appended section wins until the
+  # wineserver folds the file together, so the value is taken from the end, not the first match.
+  reg="${STEAM_COMPAT_DATA_PATH:-}/pfx/user.reg"
+  audio=
+  [ -f "$reg" ] && audio=$(awk '/^[[]Software.*Wine.*Drivers[]]/ { f = 1; next } /^[[]/ { f = 0 } f && /^"Audio"=/ { v = $0 } END { print v }' "$reg" 2>/dev/null)
+  if [ "$audio" = '"Audio"="directaudio"' ]; then
+    printf '\n[%s] %s\n"Audio"="directaudio,pulse"\n' 'Software\\\\Wine\\\\Drivers' "$(date +%s)" >> "$reg"
+    echo "bannerlator-proton: the prefix's DirectAudio-only driver list now falls back to PulseAudio" >&2
+  fi
   [ -n "${BL_DIRECTAUDIO:-}" ] || return 0
   [ -d "$BL_DIRECTAUDIO/lib/wine" ] || return 0
   version=$("$base/files/bin-arm64/wine" --version 2>/dev/null)
@@ -113,10 +129,9 @@ bl_directaudio() {
   # builds wrote the format form, so the value sat under a key named SoftwareWineDrivers that Wine
   # never reads. The check below looks for the real key, so those prefixes are repaired on their
   # next launch.
-  reg="${STEAM_COMPAT_DATA_PATH:-}/pfx/user.reg"
   if [ -f "$reg" ]; then
-    if ! grep -A3 -F '[Software\\\\Wine\\\\Drivers]' "$reg" 2>/dev/null | grep -q '"Audio"="directaudio"'; then
-      printf '\n[%s] %s\n"Audio"="directaudio"\n' 'Software\\\\Wine\\\\Drivers' "$(date +%s)" >> "$reg"
+    if [ "$audio" != '"Audio"="directaudio"' ] && [ "$audio" != '"Audio"="directaudio,pulse"' ]; then
+      printf '\n[%s] %s\n"Audio"="directaudio,pulse"\n' 'Software\\\\Wine\\\\Drivers' "$(date +%s)" >> "$reg"
       echo "bannerlator-proton: DirectAudio selected in the prefix" >&2
     fi
   else
