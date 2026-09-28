@@ -6,6 +6,8 @@ import android.content.pm.ShortcutManager
 import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Environment
+import android.os.Handler
+import android.os.Looper
 import android.provider.DocumentsContract
 import android.util.Base64
 import android.util.Log
@@ -1145,7 +1147,18 @@ class ShortcutsViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    private val mainHandler = Handler(Looper.getMainLooper())
+
     fun refresh() {
+        // Always rebuild on the main thread. The exe importer fires onCoverArtReady from its own
+        // worker thread and the import itself runs on an IO dispatcher, while ON_RESUME calls
+        // refresh() on main; two refreshes on different threads raced inside ContainerManager
+        // (clear + refill vs. iterate) and killed the app with a ConcurrentModificationException
+        // right after adding a game. Serializing here removes the race at the source.
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            mainHandler.post { refresh() }
+            return
+        }
         // Re-scan the home dir first: this manager is constructed once and lives for the whole
         // session, so a container created in the container editor (its own ContainerManager
         // instance) is otherwise absent from our in-memory list until the ViewModel is rebuilt.

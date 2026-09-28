@@ -31,7 +31,17 @@ import java.util.Comparator;
 import java.util.concurrent.Executors;
 
 public class ContainerManager {
+    // Guarded by itself: refresh() may run from the main thread (ON_RESUME) and from the
+    // cover-art worker thread at the same time, and each one clears + refills this list before
+    // walking it. Readers iterate a snapshot; writers mutate under the lock. (CME on add-exe)
     private final ArrayList<Container> containers = new ArrayList<>();
+
+    /** A copy safe to iterate while another thread reloads or edits the list. */
+    private ArrayList<Container> snapshotContainers() {
+        synchronized (containers) {
+            return new ArrayList<>(containers);
+        }
+    }
     private int maxContainerId = 0;
     private final File homeDir;
     private final Context context;
@@ -72,7 +82,7 @@ public class ContainerManager {
             boolean invertX = prefs.getBoolean("gyro_invert_x", Container.GYRO_INVERT_X_DEFAULT);
             boolean invertY = prefs.getBoolean("gyro_invert_y", Container.GYRO_INVERT_Y_DEFAULT);
 
-            for (Container container : containers) {
+            for (Container container : snapshotContainers()) {
                 container.setGyroEnabled(enabled);
                 container.setGyroTarget(target);
                 container.setGyroActivator(activator);
@@ -119,9 +129,10 @@ public class ContainerManager {
 
     // Load containers from the home directory
     private void loadContainers() {
-        containers.clear();
-        maxContainerId = 0;
-
+        // Build the new list off to the side, then swap it in under the lock, so a concurrent
+        // reader never sees a half-filled list (and never iterates while we clear it).
+        ArrayList<Container> fresh = new ArrayList<>();
+        int maxId = 0;
         try {
             File[] files = homeDir.listFiles();
             if (files != null) {
@@ -135,14 +146,19 @@ public class ContainerManager {
                             container.setRootDir(new File(homeDir, ImageFs.USER + "-" + container.id));
                             JSONObject data = new JSONObject(FileUtils.readString(container.getConfigFile()));
                             container.loadData(data);
-                            containers.add(container);
-                            maxContainerId = Math.max(maxContainerId, container.id);
+                            fresh.add(container);
+                            maxId = Math.max(maxId, container.id);
                         }
                     }
                 }
             }
         } catch (JSONException | NullPointerException e) {
             Log.e("ContainerManager", "Error loading containers", e);
+        }
+        synchronized (containers) {
+            containers.clear();
+            containers.addAll(fresh);
+            maxContainerId = maxId;
         }
     }
 
@@ -232,8 +248,10 @@ public class ContainerManager {
 //            }
 
             container.saveData();
-            maxContainerId++;
-            containers.add(container);
+            synchronized (containers) {
+                maxContainerId++;
+                containers.add(container);
+            }
             return container;
         } catch (JSONException e) {
             e.printStackTrace();
@@ -282,14 +300,18 @@ public class ContainerManager {
         dstContainer.setName(srcContainer.getName() + " (" + context.getString(R.string._copy) + ")");
         dstContainer.saveData();
 
-        maxContainerId++;
-        containers.add(dstContainer);
+        synchronized (containers) {
+            maxContainerId++;
+            containers.add(dstContainer);
+        }
         return dstContainer;
     }
 
 
     private void removeContainer(Container container) {
-        if (FileUtils.delete(container.getRootDir())) containers.remove(container);
+        if (FileUtils.delete(container.getRootDir())) {
+            synchronized (containers) { containers.remove(container); }
+        }
     }
 
     /** Desktop .lnk names written by store clients we install on the game's behalf — not games. */
@@ -299,7 +321,7 @@ public class ContainerManager {
 
     public ArrayList<Shortcut> loadShortcuts() {
         ArrayList<Shortcut> shortcuts = new ArrayList<>();
-        for (Container container : containers) {
+        for (Container container : snapshotContainers()) {
             File desktopDir = container.getDesktopDir();
             ArrayList<File> files = new ArrayList<>();
             if (desktopDir.exists())
@@ -416,7 +438,7 @@ public class ContainerManager {
 
     public Container getContainerById(int id) {
         if (com.winlator.star.linux.LinuxSettings.isLinuxContainer(id)) return getLinuxContainer();
-        for (Container container : containers) if (container.id == id) return container;
+        for (Container container : snapshotContainers()) if (container.id == id) return container;
         return null;
     }
 
@@ -535,7 +557,7 @@ public class ContainerManager {
 
     public Container getContainerForShortcut(Shortcut shortcut) {
         // Search for the container by its ID
-        for (Container container : containers) {
+        for (Container container : snapshotContainers()) {
             if (container.id == shortcut.getContainerId()) {
                 return container;
             }
@@ -578,8 +600,10 @@ public class ContainerManager {
                 newContainer.setRootDir(newContainerDir);
                 newContainer.setName(importDir.getName());
                 newContainer.saveData();
-                containers.add(newContainer);
-                maxContainerId++;
+                synchronized (containers) {
+                    containers.add(newContainer);
+                    maxContainerId++;
+                }
 
                 Log.d("ContainerManager", "Container imported successfully to: " + newContainerDir.getPath());
                 // Make sure to run the callback after successful import

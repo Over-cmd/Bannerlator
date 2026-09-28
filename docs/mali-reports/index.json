@@ -1,5 +1,15 @@
 [
   {
+    "id": "2026-09-27T09-19-49-af6469",
+    "created": "2026-09-27T09:19:49.024Z",
+    "reporter": "Simon",
+    "device": "Xiaomi 14T Pro",
+    "gpu": "Mali-G720-Immortalis MC12",
+    "game": "Mewgenics",
+    "symptom": "Black screen (no image)",
+    "logs": 1
+  },
+  {
     "id": "2026-09-13T21-26-49-0ccf80",
     "created": "2026-09-13T21:26:49.881Z",
     "reporter": "",
