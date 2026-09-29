@@ -12,9 +12,16 @@ package com.winlator.star.core
  * step with it so a bundle from either app is safe to attach as it is.
  *
  * What is deliberately KEPT, because it is what makes a log worth reading: EResult codes, CM host
- * names and IP addresses, timings, token expiry dates, app IDs, pids, connection-state changes and
- * file paths. A SteamID is masked rather than deleted - first four and last four digits survive -
- * so a reader can still tell two accounts' lines apart without the value identifying either.
+ * names and Valve's server addresses, timings, token expiry dates, app IDs, pids, connection-state
+ * changes and file paths. A SteamID is masked rather than deleted - first four and last four digits
+ * survive - so a reader can still tell two accounts' lines apart without the value identifying either.
+ *
+ * The device's OWN addresses are not kept: the client's IPv6 check logs "external address = '<ours>'"
+ * about twenty times a session, and a public IPv6 address is the user's. [learnOwnAddresses] reads
+ * the link the session was given (etc/bannerlator-net) and every address on the same /64 - privacy
+ * addresses rotate inside it - or an own public IPv4 is replaced wherever it appears. Likewise every
+ * Steam account and persona name the client knows ([learnAccounts]), for users who sign in with an
+ * account name rather than an email. (From The412Banner/DroidDeck.)
  */
 object LogRedactor {
     private val EMAIL = Regex("[A-Za-z0-9._%+\\-]+@[A-Za-z0-9.\\-]+\\.[A-Za-z]{2,}")
@@ -48,6 +55,184 @@ object LogRedactor {
     private val LONG_TOKEN = Regex("[A-Za-z0-9_\\-]{88,}")
     private val STEAMID64 = Regex("\\b(76561)(\\d{8})(\\d{4})\\b")
     private val STEAMID3 = Regex("\\[U:1:(\\d+)]")
+    /**
+     * "external address = '2607:...'" / "external IP: 203.0.113.9" - the client stating ours. The
+     * optional quote matters: the device's line quotes the address, and a NAT'd public IPv4 is
+     * never in the link file, so this rule is the only one that sees it.
+     */
+    private val EXTERNAL_ADDR = Regex(
+        "(?i)(external\\s+(?:ip\\s+)?address\\s*[:=]?\\s*['\"]?|external\\s+ip\\s*[:=]?\\s*['\"]?)([0-9A-Fa-f:.]{7,})"
+    )
+    private val IPV4 = Regex("(?<![0-9.])(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})(?![0-9.])")
+    /** An IPv6 literal: "::" somewhere, or all eight groups (a clock's 10:03:05 is neither). */
+    private val IPV6 = Regex("(?<![0-9A-Za-z:])[0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4}){2,7}(?:%[A-Za-z0-9_.]+)?(?![0-9A-Za-z:])")
+    /**
+     * The account a Steam UI login line names ("Login: OnLoginStateChange <account> 2 1 0 0"): a
+     * user who signs in with a plain account name, not an email, had it in every log. The single
+     * space then a non-space keeps "OnLoginStateChange  0 1 0 0" (no account yet) as it is.
+     */
+    private val LOGIN_STATE = Regex("(OnLoginStateChange )(\\S+)")
+    private val LOGIN_USERS = Regex("(OnLoginUsersChanged )(\\S.*)$")
+
+    /** The Steam accounts and persona names as patterns (see [learnAccounts]); empty until learned. */
+    @Volatile
+    private var accounts: List<Regex> = emptyList()
+
+    /** This device's public addresses as patterns (see [learnOwnAddresses]); empty until learned. */
+    @Volatile
+    private var own: List<Regex> = emptyList()
+
+    /**
+     * Learns every Steam account in a client's loginusers.vdf - its AccountName and PersonaName -
+     * so they are replaced wherever a log mentions them, whoever the user is. Names under three
+     * characters are skipped: blanking every "a" would ruin a log. Learned names accumulate, so
+     * the Linux client's and the Wine client's file can both be read.
+     */
+    fun learnAccounts(loginUsers: java.io.File) {
+        val found = ArrayList<Regex>(accounts)
+        try {
+            if (!loginUsers.isFile) return
+            val kv = Regex("\"(AccountName|PersonaName)\"\\s+\"([^\"]*)\"")
+            kv.findAll(loginUsers.readText()).map { it.groupValues[2].trim() }.filter { it.length >= 3 }.distinct().forEach { name ->
+                val r = Regex("(?i)(?<![A-Za-z0-9_])" + Regex.escape(name) + "(?![A-Za-z0-9_])")
+                if (found.none { it.pattern == r.pattern }) found += r
+            }
+        } catch (e: Exception) {
+            return
+        }
+        accounts = found
+    }
+
+    /**
+     * Learns the device's addresses from the link file the app writes for the Linux session
+     * (`addr <address> <prefix>` lines, LinuxNetworkLinkComponent).
+     */
+    fun learnOwnAddresses(linkFile: java.io.File) {
+        val found = ArrayList<String>()
+        try {
+            if (!linkFile.isFile) return
+            linkFile.forEachLine { line ->
+                line.trim().takeIf { it.startsWith("addr ") }?.split(Regex("\\s+"))?.getOrNull(1)?.let { found += it }
+            }
+        } catch (e: Exception) {
+            return
+        }
+        learnOwnAddresses(found)
+    }
+
+    /** The device's addresses straight from the active link, for a scrub with no session link file. */
+    fun learnOwnAddresses(context: android.content.Context) {
+        try {
+            val cm = context.getSystemService(android.content.Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager ?: return
+            val link = cm.activeNetwork?.let { cm.getLinkProperties(it) } ?: return
+            learnOwnAddresses(link.linkAddresses.mapNotNull { it.address.hostAddress?.substringBefore('%') })
+        } catch (e: Exception) {
+            return
+        }
+    }
+
+    /**
+     * Global IPv6 become their /64, public IPv4 stay exact; private, link-local and loopback
+     * addresses identify nobody and are left out.
+     */
+    fun learnOwnAddresses(addresses: Collection<String>) {
+        val found = ArrayList<Regex>()
+        for (addr in addresses) {
+            when (kind(addr)) {
+                "public IPv6" -> {
+                    val groups = expand6(addr)?.take(4) ?: continue
+                    // Any spelling of an address in this /64: leading zeros dropped, :: anywhere after.
+                    val prefix = groups.joinToString(":") { g -> "0{0,3}" + Regex.escape(g.trimStart('0').ifEmpty { "0" }) }
+                    found += Regex("(?i)(?<![0-9A-Fa-f:])$prefix(?::[0-9A-Fa-f]{0,4}){1,4}(?:%[A-Za-z0-9_.]+)?")
+                }
+                "public IPv4" -> found += Regex("(?<![0-9.])" + Regex.escape(addr) + "(?![0-9.])")
+            }
+        }
+        own = found
+    }
+
+    /** Everything the Linux runtime can tell about whose logs these are: addresses and accounts. */
+    fun learnFromRuntime(root: java.io.File) {
+        learnOwnAddresses(java.io.File(root, "etc/bannerlator-net"))
+        learnAccounts(java.io.File(root, "root/.local/share/Steam/config/loginusers.vdf"))
+    }
+
+    /** "public IPv6", "private IPv4", "link-local IPv6", ... for an address literal; null if it is not one. */
+    fun kind(address: String): String? {
+        val a = address.substringBefore('%')
+        IPV4.matchEntire(a)?.let { m ->
+            val o = m.groupValues.drop(1).map { it.toInt() }
+            if (o.any { it > 255 }) return null
+            return when {
+                o[0] == 127 -> "loopback IPv4"
+                o[0] == 10 || (o[0] == 172 && o[1] in 16..31) || (o[0] == 192 && o[1] == 168) -> "private IPv4"
+                o[0] == 169 && o[1] == 254 -> "link-local IPv4"
+                o[0] == 100 && o[1] in 64..127 -> "carrier-NAT IPv4"
+                else -> "public IPv4"
+            }
+        }
+        val g = expand6(a) ?: return null
+        val first = g[0].toInt(16)
+        return when {
+            g.all { it.toInt(16) == 0 } || (g.take(7).all { it.toInt(16) == 0 } && g[7].toInt(16) == 1) -> "loopback IPv6"
+            first and 0xffc0 == 0xfe80 -> "link-local IPv6"
+            first and 0xfe00 == 0xfc00 -> "private IPv6"
+            else -> "public IPv6"
+        }
+    }
+
+    /** The eight groups of an IPv6 literal, or null. */
+    private fun expand6(address: String): List<String>? {
+        val a = address.substringBefore('%')
+        if (!a.contains(':') || a.count { it == ':' } > 7 || a.contains(":::")) return null
+        if (!a.all { it.isDigit() || it in 'a'..'f' || it in 'A'..'F' || it == ':' }) return null
+        val parts = if (a.contains("::")) {
+            val (head, tail) = a.split("::", limit = 2)
+            val h = if (head.isEmpty()) emptyList() else head.split(':')
+            val t = if (tail.isEmpty()) emptyList() else tail.split(':')
+            if (h.size + t.size > 7) return null
+            h + List(8 - h.size - t.size) { "0" } + t
+        } else a.split(':')
+        if (parts.size != 8 || parts.any { it.isEmpty() || it.length > 4 }) return null
+        return parts.map { it.lowercase() }
+    }
+
+    /**
+     * Every IP address in [text] replaced by what kind it is ("<public IPv6>"), for reports whose
+     * point is the shape of the network, not its numbers.
+     */
+    fun describeAddresses(text: String): String {
+        var out = IPV6.replace(text) { m -> kind(m.value)?.let { "<$it>" } ?: m.value }
+        out = IPV4.replace(out) { m -> kind(m.value)?.let { "<$it>" } ?: m.value }
+        return out
+    }
+
+    /**
+     * Whose device and whose account: the client's "external address" lines, its login-state
+     * lines, and every learned own address and account name. These are not credentials, so the
+     * credential rules leave them alone; [redact] runs this, and the Wine Steam client's scrubber
+     * (SteamLogRedactor) runs it too, so the same lines come out the same from either client.
+     */
+    fun redactIdentity(line: String): String {
+        if (line.isEmpty()) return line
+        var out = EXTERNAL_ADDR.replace(line) { "${it.groupValues[1]}<redacted:ip>" }
+        for (r in own) out = r.replace(out, "<redacted:ip>")
+        out = LOGIN_STATE.replace(out) { "${it.groupValues[1]}<redacted:account>" }
+        out = LOGIN_USERS.replace(out) { "${it.groupValues[1]}<redacted:account>" }
+        for (r in accounts) out = r.replace(out, "<redacted:account>")
+        return out
+    }
+
+    /** A file worth scrubbing: text (no NUL in its first 4 KB) and not huge. */
+    fun isText(file: java.io.File): Boolean = try {
+        file.isFile && file.length() < 64L * 1024 * 1024 && file.inputStream().use { input ->
+            val buf = ByteArray(4096)
+            val n = input.read(buf)
+            n <= 0 || (0 until n).none { buf[it].toInt() == 0 }
+        }
+    } catch (e: Exception) {
+        false
+    }
 
     /** [line] with every credential shape replaced. Null- and exception-safe by construction. */
     fun redact(line: String): String {
@@ -66,6 +251,7 @@ object LogRedactor {
                 val id = m.groupValues[1]
                 "[U:1:${if (id.length > 4) "*".repeat(id.length - 4) + id.takeLast(4) else id}]"
             }
+            out = redactIdentity(out)
             out = EMAIL.replace(out, "<redacted:email>")
             out = RESIDUAL.replace(out) { "${it.groupValues[1]}=<redacted:token>" }
             out = LONG_TOKEN.replace(out, "<redacted:token>")

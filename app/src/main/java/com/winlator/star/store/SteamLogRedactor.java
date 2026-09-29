@@ -135,6 +135,11 @@ public final class SteamLogRedactor {
             out = JWT_BASE64.matcher(out).replaceAll("<redacted:jwt>");
             out = maskSteamId64(out);          // keep first 4 + last 4, mask the middle
             out = maskSteamId3(out);           // [U:1:####last4]
+            // Whose device and whose account, which none of the credential rules see: the client's
+            // "external address = '<ours>'" lines, its login-state lines, and the account and
+            // persona names learned from loginusers.vdf. Shared with the Linux session's scrubber
+            // so the same lines come out the same from either client.
+            out = com.winlator.star.core.LogRedactor.INSTANCE.redactIdentity(out);
             out = redact(out);                 // base backstop: account name, token, email, residuals
             return out;
         } catch (Throwable t) {

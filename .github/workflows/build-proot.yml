@@ -8,6 +8,9 @@ name: Build proot (Termux fork, NDK)
 # builds it (execve returns ENOSYS/EFAULT, then PEEKDATA EIO) — it is an old snapshot of this
 # fork, thousands of lines behind in the ptrace/exec core — while the Termux binary of this
 # version works on the same rootfs.
+#
+# The patches under tools/proot/patches (see tools/proot/PATCHES.md) go on top of that source,
+# in order, before the build; one that does not apply fails the build.
 
 on:
   push:
@@ -15,6 +18,7 @@ on:
       - 'feat/linux-gamescope-runtime'
     paths:
       - '.github/workflows/build-proot.yml'
+      - 'tools/proot/**'
   workflow_dispatch:
 
 permissions:
@@ -58,6 +62,28 @@ jobs:
           # is what aborts a GTK client on the first icon it loads. The Termux binary that holds
           # a session is built without it: its only NEEDED are libtalloc.so.2 and libc.so.
 
+      - name: Apply the patches under tools/proot/patches
+        run: |
+          set -euo pipefail
+          # In order, each dry-run with no fuzz against the tree it will land on before it is
+          # applied: the first one that does not apply, or is already in, fails the build here
+          # naming itself, so a proot missing part of the set is never packaged. GNU patch, not
+          # git apply: proot-src sits inside this checkout, and git apply run in there takes the
+          # patch's paths as relative to the checkout, finds nothing under proot-src and reports
+          # success having changed nothing. (From The412Banner/DroidDeck.)
+          n=0
+          for p in tools/proot/patches/*.patch; do
+            echo "applying $(basename "$p")"
+            if ! patch -p1 -F0 --forward --dry-run -d proot-src < "$p"; then
+              echo "::error file=$p::does not apply to termux/proot v${PROOT_VERSION}"
+              exit 1
+            fi
+            patch -p1 -F0 --forward --no-backup-if-mismatch -d proot-src < "$p"
+            n=$((n + 1))
+          done
+          [ "$n" -gt 0 ] || { echo "::error::no patches found under tools/proot/patches"; exit 1; }
+          echo "$n patches applied"
+
       - name: Build
         run: |
           set -e
@@ -78,6 +104,12 @@ jobs:
           cp proot-src/src/proot out/arm64-v8a/libproot.so
           cp proot-src/src/loader/loader out/arm64-v8a/libproot-loader.so
           patchelf --set-rpath '$ORIGIN' out/arm64-v8a/libproot.so
+          # The patched seccomp path is only worth shipping if the build probed seccomp and
+          # process_vm in; and filtered_sysnum_flags is the patch set's one global symbol, the
+          # marker that tells this binary from Termux's on a device.
+          grep -q '^#define HAVE_SECCOMP_FILTER' proot-src/src/build.h || { echo "::error::proot was built without seccomp filtering"; exit 1; }
+          grep -q '^#define HAVE_PROCESS_VM' proot-src/src/build.h || { echo "::error::proot was built without process_vm"; exit 1; }
+          "$BIN/llvm-nm" out/arm64-v8a/libproot.so | grep -q ' T filtered_sysnum_flags$' || { echo "::error::the patch set's marker symbol is missing from libproot.so"; exit 1; }
           "$BIN/llvm-readelf" -d out/arm64-v8a/libproot.so | grep -E "NEEDED|RUNPATH"
           "$BIN/llvm-readelf" -h out/arm64-v8a/libproot-loader.so | grep -E "Type|Entry"
           ls -la out/arm64-v8a

@@ -14,7 +14,15 @@ enum class TabType {
     GRAPHICS, HUD, RESHADE, CONTROLS, ADVANCED, TASK_MANAGER, TV, AUDIO,
     // Steam friends + chat while playing. Only in the rail while InGameFriendsSource says a live
     // source exists (see ui/XServerFriendsTab.kt).
-    FRIENDS
+    FRIENDS,
+    // FEX / DXVK / VKD3D-Proton per Proton of the Linux Steam client. Only in the rail during a
+    // Steam (Linux) session (linuxSteamSession), like the Graphics tab's Steam client section.
+    COMPONENTS
+}
+
+/** A swap from the drawer's Components tab: [value] is "orig:<build>" or a stored package file. */
+fun interface LinuxComponentSwap {
+    fun swap(protonId: String, comp: String, value: String)
 }
 
 object XServerDrawerState {
@@ -84,6 +92,12 @@ object XServerDrawerState {
     // Turnip sysmem: "" automatic, "1" on, "0" off (LinuxTuning.TU_SYSMEM_CHOICES).
     private val _linuxTurnipSysmem        = MutableStateFlow("")
     val linuxTurnipSysmem: StateFlow<String> = _linuxTurnipSysmem
+    private val _linuxTouch               = MutableStateFlow("")
+    val linuxTouch: StateFlow<String> = _linuxTouch
+    // The Components tab: every Proton the client runs games with and the FEX / DXVK / VKD3D-Proton
+    // each uses, as the activity last read them (LinuxComponents.snapshot); null until it has.
+    private val _linuxComponents          = MutableStateFlow<com.winlator.star.linux.LinuxComponents.Snapshot?>(null)
+    val linuxComponents: StateFlow<com.winlator.star.linux.LinuxComponents.Snapshot?> = _linuxComponents
     // HDR output (Wayland, HDR sessions only). `available` = the compositor opened HDR for this session
     // (the game/container setting was on AND this screen reports HDR10) - the row is shown only then.
     // `output` = the live switch: on = the game's HDR frames go to the display as HDR, off = the same
@@ -497,7 +511,11 @@ object XServerDrawerState {
     @JvmField var onLinuxSteamGuide: Runnable? = null
     @JvmField var onLinuxSteamQam: Runnable? = null
     @JvmField var onLinuxOption: java.util.function.BiConsumer<String, Boolean>? = null
+    // The Components tab: re-read the Protons (the tab opening; after a swap), and swap one.
+    @JvmField var onLinuxComponentsRefresh: Runnable? = null
+    @JvmField var onLinuxComponentSwap: LinuxComponentSwap? = null
     @JvmField var onLinuxTurnipSysmem: java.util.function.Consumer<String>? = null
+    @JvmField var onLinuxTouch: java.util.function.Consumer<String>? = null
     // HDR output switch: applied to the RUNNING compositor at once (nativeSetHdrOutput); nothing is
     // saved - it lasts for this session only.
     @JvmField var onWaylandHdrOutputToggle: java.util.function.Consumer<Boolean>? = null
@@ -557,6 +575,8 @@ object XServerDrawerState {
     fun setLinuxOptions(v: Map<String, Boolean>) { _linuxOptions.value = v }
     fun setLinuxOption(key: String, v: Boolean) { _linuxOptions.value = _linuxOptions.value + (key to v) }
     fun setLinuxTurnipSysmem(v: String)         { _linuxTurnipSysmem.value = v }
+    fun setLinuxTouch(v: String)                { _linuxTouch.value = v }
+    fun setLinuxComponents(v: com.winlator.star.linux.LinuxComponents.Snapshot?) { _linuxComponents.value = v }
     fun setWaylandHdrAvailable(v: Boolean)      { _waylandHdrAvailable.value = v }
     fun setWaylandHdrOutput(v: Boolean)         { _waylandHdrOutput.value = v }
     fun setWaylandHdrOnScreen(v: Boolean)       { _waylandHdrOnScreen.value = v }
@@ -717,6 +737,8 @@ object XServerDrawerState {
         _linuxSteamSession.value = false
         _linuxOptions.value = emptyMap()
         _linuxTurnipSysmem.value = ""
+        _linuxTouch.value = ""
+        _linuxComponents.value = null
         _waylandHdrAvailable.value = false
         _waylandHdrOutput.value = true
         _waylandHdrOnScreen.value = false
@@ -788,7 +810,8 @@ object XServerDrawerState {
         onNativeRenderingToggle = null; onFpsConfigApply = null
         onWaylandZeroCopyToggle = null; onWaylandZeroCopyPoll = null
         onWaylandGlSafeModeToggle = null
-        onLinuxSteamGuide = null; onLinuxSteamQam = null; onLinuxOption = null; onLinuxTurnipSysmem = null
+        onLinuxSteamGuide = null; onLinuxSteamQam = null; onLinuxOption = null; onLinuxTurnipSysmem = null; onLinuxTouch = null
+        onLinuxComponentsRefresh = null; onLinuxComponentSwap = null
         onWaylandHdrOutputToggle = null
         onBionicFgConfigChange = null; onFpsLimitChange = null
         onPresentModeChange = null

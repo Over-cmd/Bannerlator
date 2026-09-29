@@ -294,8 +294,8 @@ public final class LinuxSteamLibrary {
         return m.find() ? m.group(1) : null;
     }
 
-    /** The card the store installs to, when one is chosen and mounted. */
-    private static File cardRoot(android.content.Context context) {
+    /** The card the store installs to, when one is chosen and mounted. LinuxComponents looks there for a Proton depot too. */
+    static File cardRoot(android.content.Context context) {
         try {
             com.winlator.star.store.SteamSdInstall.SdTarget sd = com.winlator.star.store.SteamSdInstall.INSTANCE.detect(context);
             if (sd != null && sd.getSteamGamesBase().isDirectory()) return sd.getSteamGamesBase();

@@ -144,6 +144,14 @@ public final class SteamLiteLogCollector {
             File steamDir = new File(driveC, STEAM_DIR_REL);
             File logsDir = new File(steamDir, LOGS_SUBDIR);
             String steamLiteVersion = readMarkerVersion(steamDir);
+            // The prefs hold the account this app signed in with; the client's own loginusers.vdf
+            // holds every account and persona name it has ever seen, and the device's public
+            // addresses are what its IPv6 check writes as "external address". Both learned here so
+            // redactSteamClientLine strips them (LogRedactor.redactIdentity).
+            try {
+                LogRedactor.INSTANCE.learnAccounts(new File(steamDir, "config/loginusers.vdf"));
+                LogRedactor.INSTANCE.learnOwnAddresses(context);
+            } catch (Throwable ignored) {}
 
             // Not a SteamLite launch (or the client left nothing) → collect nothing, don't error.
             if (!logsDir.isDirectory() && steamLiteVersion == null) {

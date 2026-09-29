@@ -494,7 +494,10 @@ static void cursor_publish_hidden(void) {
 static void cursor_publish_shm(struct wl_shm_buffer *shm, int hx, int hy) {
     int32_t w = wl_shm_buffer_get_width(shm), h = wl_shm_buffer_get_height(shm);
     int32_t stride = wl_shm_buffer_get_stride(shm);
-    if (w <= 0 || h <= 0 || w * h > CURSOR_MAX_PX) return;
+    if (w <= 0 || h <= 0 || (int64_t)w * h > CURSOR_MAX_PX) return;
+    /* libwayland only promises stride >= width; each row copied here is width * 4 bytes, so a
+     * shorter stride would read past the end of the client's pool. */
+    if ((int64_t)stride < (int64_t)w * 4) return;
     wl_shm_buffer_begin_access(shm);
     const unsigned char *src = (const unsigned char *)wl_shm_buffer_get_data(shm);
     pthread_mutex_lock(&g_cursor_lock);
@@ -530,6 +533,9 @@ int banner_cursor_snapshot(int *out, int cap) {
 #define MAX_FINGERS 10
 struct finger { int id; struct surface *target; int active; };
 static struct finger g_fingers[MAX_FINGERS];
+/* Touchscreen mode on a client without wl_touch: the one finger driving the pointer, and where. */
+static int g_pointer_finger = -1;
+static double g_pointer_finger_x, g_pointer_finger_y;
 static struct surface *g_grab;              /* no-desktop fallback: surface holding the button */
 static struct surface *g_key_target;        /* no-desktop fallback: last clicked surface */
 static struct surface *g_ime_click;         /* last clicked program window: where text input goes */
@@ -2450,6 +2456,7 @@ static void seat_get_touch(struct wl_client *c, struct wl_resource *r, uint32_t 
     if (!t) { wl_client_post_no_memory(c); return; }
     wl_resource_set_implementation(t, &touch_impl, NULL, touch_res_destroy);
     if (g_ntouches < MAX_PTRS) { g_touches[g_ntouches].touch = t; g_touches[g_ntouches].focus = NULL; g_ntouches++; }
+    banner_log("touch", "%s takes touch (wl_touch v%u)", client_name(c), wl_resource_get_version(t));
 }
 static void seat_release(struct wl_client *c, struct wl_resource *r) { wl_resource_destroy(r); }
 static const struct wl_seat_interface seat_impl = {
@@ -2481,6 +2488,9 @@ static struct seat_keyboard *keyboard_for(struct wl_client *client) {
 #define for_each_pointer_of(client, sp) \
     for (int _i = 0; _i < g_nptrs; _i++) \
         if (((sp) = &g_ptrs[_i]), wl_resource_get_client((sp)->ptr) == (client))
+#define for_each_touch_of(client, st) \
+    for (int _i = 0; _i < g_ntouches; _i++) \
+        if (((st) = &g_touches[_i]), wl_resource_get_client((st)->touch) == (client))
 #define for_each_keyboard_of(client, sk) \
     for (int _i = 0; _i < g_nkbs; _i++) \
         if (((sk) = &g_kbs[_i]), wl_resource_get_client((sk)->kb) == (client))
@@ -3081,6 +3091,10 @@ static void deliver_touch(const struct input_msg *m, int action) {
         for (int i = 0; i < g_ntouches; i++)
             if (g_touches[i].focus) wl_touch_send_cancel(g_touches[i].touch);
         for (int i = 0; i < MAX_FINGERS; i++) g_fingers[i].active = 0;
+        if (g_pointer_finger >= 0) {  /* the pointer fallback's button, released where it was */
+            pointer_event(g_pointer_finger_x, g_pointer_finger_y, BTN_LEFT, 0);
+            g_pointer_finger = -1;
+        }
         wl_display_flush_clients(g_display);
         return;
     }
@@ -3088,7 +3102,7 @@ static void deliver_touch(const struct input_msg *m, int action) {
     if (action == 0) {
         if (f) f->active = 0;                       /* stale id: start it again */
         struct surface *target = g_desktop ? g_desktop : toplevel_at(x, y);
-        if (!target) return;
+        if (!target) { banner_log("touch", "no window under the finger at %.0f,%.0f", x, y); return; }
         for (int i = 0; i < MAX_FINGERS && !f; i++)
             if (!g_fingers[i].active) f = &g_fingers[i];
         if (!f) return;                             /* more fingers than we track: ignore the extra */
@@ -3098,23 +3112,55 @@ static void deliver_touch(const struct input_msg *m, int action) {
 
     struct surface *target = f->target;
     struct seat_touch *st = touch_for(wl_resource_get_client(target->resource));
-    if (!st) return;
+    /* One line per gesture (first finger), so a test can see where a touch went. */
+    if (action == 0)
+        banner_log("touch", "%s gets %s at %.0f,%.0f (id %d)", client_name(wl_resource_get_client(target->resource)),
+                   st ? "touch" : "the pointer (it takes no touch)", x, y, id);
+    if (!st) {
+        /* The client took no wl_touch (gamescope before 3.16.29-p3, a toolkit that never asks for
+         * touch): one finger drives the pointer instead, so touchscreen mode is never a dead end.
+         * A second finger is ignored while the first is down. (After The412Banner/DroidDeck.) */
+        if (action == 0) {
+            if (g_pointer_finger >= 0) { f->active = 0; return; }
+            g_pointer_finger = id;
+            pointer_event(x, y, BTN_LEFT, 1);
+        } else if (id == g_pointer_finger) {
+            if (action == 1) {
+                pointer_event(x, y, 0, 0);
+            } else {
+                pointer_event(x, y, BTN_LEFT, 0);
+                g_pointer_finger = -1;
+                f->active = 0;
+            }
+        }
+        g_pointer_finger_x = x; g_pointer_finger_y = y;
+        return;
+    }
     int tx = 0, ty = 0;
     if (target != g_desktop && target->placed) { tx = target->x; ty = target->y; }
     wl_fixed_t sx = wl_fixed_from_double(x - tx), sy = wl_fixed_from_double(y - ty);
     uint32_t t = now_ms();
+    struct wl_client *client = wl_resource_get_client(target->resource);
+    uint32_t serial = (action == 0 || action == 2) ? wl_display_next_serial(g_display) : 0;
 
-    if (action == 0) {
-        st->focus = target->resource;
-        wl_touch_send_down(st->touch, wl_display_next_serial(g_display), t, target->resource, id, sx, sy);
-    } else if (action == 1) {
-        wl_touch_send_motion(st->touch, t, id, sx, sy);
-    } else {
-        wl_touch_send_up(st->touch, wl_display_next_serial(g_display), t, id);
-        f->active = 0;
+    /* Every wl_touch the client holds gets the finger, not only the first one it asked for: a
+     * client can bind the seat more than once (gamescope's nested backend binds it on its own
+     * input thread as well), and only the one it listens on does anything with the event. Sent to
+     * just the first, a touch reached a resource nobody read and the drag did nothing - where
+     * DroidDeck, which sends to all of them, scrolled Big Picture. (After The412Banner/DroidDeck.) */
+    for_each_touch_of(client, st) {
+        if (action == 0) {
+            st->focus = target->resource;
+            wl_touch_send_down(st->touch, serial, t, target->resource, id, sx, sy);
+        } else if (action == 1) {
+            wl_touch_send_motion(st->touch, t, id, sx, sy);
+        } else {
+            wl_touch_send_up(st->touch, serial, t, id);
+        }
+        if (wl_resource_get_version(st->touch) >= WL_TOUCH_FRAME_SINCE_VERSION)
+            wl_touch_send_frame(st->touch);
     }
-    if (wl_resource_get_version(st->touch) >= WL_TOUCH_FRAME_SINCE_VERSION)
-        wl_touch_send_frame(st->touch);
+    if (action == 2) f->active = 0;
     wl_display_flush_clients(g_display);
 }
 

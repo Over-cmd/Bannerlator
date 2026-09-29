@@ -8,6 +8,7 @@ import com.winlator.star.core.ProcessHelper;
 import com.winlator.star.xenvironment.EnvironmentComponent;
 
 import java.io.File;
+import java.io.IOException;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
@@ -93,7 +94,49 @@ public class LinuxProgramLauncherComponent extends EnvironmentComponent {
                 ProcessHelper.killProcess(prootPid);
             }
             sweep(tree);
+            killGuestLeftovers();
         }
+    }
+
+    /**
+     * Every process of ours still running a program out of the Linux runtime once proot is gone.
+     * The sweep above reaches what proot still traced when the session ended; a tracee it had
+     * already lost - an Xwayland that aborted from one thread and then looped on a syscall proot's
+     * own seccomp filter, with no tracer left, answers ENOSYS - is reparented to init before the
+     * tree is read, and wrote 9 GB of one line into the session log before anything killed it.
+     * A Wine container running in the same process is safe: its programs live under imagefs, not
+     * the runtime. (From The412Banner/DroidDeck.)
+     */
+    private void killGuestLeftovers() {
+        String rootfs;
+        try {
+            rootfs = workingDir.getCanonicalPath() + "/";
+        } catch (IOException e) {
+            return;
+        }
+        File[] entries = new File("/proc").listFiles();
+        if (entries == null) return;
+        int me = android.os.Process.myPid();
+        int killed = 0;
+        for (File entry : entries) {
+            int candidate;
+            try {
+                candidate = Integer.parseInt(entry.getName());
+            } catch (NumberFormatException e) {
+                continue;
+            }
+            if (candidate == me) continue;
+            String exe;
+            try {
+                exe = new File(entry, "exe").getCanonicalPath(); // another uid's is unreadable; a gone process has none
+            } catch (IOException | SecurityException e) {
+                continue;
+            }
+            if (!exe.startsWith(rootfs)) continue;
+            ProcessHelper.killProcess(candidate);
+            killed++;
+        }
+        if (killed > 0) Log.w(TAG, "killed " + killed + " guest process(es) proot no longer tracked");
     }
 
     /**

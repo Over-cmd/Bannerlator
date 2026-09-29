@@ -16,6 +16,17 @@ library list, before anything is published.
   3.16.29: realtime-priority Vulkan queues on request (`GAMESCOPE_FORCE_VULKAN_REALTIME=1`)
   without CAP_SYS_NICE, which proot can never have; and the gamepad-driven cursor sprite following
   the X pointer that XTest moves (it sat frozen).
+- `0110-wayland-backend-touch.patch` - DroidDeck: the nested Wayland backend bound only the host's
+  pointer and keyboard, so a finger on the phone's screen never reached Steam. It now binds
+  `wl_touch` too and hands each finger to wlserver's touch path (`wlserver_touchdown` / `motion` /
+  `up`) - the one a Steam Deck's touchscreen drives - so what a touch does follows the client's
+  touch mode (Steam's Big Picture sets Passthrough: a real touch, rows scroll under a finger).
+  Finger ids are offset by one, since the nested pointer already moves wlserver's touch 0.
+- `0111-wayland-pointer-warps-in-passthrough.patch` - DroidDeck: the nested pointer's motion goes to
+  wlserver as touch 0, and in Passthrough (Big Picture's touch mode) a motion for a touch that is not
+  down moves nothing - so in touchpad mode the Steam client saw no hover and a click landed wherever
+  the pointer had last been. The motion now always warps the real pointer as well
+  (`bAlwaysWarpCursor`), which the other touch modes did already.
 
 Sixteen more of Armada's patches are DRM/lease/HDR-on-KMS work for a native display, which this
 app's Wayland-hosted gamescope never reaches, or need a newer gamescope than the runtime has.
@@ -23,6 +34,6 @@ app's Wayland-hosted gamescope never reaches, or need a newer gamescope than the
 ## Where the published copy lives
 
 The apk build fetches the archive named in `release.env` from **The412Banner/winlator-contents**, next to the Linux runtime it belongs to, and checks its sha256 before packing it in.
-The copy there is SteamDeck's own `gamescope-3.16.29-p1` build, moved unchanged, so both apps share one file.
+The copy there is DroidDeck's own `gamescope-3.16.29-p3` build (Droid-Deck/DroidDeck), moved unchanged, so both apps share one file.
 It is a pre-release that is never marked Latest, and it is not part of the runtime download (`linuxfs-r9` is untouched).
 `build-gamescope.yml` here builds the same recipe on every change to `tools/gamescope`; to replace the published copy, build it, upload the result to winlator-contents as a new tag, and update `release.env`.

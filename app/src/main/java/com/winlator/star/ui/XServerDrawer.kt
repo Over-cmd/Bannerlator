@@ -1,5 +1,6 @@
 package com.winlator.star.ui
 
+import com.winlator.star.linux.LinuxComponents
 import com.winlator.star.linux.LinuxTuning
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
@@ -161,6 +162,8 @@ fun XServerDrawer() {
     // wasn't open. See XServerFriendsTab.kt.
     val friendsSource by com.winlator.star.store.InGameFriendsSource.state.collectAsState()
     val friendsUnread by com.winlator.star.store.SteamFriendsStore.unread.collectAsState()
+    // Components tab: only in a Steam (Linux) session (see LinuxComponentsContent).
+    val linuxSteamSession by state.linuxSteamSession.collectAsState()
     // Re-check the friends source on every drawer open (its liveness isn't all flow-driven).
     val menuOpen by XServerDialogState.menuOpen.collectAsState()
     LaunchedEffect(menuOpen) { if (menuOpen) com.winlator.star.store.InGameFriendsSource.poke() }
@@ -227,6 +230,12 @@ fun XServerDrawer() {
                         Spacer(Modifier.height(6.dp))
                         TabIconButton(R.drawable.icon_debug, selectedTab == TabType.ADVANCED) {
                             handleTabClick(TabType.ADVANCED, state)
+                        }
+                        if (linuxSteamSession) {
+                            Spacer(Modifier.height(6.dp))
+                            TabIconButton(R.drawable.icon_menu_contents, selectedTab == TabType.COMPONENTS) {
+                                handleTabClick(TabType.COMPONENTS, state)
+                            }
                         }
                         if (friendsSource.tabVisible) {
                             Spacer(Modifier.height(6.dp))
@@ -307,6 +316,7 @@ fun XServerDrawer() {
                 TabType.TV -> TvContent(state)
                 TabType.AUDIO -> AudioContent(state)
                 TabType.FRIENDS -> FriendsContent(state)
+                TabType.COMPONENTS -> LinuxComponentsContent(state)
             }
         }
     }
@@ -1396,6 +1406,31 @@ private fun LinuxSteamSection(state: XServerDrawerState) {
     HelperText("Presses the Steam button, or opens Steam's Quick Access Menu, on player one's controller.")
 
     Spacer(Modifier.height(6.dp))
+    val touch by state.linuxTouch.collectAsState()
+    Text("Touch", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface)
+    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+        listOf("" to "App setting", "1" to "Touchscreen", "0" to "Touchpad").forEach { (value, label) ->
+            val selected = touch == value
+            Box(
+                contentAlignment = Alignment.Center,
+                modifier = Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.25f) else MaterialTheme.colorScheme.surface)
+                    .border(1.dp, if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline, RoundedCornerShape(8.dp))
+                    .clickable {
+                        state.setLinuxTouch(value)
+                        state.onLinuxTouch?.accept(value)
+                    }
+                    .padding(vertical = 8.dp)
+            ) {
+                Text(label, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface)
+            }
+        }
+    }
+    HelperText("Touchscreen: fingers reach Steam as real touches (Big Picture scrolls under one). Touchpad: a drag moves the pointer, a tap clicks. App setting follows the Touchscreen switch every container uses. In Touchpad, Cursor to Touch (Controls > Touch) puts the pointer under the finger instead. Applies now.")
+
+    Spacer(Modifier.height(6.dp))
     ToggleRow("On-screen Steam and Quick Access buttons", on(LinuxTuning.EXTRA_STEAM_BUTTONS)) {
         flip(LinuxTuning.EXTRA_STEAM_BUTTONS, it)
     }
@@ -1450,6 +1485,92 @@ private fun LinuxSteamSection(state: XServerDrawerState) {
     HelperText("Automatic turns it on for the imported A710/A720/A722 Linux drivers. Applies at the next session.")
 
     HorizontalDivider(color = MaterialTheme.colorScheme.outline, modifier = Modifier.padding(vertical = 6.dp))
+}
+
+// ───── Components (Steam (Linux) sessions): FEX / DXVK / VKD3D-Proton per Proton ─────
+// Its own tab, shown only in a Steam (Linux) session. Quick swaps between what the entry's Components
+// tab has already stored, per Proton: what the running game's Proton uses, then one box per component
+// listing the Proton's originals and the stored packages. A swap into the Proton a running game uses
+// waits until that game closes; every other swap applies at the next game start, and the launch
+// wrappers put it back before each start if anything changed it. Downloading, importing and deleting
+// stay on the entry's Components tab in the editor. (From The412Banner/DroidDeck.)
+@Composable
+private fun LinuxComponentsContent(state: XServerDrawerState) {
+    val active by state.linuxSteamSession.collectAsState()
+    if (!active) return
+    val snap by state.linuxComponents.collectAsState()
+    // Read on every open: a game may have closed since, letting a waiting swap go in.
+    LaunchedEffect(Unit) { state.onLinuxComponentsRefresh?.run() }
+
+    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+        Box(Modifier.weight(1f)) { SectionHeader("Components") }
+        TextButton(onClick = { state.onLinuxComponentsRefresh?.run() }) { Text("Refresh", fontSize = 12.sp) }
+    }
+    val s = snap
+    if (s == null) {
+        HelperText("Reading the Protons…")
+        return
+    }
+    val running = s.protons.filter { it.inUseByGame }
+    Text("Running now", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface)
+    if (running.isEmpty()) HelperText("No game is running on a Proton. Changes apply the next time a game starts.")
+    else for (r in running) {
+        Text(r.proton.name, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary,
+            maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(start = 4.dp, top = 2.dp))
+        for (comp in LinuxComponents.COMPONENTS) {
+            HelperText("${LinuxComponents.LABEL.getValue(comp)}: ${r.components.getValue(comp).inUse}")
+        }
+    }
+    Spacer(Modifier.height(6.dp))
+
+    // The Proton being edited: the running game's first, else the first there is; the pick survives
+    // the drawer closing and reopening like the Controls sub-tab does.
+    var pick by rememberSaveable { mutableStateOf<String?>(null) }
+    val view = s.protons.firstOrNull { it.proton.id == pick } ?: running.firstOrNull() ?: s.protons.firstOrNull()
+    if (view == null) {
+        HelperText("No Proton is installed yet. Start the Steam client once so it downloads its ARM64 Proton.")
+        return
+    }
+    val p = view.proton
+    val names = s.protons.map { it.proton.name }
+    ReshadeDropdown("Proton", names, s.protons.indexOf(view)) { pick = s.protons[it].proton.id }
+    HelperText(
+        listOfNotNull(
+            p.version,
+            "a game is running on it".takeIf { view.inUseByGame },
+            view.reappliedAt.takeIf { it > 0 }?.let {
+                "re-applied at launch " + java.text.DateFormat.getTimeInstance(java.text.DateFormat.SHORT).format(java.util.Date(it * 1000))
+            },
+        ).joinToString(" · ")
+    )
+    val build = LinuxComponents.safeName(p.version)
+    for (comp in LinuxComponents.COMPONENTS) {
+        val st = view.components.getValue(comp)
+        val stored = s.packages.filter { it.comp == comp }
+        // Value -> label: the originals by build, then the stored packages by version (by file name
+        // where two share a version, so no label is offered twice).
+        val versions = stored.groupingBy { it.version }.eachCount()
+        val options = view.originals.filter { it.comp == comp }
+            .map { ("orig:" + it.protonVersion) to (if (it.protonVersion == build) "Original" else "Original · ${it.protonVersion}") } +
+            stored.map { it.file to (if ((versions[it.version] ?: 0) > 1) it.file.removeSuffix(".wcp") else it.version) }
+        if (options.isEmpty()) continue
+        val current = st.activeFile ?: "orig:$build"
+        val selected = options.indexOfFirst { it.first == current }
+        val shown = options.getOrNull(selected)?.second
+        ReshadeDropdown(LinuxComponents.LABEL.getValue(comp), options.map { it.second }, selected) { i ->
+            val value = options[i].first
+            // Picking what is already in place again cancels the swap waiting for the game.
+            if (value != current || st.queued != null) state.onLinuxComponentSwap?.swap(p.id, comp, value)
+        }
+        // The box already shows the choice: only say more when there is more to say.
+        val detail = st.queued?.let { "Next: $it · after the game closes" } ?: st.inUse.takeIf { it != shown }
+        if (detail != null) HelperText(detail)
+    }
+    HelperText(
+        if (view.inUseByGame) "A game is running on this Proton: a change waits until it closes."
+        else "Changes apply the next time a game starts."
+    )
+    HelperText("Downloads, importing and deleting are on the Components tab of the Steam (Linux) entry's settings.")
 }
 
 // ───── Wayland: HDR output (live, HDR sessions only) ─────

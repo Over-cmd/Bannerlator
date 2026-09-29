@@ -67,6 +67,15 @@ public final class LinuxTuning {
     /** The choices for {@link #EXTRA_TU_SYSMEM}, the empty first entry meaning automatic. */
     public static final String[] TU_SYSMEM_CHOICES = {"", "1", "0"};
 
+    /**
+     * How a finger on the screen reaches the session: "" follows the app's Touchscreen setting (the
+     * one X11 containers use), "1" is a touchscreen (every finger goes to the guest as a real touch;
+     * Big Picture scrolls under it), "0" a touchpad (a drag moves the pointer, a tap clicks).
+     * The drawer changes it live.
+     */
+    public static final String EXTRA_TOUCH = "linuxTouch";
+    /** The choices for {@link #EXTRA_TOUCH}, the empty first entry meaning the app's setting. */
+    public static final String[] TOUCH_CHOICES = {"", "1", "0"};
     /** gamescope's upscaler type; unset leaves gamescope's own default. */
     public static final String EXTRA_SCALER = "linuxScaler";
     /** gamescope's upscaler filter; unset leaves gamescope's own default. */
@@ -116,6 +125,22 @@ public final class LinuxTuning {
         String chosen = oneOf(shortcut, EXTRA_STEAM_CHANNEL, STEAM_CHANNELS);
         if (!chosen.isEmpty()) return chosen;
         return isOn(shortcut, EXTRA_STEAMDECK) ? "steamdeck_publicbeta" : "publicbeta";
+    }
+
+    /** The saved touch choice: "" the app's setting, "1" touchscreen or "0" touchpad. */
+    public static String touchChoice(Shortcut shortcut) {
+        return oneOf(shortcut, EXTRA_TOUCH, TOUCH_CHOICES);
+    }
+
+    /**
+     * Whether fingers reach this session as touch rather than as a touchpad.
+     *
+     * @param appSetting the app's shared Touchscreen setting, used when the entry has no choice
+     */
+    public static boolean touchscreen(Shortcut shortcut, boolean appSetting) {
+        String chosen = touchChoice(shortcut);
+        if (!chosen.isEmpty()) return "1".equals(chosen);
+        return appSetting;
     }
 
     /** The saved sysmem choice: "" automatic, "1" on or "0" off. */

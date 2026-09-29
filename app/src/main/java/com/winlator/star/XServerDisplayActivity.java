@@ -2056,7 +2056,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
             String fgProblem = s.getFgUnavailableReason().getValue();
             if (mult >= 2 && !fgProblem.isEmpty() && nativeFrameGenEngine()) {
                 s.setFrameGenMultiplier(0);
-                Toast.makeText(this, fgProblem, Toast.LENGTH_LONG).show();
+                showToast(this, fgProblem);
                 return;
             }
             // Wayland: both native engines run inside the Wayland compositor (framegen_bridge.c),
@@ -2735,8 +2735,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
             Log.w("XServerDisplayActivity", "wayland: layer " + wineVersion + " (" + wineInfo.path
                     + ") lacks winewayland.so and/or lib/libvulkan_freedreno_wayland.so; launching on X11");
             waylandMode = false;
-            Toast.makeText(this, "Wayland needs the Wayland Proton layer (11.0-2.1 arm64ec); launching on X11.",
-                    Toast.LENGTH_LONG).show();
+            showToast(this, "Wayland needs the Wayland Proton layer (11.0-2.1 arm64ec); launching on X11.");
         }
 
         imageFs.setWinePath(wineInfo.path);
@@ -3855,7 +3854,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
             + (detail.isEmpty() ? "" : " [" + detail + "]"));
         if (announce && !nativeFgProblemAnnounced) {
             nativeFgProblemAnnounced = true;
-            Toast.makeText(this, reason, Toast.LENGTH_LONG).show();
+            showToast(this, reason);
         }
     }
 
@@ -6894,7 +6893,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             startActivity(Intent.createChooser(intent, "Open log folder"));
         } catch (Exception e) {
-            Toast.makeText(this, "Log folder: " + dir.getAbsolutePath(), Toast.LENGTH_LONG).show();
+            showToast(this, "Log folder: " + dir.getAbsolutePath());
         }
     }
 
@@ -7122,6 +7121,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
         for (String key : LINUX_DRAWER_OPTIONS) options.put(key, com.winlator.star.linux.LinuxTuning.isOn(shortcut, key));
         state.setLinuxOptions(options);
         state.setLinuxTurnipSysmem(com.winlator.star.linux.LinuxTuning.turnipSysmemChoice(shortcut));
+        state.setLinuxTouch(com.winlator.star.linux.LinuxTuning.touchChoice(shortcut));
         state.setLinuxSteamSession(true);
         state.onLinuxSteamGuide = () -> pressLinuxSteamButton(false);
         state.onLinuxSteamQam = () -> pressLinuxSteamButton(true);
@@ -7141,13 +7141,93 @@ public class XServerDisplayActivity extends AppCompatActivity {
             }
             Log.i("XServerDisplayActivity", "Steam (Linux): " + key + " " + (on ? "on" : "off") + " from the drawer, saved to the entry");
         };
+        state.onLinuxTouch = choice -> {
+            shortcut.putExtra(com.winlator.star.linux.LinuxTuning.EXTRA_TOUCH, choice.isEmpty() ? null : choice);
+            shortcut.saveData();
+            state.setLinuxTouch(choice);
+            // Read at every touch, so the next finger already takes the new path.
+            Log.i("XServerDisplayActivity", "Steam (Linux): touch " + (choice.isEmpty() ? "app setting" : "1".equals(choice) ? "touchscreen" : "touchpad") + " from the drawer");
+        };
         state.onLinuxTurnipSysmem = choice -> {
             shortcut.putExtra(com.winlator.star.linux.LinuxTuning.EXTRA_TU_SYSMEM, choice.isEmpty() ? null : choice);
             shortcut.saveData();
             state.setLinuxTurnipSysmem(choice);
             Log.i("XServerDisplayActivity", "Steam (Linux): Turnip sysmem " + (choice.isEmpty() ? "automatic" : choice) + " from the drawer, next session");
         };
+        state.onLinuxComponentsRefresh = this::refreshLinuxComponents;
+        state.onLinuxComponentSwap = this::swapLinuxComponent;
         addLinuxSteamButtons(rootView);
+    }
+
+    /**
+     * Re-reads the Protons for the drawer's Components tab, first running the swaps a closed game
+     * was holding back. Off the UI thread: it hashes every swapped file. (From The412Banner/DroidDeck.)
+     */
+    private void refreshLinuxComponents() {
+        new Thread(() -> {
+            java.util.List<String> applied;
+            try {
+                applied = com.winlator.star.linux.LinuxComponents.applyQueued(this);
+            } catch (Throwable t) {
+                Log.w("XServerDisplayActivity", "Steam (Linux): queued component swaps", t);
+                applied = java.util.Collections.emptyList();
+            }
+            // Each Proton's current files are kept as its "Original" the first time it is read. The
+            // editor's tab did that and the drawer did not, so a drawer opened before the editor had
+            // no choices to offer: every component row was empty.
+            try {
+                com.winlator.star.linux.LinuxComponents.snapshotAll(this);
+            } catch (Throwable t) {
+                Log.w("XServerDisplayActivity", "Steam (Linux): saving the Protons' originals", t);
+            }
+            com.winlator.star.linux.LinuxComponents.Snapshot snap;
+            try {
+                snap = com.winlator.star.linux.LinuxComponents.snapshot(this);
+            } catch (Throwable t) {
+                Log.w("XServerDisplayActivity", "Steam (Linux): reading the Protons' components", t);
+                snap = new com.winlator.star.linux.LinuxComponents.Snapshot(java.util.Collections.emptyList(), java.util.Collections.emptyList());
+            }
+            final java.util.List<String> done = applied;
+            final com.winlator.star.linux.LinuxComponents.Snapshot result = snap;
+            runOnUiThread(() -> {
+                XServerDrawerState.INSTANCE.setLinuxComponents(result);
+                if (!done.isEmpty()) showToast(this, "Applied: " + String.join(", ", done));
+            });
+        }, "linux-components").start();
+    }
+
+    /** A swap from the drawer's Components tab; {@code value} is "orig:<build>" or a stored package file. */
+    private void swapLinuxComponent(String protonId, String comp, String value) {
+        new Thread(() -> {
+            String message;
+            try {
+                com.winlator.star.linux.LinuxComponents.Snapshot snap = com.winlator.star.linux.LinuxComponents.snapshot(this);
+                com.winlator.star.linux.LinuxComponents.ProtonView view = null;
+                for (com.winlator.star.linux.LinuxComponents.ProtonView v : snap.getProtons()) {
+                    if (v.getProton().getId().equals(protonId)) { view = v; break; }
+                }
+                com.winlator.star.linux.LinuxComponents.Component st = view != null ? view.getComponents().get(comp) : null;
+                String current = st != null && st.getActiveFile() != null ? st.getActiveFile()
+                        : "orig:" + (view != null ? com.winlator.star.linux.LinuxComponents.safeName(view.getProton().getVersion()) : "");
+                if (st != null && st.getQueued() != null && value.equals(current)) {
+                    // Picking what is already in place again cancels the swap waiting for the game.
+                    com.winlator.star.linux.LinuxComponents.cancelQueued(this, protonId, comp);
+                    message = "The waiting swap was cancelled.";
+                } else if (value.startsWith("orig:")) {
+                    message = com.winlator.star.linux.LinuxComponents.restore(this, protonId, comp, value.substring("orig:".length()));
+                } else {
+                    message = com.winlator.star.linux.LinuxComponents.swap(this, protonId, value);
+                }
+            } catch (Throwable t) {
+                Log.w("XServerDisplayActivity", "Steam (Linux): component swap", t);
+                message = "Swap failed: " + (t.getMessage() != null ? t.getMessage() : t.getClass().getSimpleName());
+            }
+            final String text = message;
+            runOnUiThread(() -> {
+                showToast(this, text);
+                refreshLinuxComponents();
+            });
+        }, "linux-components-swap").start();
     }
 
     /**
@@ -8579,6 +8659,12 @@ public class XServerDisplayActivity extends AppCompatActivity {
                     waylandCursorView.setVisibility(View.GONE);
                 switch (act) {
                     case android.view.MotionEvent.ACTION_DOWN:
+                        // A first finger starts a new gesture, and Android has ended every earlier
+                        // one: whatever the compositor still holds (an up lost to the drawer opening
+                        // mid-touch) goes first, or every later touch lands on a stale sequence.
+                        com.winlator.star.wayland.WaylandCompositor.sendTouch(
+                                com.winlator.star.wayland.WaylandCompositor.TOUCH_CANCEL, 0, 0, 0);
+                        // fall through
                     case android.view.MotionEvent.ACTION_POINTER_DOWN: {
                         int i = ev.getActionIndex();
                         waylandSendFinger(com.winlator.star.wayland.WaylandCompositor.TOUCH_DOWN,
@@ -8605,16 +8691,31 @@ public class XServerDisplayActivity extends AppCompatActivity {
                 return true;
             }
             if (waylandCursorX < 0) { waylandCursorX = vw / 2f; waylandCursorY = vh / 2f; }
+            // The drawer's Cursor to Touch (Controls > Touch): the pointer sits under the finger
+            // instead of moving by the drag, so a tap lands where it is made. The same switch the
+            // X11 touchpad honours; here it was read by nothing, so the chip flipped and changed
+            // nothing in a Steam (Linux) session.
+            boolean cursorToTouch = preferences != null && preferences.getBoolean("move_cursor_to_touchpoint", false);
             switch (ev.getActionMasked()) {
                 case android.view.MotionEvent.ACTION_DOWN:
                     last[0] = ev.getX(); last[1] = ev.getY(); moved[0] = 0f;
+                    if (cursorToTouch) {
+                        waylandCursorX = Math.max(0f, Math.min(vw, ev.getX()));
+                        waylandCursorY = Math.max(0f, Math.min(vh, ev.getY()));
+                        updateWaylandCursor(vw, vh, 1); // motion: the client sees the hover before the tap
+                    }
                     break;
                 case android.view.MotionEvent.ACTION_MOVE: {
                     float dx = (ev.getX() - last[0]) * SENS, dy = (ev.getY() - last[1]) * SENS;
                     last[0] = ev.getX(); last[1] = ev.getY();
                     moved[0] += Math.abs(dx) + Math.abs(dy);
-                    waylandCursorX = Math.max(0f, Math.min(vw, waylandCursorX + dx));
-                    waylandCursorY = Math.max(0f, Math.min(vh, waylandCursorY + dy));
+                    if (cursorToTouch) {
+                        waylandCursorX = Math.max(0f, Math.min(vw, ev.getX()));
+                        waylandCursorY = Math.max(0f, Math.min(vh, ev.getY()));
+                    } else {
+                        waylandCursorX = Math.max(0f, Math.min(vw, waylandCursorX + dx));
+                        waylandCursorY = Math.max(0f, Math.min(vh, waylandCursorY + dy));
+                    }
                     updateWaylandCursor(vw, vh, 1); // motion
                     break;
                 }
@@ -8819,11 +8920,16 @@ public class XServerDisplayActivity extends AppCompatActivity {
         android.view.Choreographer.getInstance().postFrameCallback(waylandVsyncCallback);
     }
 
-    /** Touchscreen mode: fingers go to the guest as wl_touch. Shared with X11's setting. */
+    /**
+     * Touchscreen mode: fingers go to the guest as wl_touch. Shared with X11's setting, unless a
+     * Linux entry chose for itself (its Steam (Linux) settings, or the drawer's Steam client section).
+     */
     private boolean waylandTouchscreenMode() {
         SharedPreferences sp = preferences != null ? preferences
                 : PreferenceManager.getDefaultSharedPreferences(this);
-        return sp != null && sp.getBoolean("touchscreen_toggle", false);
+        boolean app = sp != null && sp.getBoolean("touchscreen_toggle", false);
+        if (gamescopeMode && shortcut != null) return com.winlator.star.linux.LinuxTuning.touchscreen(shortcut, app);
+        return app;
     }
 
     /** One finger to the compositor, view pixels -> output space (the same mapping the pointer uses). */
@@ -9089,6 +9195,10 @@ public class XServerDisplayActivity extends AppCompatActivity {
                 new File(getFilesDir(), "pulseaudio"));
 
         List<String> session = linuxSessionArgs();
+        // Valve's ARM64 Proton, laid over the runtime before the client's first start so the first
+        // sign-in finds it installed (LinuxSteamSeed). Steam sessions only, once, and never fatal.
+        String protonSeed = session.contains(com.winlator.star.linux.LinuxRuntime.MODE_STEAM)
+                ? seedLinuxProton() : "not a Steam session";
         // Only the Steam mode signs in; a desktop session has no client and needs no hold. The
         // desktop can of course start Steam by hand, but taking the app's store offline for every
         // file-manager session would be a worse trade.
@@ -9235,6 +9345,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
             }
             eff.append(String.format(java.util.Locale.US, "%-24s", "Settings container"))
                .append(container != null ? container.id + " (" + container.getName() + ")" : "none").append('\n');
+            eff.append(String.format(java.util.Locale.US, "%-24s", "ARM64 Proton seed")).append(protonSeed).append('\n');
             // The tuning switches too.
             // A measurement is only worth keeping if the report beside it says what was set when it was taken.
             eff.append("--- performance switches (entry settings) ---\n")
@@ -9662,6 +9773,53 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // loading screen rotates its own.)
         com.winlator.star.core.PreloaderState.show("Steam is starting…");
         winHandler.start();
+    }
+
+    /**
+     * Places Valve's Proton Experimental (ARM64) over the runtime the first time a Steam session
+     * starts, while the loading screen shows the download ("downloading Proton Experimental
+     * (ARM64) · 120 of 398 MB"), so the client finds the tool installed at its first sign-in and
+     * the session script has nothing to ask the client for. Worker thread, before the session's
+     * command is built. Never fatal: whatever goes wrong is logged, the line below goes into the
+     * device report, and the session falls back to the client fetching the depot itself.
+     *
+     * @return one line for device.txt: what was placed, or why nothing was
+     */
+    private String seedLinuxProton() {
+        try {
+            String placed = com.winlator.star.linux.LinuxSteamSeed.placedVersion(this);
+            if (placed != null) return "placed earlier (" + placed + ")";
+            if (!com.winlator.star.linux.LinuxSteamSeed.protonNeeded(this)) return "the client has it";
+            final String name = com.winlator.star.linux.LinuxSteamSeed.PROTON_NAME;
+            Log.i("XServerDisplayActivity", "Linux session: placing " + name + " before the client's first start");
+            // The centered status card, the same one the session's own milestones drive once it
+            // is running; linuxProgress writes to nothing else.
+            com.winlator.star.core.PreloaderState.show("Downloading " + name + "…");
+            final long startedAt = android.os.SystemClock.elapsedRealtime();
+            final String hint = "Once only · the Steam client keeps it up to date from here on";
+            com.winlator.star.linux.LinuxSteamSeed.Entry entry = com.winlator.star.linux.LinuxSteamSeed.fetchProton();
+            if (entry == null) {
+                Log.w("XServerDisplayActivity", "Linux session: the Proton seed catalog could not be read; the client will fetch the depot");
+                com.winlator.star.core.PreloaderState.linuxProgress("Starting the session · the client will fetch the compatibility layer itself", -1, null, null);
+                return "skipped: the catalog could not be read";
+            }
+            String problem = com.winlator.star.linux.LinuxSteamSeed.install(this, entry, (stage, percent) -> {
+                long seconds = (android.os.SystemClock.elapsedRealtime() - startedAt) / 1000;
+                String elapsed = String.format(java.util.Locale.US, "%d:%02d elapsed · still working",
+                        seconds / 60, seconds % 60);
+                com.winlator.star.core.PreloaderState.linuxProgress(stage, percent, elapsed, hint);
+            });
+            if (problem != null) {
+                Log.w("XServerDisplayActivity", "Linux session: " + name + " not placed (" + problem + "); the client will fetch the depot");
+                com.winlator.star.core.PreloaderState.linuxProgress("Starting the session · the client will fetch the compatibility layer itself", -1, null, null);
+                return "skipped: " + problem;
+            }
+            com.winlator.star.core.PreloaderState.linuxProgress(name + " is in place · starting the session", -1, null, null);
+            return "placed now (" + entry.version + ")";
+        } catch (Throwable t) {
+            Log.w("XServerDisplayActivity", "Linux session: Proton seed failed; the client will fetch the depot", t);
+            return "skipped: " + t;
+        }
     }
 
     /**
@@ -10854,6 +11012,10 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // Cursor to Touch silently reverted to off every session until it was toggled again.
         touchpadView.setMoveCursorToTouchpoint(preferences.getBoolean("move_cursor_to_touchpoint", false));
         applyGestureConfig(); // wiring ran before this view existed; push the seeded set now
+        // A Steam (Linux) session set to Touchscreen: fingers go past this view to the compositor's
+        // surface, which hands them to gamescope as real touches (Big Picture scrolls under one).
+        // Read at every touch, so the drawer's Touch choice applies at once.
+        touchpadView.setPassThrough(() -> gamescopeMode && waylandTouchscreenMode(), () -> waylandSurfaceView);
         rootView.addView(touchpadView);
 
         inputControlsView = new InputControlsView(this, timeoutHandler, hideControlsRunnable);
@@ -14721,8 +14883,7 @@ return true;
         // them why. Suppressed for the untouched default (extra absent) so we never nag users who never
         // opted in; the capability guard above already prevents the functional regression regardless.
         if (unlock && !capable && explicit) {
-            runOnUiThread(() -> Toast.makeText(this,
-                    R.string.refresh_unlock_needs_compatible_layer, Toast.LENGTH_LONG).show());
+            runOnUiThread(() -> showToast(this, R.string.refresh_unlock_needs_compatible_layer));
         }
     }
 
@@ -15739,10 +15900,8 @@ return true;
 
     private void installerReminderToast() {
         try {
-            runOnUiThread(() -> android.widget.Toast.makeText(this,
-                    "Installing " + installerLabel() + "… follow the installer's prompts if it shows any. "
-                            + "This session closes by itself when it is done.",
-                    android.widget.Toast.LENGTH_LONG).show());
+            runOnUiThread(() -> showToast(this, "Installing " + installerLabel() + "… follow the installer's prompts if it shows any. "
+                            + "This session closes by itself when it is done."));
         } catch (Throwable ignored) {}
     }
 

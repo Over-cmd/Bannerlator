@@ -22,7 +22,10 @@ Built by `.github/workflows/build-proot.yml` from
 <https://github.com/termux/proot> `v5.1.107.92` with the NDK, against Termux's own talloc, with
 `RUNPATH $ORIGIN` so libtalloc is found beside proot. The copies here come from that workflow and
 are refreshed from its artifact; they are checked in so the rootfs build does not depend on a
-previous run.
+previous run. The workflow now also applies the patch set under `tools/proot/patches`
+(`tools/proot/PATCHES.md`: DroidDeck's nine proot speed-ups, tracee lookup by pid, one-shot deep
+path resolution, a seccomp filter that stops only for the arguments proot acts on); the copies
+here predate it and stay Termux's until a patched artifact is proven on device.
 
 ## Why not `app/src/main/cpp/proot`
 

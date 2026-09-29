@@ -185,8 +185,10 @@ public final class LinuxRuntimeInstaller {
      * rootfs is full of hard links (one binary under several names), and an entry written as an
      * empty file instead of its link target is a rootfs that boots to nothing. Symlinks, hard
      * links and the executable bit are all carried over here.
+     *
+     * <p>Shared with {@link LinuxSteamSeed}, which lays a package over the live rootfs with it.
      */
-    private static boolean extract(File archive, File destination, ProgressListener listener) {
+    static boolean extract(File archive, File destination, ProgressListener listener) {
         long entries = 0;
         try (InputStream in = new ZstdCompressorInputStream(
                 new BufferedInputStream(new FileInputStream(archive), 1 << 16));
@@ -244,7 +246,7 @@ public final class LinuxRuntimeInstaller {
         }
     }
 
-    private static String sha256(File file) throws Exception {
+    static String sha256(File file) throws Exception {
         MessageDigest digest = MessageDigest.getInstance("SHA-256");
         try (InputStream in = new BufferedInputStream(new FileInputStream(file), 1 << 16)) {
             byte[] buffer = new byte[1 << 16];

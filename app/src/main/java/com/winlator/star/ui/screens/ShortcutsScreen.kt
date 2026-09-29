@@ -93,6 +93,7 @@ import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.filled.SportsEsports
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Tv
+import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.Widgets
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
@@ -6371,6 +6372,7 @@ internal fun ShortcutSettingsDialogScreen(
     var linuxNoXalia by remember { mutableStateOf(com.winlator.star.linux.LinuxTuning.isOn(shortcut, com.winlator.star.linux.LinuxTuning.EXTRA_NO_XALIA)) }
     var linuxProotNoSeccomp by remember { mutableStateOf(com.winlator.star.linux.LinuxTuning.isOn(shortcut, com.winlator.star.linux.LinuxTuning.EXTRA_PROOT_NO_SECCOMP)) }
     var linuxTurnipSysmem by remember { mutableStateOf(com.winlator.star.linux.LinuxTuning.turnipSysmemChoice(shortcut)) }
+    var linuxTouch by remember { mutableStateOf(com.winlator.star.linux.LinuxTuning.touchChoice(shortcut)) }
     // The app's own games in the client's library, their shared saves, and any Games folders (LinuxAppGames).
     var linuxAppGames by remember {
         mutableStateOf(com.winlator.star.linux.LinuxTuning.isOn(
@@ -6779,15 +6781,18 @@ internal fun ShortcutSettingsDialogScreen(
     // strip offers, in order. The two were the same list until a Linux entry had to drop a whole tab:
     // Win Components is Wine DLL-override plumbing and a gamescope session has no prefix to override.
     // Keeping selectedTab a content index means the when() branches never have to be renumbered.
+    // A Linux entry gets Components (6) instead: FEX / DXVK / VKD3D-Proton per Proton of the Linux
+    // Steam client, which no Windows entry has (ScLinuxComponentsTab).
     val tabIndices = remember(tvTabVisible, isLinuxEntry) {
         listOf(0) + (if (isLinuxEntry) emptyList() else listOf(1)) + listOf(2, 3, 4) +
+            (if (isLinuxEntry) listOf(6) else emptyList()) +
             (if (tvTabVisible) listOf(5) else emptyList())
     }
     val tabTitles = remember(tabIndices) {
         tabIndices.map {
             when (it) {
                 0 -> "General"; 1 -> "Win Components"; 2 -> "Env Vars"
-                3 -> "Advanced"; 4 -> "Controller"; else -> "TV"
+                3 -> "Advanced"; 4 -> "Controller"; 6 -> "Components"; else -> "TV"
             }
         }
     }
@@ -7040,6 +7045,7 @@ internal fun ShortcutSettingsDialogScreen(
                 putExtra(com.winlator.star.linux.LinuxTuning.EXTRA_NO_XALIA, if (linuxNoXalia) "1" else "0")
                 putExtra(com.winlator.star.linux.LinuxTuning.EXTRA_PROOT_NO_SECCOMP, if (linuxProotNoSeccomp) "1" else "0")
                 putExtra(com.winlator.star.linux.LinuxTuning.EXTRA_TU_SYSMEM, linuxTurnipSysmem.ifEmpty { null })
+                putExtra(com.winlator.star.linux.LinuxTuning.EXTRA_TOUCH, linuxTouch.ifEmpty { null })
                 putExtra(com.winlator.star.linux.LinuxTuning.EXTRA_APP_GAMES, if (linuxAppGames) "1" else "0")
                 putExtra(com.winlator.star.linux.LinuxTuning.EXTRA_SHARE_SAVES, if (linuxShareSaves) "1" else "0")
                 putExtra(com.winlator.star.linux.LinuxTuning.EXTRA_GAMES_FOLDERS,
@@ -7063,6 +7069,9 @@ internal fun ShortcutSettingsDialogScreen(
     // and out of the D-pad order automatically. Now that each tab is its own screen, only the SELECTED
     // tab's controls are in the order — the tab selector ("tabs", Left/Right switches tabs) plus the
     // title-close and OK/Cancel are always present. Tab content on Win/Env/Advanced is touch-navigable.
+    // The Components tab's controls come and go with what is stored and listed, which only the tab
+    // knows, so it publishes its own ordered ids (ScLinuxComponentsTab) and they are spliced in here.
+    var linuxComponentIds by remember { mutableStateOf(emptyList<String>()) }
     val dpadIds = buildList {
         add("titleX")
         when (selectedTab) {
@@ -7135,6 +7144,7 @@ internal fun ShortcutSettingsDialogScreen(
                 if (com.winlator.star.display.ExternalDisplay.selectableModes(tvDisplay).size > 1) add("tvModeId")
                 add("tvMatchRes")
             }
+            6 -> addAll(linuxComponentIds) // Components — Linux entries only (see tabIndices)
         }
         add("tabs"); add("cancel"); add("ok")
     }
@@ -7766,6 +7776,14 @@ internal fun ShortcutSettingsDialogScreen(
                             // ones and saves to the same extras; there they apply live where they can.
                             Text("Steam client", style = MaterialTheme.typography.titleSmall)
                             Spacer(Modifier.height(4.dp))
+                            val touchLabels = listOf("App setting (the Touchscreen switch)", "Touchscreen", "Touchpad")
+                            DpDrop(
+                                dp, com.winlator.star.linux.LinuxTuning.EXTRA_TOUCH,
+                                label = "Touch",
+                                options = touchLabels,
+                                selected = touchLabels[com.winlator.star.linux.LinuxTuning.TOUCH_CHOICES.indexOf(linuxTouch).coerceAtLeast(0)],
+                                onSelect = { linuxTouch = com.winlator.star.linux.LinuxTuning.TOUCH_CHOICES[touchLabels.indexOf(it).coerceAtLeast(0)] }
+                            )
                             PerfEditRow(dp, com.winlator.star.linux.LinuxTuning.EXTRA_STEAM_BUTTONS,
                                 "On-screen Steam and Quick Access buttons", linuxSteamButtons,
                                 com.winlator.star.linux.LinuxTuning.defaultOn(com.winlator.star.linux.LinuxTuning.EXTRA_STEAM_BUTTONS)) { linuxSteamButtons = it }
@@ -7779,7 +7797,8 @@ internal fun ShortcutSettingsDialogScreen(
                                 "Quake-engine games windowed", linuxIdTech3,
                                 com.winlator.star.linux.LinuxTuning.defaultOn(com.winlator.star.linux.LinuxTuning.EXTRA_IDTECH3)) { linuxIdTech3 = it }
                             Text(
-                                "The buttons sit in the top corners: Steam's menu on the left, its Quick Access Menu on the right. "
+                                "Touchscreen sends fingers to Steam as real touches (Big Picture scrolls under one); Touchpad moves the pointer with a drag and clicks with a tap. "
+                                    + "The buttons sit in the top corners: Steam's menu on the left, its Quick Access Menu on the right. "
                                     + "With double Back, one Back press still opens the in-game drawer. "
                                     + "Stretch keeps a game that shrinks its window (FlatOut after Resume game) filling the screen. "
                                     + "Quake III, Team Arena, Return to Castle Wolfenstein and Jedi Academy run windowed at the session's size, the one way they start here. "
@@ -8901,6 +8920,7 @@ internal fun ShortcutSettingsDialogScreen(
                                 tvMatchRes = tvMatchRes,
                                 onTvMatchResChange = { tvMatchRes = it },
                             )
+                            6 -> ScLinuxComponentsTab(dp) { linuxComponentIds = it }
                         }
                     }
                 }
@@ -9084,6 +9104,7 @@ private fun shortcutTabIcon(title: String): ImageVector = when (title) {
     "Advanced" -> Icons.Filled.Tune
     "Controller" -> Icons.Filled.SportsEsports
     "TV" -> Icons.Filled.Tv
+    "Components" -> Icons.Filled.Layers
     else -> Icons.Filled.Settings
 }
 
@@ -9336,6 +9357,308 @@ private fun ScWinComponentsTab(components: androidx.compose.runtime.snapshots.Sn
                 }
             }
         }
+    }
+}
+
+// ───── Components (Steam (Linux) entries) ─────
+// FEX, DXVK and VKD3D-Proton per Proton of the Linux Steam client (LinuxComponents). What each Proton
+// the client runs games with uses, swapped for a package from the Nightlies "-Linux" releases or an
+// imported .wcp, and put back from the Proton's own files, which are saved as an original per Proton
+// build the first time this tab opens. A choice applies the next time a game starts - Proton copies
+// DXVK and VKD3D into the prefix at every launch - and is checked again by the Proton launch wrappers
+// right before each start, so the client's own start-up runs cannot undo it. Nothing here is an
+// extra on the entry: the choices belong to the Protons, which every Linux entry shares. The in-game
+// drawer's Components tab swaps between what is stored here; downloading, importing and deleting
+// live only on this tab. (From The412Banner/DroidDeck.)
+@Composable
+private fun ScLinuxComponentsTab(dp: SettingsDpad, onDpadIds: (List<String>) -> Unit) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var snapshot by remember { mutableStateOf<com.winlator.star.linux.LinuxComponents.Snapshot?>(null) }
+    var catalog by remember { mutableStateOf<List<com.winlator.star.linux.LinuxComponents.CatalogItem>>(emptyList()) }
+    var catalogAt by remember { mutableStateOf(0L) }
+    var protonId by remember { mutableStateOf<String?>(null) }
+    var busy by remember { mutableStateOf<String?>(null) }
+    var checking by remember { mutableStateOf(false) }
+    var downloads by remember { mutableStateOf<Map<String, Int>>(emptyMap()) }
+    // A swap, restore or delete asks first: a stray A press on a controller must never change a Proton.
+    var confirm by remember { mutableStateOf<Triple<String, String, () -> Unit>?>(null) }
+    fun toast(text: String) = Toast.makeText(context, text, Toast.LENGTH_LONG).show()
+
+    // Reads the Protons off the UI thread, first running the swaps a closed game was holding back; the
+    // Nightlies list comes from its cache. The first open also saves every Proton's originals.
+    fun refresh(snapshotFirst: Boolean = false) {
+        scope.launch {
+            val result = withContext(Dispatchers.IO) {
+                if (snapshotFirst) runCatching { com.winlator.star.linux.LinuxComponents.snapshotAll(context) }
+                val applied = runCatching { com.winlator.star.linux.LinuxComponents.applyQueued(context) }.getOrDefault(emptyList())
+                val snap = runCatching { com.winlator.star.linux.LinuxComponents.snapshot(context) }.getOrNull()
+                val cat = runCatching { com.winlator.star.linux.LinuxComponents.catalog(context, false) }.getOrNull()
+                Triple(applied, snap, cat)
+            }
+            val (applied, snap, cat) = result
+            snapshot = snap ?: com.winlator.star.linux.LinuxComponents.Snapshot(emptyList(), emptyList())
+            if (cat != null && cat.fetchedAt > 0) { catalog = cat.items; catalogAt = cat.fetchedAt }
+            if (protonId == null || snap?.protons?.none { it.proton.id == protonId } == true) protonId = snap?.protons?.firstOrNull()?.proton?.id
+            if (applied.isNotEmpty()) toast("Applied: " + applied.joinToString(", "))
+        }
+    }
+    // One action at a time; what happened is said in a toast, then the Protons are read again.
+    fun action(label: String, work: () -> String) {
+        if (busy != null) return
+        busy = label
+        scope.launch {
+            val message = withContext(Dispatchers.IO) { runCatching(work).getOrElse { e -> "$label failed: ${e.message ?: e.javaClass.simpleName}" } }
+            busy = null
+            toast(message)
+            refresh()
+        }
+    }
+    fun refreshCatalog() {
+        if (checking) return
+        checking = true
+        scope.launch {
+            val cat = withContext(Dispatchers.IO) { runCatching { com.winlator.star.linux.LinuxComponents.catalog(context, true) }.getOrNull() }
+            checking = false
+            if (cat == null || cat.items.isEmpty()) toast("The Nightlies could not be reached")
+            else { catalog = cat.items; catalogAt = cat.fetchedAt }
+        }
+    }
+    fun download(item: com.winlator.star.linux.LinuxComponents.CatalogItem) {
+        if (downloads.containsKey(item.file)) return
+        downloads = downloads + (item.file to -1)
+        scope.launch {
+            val message = withContext(Dispatchers.IO) {
+                runCatching {
+                    val pkg = com.winlator.star.linux.LinuxComponents.download(context, item) { pc ->
+                        scope.launch { if (downloads.containsKey(item.file)) downloads = downloads + (item.file to pc) }
+                    }
+                    "Stored ${pkg.version}"
+                }.getOrElse { e -> "Download failed: ${e.message ?: e.javaClass.simpleName}" }
+            }
+            downloads = downloads - item.file
+            toast(message)
+            refresh()
+        }
+    }
+    val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        val path = if (result.resultCode == Activity.RESULT_OK) InAppFilePicker.pickedPath(result.data) else null
+        if (path != null) action("Importing") {
+            "Imported " + com.winlator.star.linux.LinuxComponents.importPackage(context, File(path), File(path).name).version
+        }
+    }
+    LaunchedEffect(Unit) { refresh(snapshotFirst = true) }
+
+    val views = snapshot?.protons ?: emptyList()
+    val view = views.firstOrNull { it.proton.id == protonId } ?: views.firstOrNull()
+    val comps = com.winlator.star.linux.LinuxComponents.COMPONENTS
+    val labelOf = com.winlator.star.linux.LinuxComponents.LABEL
+    val build = view?.let { com.winlator.star.linux.LinuxComponents.safeName(it.proton.version) }
+    // Everything stored: this Proton's older-build originals (this build's is the way back and stays)
+    // and the packages, which every Proton shares.
+    val olderOriginals = view?.originals?.filter { it.protonVersion != build } ?: emptyList()
+    val packages = snapshot?.packages ?: emptyList()
+    val storedNames = packages.map { it.file }.toSet()
+    val available = catalog.filter { com.winlator.star.linux.LinuxComponents.safeName(it.file) !in storedNames }
+
+    // The ordered D-pad ids of everything drawn below, handed to the editor's root handler.
+    val ids = buildList {
+        add("cmpRefresh")
+        if (view != null) {
+            add("cmpProton")
+            for (comp in comps) {
+                add("cmp:$comp")
+                if (view.components.getValue(comp).queued != null) add("cmpCancel:$comp")
+            }
+            for (o in olderOriginals) add("cmpDelOrig:${o.comp}:${o.protonVersion}")
+            for (p in packages) add("cmpDel:${p.file}")
+            add("cmpImport")
+            for (d in available) if (!downloads.containsKey(d.file)) add("cmpDl:${d.file}")
+        }
+    }
+    SideEffect { onDpadIds(ids) }
+
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Components", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+            DpButton(dp, "cmpRefresh", onActivate = { refreshCatalog() }) {
+                TextButton(onClick = { refreshCatalog() }, enabled = !checking) { Text(if (checking) "Checking…" else "Check the Nightlies") }
+            }
+        }
+        Text(
+            "FEX, DXVK and VKD3D-Proton for each Proton the Steam client runs games with. "
+                + "Pick one to swap it in; it applies the next time a game starts, and waits for a game running on that Proton to close. "
+                + "Each Proton build's own files are kept as its original, so a Steam update never loses them, and your choice is put back "
+                + "before every launch if anything changed the Proton's files. Packages come from the Nightlies \"-Linux\" releases or an imported .wcp.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        when {
+            snapshot == null -> Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 8.dp)) {
+                CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(12.dp))
+                Text("Reading the Protons…", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            view == null -> Text(
+                "No Proton is installed in the Linux runtime yet. Start the Steam client once so it downloads its ARM64 Proton, "
+                    + "or add GE-Proton / CachyOS from the Linux Protons catalog.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(vertical = 8.dp)
+            )
+            else -> {
+                val p = view.proton
+                // Name and build together: two installs of one Proton would otherwise read the same.
+                val protonLabels = views.map { "${it.proton.name} · ${it.proton.version}" }
+                DpDrop(
+                    dp, "cmpProton", label = "Proton", options = protonLabels,
+                    selected = protonLabels[views.indexOf(view)],
+                    onSelect = { protonId = views[protonLabels.indexOf(it).coerceAtLeast(0)].proton.id }
+                )
+                Text(
+                    listOfNotNull(
+                        if (p.valve) "Valve's own Proton, replaced when Steam updates it; its originals are kept per build" else "Installed in compatibilitytools.d",
+                        "a game is running on it".takeIf { view.inUseByGame },
+                        view.reappliedAt.takeIf { it > 0 }?.let {
+                            "re-applied at launch " + java.text.DateFormat.getTimeInstance(java.text.DateFormat.SHORT).format(java.util.Date(it * 1000))
+                        },
+                    ).joinToString(" · "),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(4.dp))
+                for (comp in comps) {
+                    val st = view.components.getValue(comp)
+                    val originals = view.originals.filter { it.comp == comp }
+                    val stored = packages.filter { it.comp == comp }
+                    // Value -> label. Originals by build, then the stored packages by version - by file name
+                    // where two packages share a version, so the dropdown never offers one label twice.
+                    val versions = stored.groupingBy { it.version }.eachCount()
+                    val options = originals.map { ("orig:" + it.protonVersion) to (if (it.protonVersion == build) "Original" else "Original · ${it.protonVersion}") } +
+                        stored.map { it.file to (if ((versions[it.version] ?: 0) > 1) it.file.removeSuffix(".wcp") else it.version) }
+                    val current = st.activeFile ?: "orig:$build"
+                    val labels = options.map { it.second }
+                    val selectedLabel = options.firstOrNull { it.first == current }?.second ?: st.inUse
+                    fun pick(label: String) {
+                        val value = options.firstOrNull { it.second == label }?.first ?: return
+                        if (value == current && st.queued == null) return
+                        val waits = if (view.inUseByGame) " A game is running on this Proton, so it waits until the game closes." else " It applies the next time a game starts."
+                        if (value.startsWith("orig:")) {
+                            val v = value.removePrefix("orig:")
+                            confirm = Triple("Restore ${labelOf[comp]}?", "Put the $v original back into ${p.name}?$waits") {
+                                action("Restoring") { com.winlator.star.linux.LinuxComponents.restore(context, p.id, comp, v) }
+                            }
+                        } else {
+                            confirm = Triple("Swap ${labelOf[comp]}?", "Put $label into ${p.name}? Its shipped files stay saved as an original bundle.$waits") {
+                                action("Swapping") { com.winlator.star.linux.LinuxComponents.swap(context, p.id, value) }
+                            }
+                        }
+                    }
+                    if (options.isEmpty()) {
+                        Text("${labelOf[comp]}: nothing stored yet (${st.detected})", fontSize = 13.sp)
+                        continue
+                    }
+                    DpDrop(
+                        dp, "cmp:$comp", label = "${labelOf[comp]} · in use: ${st.inUse}", options = labels,
+                        selected = selectedLabel, onSelect = { pick(it) }, enabled = busy == null
+                    )
+                    Text(
+                        listOf(st.detected, st.detail).filter { it.isNotEmpty() }.joinToString(" · "),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    if (st.queued != null) Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                        Text("Next: ${st.queued} · after the game closes", fontSize = 12.sp, color = MaterialTheme.colorScheme.primary, modifier = Modifier.weight(1f))
+                        val cancel = { action("Cancelling") { com.winlator.star.linux.LinuxComponents.cancelQueued(context, p.id, comp); "The waiting swap was cancelled." } }
+                        DpButton(dp, "cmpCancel:$comp", onActivate = cancel) { TextButton(onClick = cancel) { Text("Cancel") } }
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+
+                Text("Stored", style = MaterialTheme.typography.titleSmall)
+                if (olderOriginals.isEmpty() && packages.isEmpty()) Text(
+                    "Nothing stored yet. Each Proton's own files were saved as its original when this tab opened.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                for (o in olderOriginals) {
+                    val id = "cmpDelOrig:${o.comp}:${o.protonVersion}"
+                    val remove = {
+                        confirm = Triple("Delete this original?", "The ${o.protonVersion} original of ${labelOf[o.comp]} belongs to an earlier build of ${p.name}. The installed build's original is always kept.") {
+                            action("Deleting") { com.winlator.star.linux.LinuxComponents.deleteOriginal(context, p.id, o.comp, o.protonVersion) }
+                        }
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                        Column(Modifier.weight(1f)) {
+                            Text("${labelOf[o.comp]} · Original · ${o.protonVersion}", fontSize = 13.sp)
+                            Text("earlier build of ${p.name} · " + String.format("%.1f MB", o.size / 1048576.0), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        DpButton(dp, id, onActivate = remove) { TextButton(onClick = remove) { Text("Delete") } }
+                    }
+                }
+                for (s in packages) {
+                    val inUseBy = views.filter { it.components[s.comp]?.activeFile == s.file }.map { it.proton.name }
+                    val remove = {
+                        confirm = Triple("Delete ${s.version}?", "Its package file is removed from the app. You can download it again any time.") {
+                            action("Deleting") { com.winlator.star.linux.LinuxComponents.deletePackage(context, s.file) }
+                        }
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                        Column(Modifier.weight(1f)) {
+                            Text("${labelOf[s.comp]} · ${s.version}", fontSize = 13.sp)
+                            Text(
+                                String.format("%.1f MB", s.size / 1048576.0) + (if (inUseBy.isNotEmpty()) " · in use by " + inUseBy.joinToString(", ") else ""),
+                                fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        DpButton(dp, "cmpDel:${s.file}", onActivate = remove) { TextButton(onClick = remove, enabled = inUseBy.isEmpty()) { Text("Delete") } }
+                    }
+                }
+                val pickFile = { importLauncher.launch(InAppFilePicker.buildIntent(context, arrayOf("wcp"), "Choose a component package (-linux .wcp)")) }
+                DpButton(dp, "cmpImport", onActivate = pickFile) { TextButton(onClick = pickFile) { Text("Import a .wcp…") } }
+                Spacer(Modifier.height(8.dp))
+
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                    Text("On the Nightlies", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+                    Text(
+                        if (checking) "checking…" else if (catalogAt > 0) "checked " + java.text.DateFormat.getTimeInstance(java.text.DateFormat.SHORT).format(java.util.Date(catalogAt * 1000)) else "never checked",
+                        fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                if (available.isEmpty()) Text(
+                    if (catalogAt == 0L) "Check the Nightlies to list the packages." else "Nothing new since the last check.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                for (d in available) {
+                    val progress = downloads[d.file]
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                        Column(Modifier.weight(1f)) {
+                            Text("${labelOf[d.comp]} · " + d.file.removeSuffix(".wcp"), fontSize = 13.sp)
+                            Text("${d.release} · " + String.format("%.1f MB", d.size / 1048576.0), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        if (progress == null) {
+                            val start = { download(d) }
+                            DpButton(dp, "cmpDl:${d.file}", onActivate = start) { TextButton(onClick = start, enabled = busy == null) { Text("Download") } }
+                        } else Column(horizontalAlignment = Alignment.End, modifier = Modifier.width(96.dp)) {
+                            Text(if (progress < 0) "…" else "$progress%", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Spacer(Modifier.height(4.dp))
+                            if (progress < 0) LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                            else LinearProgressIndicator(progress = { progress / 100f }, modifier = Modifier.fillMaxWidth())
+                        }
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+            }
+        }
+    }
+
+    confirm?.let { (title, body, go) ->
+        AlertDialog(
+            onDismissRequest = { confirm = null },
+            title = { Text(title) },
+            text = { Text(body, fontSize = 14.sp) },
+            confirmButton = { TextButton(onClick = { confirm = null; go() }) { Text(title.substringBefore(' ')) } },
+            dismissButton = { TextButton(onClick = { confirm = null }) { Text("Cancel") } },
+        )
     }
 }
 

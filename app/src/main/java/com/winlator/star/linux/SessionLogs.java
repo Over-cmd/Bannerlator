@@ -41,6 +41,12 @@ import java.util.Locale;
  * account's session token in it ("Using JWT ..."). They are copied here by the app at teardown
  * whatever ended the session, through {@link LogRedactor}. {@code loginusers.vdf},
  * {@code config.vdf} and {@code ssfn*} are never copied.
+ *
+ * <p>The redactor is told whose logs these are first ({@link LogRedactor#learnFromRuntime}): the
+ * device's public addresses from the session's link file and the account names from the client's
+ * {@code loginusers.vdf}, so "external address = '...'" and "OnLoginStateChange &lt;account&gt;"
+ * lines come out clean. The folder's own files - written as they happened - go through the same
+ * redactor once the session is over ({@link #scrubFolder}). (From The412Banner/DroidDeck.)
  */
 public final class SessionLogs {
     private static final String TAG = "SessionLogs";
@@ -130,7 +136,7 @@ public final class SessionLogs {
     public static void writeNetworkReport(Context context, File target) {
         StringBuilder b = new StringBuilder();
         b.append("Network as the session starts\n=============================\n");
-        b.append("The SSID is deliberately not recorded. Transport, address families and DNS are.\n\n");
+        b.append("The SSID is deliberately not recorded, and addresses appear as their kind, not their numbers.\n\n");
         try {
             android.net.ConnectivityManager cm = (android.net.ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
             android.net.Network network = cm != null ? cm.getActiveNetwork() : null;
@@ -176,7 +182,9 @@ public final class SessionLogs {
         } else {
             b.append("etc/resolv.conf does not exist yet.\n");
         }
-        write(target, b.toString());
+        // Addresses as their kind ("<public IPv6>"), never the numbers: a public address is the
+        // user's, and this file goes into a folder meant to be shared as it is.
+        write(target, LogRedactor.INSTANCE.describeAddresses(b.toString()));
     }
 
     /** This process's own logcat, streamed to {@code target} until {@link #stopAppLog()}. */
@@ -215,6 +223,8 @@ public final class SessionLogs {
             // Cheapest and most valuable first: a session that ends while this runs still has these.
             dumpCrashBuffer(new File(dir, "crash.log"));
             if (pulseLog != null && pulseLog.isFile()) copyLines(pulseLog, new File(dir, "audio.log"), false, 0);
+            // Whose logs these are, before a line of the client's is copied.
+            LogRedactor.INSTANCE.learnFromRuntime(LinuxRuntime.rootDir(context));
             File logs = new File(LinuxRuntime.rootDir(context), "root/.local/share/Steam/logs");
             File[] files = logs.isDirectory() ? logs.listFiles() : null;
             if (files != null) {
@@ -235,12 +245,54 @@ public final class SessionLogs {
                 }
                 Log.i(TAG, "collected " + n + " Steam log(s), scrubbed, into " + out);
             }
+            // The app's own logcat has to stop before its file is rewritten.
+            stopAppLog();
+            scrubFolder(dir);
         } catch (Exception e) {
             Log.w(TAG, "collecting session artifacts", e);
         } finally {
             stopAppLog();
             if (current == dir) current = null;
         }
+    }
+
+    /**
+     * The folder's own files (session.log, app.log, device.txt, fake-input.txt, ...) were written
+     * as they happened, unscrubbed; once the session is over every one goes through the redactor
+     * so the folder can be shared as it is. A file is rewritten only when a line changed. steam/
+     * was scrubbed on the way in, and a file that is not text, or is huge, is left alone.
+     */
+    private static void scrubFolder(File dir) {
+        File[] files = dir.listFiles();
+        if (files == null) return;
+        int rewritten = 0;
+        for (File f : files) {
+            if (!f.isFile() || f.getName().startsWith(".") || !LogRedactor.INSTANCE.isText(f)) continue;
+            File tmp = new File(dir, "." + f.getName() + ".scrub");
+            boolean changed = false;
+            try (BufferedReader r = new BufferedReader(new FileReader(f));
+                 BufferedWriter w = new BufferedWriter(new FileWriter(tmp))) {
+                String line;
+                while ((line = r.readLine()) != null) {
+                    String clean = LogRedactor.INSTANCE.redact(line);
+                    if (!changed && !clean.equals(line)) changed = true;
+                    w.write(clean);
+                    w.newLine();
+                }
+            } catch (IOException e) {
+                Log.w(TAG, "could not scrub " + f.getName(), e);
+                //noinspection ResultOfMethodCallIgnored
+                tmp.delete();
+                continue;
+            }
+            if (changed && tmp.renameTo(f)) {
+                rewritten++;
+            } else {
+                //noinspection ResultOfMethodCallIgnored
+                tmp.delete();
+            }
+        }
+        if (rewritten > 0) Log.i(TAG, "scrubbed " + rewritten + " session file(s) in " + dir.getName());
     }
 
     private static final long TAIL_ABOVE_BYTES = 512L * 1024;
