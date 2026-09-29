@@ -10450,8 +10450,9 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // Initialize fake input for controller emulation - MUST be before Wine starts!
         File devInputDir = new File(imageFs.getRootDir(), "dev/input");
         if (devInputDir.exists() || devInputDir.mkdirs()) {
-             // Cleanup moved to onCreate
-        }
+		}
+
+        // Cleanup moved to onCreate
 
         // Manual per-device slot overrides (in-game Players sub-tab), per-container — pushed BEFORE
         // pre-assignment so launch-time slotting honors the user's pins/ignores first (a pinned pad
@@ -10543,6 +10544,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
         dxwrapperConfig = null;
 
     }
+}
 
     private void createWrapperScript(String path, String content) {
         File scriptFile = new File(path);
