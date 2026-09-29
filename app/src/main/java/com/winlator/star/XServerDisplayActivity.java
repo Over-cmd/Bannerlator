@@ -154,7 +154,6 @@ import com.winlator.star.xserver.Window;
 import com.winlator.star.xserver.WindowManager;
 import com.winlator.star.xserver.XKeycode;
 import com.winlator.star.xserver.XServer;
-import com.winlator.star.renderer.GPUImage;
 
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -1550,6 +1549,8 @@ public class XServerDisplayActivity extends AppCompatActivity {
     private boolean waylandMode = false;
     // The session runs gamescope in the Linux runtime instead of Wine; the compositor is its display.
     private boolean gamescopeMode = false;
+    // Bumped per compositor bring-to-front request, so a delayed repeat never re-raises an older window.
+    private volatile int waylandBringToFrontSeq = 0;
     /** This Linux session's log folder, for the teardown collection. */
     private File linuxSessionLogDir;
     /** The option files the in-game drawer rewrites while a Linux session runs (LinuxTuning.writeLive). */
@@ -4584,7 +4585,6 @@ public class XServerDisplayActivity extends AppCompatActivity {
         if ("alsa".equals(d)) return "ALSA";
         if ("pulseaudio".equals(d)) return "PulseAudio";
         if ("directaudio".equals(d)) return "DirectAudio";
-        if ("nativeaudio".equals(d)) return "Native Audio (Wrapper)"; // 🚨 SINCRO LIMPIA: Solo retorna el letrero
         return d == null ? "" : d;
     }
 
@@ -8449,6 +8449,8 @@ public class XServerDisplayActivity extends AppCompatActivity {
                 String name = atm.getDriverName(driverId);
                 String ver = atm.getDriverVersion(driverId);
                 comp = (name == null || name.isEmpty() ? driverId : name) + (ver == null || ver.isEmpty() ? "" : " " + ver);
+                if (com.winlator.star.core.WaylandAdapter.isProprietaryBlob(this, driverId))
+                    comp += " (screen on a bundled Turnip: the blob can't import frames)";
             }
         } catch (Exception e) {
             Log.w("XServerDisplayActivity", "wayland: compositor driver name unavailable", e);
@@ -8456,7 +8458,19 @@ public class XServerDisplayActivity extends AppCompatActivity {
         String game;
         try {
             String choice = com.winlator.star.core.WaylandGameDriver.effectiveChoice(container, shortcut);
-            if (com.winlator.star.core.WaylandGameDriver.isImported(choice)) {
+            if (Container.WAYLAND_GAME_DRIVER_ADAPTER.equals(choice)) {
+                String gdc = (shortcut != null)
+                        ? shortcut.getExtra("graphicsDriverConfig", container.getGraphicsDriverConfig())
+                        : container.getGraphicsDriverConfig();
+                String driverId = com.winlator.star.contentdialog.GraphicsDriverConfigDialog.getVersion(gdc);
+                String why = com.winlator.star.core.WaylandAdapter.unusableReason(this, driverId);
+                if (why == null) game = "adapter on " + comp;
+                else {
+                    String v = com.winlator.star.core.WaylandGameDriver.autoVariantIfKnown();
+                    game = (v == null ? "Auto (by GPU)" : com.winlator.star.core.WaylandGameDriver.variantShortName(v) + " (auto)")
+                            + " - adapter off: " + why;
+                }
+            } else if (com.winlator.star.core.WaylandGameDriver.isImported(choice)) {
                 com.winlator.star.core.WaylandGameDriver.Resolution r =
                         com.winlator.star.core.WaylandGameDriver.resolve(this, choice);
                 game = r.icdPath != null
@@ -8568,6 +8582,20 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // delivers deltas exactly like Relative Mouse (and captures a physical mouse); when it
         // ends, the X pointer (the absolute input's source) is re-synced to where the compositor's
         // pointer ended up (a SetCursorPos warp, typically), so absolute input resumes from there.
+        // The compositor focused a window by itself (new window / the focused one closed): have
+        // winhandler.exe bring it to the front inside Wine, as DesktopHelper does on every X11 map,
+        // and once more a second later (idempotent) unless a newer window asked meanwhile.
+        com.winlator.star.wayland.WaylandCompositor.setBringToFrontListener((exe, hwnd) -> {
+            final int seq = ++waylandBringToFrontSeq;
+            Log.i("XServerDisplayActivity", "wayland: bring to front: " + exe + " hwnd 0x" + Long.toHexString(hwnd));
+            WinHandler wh = winHandler;
+            if (wh == null) { Log.w("XServerDisplayActivity", "wayland: bring to front: no WinHandler"); return; }
+            wh.bringToFront(exe, hwnd);
+            new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
+                WinHandler w = winHandler;
+                if (w != null && seq == waylandBringToFrontSeq) w.bringToFront(exe, hwnd);
+            }, 1000L);
+        });
         com.winlator.star.wayland.WaylandCompositor.setPointerLockListener((locked, x, y) -> runOnUiThread(() -> {
             if (xServer == null) return;
             waylandPointerLocked = locked;
@@ -8751,7 +8779,13 @@ public class XServerDisplayActivity extends AppCompatActivity {
                     ? shortcut.getExtra("graphicsDriverConfig", container.getGraphicsDriverConfig())
                     : container.getGraphicsDriverConfig();
             String driverId = com.winlator.star.contentdialog.GraphicsDriverConfigDialog.getVersion(gdc);
-            if (driverId != null && !driverId.isEmpty() && !driverId.equals("System")) {
+            if (com.winlator.star.core.WaylandAdapter.isProprietaryBlob(this, driverId)) {
+                // The Qualcomm blob (v819) has no dma-buf import either: same black screen as System
+                // (device-seen 2026-09-25). The pick still stands for the game's side; the compositor
+                // takes the bundled Turnip below instead.
+                Log.w("XServerDisplayActivity", "wayland: " + driverId + " is the proprietary Qualcomm driver, "
+                        + "which cannot import the game's frames; the compositor uses a bundled Turnip");
+            } else if (driverId != null && !driverId.isEmpty() && !driverId.equals("System")) {
                 com.winlator.star.contents.AdrenotoolsManager atm =
                         new com.winlator.star.contents.AdrenotoolsManager(this);
                 driverPath = atm.getDriverPath(driverId);
@@ -8844,6 +8878,19 @@ public class XServerDisplayActivity extends AppCompatActivity {
             boolean ubwc = !(ub != null && (ub.equals("0") || ub.equalsIgnoreCase("false") || ub.equalsIgnoreCase("off")));
             com.winlator.star.wayland.WaylandCompositor.nativeSetUbwc(ubwc);
             if (!ubwc) Log.i("XServerDisplayActivity", "wayland: compressed (UBWC) game buffers disabled by BANNER_WAYLAND_UBWC");
+            // Windows the compositor focuses by itself are made Wine's foreground window: by default
+            // through winhandler.exe (the X11 path's DesktopHelper does the same on every map), "click"
+            // = one synthetic click instead, 0/false/off = keyboard focus only. Wine sessions only: in a
+            // Linux session the window is gamescope and there is no winhandler.
+            String aa = env != null ? env.get("BANNER_WAYLAND_AUTO_ACTIVATE") : null;
+            int autoActivate = com.winlator.star.wayland.WaylandCompositor.AUTO_ACTIVATE_BRING_TO_FRONT;
+            if (gamescopeMode || (aa != null && (aa.equals("0") || aa.equalsIgnoreCase("false") || aa.equalsIgnoreCase("off"))))
+                autoActivate = com.winlator.star.wayland.WaylandCompositor.AUTO_ACTIVATE_OFF;
+            else if (aa != null && aa.equalsIgnoreCase("click"))
+                autoActivate = com.winlator.star.wayland.WaylandCompositor.AUTO_ACTIVATE_CLICK;
+            com.winlator.star.wayland.WaylandCompositor.nativeSetAutoActivate(autoActivate);
+            if (aa != null && !gamescopeMode)
+                Log.i("XServerDisplayActivity", "wayland: BANNER_WAYLAND_AUTO_ACTIVATE=" + aa + " -> mode " + autoActivate);
             // Debug: BANNER_WAYLAND_NO_RENDER_NODE=1 makes the compositor name no DRM device in its
             // dma-buf feedback (main device 0:0), which is what a phone that exposes no /dev/dri
             // node to apps sends. Reproduces those phones' OpenGL path on a device that has one.
@@ -10400,15 +10447,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
             // by changeWineAudioDriver(); route changes are handled inside the driver.
             overlayDirectAudioDriver();   // ensure a supported layer (any 11.0-x / 10.0-4) has the bundled driver before the guest loads it
             applyDirectAudioConfig(envVars);
-        } else if (audioDriver.equals("nativeaudio")) {
-            /* 🚨 ENLAZADOR ASÍNCRONO DE ALTA PRIORIDAD:
-               Llamamos de forma directa a la clase estática importada.
-               Esto limpia la firma ante el compilador de Kotlin/Java y quita el atasco. */
-            initNativeAudioWrapper();
         }
-    private static void initNativeAudioWrapper() {
-        // Implementation here
-    }
 
         // Turnip TU_DEBUG composition (per-container + per-game). Runs AFTER every env source is
         // merged (container DEFAULT_ENV_VARS, shortcut envVars, overrideEnvVars) so it unions with —
@@ -10452,9 +10491,8 @@ public class XServerDisplayActivity extends AppCompatActivity {
         // Initialize fake input for controller emulation - MUST be before Wine starts!
         File devInputDir = new File(imageFs.getRootDir(), "dev/input");
         if (devInputDir.exists() || devInputDir.mkdirs()) {
-		}
-
-        // Cleanup moved to onCreate
+             // Cleanup moved to onCreate
+        }
 
         // Manual per-device slot overrides (in-game Players sub-tab), per-container — pushed BEFORE
         // pre-assignment so launch-time slotting honors the user's pins/ignores first (a pinned pad
@@ -12559,12 +12597,14 @@ public class XServerDisplayActivity extends AppCompatActivity {
         adrenotoolsManager.setDriverById(envVars, imageFs, adrenoToolsDriverId);
     }
 
-    // Wayland GAME driver (the adrenotools driver above only feeds the compositor on Wayland: winewayland
-    // sets VK_ICD_FILENAMES itself). Resolve the container's waylandGameDriver extra (shortcut override
-    // first) into the Proton's BANNER_WAYLAND_VK_VARIANT / BANNER_WAYLAND_VK_ICD contract — Auto maps
-    // the device GPU to a bundled variant, imported: hands over an imported Linux ICD (missing import →
-    // Auto, logged). No-op on X11; waylandMode is final by here (gated on the layer above).
-    com.winlator.star.core.WaylandGameDriver.applyToLaunchEnv(this, envVars, container, shortcut, waylandMode);
+    // Wayland GAME driver (winewayland sets VK_ICD_FILENAMES itself). Resolve the container's
+    // waylandGameDriver extra (shortcut override first) into the Proton's BANNER_WAYLAND_VK_VARIANT /
+    // BANNER_WAYLAND_VK_ICD contract — adapter hands over the bundled Wayland adapter, which loads the
+    // adrenotools driver exported just above (so that one pick feeds compositor AND game; System / a
+    // Qualcomm blob → Auto, logged), Auto maps the device GPU to a bundled variant, imported: hands over
+    // an imported Linux ICD (missing import → Auto, logged). No-op on X11; waylandMode is final by here.
+    com.winlator.star.core.WaylandGameDriver.applyToLaunchEnv(this, envVars, container, shortcut, waylandMode,
+            adrenoToolsDriverId);
     // The Task Manager's CONTAINER block was built before this ran (setupUI); now Auto's variant is known.
     if (waylandMode) XServerDialogState.INSTANCE.setTmContainerInfo(buildTmContainerInfo());
 
