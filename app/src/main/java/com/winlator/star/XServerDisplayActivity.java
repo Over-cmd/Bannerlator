@@ -154,7 +154,7 @@ import com.winlator.star.xserver.Window;
 import com.winlator.star.xserver.WindowManager;
 import com.winlator.star.xserver.XKeycode;
 import com.winlator.star.xserver.XServer;
-import com.winlator.renderer.GPUImage;
+import com.winlator.star.renderer.GPUImage;
 
 import org.json.JSONArray;
 import org.json.JSONException;
