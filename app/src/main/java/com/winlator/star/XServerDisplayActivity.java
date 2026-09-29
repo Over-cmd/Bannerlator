@@ -10404,7 +10404,9 @@ public class XServerDisplayActivity extends AppCompatActivity {
             /* 🚨 ENLAZADOR ASÍNCRONO DE ALTA PRIORIDAD:
                Llamamos de forma directa a la clase estática importada.
                Esto limpia la firma ante el compilador de Kotlin/Java y quita el atasco. */
-    public static void initNativeAudioWrapper() {
+            initNativeAudioWrapper();
+        }
+    private static void initNativeAudioWrapper() {
         // Implementation here
     }
 
@@ -10510,7 +10512,6 @@ public class XServerDisplayActivity extends AppCompatActivity {
         String preloaderGameName = (shortcut != null) ? shortcut.name : container.getName();
         preloaderDialog.enterGuest("Waiting for " + preloaderGameName + " to render…");
         runOnUiThread(this::startLaunchTimers);
-		}
 
         // Wayland: the launch overlay must ALWAYS clear so the guest is visible — the compositor
         // present path (first-frame hook) may not fire for a shm-only desktop, and the guest must
