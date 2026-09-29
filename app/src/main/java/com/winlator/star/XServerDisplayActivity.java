@@ -10404,9 +10404,9 @@ public class XServerDisplayActivity extends AppCompatActivity {
             /* 🚨 ENLAZADOR ASÍNCRONO DE ALTA PRIORIDAD:
                Llamamos de forma directa a la clase estática importada.
                Esto limpia la firma ante el compilador de Kotlin/Java y quita el atasco. */
-            GPUImage.initNativeAudioWrapper();
-        }
-
+    public static void initNativeAudioWrapper() {
+        // Implementation here
+    }
 
         // Turnip TU_DEBUG composition (per-container + per-game). Runs AFTER every env source is
         // merged (container DEFAULT_ENV_VARS, shortcut envVars, overrideEnvVars) so it unions with —
