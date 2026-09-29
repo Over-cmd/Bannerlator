@@ -10510,6 +10510,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
         String preloaderGameName = (shortcut != null) ? shortcut.name : container.getName();
         preloaderDialog.enterGuest("Waiting for " + preloaderGameName + " to render…");
         runOnUiThread(this::startLaunchTimers);
+		}
 
         // Wayland: the launch overlay must ALWAYS clear so the guest is visible — the compositor
         // present path (first-frame hook) may not fire for a shm-only desktop, and the guest must
@@ -10544,7 +10545,6 @@ public class XServerDisplayActivity extends AppCompatActivity {
         dxwrapperConfig = null;
 
     }
-}
 
     private void createWrapperScript(String path, String content) {
         File scriptFile = new File(path);
