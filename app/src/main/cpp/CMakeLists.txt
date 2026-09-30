@@ -258,3 +258,11 @@ add_subdirectory(waylandcomp)
 
 # proot: the Linux runtime container (gamescope sessions); see proot/CMakeLists.txt.
 add_subdirectory(proot)
+
+# =============================================================================
+# 🚀 MOTOR DE AUDIO ASÍNCRONO MODULAR (NATIVE_AUDIO)
+# COMPILACIÓN AUTOMÁTICA BAJA LATENCIA MALI
+# =============================================================================
+add_library(native_audio SHARED native_audio.c)
+target_link_libraries(native_audio log aaudio)
+
