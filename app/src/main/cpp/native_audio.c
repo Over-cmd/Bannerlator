@@ -8,7 +8,7 @@
 #include <sys/resource.h> // 🚀 SEGURIDAD ANDROID: API para el control legal de prioridades
 #include <aaudio/AAudio.h>
 
-#define NATIVE_AUDIO_BUFFER_SIZE 16384 // 🚀 DUPLICAMOS EL BUFFER: Da más pulmón contra cortes
+#define NATIVE_AUDIO_BUFFER_SIZE 16384 // Búfer de 16KB para amortiguar ráfagas masivas
 #define NATIVE_AUDIO_CHANNELS 2
 #define NATIVE_AUDIO_RATE 48000
 
@@ -35,6 +35,22 @@ static void* wrapper_audio_playback_loop(void *arg) {
     // Fijamos la prioridad legal de Android a máxima velocidad de audio
     setpriority(PRIO_PROCESS, 0, -19);
 
+    // 🏗️ CONSTRUCCIÓN DEL SUMIDERO EN EL HILO AUDIO:
+    // Forzamos el arranque físico desde este hilo con contexto nativo legítimo
+    AAudioStreamBuilder *builder = NULL;
+    if (AAudio_createStreamBuilder(&builder) == AAUDIO_OK) {
+        AAudioStreamBuilder_setSampleRate(builder, NATIVE_AUDIO_RATE);
+        AAudioStreamBuilder_setChannelCount(builder, NATIVE_AUDIO_CHANNELS);
+        AAudioStreamBuilder_setFormat(builder, AAUDIO_FORMAT_PCM_I16);
+        AAudioStreamBuilder_setPerformanceMode(builder, AAUDIO_PERFORMANCE_MODE_NONE); // Modo Extensible compatible Mali
+        AAudioStreamBuilder_setSharingMode(builder, AAUDIO_SHARING_MODE_SHARED);
+
+        if (AAudioStreamBuilder_openStream(builder, &ctx->aaudio_stream) == AAUDIO_OK) {
+            AAudioStream_requestStart(ctx->aaudio_stream);
+        }
+        AAudioStreamBuilder_delete(builder);
+    }
+
     int16_t temp_buffer[512];
 
     while (ctx->is_running) {
@@ -52,8 +68,6 @@ static void* wrapper_audio_playback_loop(void *arg) {
         int samples_to_play = samples_available;
         if (samples_to_play > 512) samples_to_play = 512;
 
-        // 🚀 REPARACIÓN ATÓMICA DE COPIA: 
-        // Asignamos las muestras indexadas a [i] para llenar el buffer real de sonido
         for (int i = 0; i < samples_to_play; i++) {
             temp_buffer[i] = ctx->data[ctx->tail];
             ctx->tail = (ctx->tail + 1) % NATIVE_AUDIO_BUFFER_SIZE;
@@ -61,15 +75,22 @@ static void* wrapper_audio_playback_loop(void *arg) {
 
         pthread_mutex_unlock(&ctx->mutex);
 
-        // 🔊 AUDIO DIRECTO AL SILICIO:
+        // 🔊 AUDIO DIRECTO AL HARDWARE REAL:
         if (ctx->aaudio_stream && ctx->is_running) {
             int32_t num_frames = samples_to_play / NATIVE_AUDIO_CHANNELS;
             if (num_frames > 0) {
-                // Escribimos en AAudio con un timeout estricto de 5 milisegundos
                 AAudioStream_write(ctx->aaudio_stream, temp_buffer, num_frames, 5000000);
             }
         }
     }
+
+    // 🛑 CIERRE SEGURO DEL HARDWARE: AL salir del bucle, apagamos el flujo
+    if (ctx->aaudio_stream) {
+        AAudioStream_requestStop(ctx->aaudio_stream);
+        AAudioStream_close(ctx->aaudio_stream);
+        ctx->aaudio_stream = NULL;
+    }
+
     return NULL;
 }
 
@@ -82,26 +103,7 @@ void wrapper_native_audio_init(void) {
     g_audio_ctx->is_running = true;
     g_audio_ctx->aaudio_stream = NULL;
 
-    // 🚀 ORDEN DE HARDWARE CORREGIDO: Inicializamos el candado ANTES de arrancar el hilo
     pthread_mutex_init(&g_audio_ctx->mutex, NULL);
-
-    AAudioStreamBuilder *builder = NULL;
-    if (AAudio_createStreamBuilder(&builder) == AAUDIO_OK) {
-        AAudioStreamBuilder_setSampleRate(builder, NATIVE_AUDIO_RATE);
-        AAudioStreamBuilder_setChannelCount(builder, NATIVE_AUDIO_CHANNELS);
-        AAudioStreamBuilder_setFormat(builder, AAUDIO_FORMAT_PCM_I16);
-        // 🚀 COMPATIBILIDAD UNISOC/MALI:
-        // Ponemos MODE_NONE para activar el remuestreador seguro de Android y evitar
-        // que el mezclador del sistema (AudioFlinger) mutee los 16 bits de Windows.
-        AAudioStreamBuilder_setPerformanceMode(builder, AAUDIO_PERFORMANCE_MODE_NONE);
-        AAudioStreamBuilder_setSharingMode(builder, AAUDIO_SHARING_MODE_SHARED);
-
-        if (AAudioStreamBuilder_openStream(builder, &g_audio_ctx->aaudio_stream) == AAUDIO_OK) {
-            AAudioStream_requestStart(g_audio_ctx->aaudio_stream);
-        }
-        AAudioStreamBuilder_delete(builder);
-    }
-
     pthread_create(&g_audio_thread, NULL, wrapper_audio_playback_loop, g_audio_ctx);
 }
 
@@ -131,11 +133,6 @@ void wrapper_native_audio_terminate(void) {
 
     pthread_join(g_audio_thread, NULL);
 
-    if (g_audio_ctx->aaudio_stream) {
-        AAudioStream_requestStop(g_audio_ctx->aaudio_stream);
-        AAudioStream_close(g_audio_ctx->aaudio_stream);
-    }
-
     pthread_mutex_destroy(&g_audio_ctx->mutex);
     free(g_audio_ctx);
     g_audio_ctx = NULL;
@@ -150,7 +147,7 @@ JNIEXPORT void JNICALL
 Java_com_winlator_star_core_NativeAudio_write(JNIEnv *env, jclass clazz, jshortArray samples, jint count) {
     if (count <= 0 || samples == NULL) return;
     
-    // 🚀 ZONA CRÍTICA DIRECTA JNI: Bloqueamos la purga de memoria flotante para transferir a RAM pura
+    // ZONA CRÍTICA DIRECTA JNI: Evitamos copias flotantes en la transferencia
     jshort *body = (jshort *)(*env)->GetPrimitiveArrayCritical(env, samples, NULL);
     if (body != NULL) {
         wrapper_native_audio_write((const int16_t*)body, count);
