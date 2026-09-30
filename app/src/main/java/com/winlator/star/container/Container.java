@@ -571,7 +571,11 @@ public class Container {
     // force one; "imported:<id>" points at a driver imported on the Contents screen
     // (WaylandGameDriverManager). A shortcut may override with the same-named extra ("" = this).
     // Only consumed when the resolved display backend is Wayland.
+    // "adapter" = the bundled Wayland adapter (core.WaylandAdapter) on top of this container's own
+    // AdrenoTools graphics driver: one driver pick feeds the compositor and the game. New containers
+    // start on it; a stored "auto" (or no value: every container made before it) keeps Auto.
     public static final String WAYLAND_GAME_DRIVER_AUTO = "auto";
+    public static final String WAYLAND_GAME_DRIVER_ADAPTER = "adapter";
     public static final String WAYLAND_GAME_DRIVER_BUNDLED = "bundled";
     public static final String WAYLAND_GAME_DRIVER_BUNDLED_A7XX = "bundled-a7xx";
     public static final String WAYLAND_GAME_DRIVER_BUNDLED_A8XX = "bundled-a8xx";
@@ -587,10 +591,13 @@ public class Container {
         return v.isEmpty() ? WAYLAND_GAME_DRIVER_AUTO : v;
     }
 
-    /** "auto" (or null/"") clears the extra so the default stays an untouched default. */
+    /**
+     * null/"" clears the extra. "auto" is stored as written: an ABSENT value means "never chosen"
+     * (every container from before the adapter), which the editor's create/New Container Defaults
+     * forms fill with "adapter" — an explicit Auto must survive that.
+     */
     public void setWaylandGameDriver(String value) {
-        putExtra("waylandGameDriver",
-                value == null || value.isEmpty() || WAYLAND_GAME_DRIVER_AUTO.equals(value) ? null : value);
+        putExtra("waylandGameDriver", value == null || value.isEmpty() ? null : value);
     }
 
     // --- bionic-fg frame generation (per-container), stored in extraData ---

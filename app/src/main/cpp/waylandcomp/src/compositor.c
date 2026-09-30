@@ -273,6 +273,7 @@ struct surface {
 
     char *title;                            /* xdg_toplevel title, for the session log */
     int announced_vulkan;                   /* logged its first dmabuf frame */
+    int auto_activated;                     /* got its one synthetic activation click (auto_activate) */
     uint32_t hdr_fmt_logged;                /* HDR session: the buffer format last named in the log */
 };
 
@@ -320,6 +321,19 @@ volatile int g_ubwc = 1;
  * that exposes no /dev/dri node to apps does, to reproduce its OpenGL path here. Set from the app
  * before the compositor starts. */
 volatile int g_no_render_node;
+
+/* A program window the compositor focuses by itself must also become Wine's FOREGROUND window: in
+ * virtual-desktop mode wl_keyboard.enter does not do it (device-seen 2026-09-28/29). Modes, from
+ * BANNER_WAYLAND_AUTO_ACTIVATE in the container's environment (set from the app before the
+ * compositor starts):
+ *   AUTO_ACTIVATE_BRING_TO_FRONT (default) - ask the app to have winhandler.exe bring the window to
+ *       the front from inside Wine (banner_on_bring_to_front), like the X11 path's DesktopHelper;
+ *   AUTO_ACTIVATE_CLICK ("click") - one synthetic left click on the window instead (auto_activate);
+ *   AUTO_ACTIVATE_OFF ("0") - keyboard focus only. */
+#define AUTO_ACTIVATE_OFF 0
+#define AUTO_ACTIVATE_BRING_TO_FRONT 1
+#define AUTO_ACTIVATE_CLICK 2
+volatile int g_auto_activate = AUTO_ACTIVATE_BRING_TO_FRONT;
 
 /* The panel's refresh rate in mHz, from the app; wl_output advertises it so Wine's display modes
  * carry the real rate (games pick their saved 144 Hz mode, as on X11). 0 = 60 Hz. */
@@ -552,6 +566,13 @@ static void constraints_pointer_gone(struct wl_resource *pointer);
 static void relative_pointers_pointer_gone(struct wl_resource *pointer);
 static void constraints_focus_entered(struct wl_resource *target, struct wl_client *client);
 
+/* Window-manager style activation of new program windows; see "keyboard focus for new windows". */
+static void focus_new_window(struct surface *s);
+static void focus_topmost_if_unfocused(const char *why);
+static void auto_activate_schedule(struct surface *s);
+static void auto_activate_surface_gone(struct surface *s);
+static int64_t g_last_user_input_ns;        /* last real key / pointer / touch from the app (not synthetic) */
+
 /* ------------------------------------------------------------------ dmabuf buffers */
 
 #define FOURCC(a, b, c, d) \
@@ -657,6 +678,7 @@ static void map_toplevel(struct surface *s) {
     }
     wl_list_insert(g_toplevels.prev, &s->toplevel_link); /* new windows start on top */
     apply_zorder();
+    focus_new_window(s);
 }
 
 static void unmap_toplevel(struct surface *s) {
@@ -671,6 +693,7 @@ static void unmap_toplevel(struct surface *s) {
     wl_list_init(&s->toplevel_link);
     if (g_ime_click == s) g_ime_click = NULL;
     banner_text_input_refocus();
+    focus_topmost_if_unfocused("a window closed");
 }
 
 /* Let go of the surface's dmabuf content. paced = 1: the buffer was replaced, give it back on the
@@ -1069,6 +1092,7 @@ static void surface_resource_destroy(struct wl_resource *r) {
     if (g_grab == s) g_grab = NULL;
     if (g_key_target == s) g_key_target = NULL;
     if (g_ime_click == s) g_ime_click = NULL;
+    auto_activate_surface_gone(s);
     banner_text_input_surface_gone(r);
     if (g_desktop == s) { g_desktop = NULL; banner_log("desktop", "the desktop closed"); }
     if (g_hud_surface == s) { g_hud_surface = NULL; banner_on_game_surface(NULL, NULL); }
@@ -2446,6 +2470,7 @@ static void seat_get_keyboard(struct wl_client *c, struct wl_resource *r, uint32
     }
     if (wl_resource_get_version(k) >= WL_KEYBOARD_REPEAT_INFO_SINCE_VERSION)
         wl_keyboard_send_repeat_info(k, 25, 500);
+    focus_topmost_if_unfocused("its keyboard arrived after the window");
 }
 static void touch_res_destroy(struct wl_resource *r) {
     for (int i = 0; i < g_ntouches; i++)
@@ -2580,6 +2605,95 @@ static void keyboard_focus(struct wl_resource *target) {
     banner_clipboard_keyboard_focus(client); /* wl_data_device selection follows focus */
 }
 
+/* ------------------------------------------------------------------ keyboard focus for new windows
+ * Keyboard focus used to move only in key_event(), so a window that opened got no wl_keyboard.enter
+ * until the first key or click. winewayland then keeps it inactive, and a game that pauses when it
+ * loses focus (DiRT Showdown: black, muted, ~19 fps) waits for a tap. Like a window manager, a new
+ * program window is activated when it maps, and when the focused window closes (or the program only
+ * binds its wl_keyboard after mapping) the topmost program window left takes over. Left alone:
+ *   - explorer's windows (desktop, taskbar, Start menu: the desktop's process) and small windows
+ *     (tooltips, menus, drop-down lists), which Windows doesn't activate either;
+ *   - a window opened BENEATH others (the new window must be the topmost program window);
+ *   - while a pointer lock/confine holds (a mouse-look game keeps the input it grabbed);
+ *   - while the user is typing: a key in the last 2 s. */
+
+#define FOCUS_MIN_W 200
+#define FOCUS_MIN_H 150
+#define FOCUS_TYPING_NS 2000000000LL
+
+static int64_t g_last_key_ns;               /* when key_event last delivered a key */
+static int constraint_active(void);
+
+static int is_shell_window(const struct surface *s) {
+    return g_desktop && s != g_desktop
+        && wl_resource_get_client(s->resource) == wl_resource_get_client(g_desktop->resource);
+}
+
+static int focusable_window(const struct surface *s) {
+    int w, h;
+    if (!s->mapped || s == g_desktop || s->role != ROLE_TOPLEVEL || is_shell_window(s)) return 0;
+    surface_size(s, &w, &h);
+    return w >= FOCUS_MIN_W && h >= FOCUS_MIN_H;
+}
+
+static struct surface *topmost_program_window(void) {
+    struct surface *s;
+    wl_list_for_each_reverse(s, &g_toplevels, toplevel_link)
+        if (s != g_desktop && !is_shell_window(s)) return s;
+    return NULL;
+}
+
+/* Some wl_keyboard is focused on a live program window or the desktop. */
+static int keyboard_focus_held(void) {
+    for (int i = 0; i < g_nkbs; i++) {
+        struct surface *f = g_kbs[i].focus ? wl_resource_get_user_data(g_kbs[i].focus) : NULL;
+        if (f && (f->mapped || f == g_desktop)) return 1;
+    }
+    return 0;
+}
+
+static void activate_window(struct surface *s, const char *why) {
+    if (!keyboard_for(wl_resource_get_client(s->resource))) return;
+    g_key_target = s;
+    g_ime_click = s;                        /* text input follows the active window, as after a click */
+    keyboard_focus(s->resource);
+    banner_text_input_refocus();
+    char name[160];
+    describe(s, name, sizeof(name));
+    banner_log("window", "focused %s (%s)", name, why);
+    if (g_auto_activate == AUTO_ACTIVATE_BRING_TO_FRONT) {
+        /* winhandler.exe matches the program by its exe name (lower case, as winex11's WM_CLASS gives
+         * it on X11) and prefers the hwnd when it has one (0 = unknown: name only). */
+        char exe[128];
+        const char *prog = client_name(wl_resource_get_client(s->resource));
+        size_t i;
+        for (i = 0; prog[i] && i < sizeof(exe) - 1; i++)
+            exe[i] = (prog[i] >= 'A' && prog[i] <= 'Z') ? (char)(prog[i] + 32) : prog[i];
+        exe[i] = 0;
+        banner_log("window", "bring to front: %s hwnd %#x", exe, s->hwnd);
+        banner_on_bring_to_front(exe, s->hwnd);
+    } else if (g_auto_activate == AUTO_ACTIVATE_CLICK) {
+        auto_activate_schedule(s);
+    }
+}
+
+static void focus_new_window(struct surface *s) {
+    if (!focusable_window(s) || topmost_program_window() != s) return;
+    if (constraint_active()) return;
+    /* No text-input guard: winewayland enables zwp_text_input on every focused window (cursor rect
+     * 0,0 0x0), so "a text input is enabled" is always true; the recent-key test covers typing. */
+    if (g_last_key_ns && now_ns() - g_last_key_ns < FOCUS_TYPING_NS && keyboard_focus_held()) return;
+    activate_window(s, "new window");
+}
+
+/* Nothing holds keyboard focus (the focused window closed, or a program's wl_keyboard arrived after
+ * its window mapped): the topmost program window takes it. */
+static void focus_topmost_if_unfocused(const char *why) {
+    if (keyboard_focus_held() || constraint_active()) return;
+    struct surface *s = topmost_program_window();
+    if (s && focusable_window(s)) activate_window(s, why);
+}
+
 /* ------------------------------------------------------------------ pointer constraints
  * zwp_pointer_constraints_v1 and zwp_relative_pointer_manager_v1: what winewayland uses for
  * SetCursorPos, ClipCursor and hidden-cursor (mouse-look) games.
@@ -2613,6 +2727,7 @@ struct constraint {
 };
 static struct wl_list g_constraints;
 static struct constraint *g_active_constraint;
+static int constraint_active(void) { return g_active_constraint != NULL; }
 
 struct relative_pointer {
     struct wl_list link;                    /* g_relative_pointers */
@@ -2955,10 +3070,14 @@ static int send_relative_motion(struct wl_client *client, double dx, double dy) 
  * x,y are scene coordinates; with `relative` they are a delta. While a lock holds the pointer
  * stays put and the delta (or the change between absolute positions) becomes relative motion
  * for the locking program; a confine keeps the pointer inside its area. */
+static int g_synthetic_input;                /* auto_activate's click is being delivered */
+
 static void pointer_input(double x, double y, int relative, uint32_t button, int pressed) {
     struct surface *target;
     struct constraint *k = g_active_constraint;
     double dx, dy;
+
+    if (!g_synthetic_input) g_last_user_input_ns = now_ns();
 
     if (relative) {
         dx = x; dy = y;
@@ -3038,6 +3157,91 @@ static void pointer_button(uint32_t button, int pressed) {
     pointer_input(0, 0, 1, button, pressed);
 }
 
+/* ------------------------------------------------------------------ auto_activate
+ * wl_keyboard.enter alone does not make a Wine window foreground in our virtual-desktop mode: all
+ * pointer input goes through explorer's desktop surface, and it is Wine's MOUSE activation of the
+ * window under the click that brings it forward (device-seen 2026-09-28: DiRT Showdown's splash
+ * closed, Wine handed activation to explorer's taskbar, the game sat paused until a tap). So a
+ * window the compositor focuses by itself (focus_new_window / focus_topmost_if_unfocused) also gets
+ * ONE left click, delivered exactly like a tap (pointer_input: the desktop surface in desktop mode,
+ * else the window under the point) at the window's top-left interior corner (x+2, y+2), and the
+ * pointer goes back to where it was. The click waits AUTO_ACTIVATE_DELAY_MS (3 s) so Wine's own reaction
+ * to the window change settles (explorer takes and drops a pointer lock right after a splash
+ * closes), retries while a lock/confine holds, and is dropped when the window is gone or no longer
+ * the topmost program window or real input arrived in the last 2 s. Once per window. Only with
+ * BANNER_WAYLAND_AUTO_ACTIVATE=click (g_auto_activate = AUTO_ACTIVATE_CLICK); the default asks
+ * winhandler.exe to bring the window to the front instead (activate_window). */
+
+#define AUTO_ACTIVATE_DELAY_MS 3000   /* first click: 3 s after the focus change */
+#define AUTO_ACTIVATE_RETRY_MS 150    /* re-check while a pointer lock/confine holds */
+#define AUTO_ACTIVATE_TRIES 8
+#define AUTO_ACTIVATE_QUIET_NS 2000000000LL
+
+static struct wl_event_source *g_auto_activate_timer;
+static struct surface *g_auto_activate_target;
+static int g_auto_activate_tries;
+
+static void auto_activate_surface_gone(struct surface *s) {
+    if (g_auto_activate_target == s) g_auto_activate_target = NULL;
+}
+
+static void auto_activate_click(struct surface *s) {
+    double old_x = g_ptr_x, old_y = g_ptr_y, old_raw_x = g_raw_x, old_raw_y = g_raw_y;
+    int old_raw_valid = g_raw_valid;
+    double x = (s->placed ? s->x : 0) + 2, y = (s->placed ? s->y : 0) + 2;
+    g_synthetic_input = 1;
+    /* Absolute motion with the raw position preset to the target: no relative motion jump reaches a
+     * program holding a relative pointer (a mouse-look camera would spin otherwise). */
+    g_raw_x = x; g_raw_y = y; g_raw_valid = 1;
+    pointer_input(x, y, 0, BTN_LEFT, 1);
+    pointer_input(x, y, 0, BTN_LEFT, 0);
+    g_raw_x = old_x; g_raw_y = old_y; g_raw_valid = 1;
+    pointer_input(old_x, old_y, 0, 0, 0);
+    g_raw_x = old_raw_x; g_raw_y = old_raw_y; g_raw_valid = old_raw_valid;
+    g_synthetic_input = 0;
+    char name[160];
+    describe(s, name, sizeof(name));
+    banner_log("window", "activated %s with a synthetic click at %d,%d", name, (int)x, (int)y);
+}
+
+static int on_auto_activate_timer(void *data) {
+    struct surface *s = g_auto_activate_target;
+    if (!s) return 0;
+    const char *skip = NULL;
+    if (!s->mapped || topmost_program_window() != s) skip = "it is no longer the topmost program window";
+    else if (g_last_user_input_ns && now_ns() - g_last_user_input_ns < AUTO_ACTIVATE_QUIET_NS) skip = "the user is giving input";
+    else if (constraint_active()) {
+        if (++g_auto_activate_tries < AUTO_ACTIVATE_TRIES) {
+            wl_event_source_timer_update(g_auto_activate_timer, AUTO_ACTIVATE_RETRY_MS);
+            return 0;
+        }
+        skip = "a pointer lock/confine holds";
+    }
+    g_auto_activate_target = NULL;
+    if (skip) {
+        char name[160];
+        describe(s, name, sizeof(name));
+        banner_log("window", "no activation click for %s: %s", name, skip);
+        return 0;
+    }
+    auto_activate_click(s);
+    return 0;
+}
+
+static void auto_activate_schedule(struct surface *s) {
+    if (g_auto_activate != AUTO_ACTIVATE_CLICK || s->auto_activated) return;
+    if (g_last_user_input_ns && now_ns() - g_last_user_input_ns < AUTO_ACTIVATE_QUIET_NS) return;
+    if (!g_auto_activate_timer) {
+        g_auto_activate_timer = wl_event_loop_add_timer(wl_display_get_event_loop(g_display),
+                                                        on_auto_activate_timer, NULL);
+        if (!g_auto_activate_timer) return;
+    }
+    s->auto_activated = 1;
+    g_auto_activate_target = s;             /* a newer window replaces a pending one */
+    g_auto_activate_tries = 0;
+    wl_event_source_timer_update(g_auto_activate_timer, AUTO_ACTIVATE_DELAY_MS);
+}
+
 /* Java touch events arrive in INPUT_SPACE over the whole output: action 0=press, 1=move, 2=release.
  * Output pixels go through the inverse of the scale mode's mapping (letterbox bars, FILL crop, a
  * TOP/BOTTOM half), so the touch lands on the scene pixel that is drawn under the finger. */
@@ -3070,6 +3274,7 @@ static struct seat_touch *touch_for(struct wl_client *client) {
 static void deliver_touch(const struct input_msg *m, int action) {
     int w, h, ow, oh;
     double x, y;
+    g_last_user_input_ns = now_ns();
     scene_size(&w, &h);
     vkp_output_size(&ow, &oh);
     if (ow <= 0 || oh <= 0 ||
@@ -3215,6 +3420,8 @@ static void key_event(uint32_t evdev, int pressed) {
     struct seat_keyboard *sk;
     if (!keyboard_for(client)) return;
     keyboard_focus(target->resource);
+    g_last_key_ns = now_ns();
+    g_last_user_input_ns = g_last_key_ns;
     int mods_changed = mods_key(evdev, pressed);
     for_each_keyboard_of(client, sk) {
         wl_keyboard_send_key(sk->kb, wl_display_next_serial(g_display), now_ms(), evdev,

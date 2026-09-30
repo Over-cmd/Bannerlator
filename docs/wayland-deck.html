@@ -121,7 +121,7 @@ th.num{text-align:right}
 
 <div class="deck">
 <nav class="rail" aria-label="Slides">
-  <a href="#s1" data-i="1">1</a><a href="#s2" data-i="2">2</a><a href="#s3" data-i="3">3</a><a href="#s4" data-i="4">4</a><a href="#s5" data-i="5">5</a><a href="#s6" data-i="6">6</a><a href="#s7" data-i="7">7</a><a href="#s8" data-i="8">8</a><a href="#s9" data-i="9">9</a><a href="#s10" data-i="10">10</a><a href="#s11" data-i="11">11</a><a href="#s12" data-i="12">12</a>
+  <a href="#s1" data-i="1">1</a><a href="#s2" data-i="2">2</a><a href="#s3" data-i="3">3</a><a href="#s3b" data-i="3b">3b</a><a href="#s4" data-i="4">4</a><a href="#s5" data-i="5">5</a><a href="#s6" data-i="6">6</a><a href="#s7" data-i="7">7</a><a href="#s8" data-i="8">8</a><a href="#s9" data-i="9">9</a><a href="#s10" data-i="10">10</a><a href="#s11" data-i="11">11</a><a href="#s12" data-i="12">12</a>
 </nav>
 <main class="slides">
 
@@ -205,6 +205,32 @@ th.num{text-align:right}
     </tbody>
   </table></div>
   <p class="note">Half-Life 2, same scripted intro scene, two 60-second passes per mode alternating, GPU and battery sampled once a second. Frame rate did not move because the game is CPU-bound under FEX on this device; the compositor's GPU work did go away. A frame-rate gain needs a GPU-bound game or a large panel.</p>
+</section>
+
+<section class="slide" id="s3b">
+  <div class="eyebrow">Slide 3b · 28 September 2026 · uncapped, all eight APIs, one driver pick</div>
+  <h2>Frame rate after the adapter, and the zero-copy ceiling fixed</h2>
+  <p class="lede">The Wayland wrapper (the bionic Vulkan wrapper X11 already uses, rebuilt with the Wayland window system) lets a normal Android Turnip, picked once, drive both the compositor and the game. Measured against the original numbers from slide 3, with the drivers Wayland ships today.</p>
+  <div class="tablewrap"><table>
+    <thead><tr><th>API (AIO average, fps)</th><th class="num">X11<br>15 Sep</th><th class="num">Wayland copy<br>15 Sep</th><th class="num">Adapter<br>zero-copy</th><th class="num">Adapter<br>copy</th><th class="num">Bundled Turnip<br>zero-copy</th><th class="num">Bundled Turnip<br>zero-copy off</th><th class="num">Combined Turnip<br>zero-copy</th><th class="num">Wayland Turnip<br>zero-copy <strong>fixed</strong></th></tr></thead>
+    <tbody>
+      <tr><td>Vulkan</td><td class="num">752</td><td class="num">596</td><td class="num"><strong>531</strong></td><td class="num">534</td><td class="num">295</td><td class="num">535</td><td class="num">298</td><td class="num"><strong>541</strong></td></tr>
+      <tr><td>OpenGL</td><td class="num">172</td><td class="num">230</td><td class="num">266</td><td class="num">240</td><td class="num">261</td><td class="num">240</td><td class="num">261</td><td class="num">269</td></tr>
+      <tr><td>D3D12</td><td class="num">430</td><td class="num">336</td><td class="num"><strong>374</strong></td><td class="num">384</td><td class="num">312</td><td class="num">397</td><td class="num">301</td><td class="num">378</td></tr>
+      <tr><td>D3D11</td><td class="num">2,298</td><td class="num">2,144</td><td class="num"><strong>3,661</strong></td><td class="num">3,420</td><td class="num">274</td><td class="num">3,423</td><td class="num">267</td><td class="num"><strong>3,658</strong></td></tr>
+      <tr><td>D3D10</td><td class="num">396</td><td class="num">303</td><td class="num">358</td><td class="num">358</td><td class="num">323</td><td class="num">356</td><td class="num">322</td><td class="num">355</td></tr>
+      <tr><td>D3D9</td><td class="num">292</td><td class="num">284</td><td class="num">242</td><td class="num">241</td><td class="num">254</td><td class="num">241</td><td class="num">253</td><td class="num">241</td></tr>
+      <tr><td>D3D8</td><td class="num">291</td><td class="num">288</td><td class="num">242</td><td class="num">241</td><td class="num">254</td><td class="num">240</td><td class="num">255</td><td class="num">242</td></tr>
+      <tr><td>DirectDraw</td><td class="num">224</td><td class="num">231</td><td class="num">239</td><td class="num">232</td><td class="num">239</td><td class="num">229</td><td class="num">239</td><td class="num">239</td></tr>
+    </tbody>
+  </table></div>
+  <div class="legend"><span class="mono">Adapter = the Pipetto wrapper-25 lineage with Wayland WSI, on "Mesa Turnip v26.3.0-20260830-r4". Bundled = the Wayland Turnip inside Proton 11.0-2.1 (Auto). Combined = one Turnip .so with both the Android and the Wayland entry points.</span></div>
+  <ol class="ranked">
+    <li><span><strong>The adapter runs a normal Android Turnip at full speed.</strong> It matches the bundled driver with zero-copy off. Caveat found while fixing zero-copy: the wrapper never waits for the display to let go of a buffer (it sets no supported sync types), so its zero-copy numbers come from rendering into buffers the screen may still be showing. It needs the same tear-safe fix before its zero-copy is trusted.</span></li>
+    <li><span><strong>Zero-copy had a ceiling of about 270 to 300 fps, now fixed.</strong> Current Mesa handed the game back the buffer the display had just released, so the GPU waited for the screen every refresh (27 percent busy), and five images were too few for the display layer. The fix picks buffers the display has let go of first and gives zero-copy mailbox swapchains two extra images, still waiting on every fence: D3D11 274 to 3,658, Vulkan 295 to 541, zero-copy still presenting. Banners-Turnip branch fix/wayland-zero-copy-ceiling, commits a21b38c and f7ac07e; not in the shipped layer yet.</span></li>
+    <li><span><strong>Real games don't hit it yet.</strong> DiRT Showdown on the adapter ran its menu at the 144 Hz cap with zero-copy, and at about 100 to 120 fps uncapped in the game world, the same as the combined driver.</span></li>
+  </ol>
+  <p class="note">Not the same conditions as slide 3, so compare trends rather than single cells. Slide 3: AIO 2.0.1 in a maximized window (960 x 586 render), copy path, 15 s per API, one launch. 28 September: the AIO fullscreen build (--sweep 15, true fullscreen 1280 x 720, vsync off, mailbox), 15 s per API, one launch per driver, container 3, Proton 11.0-2.1-arm64ec-16, compositor driver r4. Adapter and combined columns are the mean of three runs, the bundled and fixed columns one run each, runs alternated with a cooldown. OpenGL, D3D9, D3D8 and DirectDraw land at 230 to 270 on every driver, so something other than the driver limits them. Pocket FIT, Adreno 750.</p>
 </section>
 
 <section class="slide" id="s4">

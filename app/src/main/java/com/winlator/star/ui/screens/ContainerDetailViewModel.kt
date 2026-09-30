@@ -147,7 +147,7 @@ class ContainerDetailViewModel(app: Application) : AndroidViewModel(app) {
     var displayBackend by mutableStateOf(Container.DISPLAY_BACKEND_X11)
     val isWaylandStored get() = displayBackend == Container.DISPLAY_BACKEND_WAYLAND
     val isWaylandBackend get() = isWaylandStored && isWineWaylandCapable(selectedWineVersion)
-    // Wayland GAME driver (extra "waylandGameDriver": auto | bundled | bundled-a7xx | bundled-a8xx | bundled-a8xx-perf |
+    // Wayland GAME driver (extra "waylandGameDriver": adapter | auto | bundled | bundled-a7xx | bundled-a8xx | bundled-a8xx-perf |
     // imported:<id>). Only shown/used on the Wayland backend; kept as stored on X11 so flipping the
     // backend back and forth doesn't lose it. See core.WaylandGameDriver.
     var waylandGameDriver by mutableStateOf(Container.WAYLAND_GAME_DRIVER_AUTO)
@@ -590,7 +590,10 @@ class ContainerDetailViewModel(app: Application) : AndroidViewModel(app) {
         rendererSwapRB           = seed?.getRendererSwapRB() ?: false
         rendererSfCompatMode     = seed?.getRendererSfCompatMode() ?: true
         displayBackend           = seed?.getDisplayBackend() ?: Container.DISPLAY_BACKEND_X11
-        waylandGameDriver        = seed?.getWaylandGameDriver() ?: Container.WAYLAND_GAME_DRIVER_AUTO
+        // A container (or defaults profile) that never chose keeps Auto when edited, but a NEW one —
+        // and the New Container Defaults form — starts on the adapter (one driver pick on Wayland).
+        waylandGameDriver        = seed?.getExtra("waylandGameDriver", "")?.ifEmpty { null }
+            ?: if (isEditMode) Container.WAYLAND_GAME_DRIVER_AUTO else Container.WAYLAND_GAME_DRIVER_ADAPTER
         waylandHdr               = seed?.isWaylandHdr() ?: false
         unrealHdr                = seed?.getUnrealHdr() ?: com.winlator.star.core.UnrealHdr.OFF
         renderScale              = seed?.getExtra("renderScale", "1.0") ?: "1.0"
@@ -1244,7 +1247,7 @@ class ContainerDetailViewModel(app: Application) : AndroidViewModel(app) {
         // displayed as X11 in the editor, so X11 is what gets saved. Because create goes through
         // here too, a container can never be BORN claiming a Wayland its layer cannot do either.
         c.setDisplayBackend(if (isWaylandBackend) Container.DISPLAY_BACKEND_WAYLAND else Container.DISPLAY_BACKEND_X11)
-        c.setWaylandGameDriver(waylandGameDriver)   // "auto" clears the extra
+        c.setWaylandGameDriver(waylandGameDriver)
         c.setWaylandHdr(waylandHdr)                 // off clears the extra
         c.setUnrealHdr(unrealHdr)                   // off clears the extra
         c.putExtra("renderScale", if (renderScale == "1.0") null else renderScale)

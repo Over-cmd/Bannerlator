@@ -6333,6 +6333,12 @@ internal fun ShortcutSettingsDialogScreen(
     // Wayland GAME driver override (per-game, same extra name as the container's): "" = the
     // container's choice. Only shown when the effective backend is Wayland; see core.WaylandGameDriver.
     var waylandGameDriverOverride by remember { mutableStateOf(shortcut.getExtra("waylandGameDriver", "")) }
+    // The game driver row sits under a fold on Wayland; folded while the effective choice is the
+    // adapter (one driver pick), open otherwise, until the user toggles it (null = not toggled).
+    var waylandAdvancedToggled by remember { mutableStateOf<Boolean?>(null) }
+    val waylandAdapterChoice = waylandGameDriverOverride.ifEmpty { shortcut.container.waylandGameDriver } ==
+        Container.WAYLAND_GAME_DRIVER_ADAPTER
+    val waylandAdvancedOpen = waylandAdvancedToggled ?: !waylandAdapterChoice
     // Which Vulkan driver a LINUX session draws with ("" = the one inside the runtime). Separate
     // from the row above it in the editor, which picks the Android driver that displays the session.
     var linuxVulkanDriverOverride by remember {
@@ -7086,7 +7092,10 @@ internal fun ShortcutSettingsDialogScreen(
                 // cursor can never land on a row that isn't drawn (see the render conditionals).
                 if (!isLinuxEntry) add("displayBackend")
                 add("gfxDriver")   // the compositor driver: live on the gamescope path too
-                if (effectiveWaylandShortcut && !isLinuxEntry) { add("waylandGameDriver"); add("waylandDriverCfg") }
+                if (effectiveWaylandShortcut && !isLinuxEntry) {
+                    add("waylandAdvanced"); add("waylandDriverCfg")
+                    if (waylandAdvancedOpen) add("waylandGameDriver")
+                }
                 if (isLinuxEntry) add("linuxVulkanDriver")
                 if (isLinuxEntry) {
                     add(com.winlator.star.linux.LinuxTuning.EXTRA_GLTHREAD)
@@ -7581,7 +7590,7 @@ internal fun ShortcutSettingsDialogScreen(
                                 // Named for what it does on each path. On a Linux entry the distinction
                                 // matters: this is the Android driver that DISPLAYS the session, while a
                                 // separate Linux driver inside the runtime is what draws it.
-                                label = if (isLinuxEntry) "Display driver (Android side)" else "Compositor driver",
+                                label = if (isLinuxEntry) "Display driver (Android side)" else stringResource(R.string.graphics_driver),
                                 options = compositorChoices,
                                 selected = compositorDriverLabel(compositorVersion, compositorChoices, compositorChoicesLoaded),
                                 onSelect = { graphicsDriverConfig = withGraphicsDriverVersion(graphicsDriverConfig, it) },
@@ -7893,15 +7902,31 @@ internal fun ShortcutSettingsDialogScreen(
                                 color = MaterialTheme.colorScheme.error
                             )
                         }
+                        // What the one pick drives (same rules as the container editor).
+                        val blobPicked = remember(compositorVersion) {
+                            com.winlator.star.core.WaylandAdapter.isProprietaryBlob(gfxContext, compositorVersion)
+                        }
+                        val effectiveGameChoice = waylandGameDriverOverride.ifEmpty { shortcut.container.waylandGameDriver }
+                        val adapterActive = remember(effectiveGameChoice, compositorVersion) {
+                            com.winlator.star.core.WaylandGameDriver.adapterActive(gfxContext, effectiveGameChoice, compositorVersion)
+                        }
                         Text(
-                            "Used by the Wayland compositor to put frames on screen; the game renders on the Wayland game driver below.",
+                            when {
+                                blobPicked -> "Qualcomm's own driver cannot put Wayland frames on screen, so the screen uses a " +
+                                    "bundled Turnip automatically" + (if (waylandAdapterChoice) " and the game renders on the bundled " +
+                                    "Wayland Turnip (the adapter needs a Turnip driver here)." else ".")
+                                adapterActive -> "Used for the game (through the Wayland adapter) and for putting its frames on screen."
+                                else -> "Used by the Wayland compositor to put frames on screen; the game renders on the " +
+                                    "Wayland game driver under Advanced."
+                            },
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                         Spacer(Modifier.height(8.dp))
-                        // Wayland game driver (per-game): "Use container default (<its label>)" first,
-                        // then Auto / bundled variants / imported Linux ICDs. A stored imported:<id>
-                        // whose import is gone stays listed (labelled missing); launch uses Auto for it.
+                        // Advanced: the Wayland game driver (per-game): "Use container default (<its
+                        // label>)" first, then Adapter / Auto / bundled variants / imported Linux ICDs.
+                        // A stored imported:<id> whose import is gone stays listed (labelled missing);
+                        // launch uses Auto for it. Folded while the effective choice is the adapter.
                         run {
                             val containerChoice = shortcut.container.waylandGameDriver
                             val values = listOf("") + (
@@ -7914,27 +7939,42 @@ internal fun ShortcutSettingsDialogScreen(
                             // The gear: this game's Wayland driver settings (GPU name spoof, memory cap,
                             // present mode, UBWC hint) in its graphicsDriverConfig, like X11's per-game
                             // driver configuration.
+                            val selectedLabel = labels[values.indexOf(waylandGameDriverOverride).coerceAtLeast(0)]
                             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                DpDrop(
-                                    dp, "waylandGameDriver",
-                                    label = "Wayland game driver",
-                                    options = labels,
-                                    selected = labels[values.indexOf(waylandGameDriverOverride).coerceAtLeast(0)],
-                                    onSelect = { waylandGameDriverOverride = values[labels.indexOf(it)] },
+                                DpButton(
+                                    dp, "waylandAdvanced",
+                                    onActivate = { waylandAdvancedToggled = !waylandAdvancedOpen },
                                     modifier = Modifier.weight(1f),
                                     onRightId = "waylandDriverCfg"
-                                )
-                                DpButton(dp, "waylandDriverCfg", onActivate = { showWaylandDriverCfg = true }, onLeftId = "waylandGameDriver") {
+                                ) {
+                                    TextButton(onClick = { waylandAdvancedToggled = !waylandAdvancedOpen }, modifier = Modifier.fillMaxWidth()) {
+                                        Icon(if (waylandAdvancedOpen) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                                            contentDescription = null, modifier = Modifier.size(18.dp))
+                                        Spacer(Modifier.width(6.dp))
+                                        Text("Advanced: Wayland game driver ($selectedLabel)", modifier = Modifier.weight(1f))
+                                    }
+                                }
+                                DpButton(dp, "waylandDriverCfg", onActivate = { showWaylandDriverCfg = true }, onLeftId = "waylandAdvanced") {
                                     IconButton(onClick = { showWaylandDriverCfg = true }) {
                                         Icon(Icons.Default.Settings, contentDescription = "Wayland driver settings")
                                     }
                                 }
                             }
-                            Text(
-                                com.winlator.star.core.WaylandGameDriver.HELP_TEXT,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
+                            if (waylandAdvancedOpen) {
+                                DpDrop(
+                                    dp, "waylandGameDriver",
+                                    label = "Wayland game driver",
+                                    options = labels,
+                                    selected = selectedLabel,
+                                    onSelect = { waylandGameDriverOverride = values[labels.indexOf(it)] },
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                Text(
+                                    com.winlator.star.core.WaylandGameDriver.HELP_TEXT,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
                             val spoof = com.winlator.star.core.GpuSpoof.gpuNameOf(graphicsDriverConfig)
                             if (com.winlator.star.core.GpuSpoof.isSpoofing(spoof)) Text(
                                 "GPU name spoof: $spoof (the gear)",

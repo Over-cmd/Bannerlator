@@ -217,6 +217,36 @@ public final class WaylandCompositor {
      *  Set before the compositor starts. */
     public static native void nativeSetUbwc(boolean on);
 
+    /** How a program window the compositor focuses by itself (a new window, or the one left when the
+     *  focused window closes) is made Wine's foreground window, so a game that pauses unfocused starts
+     *  without a tap: {@link #AUTO_ACTIVATE_BRING_TO_FRONT} (default; {@link BringToFrontListener} →
+     *  winhandler.exe), {@link #AUTO_ACTIVATE_CLICK} (one synthetic click at its top-left corner) or
+     *  {@link #AUTO_ACTIVATE_OFF}. From BANNER_WAYLAND_AUTO_ACTIVATE (0 / click / default). Set before
+     *  the compositor starts. */
+    public static native void nativeSetAutoActivate(int mode);
+
+    public static final int AUTO_ACTIVATE_OFF = 0;
+    public static final int AUTO_ACTIVATE_BRING_TO_FRONT = 1;
+    public static final int AUTO_ACTIVATE_CLICK = 2;
+
+    /** The compositor focused a program window by itself and wants it foreground inside Wine. */
+    public interface BringToFrontListener {
+        /** {@code exe}: the program's exe name, lower case; {@code hwnd}: its Win32 handle (0 =
+         *  unknown). Compositor thread — only queue work here. */
+        void onBringToFront(String exe, long hwnd);
+    }
+
+    private static volatile BringToFrontListener bringToFrontListener;
+
+    public static void setBringToFrontListener(BringToFrontListener l) { bringToFrontListener = l; }
+
+    /** Invoked from native (banner_on_bring_to_front). */
+    @SuppressWarnings("unused")
+    static void onBringToFront(String exe, long hwnd) {
+        BringToFrontListener l = bringToFrontListener;
+        if (l != null) l.onBringToFront(exe != null ? exe : "", hwnd);
+    }
+
     /** Debug: advertise no DRM device (main device 0:0) in the dma-buf feedback, as a phone that
      *  exposes no /dev/dri node to apps does. BANNER_WAYLAND_NO_RENDER_NODE=1 in the container's or
      *  shortcut's environment variables. Set before the compositor starts. */

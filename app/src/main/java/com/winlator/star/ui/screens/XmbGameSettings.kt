@@ -380,9 +380,18 @@ private fun generalRows(xmb: XmbScope, p: XmbPrefs, host: XmbGameHost): List<Xmb
         }
         val turnips = ((xmbBundledDriverVersions ?: emptyList()) + importedDriverVersions(p.context)).distinct()
         val turnipsLoaded = xmbBundledDriverVersions != null
-        rows += XmbRow.Choice("gfxDriver", "Compositor driver", Icons.Filled.Memory, turnips,
+        // One driver pick on Wayland: with the game driver on "adapter" it drives the game too.
+        val wgdEffective = p.ex("waylandGameDriver", "").ifEmpty { c.waylandGameDriver }
+        val gfxSubtitle = when {
+            com.winlator.star.core.WaylandAdapter.isProprietaryBlob(p.context, compositorVersion) ->
+                "Qualcomm's own driver cannot put Wayland frames on screen: the screen uses a bundled Turnip automatically."
+            com.winlator.star.core.WaylandGameDriver.adapterActive(p.context, wgdEffective, compositorVersion) ->
+                "Used for the game (through the Wayland adapter) and for putting its frames on screen."
+            else -> "Used by the Wayland compositor to put frames on screen; the game renders on the Wayland game driver below."
+        }
+        rows += XmbRow.Choice("gfxDriver", p.str(R.string.graphics_driver), Icons.Filled.Memory, turnips,
             compositorDriverLabel(compositorVersion, turnips, turnipsLoaded),
-            subtitle = "Used by the Wayland compositor to put frames on screen; the game renders on the Wayland game driver below.") { v ->
+            subtitle = gfxSubtitle) { v ->
             xmb.set(p, "graphicsDriverConfig", withGraphicsDriverVersion(gdc, v))
         }
         // "System"/empty falls back to the system libvulkan, which can't import the game's dmabufs
@@ -391,7 +400,7 @@ private fun generalRows(xmb: XmbScope, p: XmbPrefs, host: XmbGameHost): List<Xmb
         if (compositorDriverUnusable(compositorVersion, turnips, turnipsLoaded)) {
             val isSystem = compositorVersion.isEmpty() || compositorVersion == "System"
             rows += XmbRow.Info("gfxSystemWarn",
-                if (isSystem) "Compositor driver is \"System\"" else "Compositor driver is not available", Icons.Filled.Info,
+                if (isSystem) "Graphics driver is \"System\"" else "Graphics driver is not available", Icons.Filled.Info,
                 subtitle = """Wayland needs a Turnip driver here. "System" or a missing driver cannot import the game's frames and shows a black screen.""")
         }
         // Wayland game driver (per-game override of the container's waylandGameDriver; "" = container
@@ -414,7 +423,7 @@ private fun generalRows(xmb: XmbScope, p: XmbPrefs, host: XmbGameHost): List<Xmb
             if (it.isEmpty()) "Container default (" + com.winlator.star.core.WaylandGameDriver.optionLabel(p.context, c.waylandGameDriver, wgdAuto) + ")"
             else com.winlator.star.core.WaylandGameDriver.optionLabel(p.context, it, wgdAuto)
         }
-        rows += XmbRow.Choice("waylandGameDriver", "Wayland game driver", Icons.Filled.Memory, wgdLabels,
+        rows += XmbRow.Choice("waylandGameDriver", "Wayland game driver (advanced)", Icons.Filled.Memory, wgdLabels,
             wgdLabels[wgdValues.indexOf(wgdOverride).coerceAtLeast(0)],
             subtitle = com.winlator.star.core.WaylandGameDriver.HELP_TEXT) { v ->
             xmb.set(p, "waylandGameDriver", wgdValues[wgdLabels.indexOf(v)].ifEmpty { null })

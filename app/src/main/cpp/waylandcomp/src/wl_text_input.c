@@ -102,6 +102,8 @@ static void send_leave(struct text_input *ti) {
     ti->has_preedit = 0;
 }
 
+int banner_text_input_active(void) { return active_input() != NULL; }
+
 void banner_text_input_refocus(void) {
     struct wl_resource *t = banner_ime_target();
     struct text_input *ti;

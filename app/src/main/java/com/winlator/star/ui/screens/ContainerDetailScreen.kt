@@ -111,6 +111,7 @@ import com.winlator.star.container.VegasLiveCheck
 import com.winlator.star.core.HttpUtils
 import androidx.compose.material.icons.filled.Book
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.text.TextStyle
@@ -941,9 +942,10 @@ private fun TopLevelFields(
         // Graphics Driver + wrapper manager (cloud) + config button. Under Wayland the wrapper
         // flavour is irrelevant: the compositor loads the installed Turnip named by the "version"
         // key of graphicsDriverConfig (XServerDisplayActivity's Wayland resolve → adrenotools), and
-        // the game renders on the Proton's bundled Wayland Turnip. So on Wayland the flavour
-        // dropdown is replaced by a "Compositor driver" picker over the installed Turnip ids that
-        // writes ONLY the version key back; the config dialog stays reachable for the same key.
+        // with the Wayland game driver on "adapter" the game renders on that same driver through the
+        // bundled Wayland adapter. So on Wayland the flavour dropdown is replaced by one "Graphics
+        // driver" picker over the installed Turnip ids that writes ONLY the version key back; the
+        // game driver itself moves under "Advanced".
         var showWrapperManager by remember { mutableStateOf(false) }
         val compositorDriverOnly = viewModel.isWaylandBackend
         var compositorChoices by remember { mutableStateOf<List<String>>(emptyList()) }
@@ -968,7 +970,7 @@ private fun TopLevelFields(
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             if (compositorDriverOnly) {
                 LabeledDropdown(
-                    label = "Compositor driver",
+                    label = stringResource(R.string.graphics_driver),
                     options = compositorChoices,
                     selectedOption = compositorDriverLabel(compositorVersion, compositorChoices, compositorChoicesLoaded),
                     onSelect = { viewModel.onCompositorDriverPicked(it) },
@@ -1045,41 +1047,73 @@ private fun TopLevelFields(
                     }
                 )
             }
+            // What this one pick drives, keyed on the stored game driver + the pick itself so it
+            // follows either dropdown.
+            val adapterChoice = viewModel.waylandGameDriver == Container.WAYLAND_GAME_DRIVER_ADAPTER
+            val blobPicked = remember(compositorVersion) {
+                com.winlator.star.core.WaylandAdapter.isProprietaryBlob(context, compositorVersion)
+            }
+            val adapterActive = remember(viewModel.waylandGameDriver, compositorVersion) {
+                com.winlator.star.core.WaylandGameDriver.adapterActive(context, viewModel.waylandGameDriver, compositorVersion)
+            }
             Text(
-                "Used by the Wayland compositor to put frames on screen; the game renders on the Wayland game driver below.",
+                when {
+                    blobPicked -> "Qualcomm's own driver cannot put Wayland frames on screen, so the screen uses a " +
+                        "bundled Turnip automatically" + (if (adapterChoice) " and the game renders on the bundled " +
+                        "Wayland Turnip (the adapter needs a Turnip driver here)." else ".")
+                    adapterActive -> "Used for the game (through the Wayland adapter) and for putting its frames on screen."
+                    else -> "Used by the Wayland compositor to put frames on screen; the game renders on the " +
+                        "Wayland game driver under Advanced."
+                },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             Spacer(Modifier.height(8.dp))
-            // Wayland game driver: what the GAME renders on (winewayland sets VK_ICD_FILENAMES from
-            // it). Auto / the three bundled Turnip variants / each imported Linux ICD. A stored
-            // imported:<id> whose import is gone is still listed (labelled missing) so the editor
-            // shows what is saved; launch falls back to Auto for it. The gear opens the settings that
-            // reach a Wayland game (GPU name spoof, memory cap, present mode, UBWC hint), stored in
-            // the same graphicsDriverConfig keys as X11's driver configuration.
+            // Advanced: the Wayland game driver — what the GAME renders on (winewayland sets
+            // VK_ICD_FILENAMES from it). Adapter / Auto / the bundled Turnip variants / each imported
+            // Linux ICD. A stored imported:<id> whose import is gone is still listed (labelled missing)
+            // so the editor shows what is saved; launch falls back to Auto for it. Folded away while the
+            // adapter is the choice (null = not toggled yet: follow the stored choice once it loads).
+            // The gear opens the settings that reach a Wayland game (GPU name spoof, memory cap,
+            // present mode, UBWC hint), stored in the same graphicsDriverConfig keys as X11's driver
+            // configuration; with the adapter they apply to the one driver.
             run {
                 val stored = viewModel.waylandGameDriver
                 val values = if (stored in waylandGameDriverValues) waylandGameDriverValues
                              else waylandGameDriverValues + stored
                 val labels = values.map { com.winlator.star.core.WaylandGameDriver.optionLabel(context, it, waylandAutoPick) }
                 var showWaylandDriverSettings by remember { mutableStateOf(false) }
+                var advancedToggled by remember { mutableStateOf<Boolean?>(null) }
+                val advancedOpen = advancedToggled ?: !adapterChoice
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    TextButton(onClick = { advancedToggled = !advancedOpen }, modifier = Modifier.weight(1f)) {
+                        Icon(if (advancedOpen) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                            contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            "Advanced: Wayland game driver (" +
+                                com.winlator.star.core.WaylandGameDriver.optionLabel(context, stored, waylandAutoPick) + ")",
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                    IconButton(onClick = { showWaylandDriverSettings = true }) {
+                        Icon(Icons.Default.Settings, contentDescription = "Wayland driver settings")
+                    }
+                }
+                if (advancedOpen) {
                     LabeledDropdown(
                         label = "Wayland game driver",
                         options = labels,
                         selectedOption = labels[values.indexOf(stored)],
                         onSelect = { viewModel.waylandGameDriver = values[labels.indexOf(it)] },
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier.fillMaxWidth()
                     )
-                    IconButton(onClick = { showWaylandDriverSettings = true }) {
-                        Icon(Icons.Default.Settings, contentDescription = "Wayland driver settings")
-                    }
+                    Text(
+                        com.winlator.star.core.WaylandGameDriver.HELP_TEXT,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
-                Text(
-                    com.winlator.star.core.WaylandGameDriver.HELP_TEXT,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
                 val spoof = com.winlator.star.core.GpuSpoof.gpuNameOf(viewModel.graphicsDriverConfig)
                 if (com.winlator.star.core.GpuSpoof.isSpoofing(spoof)) Text(
                     "GPU name spoof: $spoof (the gear)",
