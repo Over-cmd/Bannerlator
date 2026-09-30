@@ -260,9 +260,16 @@ add_subdirectory(waylandcomp)
 add_subdirectory(proot)
 
 # =============================================================================
-# 🚀 MOTOR DE AUDIO ASÍNCRONO MODULAR (NATIVE_AUDIO)
-# COMPILACIÓN AUTOMÁTICA BAJA LATENCIA MALI
+# 🚀 ACCELERACIÓN DE AUDIO NATIVA COMPILACIÓN AISLADA PARA MALI
 # =============================================================================
+# 1. Le indicamos a Gradle que añada y compile tu nuevo archivo nativo en C
 add_library(native_audio SHARED native_audio.c)
-target_link_libraries(native_audio log aaudio)
+
+# 2. Enlazamos los componentes físicos necesarios: el log del sistema y AAudio de Android
+target_link_libraries(
+    native_audio
+    log
+    aaudio
+)
+
 
