@@ -54,29 +54,30 @@ public class ALSARequestHandler implements RequestHandler {
                 int sampleRate = inputStream.readInt();
                 int bufferSize = inputStream.readInt();
 
-                if (alsaClient != null) {
-                    alsaClient.setChannelCount(channels);
-                    alsaClient.setDataType(ALSAClient.DataType.values()[dataTypeOrdinal]);
-                    alsaClient.setSampleRate(sampleRate);
-                    alsaClient.setBufferSize(bufferSize);
-                    alsaClient.prepare();
-                }
-
-                // Inicializamos tu native_audio.c aislado
-                try { com.winlator.star.core.NativeAudio.init(); } catch (Throwable e) {}
-                
-                // Creamos el entorno de memoria virtual compartida reglamentario para dejar a Wine tranquilo
-                int size = bufferSize * (channels * 2);
-                int fd = SysVSharedMemory.createMemoryFd("alsa-shm"+(++maxSHMemoryId), size);
-                if (fd >= 0 && alsaClient != null) {
-                    ByteBuffer buffer = SysVSharedMemory.mapSHMSegment(fd, size, 0, true);
-                    if (buffer != null) alsaClient.setSharedBuffer(buffer);
-                }
-                try (XStreamLock lock = outputStream.lock()) {
-                    outputStream.writeByte((byte)0);
-                    outputStream.setAncillaryFd(fd);
-                } finally {
-                    if (fd >= 0) XConnectorEpoll.closeFd(fd);
+                // 🏗️ BIFURCACIÓN MODULAR LIMPIA EN PREPARE:
+                if (useNativeAudio) {
+                    // Inicializamos tu native_audio.c aislado en C sin tocar el cliente clásico
+                    try { com.winlator.star.core.NativeAudio.init(); } catch (Throwable e) {}
+                    
+                    // Respondemos el OK virtual y el fd fantasma para que Wine se quede tranquilo y envíe los datos
+                    int size = bufferSize * (channels * 2);
+                    int fd = SysVSharedMemory.createMemoryFd("alsa-shm"+(++maxSHMemoryId), size);
+                    try (XStreamLock lock = outputStream.lock()) {
+                        outputStream.writeByte((byte)0);
+                        outputStream.setAncillaryFd(fd);
+                    } finally {
+                        if (fd >= 0) XConnectorEpoll.closeFd(fd);
+                    }
+                } else {
+                    // Camino original de fábrica solo si nativeaudio estuviera apagado
+                    if (alsaClient != null) {
+                        alsaClient.setChannelCount(channels);
+                        alsaClient.setDataType(ALSAClient.DataType.values()[dataTypeOrdinal]);
+                        alsaClient.setSampleRate(sampleRate);
+                        alsaClient.setBufferSize(bufferSize);
+                        alsaClient.prepare();
+                        createSharedMemory(alsaClient, outputStream);
+                    }
                 }
                 break;
             case RequestCodes.WRITE:
