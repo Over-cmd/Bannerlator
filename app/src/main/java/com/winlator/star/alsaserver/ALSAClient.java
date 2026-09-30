@@ -28,14 +28,6 @@ public class ALSAClient {
     }
 
     public void release() {
-        // 🛑 CIERRE COMPLETO DEL HARDWARE DEL WRAPPER:
-        // Apagamos y destruimos el bucle asíncrono en tu libvulkan_wrapper.so
-        try {
-            com.winlator.star.core.NativeAudio.terminate();
-        } catch (Throwable e) {
-            // Mitigación por si el componente se invoca sin la librería cargada
-        }
-
         if (sharedBuffer != null) {
             SysVSharedMemory.unmapSHMSegment(sharedBuffer, sharedBuffer.capacity());
             sharedBuffer = null;
@@ -54,18 +46,8 @@ public class ALSAClient {
         frameBytes = channelCount * dataType.byteCount;
         release();
 
-        // 🚀 INICIALIZACIÓN NATIVA DEL WRAPPER SEGURO:
-        // Arrancamos tu bucle asíncrono de AAudio en C, pero NO detenemos el flujo
-        // para que Java mantenga la estructura del stream viva y el emulador no se caiga.
-        try {
-            com.winlator.star.core.NativeAudio.init();
-        } catch (Throwable e) {
-            // Fallback por si la librería no carga
-        }
-
         if (!isValidBufferSize()) return;
 
-        // Forzamos la creación del stream nativo de control para estabilizar el proceso
         streamPtr = create(dataType.ordinal(), channelCount, sampleRate, bufferSize);
         if (streamPtr > 0) start();
     }
@@ -101,34 +83,6 @@ public class ALSAClient {
         }
         else if (dataType == DataType.S16BE || dataType == DataType.FLOATBE) {
             data.order(ByteOrder.BIG_ENDIAN);
-        }
-
-        // 🔊 COMPROBACIÓN DE SEGURIDAD MAESTRA NATIVEAUDIO:
-        // Evitamos que ráfagas desalineadas de Wine hagan explotar la RAM del teléfono.
-        if (playing && streamPtr == 0) {
-            try {
-                int remainingBytes = data.remaining();
-                // Forzamos la alineación estricta a 16 bits (múltiplos de 2 bytes por muestra)
-                int shortCount = remainingBytes / 2;
-                
-                if (shortCount > 0 && (remainingBytes % 2 == 0)) {
-                    short[] samples = new short[shortCount];
-                    // Usamos una lectura segura por posición absoluta para no estresar el ShortBuffer
-                    for (int i = 0; i < shortCount; i++) {
-                        samples[i] = data.getShort();
-                    }
-                    com.winlator.star.core.NativeAudio.write(samples, shortCount);
-                    position += (shortCount / channelCount);
-                } else {
-                    // Si el buffer viene corrupto o impar, vaciamos el puntero de largo de forma elástica
-                    data.position(data.limit());
-                }
-                return;
-            } catch (Throwable e) {
-                // Si ocurre cualquier amago de desborde, forzamos el avance para que el emulador no muera
-                data.position(data.limit());
-                return;
-            }
         }
 
         if (playing && streamPtr > 0) {
