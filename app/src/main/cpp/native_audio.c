@@ -107,19 +107,25 @@ void wrapper_native_audio_init(void) {
 }
 
 void wrapper_native_audio_write(const int16_t *samples, int count) {
-    if (!g_audio_ctx || !g_audio_ctx->is_running) return;
+    if (!g_audio_ctx || !g_audio_ctx->is_running || count <= 0) return;
 
+    // 🚀 COJÍN DE SEGURIDAD MUTEX: Bloqueamos los hilos antes de tocar la RAM
     pthread_mutex_lock(&g_audio_ctx->mutex);
 
     for (int i = 0; i < count; i++) {
         int next_head = (g_audio_ctx->head + 1) % NATIVE_AUDIO_BUFFER_SIZE;
+        
         if (next_head == g_audio_ctx->tail) {
+            // Buffer lleno (Underrun guard): descartamos muestras viejas para evitar saturación metálica
             g_audio_ctx->tail = (g_audio_ctx->tail + 1) % NATIVE_AUDIO_BUFFER_SIZE;
         }
+        
+        // Copia atómica directa al bloque de memoria seguro asignado por malloc
         g_audio_ctx->data[g_audio_ctx->head] = samples[i];
         g_audio_ctx->head = next_head;
     }
 
+    // Despertamos al hilo de reproducción de AAudio de forma segura
     pthread_cond_signal(&g_audio_ctx->cond);
     pthread_mutex_unlock(&g_audio_ctx->mutex);
 }
