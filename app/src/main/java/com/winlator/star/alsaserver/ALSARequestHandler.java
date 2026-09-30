@@ -25,8 +25,8 @@ public class ALSARequestHandler implements RequestHandler {
         byte requestCode = inputStream.readByte();
         int requestLength = inputStream.readInt();
 
-        // 🚀 DETECTOR DEL ENTRAMADO: Si alsaClient no está inicializado o el buffer es cero,
-        // significa que estamos gobernando bajo la variable independiente "nativeaudio".
+        // 🚀 DETECTOR DEL ENTRAMADO INDEPENDIENTE:
+        // Si alsaClient no está inicializado o el buffer es cero, gobernamos bajo "nativeaudio".
         boolean useNativeAudio = (alsaClient == null || alsaClient.getBufferSize() == 0);
 
         switch (requestCode) {
@@ -63,7 +63,6 @@ public class ALSARequestHandler implements RequestHandler {
                     createSharedMemory(alsaClient, outputStream);
                 } else {
                     // 🏗️ INICIALIZACIÓN MUTEADA DEL PROPIO MOTOR:
-                    // Inicializamos tu native_audio.c pero respondemos el OK binario exacto a Wine
                     try { com.winlator.star.core.NativeAudio.init(); } catch (Throwable e) {}
                     
                     int size = bufferSize * (channels * 2);
@@ -78,11 +77,19 @@ public class ALSARequestHandler implements RequestHandler {
                 break;
             case RequestCodes.WRITE:
                 if (useNativeAudio) {
-                    // Vaciamos de inmediato la red local interna para que el buffer no colapse el socket
+                    // 🚀 BOMBEO DE RED SEGURO NATIVEAUDIO:
+                    // Forzamos un bucle elástico de espera en el socket local para que los trozos 
+                    // de audio fragmentados de Wine se junten completos en la RAM antes de leer.
+                    int timeout = 0;
+                    while (inputStream.available() < requestLength && timeout < 100) {
+                        try { Thread.sleep(1); } catch (InterruptedException e) {}
+                        timeout++;
+                    }
+
                     if (inputStream.available() < requestLength) return false;
                     ByteBuffer rawBuffer = inputStream.readByteBuffer(requestLength);
                     
-                    // 🔊 DESVÍO DE SEGURIDAD NATIVO AL ARCHIVO EN C:
+                    // 🔊 INYECCIÓN DIRECTA AL SILICIO DE C:
                     try {
                         rawBuffer.order(ByteOrder.LITTLE_ENDIAN);
                         int shortCount = rawBuffer.remaining() / 2;
