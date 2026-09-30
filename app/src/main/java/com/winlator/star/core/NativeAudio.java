@@ -1,17 +1,16 @@
 package com.winlator.star.core;
 
-import android.content.Context;
-
 public class NativeAudio {
-    // 🚀 FIRMAS JNI EXCLUSIVAS DEL WRAPPER:
-    // Mapeamos los métodos nativos para que enganchen con las funciones de C++
-    // de tu repositorio gamenative-wrapper.
+    // 🚀 ENLACE NATIVO MODULAR AISLADO:
+    // Mapeamos los métodos estáticos para que enganchen con las firmas JNI 
+    // que programamos al final de tu archivo native_audio.c
     public native static void init();
     public native static void write(short[] samples, int count);
     public native static void terminate();
 
     static {
-        // Forzamos al cargador dinámico de Android a enlazar tu driver gráfico
-        System.loadLibrary("vulkan_wrapper");
+        // 🔊 JAQUE MATE AL SILENCIO:
+        // Cargamos estrictamente el módulo independiente 'native_audio' creado por tu CMakeLists.txt
+        System.loadLibrary("native_audio");
     }
 }
