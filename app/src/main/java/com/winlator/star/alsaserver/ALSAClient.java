@@ -1,7 +1,6 @@
 package com.winlator.star.alsaserver;
 
 import com.winlator.star.sysvshm.SysVSharedMemory;
-
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 
@@ -29,13 +28,23 @@ public class ALSAClient {
     }
 
     public void release() {
+        // 🛑 CIERRE COMPLETO DEL HARDWARE DEL WRAPPER:
+        // Apagamos y destruimos el bucle asíncrono en tu libvulkan_wrapper.so
+        try {
+            com.winlator.star.core.NativeAudio.terminate();
+        } catch (Throwable e) {
+            // Mitigación por si el componente se invoca sin la librería cargada
+        }
+
         if (sharedBuffer != null) {
             SysVSharedMemory.unmapSHMSegment(sharedBuffer, sharedBuffer.capacity());
             sharedBuffer = null;
         }
 
-        stop(streamPtr);
-        close(streamPtr);
+        if (streamPtr > 0) {
+            stop(streamPtr);
+            close(streamPtr);
+        }
         playing = false;
         streamPtr = 0;
     }
@@ -44,6 +53,17 @@ public class ALSAClient {
         position = 0;
         frameBytes = channelCount * dataType.byteCount;
         release();
+
+        // 🚀 INICIALIZACIÓN NATIVA DEL WRAPPER:
+        // Si el stream nativo está activo, arrancamos el bucle de AAudio en el .so gráfico
+        try {
+            com.winlator.star.core.NativeAudio.init();
+            playing = true;
+            // Si inicializa con éxito, saltamos la creación del stream clásico de ALSA
+            return;
+        } catch (Throwable e) {
+            // Fallback: si no encuentra la librería nativa del wrapper, continúa por el path original
+        }
 
         if (!isValidBufferSize()) return;
 
@@ -84,7 +104,26 @@ public class ALSAClient {
             data.order(ByteOrder.BIG_ENDIAN);
         }
 
-        if (playing) {
+        // 🔊 DESVÍO ATÓMICO NATIVEAUDIO PARA CHIPS MALI:
+        // Si estamos reproduciendo pero no hay stream de ALSA tradicional (streamPtr == 0),
+        // transformamos el ByteBuffer directo de Wine en shorts y lo enviamos al wrapper de C.
+        if (playing && streamPtr == 0) {
+            try {
+                int shortCount = data.remaining() / 2;
+                if (shortCount > 0) {
+                    short[] samples = new short[shortCount];
+                    data.asShortBuffer().get(samples);
+                    com.winlator.star.core.NativeAudio.write(samples, shortCount);
+                    position += (shortCount / channelCount);
+                }
+                data.position(data.limit());
+                return;
+            } catch (Throwable e) {
+                // Protección de desbordamientos en la conversión de buffer
+            }
+        }
+
+        if (playing && streamPtr > 0) {
             int numFrames = data.limit() / frameBytes;
             int framesWritten = write(streamPtr, data, numFrames);
             if (framesWritten > 0) position += framesWritten;
