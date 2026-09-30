@@ -25,26 +25,26 @@ public class ALSARequestHandler implements RequestHandler {
         byte requestCode = inputStream.readByte();
         int requestLength = inputStream.readInt();
 
-        // 🚀 DETECTOR DEL ENTRAMADO INDEPENDIENTE:
-        // Si alsaClient no está inicializado o el buffer es cero, gobernamos bajo "nativeaudio".
-        boolean useNativeAudio = (alsaClient == null || alsaClient.getBufferSize() == 0);
+        // 🚀 INDEPENDENCIA REAL MULTI-DRIVER:
+        // Forzamos el uso de nativeaudio de manera estricta y absoluta en la aduana de red
+        boolean useNativeAudio = true; 
 
         switch (requestCode) {
             case RequestCodes.CLOSE:
                 if (useNativeAudio) {
                     try { com.winlator.star.core.NativeAudio.terminate(); } catch (Throwable e) {}
                 } else {
-                    alsaClient.release();
+                    if (alsaClient != null) alsaClient.release();
                 }
                 break;
             case RequestCodes.START:
-                if (!useNativeAudio) alsaClient.start();
+                if (!useNativeAudio && alsaClient != null) alsaClient.start();
                 break;
             case RequestCodes.STOP:
-                if (!useNativeAudio) alsaClient.stop();
+                if (!useNativeAudio && alsaClient != null) alsaClient.stop();
                 break;
             case RequestCodes.PAUSE:
-                if (!useNativeAudio) alsaClient.pause();
+                if (!useNativeAudio && alsaClient != null) alsaClient.pause();
                 break;
             case RequestCodes.PREPARE:
                 if (inputStream.available() < requestLength) return false;
@@ -60,26 +60,28 @@ public class ALSARequestHandler implements RequestHandler {
                     alsaClient.setSampleRate(sampleRate);
                     alsaClient.setBufferSize(bufferSize);
                     alsaClient.prepare();
-                    createSharedMemory(alsaClient, outputStream);
-                } else {
-                    // 🏗️ INICIALIZACIÓN MUTEADA DEL PROPIO MOTOR:
-                    try { com.winlator.star.core.NativeAudio.init(); } catch (Throwable e) {}
-                    
-                    int size = bufferSize * (channels * 2);
-                    int fd = SysVSharedMemory.createMemoryFd("alsa-shm"+(++maxSHMemoryId), size);
-                    try (XStreamLock lock = outputStream.lock()) {
-                        outputStream.writeByte((byte)0);
-                        outputStream.setAncillaryFd(fd);
-                    } finally {
-                        if (fd >= 0) XConnectorEpoll.closeFd(fd);
-                    }
+                }
+
+                // Inicializamos tu native_audio.c aislado
+                try { com.winlator.star.core.NativeAudio.init(); } catch (Throwable e) {}
+                
+                // Creamos el entorno de memoria virtual compartida reglamentario para dejar a Wine tranquilo
+                int size = bufferSize * (channels * 2);
+                int fd = SysVSharedMemory.createMemoryFd("alsa-shm"+(++maxSHMemoryId), size);
+                if (fd >= 0 && alsaClient != null) {
+                    ByteBuffer buffer = SysVSharedMemory.mapSHMSegment(fd, size, 0, true);
+                    if (buffer != null) alsaClient.setSharedBuffer(buffer);
+                }
+                try (XStreamLock lock = outputStream.lock()) {
+                    outputStream.writeByte((byte)0);
+                    outputStream.setAncillaryFd(fd);
+                } finally {
+                    if (fd >= 0) XConnectorEpoll.closeFd(fd);
                 }
                 break;
             case RequestCodes.WRITE:
                 if (useNativeAudio) {
-                    // 🚀 BOMBEO DE RED SEGURO NATIVEAUDIO:
-                    // Forzamos un bucle elástico de espera en el socket local para que los trozos 
-                    // de audio fragmentados de Wine se junten completos en la RAM antes de leer.
+                    // 🚀 BOMBEO ELÁSTICO DE ENTRADA CONTRAL COLLISION:
                     int timeout = 0;
                     while (inputStream.available() < requestLength && timeout < 100) {
                         try { Thread.sleep(1); } catch (InterruptedException e) {}
@@ -89,7 +91,7 @@ public class ALSARequestHandler implements RequestHandler {
                     if (inputStream.available() < requestLength) return false;
                     ByteBuffer rawBuffer = inputStream.readByteBuffer(requestLength);
                     
-                    // 🔊 INYECCIÓN DIRECTA AL SILICIO DE C:
+                    // 🔊 INYECCIÓN CRÍTICA DE ALTA VELOCIDAD AL COMPONENTE EN C:
                     try {
                         rawBuffer.order(ByteOrder.LITTLE_ENDIAN);
                         int shortCount = rawBuffer.remaining() / 2;
@@ -100,22 +102,24 @@ public class ALSARequestHandler implements RequestHandler {
                         }
                     } catch (Throwable e) {}
                 } else {
-                    ByteBuffer buffer = alsaClient.getSharedBuffer();
-                    if (buffer != null) {
-                        buffer.limit(requestLength);
-                        alsaClient.writeDataToStream(buffer);
-                    } else {
-                        if (inputStream.available() < requestLength) return false;
-                        alsaClient.writeDataToStream(inputStream.readByteBuffer(requestLength));
+                    if (alsaClient != null) {
+                        ByteBuffer buffer = alsaClient.getSharedBuffer();
+                        if (buffer != null) {
+                            buffer.limit(requestLength);
+                            alsaClient.writeDataToStream(buffer);
+                        } else {
+                            if (inputStream.available() < requestLength) return false;
+                            alsaClient.writeDataToStream(inputStream.readByteBuffer(requestLength));
+                        }
                     }
                 }
                 break;
             case RequestCodes.DRAIN:
-                if (!useNativeAudio) alsaClient.drain();
+                if (!useNativeAudio && alsaClient != null) alsaClient.drain();
                 break;
             case RequestCodes.POINTER:
                 try (XStreamLock lock = outputStream.lock()) {
-                    outputStream.writeInt(useNativeAudio ? 0 : alsaClient.pointer());
+                    outputStream.writeInt((useNativeAudio || alsaClient == null) ? 0 : alsaClient.pointer());
                 }
                 break;
         }
