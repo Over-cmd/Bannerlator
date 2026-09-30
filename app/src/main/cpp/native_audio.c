@@ -82,6 +82,9 @@ void wrapper_native_audio_init(void) {
     g_audio_ctx->is_running = true;
     g_audio_ctx->aaudio_stream = NULL;
 
+    // 🚀 ORDEN DE HARDWARE CORREGIDO: Inicializamos el candado ANTES de arrancar el hilo
+    pthread_mutex_init(&g_audio_ctx->mutex, NULL);
+
     AAudioStreamBuilder *builder = NULL;
     if (AAudio_createStreamBuilder(&builder) == AAUDIO_OK) {
         AAudioStreamBuilder_setSampleRate(builder, NATIVE_AUDIO_RATE);
@@ -99,7 +102,6 @@ void wrapper_native_audio_init(void) {
         AAudioStreamBuilder_delete(builder);
     }
 
-    pthread_mutex_init(&g_audio_ctx->mutex, NULL);
     pthread_create(&g_audio_thread, NULL, wrapper_audio_playback_loop, g_audio_ctx);
 }
 
@@ -146,12 +148,13 @@ Java_com_winlator_star_core_NativeAudio_init(JNIEnv *env, jclass clazz) {
 
 JNIEXPORT void JNICALL
 Java_com_winlator_star_core_NativeAudio_write(JNIEnv *env, jclass clazz, jshortArray samples, jint count) {
-    if (count <= 0) return;
+    if (count <= 0 || samples == NULL) return;
     
-    jshort *body = (*env)->GetShortArrayElements(env, samples, NULL);
+    // 🚀 ZONA CRÍTICA DIRECTA JNI: Bloqueamos la purga de memoria flotante para transferir a RAM pura
+    jshort *body = (jshort *)(*env)->GetPrimitiveArrayCritical(env, samples, NULL);
     if (body != NULL) {
         wrapper_native_audio_write((const int16_t*)body, count);
-        (*env)->ReleaseShortArrayElements(env, samples, body, JNI_ABORT);
+        (*env)->ReleasePrimitiveArrayCritical(env, samples, body, 0);
     }
 }
 
