@@ -10,6 +10,7 @@ import com.winlator.star.xconnector.XStreamLock;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 
 public class ALSARequestHandler implements RequestHandler {
     private int maxSHMemoryId = 0;
@@ -24,47 +25,90 @@ public class ALSARequestHandler implements RequestHandler {
         byte requestCode = inputStream.readByte();
         int requestLength = inputStream.readInt();
 
+        // 🚀 DETECTOR DEL ENTRAMADO: Si alsaClient no está inicializado o el buffer es cero,
+        // significa que estamos gobernando bajo la variable independiente "nativeaudio".
+        boolean useNativeAudio = (alsaClient == null || alsaClient.getBufferSize() == 0);
+
         switch (requestCode) {
             case RequestCodes.CLOSE:
-                alsaClient.release();
+                if (useNativeAudio) {
+                    try { com.winlator.star.core.NativeAudio.terminate(); } catch (Throwable e) {}
+                } else {
+                    alsaClient.release();
+                }
                 break;
             case RequestCodes.START:
-                alsaClient.start();
+                if (!useNativeAudio) alsaClient.start();
                 break;
             case RequestCodes.STOP:
-                alsaClient.stop();
+                if (!useNativeAudio) alsaClient.stop();
                 break;
             case RequestCodes.PAUSE:
-                alsaClient.pause();
+                if (!useNativeAudio) alsaClient.pause();
                 break;
             case RequestCodes.PREPARE:
                 if (inputStream.available() < requestLength) return false;
 
-                alsaClient.setChannelCount(inputStream.readByte());
-                alsaClient.setDataType(ALSAClient.DataType.values()[inputStream.readByte()]);
-                alsaClient.setSampleRate(inputStream.readInt());
-                alsaClient.setBufferSize(inputStream.readInt());
-                alsaClient.prepare();
+                byte channels = inputStream.readByte();
+                byte dataTypeOrdinal = inputStream.readByte();
+                int sampleRate = inputStream.readInt();
+                int bufferSize = inputStream.readInt();
 
-                createSharedMemory(alsaClient, outputStream);
+                if (alsaClient != null) {
+                    alsaClient.setChannelCount(channels);
+                    alsaClient.setDataType(ALSAClient.DataType.values()[dataTypeOrdinal]);
+                    alsaClient.setSampleRate(sampleRate);
+                    alsaClient.setBufferSize(bufferSize);
+                    alsaClient.prepare();
+                    createSharedMemory(alsaClient, outputStream);
+                } else {
+                    // 🏗️ INICIALIZACIÓN MUTEADA DEL PROPIO MOTOR:
+                    // Inicializamos tu native_audio.c pero respondemos el OK binario exacto a Wine
+                    try { com.winlator.star.core.NativeAudio.init(); } catch (Throwable e) {}
+                    
+                    int size = bufferSize * (channels * 2);
+                    int fd = SysVSharedMemory.createMemoryFd("alsa-shm"+(++maxSHMemoryId), size);
+                    try (XStreamLock lock = outputStream.lock()) {
+                        outputStream.writeByte((byte)0);
+                        outputStream.setAncillaryFd(fd);
+                    } finally {
+                        if (fd >= 0) XConnectorEpoll.closeFd(fd);
+                    }
+                }
                 break;
             case RequestCodes.WRITE:
-                ByteBuffer buffer = alsaClient.getSharedBuffer();
-                if (buffer != null) {
-                    buffer.limit(requestLength);
-                    alsaClient.writeDataToStream(buffer);
-                }
-                else {
+                if (useNativeAudio) {
+                    // Vaciamos de inmediato la red local interna para que el buffer no colapse el socket
                     if (inputStream.available() < requestLength) return false;
-                    alsaClient.writeDataToStream(inputStream.readByteBuffer(requestLength));
+                    ByteBuffer rawBuffer = inputStream.readByteBuffer(requestLength);
+                    
+                    // 🔊 DESVÍO DE SEGURIDAD NATIVO AL ARCHIVO EN C:
+                    try {
+                        rawBuffer.order(ByteOrder.LITTLE_ENDIAN);
+                        int shortCount = rawBuffer.remaining() / 2;
+                        if (shortCount > 0) {
+                            short[] samples = new short[shortCount];
+                            rawBuffer.asShortBuffer().get(samples);
+                            com.winlator.star.core.NativeAudio.write(samples, shortCount);
+                        }
+                    } catch (Throwable e) {}
+                } else {
+                    ByteBuffer buffer = alsaClient.getSharedBuffer();
+                    if (buffer != null) {
+                        buffer.limit(requestLength);
+                        alsaClient.writeDataToStream(buffer);
+                    } else {
+                        if (inputStream.available() < requestLength) return false;
+                        alsaClient.writeDataToStream(inputStream.readByteBuffer(requestLength));
+                    }
                 }
                 break;
             case RequestCodes.DRAIN:
-                alsaClient.drain();
+                if (!useNativeAudio) alsaClient.drain();
                 break;
             case RequestCodes.POINTER:
                 try (XStreamLock lock = outputStream.lock()) {
-                    outputStream.writeInt(alsaClient.pointer());
+                    outputStream.writeInt(useNativeAudio ? 0 : alsaClient.pointer());
                 }
                 break;
         }
