@@ -54,19 +54,18 @@ public class ALSAClient {
         frameBytes = channelCount * dataType.byteCount;
         release();
 
-        // 🚀 INICIALIZACIÓN NATIVA DEL WRAPPER:
-        // Si el stream nativo está activo, arrancamos el bucle de AAudio en el .so gráfico
+        // 🚀 INICIALIZACIÓN NATIVA DEL WRAPPER SEGURO:
+        // Arrancamos tu bucle asíncrono de AAudio en C, pero NO detenemos el flujo
+        // para que Java mantenga la estructura del stream viva y el emulador no se caiga.
         try {
             com.winlator.star.core.NativeAudio.init();
-            playing = true;
-            // Si inicializa con éxito, saltamos la creación del stream clásico de ALSA
-            return;
         } catch (Throwable e) {
-            // Fallback: si no encuentra la librería nativa del wrapper, continúa por el path original
+            // Fallback por si la librería no carga
         }
 
         if (!isValidBufferSize()) return;
 
+        // Forzamos la creación del stream nativo de control para estabilizar el proceso
         streamPtr = create(dataType.ordinal(), channelCount, sampleRate, bufferSize);
         if (streamPtr > 0) start();
     }
