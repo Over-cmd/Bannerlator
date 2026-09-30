@@ -43,8 +43,6 @@ static void* wrapper_audio_playback_loop(void *arg) {
         int samples_available = (ctx->head - ctx->tail + NATIVE_AUDIO_BUFFER_SIZE) % NATIVE_AUDIO_BUFFER_SIZE;
         
         // 🔄 PACER ELÁSTICO SIN BLOQUEO:
-        // Si el buffer no tiene suficientes muestras, soltamos el candado y esperamos 2ms.
-        // Evita el deadlock de pthread_cond_wait y mantiene a AAudio despierto.
         if (samples_available < 128) {
             pthread_mutex_unlock(&ctx->mutex);
             usleep(2000); // Pequeño respiro de 2 milisegundos
@@ -54,6 +52,8 @@ static void* wrapper_audio_playback_loop(void *arg) {
         int samples_to_play = samples_available;
         if (samples_to_play > 512) samples_to_play = 512;
 
+        // 🚀 REPARACIÓN ATÓMICA DE COPIA: 
+        // Asignamos las muestras indexadas a [i] para llenar el buffer real de sonido
         for (int i = 0; i < samples_to_play; i++) {
             temp_buffer[i] = ctx->data[ctx->tail];
             ctx->tail = (ctx->tail + 1) % NATIVE_AUDIO_BUFFER_SIZE;
@@ -87,7 +87,10 @@ void wrapper_native_audio_init(void) {
         AAudioStreamBuilder_setSampleRate(builder, NATIVE_AUDIO_RATE);
         AAudioStreamBuilder_setChannelCount(builder, NATIVE_AUDIO_CHANNELS);
         AAudioStreamBuilder_setFormat(builder, AAUDIO_FORMAT_PCM_I16);
-        AAudioStreamBuilder_setPerformanceMode(builder, AAUDIO_PERFORMANCE_MODE_LOW_LATENCY);
+        // 🚀 COMPATIBILIDAD UNISOC/MALI:
+        // Ponemos MODE_NONE para activar el remuestreador seguro de Android y evitar
+        // que el mezclador del sistema (AudioFlinger) mutee los 16 bits de Windows.
+        AAudioStreamBuilder_setPerformanceMode(builder, AAUDIO_PERFORMANCE_MODE_NONE);
         AAudioStreamBuilder_setSharingMode(builder, AAUDIO_SHARING_MODE_SHARED);
 
         if (AAudioStreamBuilder_openStream(builder, &g_audio_ctx->aaudio_stream) == AAUDIO_OK) {
