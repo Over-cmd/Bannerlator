@@ -104,22 +104,31 @@ public class ALSAClient {
             data.order(ByteOrder.BIG_ENDIAN);
         }
 
-        // 🔊 DESVÍO ATÓMICO NATIVEAUDIO PARA CHIPS MALI:
-        // Si estamos reproduciendo pero no hay stream de ALSA tradicional (streamPtr == 0),
-        // transformamos el ByteBuffer directo de Wine en shorts y lo enviamos al wrapper de C.
+        // 🔊 COMPROBACIÓN DE SEGURIDAD MAESTRA NATIVEAUDIO:
+        // Evitamos que ráfagas desalineadas de Wine hagan explotar la RAM del teléfono.
         if (playing && streamPtr == 0) {
             try {
-                int shortCount = data.remaining() / 2;
-                if (shortCount > 0) {
+                int remainingBytes = data.remaining();
+                // Forzamos la alineación estricta a 16 bits (múltiplos de 2 bytes por muestra)
+                int shortCount = remainingBytes / 2;
+                
+                if (shortCount > 0 && (remainingBytes % 2 == 0)) {
                     short[] samples = new short[shortCount];
-                    data.asShortBuffer().get(samples);
+                    // Usamos una lectura segura por posición absoluta para no estresar el ShortBuffer
+                    for (int i = 0; i < shortCount; i++) {
+                        samples[i] = data.getShort();
+                    }
                     com.winlator.star.core.NativeAudio.write(samples, shortCount);
                     position += (shortCount / channelCount);
+                } else {
+                    // Si el buffer viene corrupto o impar, vaciamos el puntero de largo de forma elástica
+                    data.position(data.limit());
                 }
-                data.position(data.limit());
                 return;
             } catch (Throwable e) {
-                // Protección de desbordamientos en la conversión de buffer
+                // Si ocurre cualquier amago de desborde, forzamos el avance para que el emulador no muera
+                data.position(data.limit());
+                return;
             }
         }
 
