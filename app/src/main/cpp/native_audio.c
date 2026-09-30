@@ -8,7 +8,7 @@
 #include <sys/resource.h> // 🚀 SEGURIDAD ANDROID: API para el control legal de prioridades
 #include <aaudio/AAudio.h>
 
-#define NATIVE_AUDIO_BUFFER_SIZE 8192
+#define NATIVE_AUDIO_BUFFER_SIZE 16384 // 🚀 DUPLICAMOS EL BUFFER: Da más pulmón contra cortes
 #define NATIVE_AUDIO_CHANNELS 2
 #define NATIVE_AUDIO_RATE 48000
 
@@ -21,7 +21,6 @@ typedef struct {
     int head;
     int tail;
     pthread_mutex_t mutex;
-    pthread_cond_t cond;
     bool is_running;
     AAudioStream *aaudio_stream;
 } WrapperAudioBuffer;
@@ -33,9 +32,7 @@ static pthread_t g_audio_thread;
 static void* wrapper_audio_playback_loop(void *arg) {
     WrapperAudioBuffer *ctx = (WrapperAudioBuffer*)arg;
     
-    // 🚀 CONTROL DE HARDWARE COMPATIBLE:
-    // En lugar de usar SCHED_FIFO (que hace crashear a Android), fijamos el "nice value"
-    // al valor -19. Esto le dice al Kernel legalmente que es un hilo de audio de ultra alta prioridad.
+    // Fijamos la prioridad legal de Android a máxima velocidad de audio
     setpriority(PRIO_PROCESS, 0, -19);
 
     int16_t temp_buffer[512];
@@ -43,16 +40,18 @@ static void* wrapper_audio_playback_loop(void *arg) {
     while (ctx->is_running) {
         pthread_mutex_lock(&ctx->mutex);
         
-        while (ctx->head == ctx->tail && ctx->is_running) {
-            pthread_cond_wait(&ctx->cond, &ctx->mutex);
-        }
-
-        if (!ctx->is_running) {
+        int samples_available = (ctx->head - ctx->tail + NATIVE_AUDIO_BUFFER_SIZE) % NATIVE_AUDIO_BUFFER_SIZE;
+        
+        // 🔄 PACER ELÁSTICO SIN BLOQUEO:
+        // Si el buffer no tiene suficientes muestras, soltamos el candado y esperamos 2ms.
+        // Evita el deadlock de pthread_cond_wait y mantiene a AAudio despierto.
+        if (samples_available < 128) {
             pthread_mutex_unlock(&ctx->mutex);
-            break;
+            usleep(2000); // Pequeño respiro de 2 milisegundos
+            continue;
         }
 
-        int samples_to_play = (ctx->head - ctx->tail + NATIVE_AUDIO_BUFFER_SIZE) % NATIVE_AUDIO_BUFFER_SIZE;
+        int samples_to_play = samples_available;
         if (samples_to_play > 512) samples_to_play = 512;
 
         for (int i = 0; i < samples_to_play; i++) {
@@ -62,10 +61,12 @@ static void* wrapper_audio_playback_loop(void *arg) {
 
         pthread_mutex_unlock(&ctx->mutex);
 
-        if (ctx->aaudio_stream && samples_to_play > 0) {
+        // 🔊 AUDIO DIRECTO AL SILICIO:
+        if (ctx->aaudio_stream && ctx->is_running) {
             int32_t num_frames = samples_to_play / NATIVE_AUDIO_CHANNELS;
             if (num_frames > 0) {
-                AAudioStream_write(ctx->aaudio_stream, temp_buffer, num_frames, 10000000);
+                // Escribimos en AAudio con un timeout estricto de 5 milisegundos
+                AAudioStream_write(ctx->aaudio_stream, temp_buffer, num_frames, 5000000);
             }
         }
     }
@@ -96,8 +97,6 @@ void wrapper_native_audio_init(void) {
     }
 
     pthread_mutex_init(&g_audio_ctx->mutex, NULL);
-    pthread_cond_init(&g_audio_ctx->cond, NULL);
-
     pthread_create(&g_audio_thread, NULL, wrapper_audio_playback_loop, g_audio_ctx);
 }
 
@@ -115,7 +114,6 @@ void wrapper_native_audio_write(const int16_t *samples, int count) {
         g_audio_ctx->head = next_head;
     }
 
-    pthread_cond_signal(&g_audio_ctx->cond);
     pthread_mutex_unlock(&g_audio_ctx->mutex);
 }
 
@@ -124,7 +122,6 @@ void wrapper_native_audio_terminate(void) {
 
     pthread_mutex_lock(&g_audio_ctx->mutex);
     g_audio_ctx->is_running = false;
-    pthread_cond_signal(&g_audio_ctx->cond);
     pthread_mutex_unlock(&g_audio_ctx->mutex);
 
     pthread_join(g_audio_thread, NULL);
@@ -135,7 +132,6 @@ void wrapper_native_audio_terminate(void) {
     }
 
     pthread_mutex_destroy(&g_audio_ctx->mutex);
-    pthread_cond_destroy(&g_audio_ctx->cond);
     free(g_audio_ctx);
     g_audio_ctx = NULL;
 }
