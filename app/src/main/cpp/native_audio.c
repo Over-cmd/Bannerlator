@@ -5,7 +5,8 @@
 #include <stdbool.h>
 #include <pthread.h>
 #include <jni.h>
-#include <aaudio/AAudio.h> // 🚀 CONEXIÓN FÍSICA: Cargamos la API AAudio de baja latencia de Android
+#include <sys/resource.h> // 🚀 SEGURIDAD ANDROID: API para el control legal de prioridades
+#include <aaudio/AAudio.h>
 
 #define NATIVE_AUDIO_BUFFER_SIZE 8192
 #define NATIVE_AUDIO_CHANNELS 2
@@ -22,7 +23,7 @@ typedef struct {
     pthread_mutex_t mutex;
     pthread_cond_t cond;
     bool is_running;
-    AAudioStream *aaudio_stream; // 🎛️ MANEJADOR DE HARDWARE: Puntero del flujo físico de Android
+    AAudioStream *aaudio_stream;
 } WrapperAudioBuffer;
 
 static WrapperAudioBuffer *g_audio_ctx = NULL;
@@ -32,11 +33,11 @@ static pthread_t g_audio_thread;
 static void* wrapper_audio_playback_loop(void *arg) {
     WrapperAudioBuffer *ctx = (WrapperAudioBuffer*)arg;
     
-    struct sched_param param;
-    param.sched_priority = sched_get_priority_max(SCHED_FIFO);
-    pthread_setschedparam(pthread_self(), SCHED_FIFO, &param);
+    // 🚀 CONTROL DE HARDWARE COMPATIBLE:
+    // En lugar de usar SCHED_FIFO (que hace crashear a Android), fijamos el "nice value"
+    // al valor -19. Esto le dice al Kernel legalmente que es un hilo de audio de ultra alta prioridad.
+    setpriority(PRIO_PROCESS, 0, -19);
 
-    // Búfer local de transferencia temporal para el silicio
     int16_t temp_buffer[512];
 
     while (ctx->is_running) {
@@ -54,7 +55,6 @@ static void* wrapper_audio_playback_loop(void *arg) {
         int samples_to_play = (ctx->head - ctx->tail + NATIVE_AUDIO_BUFFER_SIZE) % NATIVE_AUDIO_BUFFER_SIZE;
         if (samples_to_play > 512) samples_to_play = 512;
 
-        // Volcamos los bytes desde el búfer circular al búfer temporal local
         for (int i = 0; i < samples_to_play; i++) {
             temp_buffer[i] = ctx->data[ctx->tail];
             ctx->tail = (ctx->tail + 1) % NATIVE_AUDIO_BUFFER_SIZE;
@@ -62,12 +62,9 @@ static void* wrapper_audio_playback_loop(void *arg) {
 
         pthread_mutex_unlock(&ctx->mutex);
 
-        // 🔊 JAKE MATE AL SILENCIO: Inyectamos el sonido directamente en la GPU/Hardware de audio
         if (ctx->aaudio_stream && samples_to_play > 0) {
-            // Calculamos el número de frames (Cada frame estéreo tiene 2 muestras)
             int32_t num_frames = samples_to_play / NATIVE_AUDIO_CHANNELS;
             if (num_frames > 0) {
-                // Escribimos los datos en modo bloqueante de baja latencia con un timeout de 10ms
                 AAudioStream_write(ctx->aaudio_stream, temp_buffer, num_frames, 10000000);
             }
         }
@@ -75,7 +72,6 @@ static void* wrapper_audio_playback_loop(void *arg) {
     return NULL;
 }
 
-// Inicializador oficial del puente de sonido nativo
 void wrapper_native_audio_init(void) {
     if (g_audio_ctx) return;
 
@@ -85,13 +81,12 @@ void wrapper_native_audio_init(void) {
     g_audio_ctx->is_running = true;
     g_audio_ctx->aaudio_stream = NULL;
 
-    // 🏗️ CONSTRUCCIÓN DEL SUMIDERO AAUDIO:
     AAudioStreamBuilder *builder = NULL;
     if (AAudio_createStreamBuilder(&builder) == AAUDIO_OK) {
         AAudioStreamBuilder_setSampleRate(builder, NATIVE_AUDIO_RATE);
         AAudioStreamBuilder_setChannelCount(builder, NATIVE_AUDIO_CHANNELS);
         AAudioStreamBuilder_setFormat(builder, AAUDIO_FORMAT_PCM_I16);
-        AAudioStreamBuilder_setPerformanceMode(builder, AAUDIO_PERFORMANCE_MODE_LOW_LATENCY); // Modo Ultra-Baja Latencia
+        AAudioStreamBuilder_setPerformanceMode(builder, AAUDIO_PERFORMANCE_MODE_LOW_LATENCY);
         AAudioStreamBuilder_setSharingMode(builder, AAUDIO_SHARING_MODE_SHARED);
 
         if (AAudioStreamBuilder_openStream(builder, &g_audio_ctx->aaudio_stream) == AAUDIO_OK) {
@@ -109,23 +104,17 @@ void wrapper_native_audio_init(void) {
 void wrapper_native_audio_write(const int16_t *samples, int count) {
     if (!g_audio_ctx || !g_audio_ctx->is_running || count <= 0) return;
 
-    // 🚀 COJÍN DE SEGURIDAD MUTEX: Bloqueamos los hilos antes de tocar la RAM
     pthread_mutex_lock(&g_audio_ctx->mutex);
 
     for (int i = 0; i < count; i++) {
         int next_head = (g_audio_ctx->head + 1) % NATIVE_AUDIO_BUFFER_SIZE;
-        
         if (next_head == g_audio_ctx->tail) {
-            // Buffer lleno (Underrun guard): descartamos muestras viejas para evitar saturación metálica
             g_audio_ctx->tail = (g_audio_ctx->tail + 1) % NATIVE_AUDIO_BUFFER_SIZE;
         }
-        
-        // Copia atómica directa al bloque de memoria seguro asignado por malloc
         g_audio_ctx->data[g_audio_ctx->head] = samples[i];
         g_audio_ctx->head = next_head;
     }
 
-    // Despertamos al hilo de reproducción de AAudio de forma segura
     pthread_cond_signal(&g_audio_ctx->cond);
     pthread_mutex_unlock(&g_audio_ctx->mutex);
 }
@@ -151,11 +140,6 @@ void wrapper_native_audio_terminate(void) {
     g_audio_ctx = NULL;
 }
 
-// =============================================================================
-// 🚀 PUENTE DE COMUNICACIÓN JNI ENLACE DIRECTO (JAVA -> C):
-// Vinculamos de forma estricta los métodos con el paquete com.winlator.star.core
-// =============================================================================
-
 JNIEXPORT void JNICALL
 Java_com_winlator_star_core_NativeAudio_init(JNIEnv *env, jclass clazz) {
     wrapper_native_audio_init();
@@ -165,11 +149,9 @@ JNIEXPORT void JNICALL
 Java_com_winlator_star_core_NativeAudio_write(JNIEnv *env, jclass clazz, jshortArray samples, jint count) {
     if (count <= 0) return;
     
-    // Obtenemos un puntero directo de memoria a los elementos del array de Java
     jshort *body = (*env)->GetShortArrayElements(env, samples, NULL);
     if (body != NULL) {
         wrapper_native_audio_write((const int16_t*)body, count);
-        // Liberamos los recursos del array sin copiar de vuelta (JNI_ABORT es más rápido)
         (*env)->ReleaseShortArrayElements(env, samples, body, JNI_ABORT);
     }
 }
