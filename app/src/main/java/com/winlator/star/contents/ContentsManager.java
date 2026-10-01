@@ -502,8 +502,17 @@ public class ContentsManager {
                 java.io.InputStream inputStream = context.getAssets().open("nativeaudio.tzst");
                 File tmpTzst = new File(context.getCacheDir(), "nativeaudio.tzst");
                 
-                // Volcado rápido de flujo de bytes
-                com.winlator.star.core.FileUtils.copy(inputStream, new java.io.FileOutputStream(tmpTzst));
+                // 🚀 VOLCADO DE BYTES ESTÁNDAR INDESTRUCTIBLE:
+                // Copiamos el flujo de datos celda por celda a través de un búfer de caché en la RAM
+                // saltándonos las firmas rígidas de la clase FileUtils de Winlator.
+                java.io.FileOutputStream outputStream = new java.io.FileOutputStream(tmpTzst);
+                byte[] buffer = new byte[4096];
+                int bytesRead;
+                while ((bytesRead = inputStream.read(buffer)) != -1) {
+                    outputStream.write(buffer, 0, bytesRead);
+                }
+                outputStream.close();
+                inputStream.close();
                 
                 // Desempaquetamos mediante las utilidades XZ/Zstd del emulador directo al RootFS
                 com.winlator.star.core.TarCompressorUtils.extract(
