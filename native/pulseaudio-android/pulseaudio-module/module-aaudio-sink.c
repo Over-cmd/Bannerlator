@@ -155,12 +155,21 @@ static void banner_adapt_buffer(struct userdata *u) {
 static aaudio_data_callback_result_t aaudio_data_callback(AAudioStream *stream, void *userdata, void *audioData, int32_t numFrames) {
     struct userdata* u = userdata;
     
-    // Ejecutamos la calibración lineal del búfer
+    // Ejecutamos la calibración lineal del búfer pasito a pasito
     banner_adapt_buffer(u);   
 
-    if (PA_UNLIKELY(!PA_SINK_IS_LINKED(u->sink->thread_info.state))) return AAUDIO_CALLBACK_RESULT_STOP;
+    // 🚀 BARRERA ELÁSTICA DE LOGOS (ANTI-CAÍDA DE FPS):
+    // Si el sumidero aún no está enlazado o listo en la RAM, limpiamos el búfer con silencio
+    // y devolvemos CONTINUE de forma inmediata. Esto evita congelar a la GPU Mali y mantiene
+    // el renderizado a plenos fotogramas sin saturar la cola asíncrona.
+    if (PA_UNLIKELY(!u->sink || !PA_SINK_IS_LINKED(u->sink->thread_info.state))) {
+        if (audioData && numFrames > 0) {
+            memset(audioData, 0, numFrames * u->frame_size);
+        }
+        return AAUDIO_CALLBACK_RESULT_CONTINUE;
+    }
 
-    // Despachamos las muestras a la cola asíncrona sin bloquear el hilo de ejecución principal
+    // Despachamos las muestras reales a la cola asíncrona sin bloquear la CPU Unisoc
     pa_asyncmsgq_post(u->aaudio_msgq, PA_MSGOBJECT(u->sink), SINK_MESSAGE_RENDER, audioData, numFrames, NULL, NULL);
     
     return AAUDIO_CALLBACK_RESULT_CONTINUE;
