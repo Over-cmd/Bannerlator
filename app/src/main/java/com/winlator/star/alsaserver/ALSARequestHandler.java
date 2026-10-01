@@ -15,7 +15,7 @@ import java.nio.ByteOrder;
 public class ALSARequestHandler implements RequestHandler {
     private int maxSHMemoryId = 0;
     // 🚀 CONTADOR DE POSICIÓN VIRTUAL NATIVEAUDIO:
-    // Mantiene el registro global de frames procesados para simular el avance del reloj ante Wine
+    // Mantiene el registro global de bytes procesados para simular el avance del reloj ante Wine
     private int virtualAudioPosition = 0;
 
     @Override
@@ -56,9 +56,6 @@ public class ALSARequestHandler implements RequestHandler {
                 int sampleRate = inputStream.readInt();
                 int bufferSize = inputStream.readInt();
 
-                // 🏗️ CONFIGURACIÓN SANEADA NATIVEAUDIO (SIN EXTRACCIÓN TRADICIONAL):
-                // Seteamos las variables en Java para que el objeto no quede huérfano,
-                // pero NO llamamos a alsaClient.prepare() para no secuestrar los códecs.
                 if (alsaClient != null) {
                     alsaClient.setChannelCount(channels);
                     alsaClient.setDataType(ALSAClient.DataType.values()[dataTypeOrdinal]);
@@ -78,9 +75,14 @@ public class ALSARequestHandler implements RequestHandler {
                     if (buffer != null) alsaClient.setSharedBuffer(buffer);
                 }
 
+                // 🚀 CIERRE SEGURO REPARADO:
+                // Usamos finally para liberar el descriptor del lado de Java una vez que Android lo duplica y envía.
+                // Esto destranca el Kernel, elimina el congelamiento y permite el flujo continuo.
                 try (XStreamLock lock = outputStream.lock()) {
                     outputStream.writeByte((byte)0);
                     outputStream.setAncillaryFd(fd);
+                } finally {
+                    if (fd >= 0) XConnectorEpoll.closeFd(fd);
                 }
                 break;
             case RequestCodes.WRITE:
@@ -104,10 +106,10 @@ public class ALSARequestHandler implements RequestHandler {
                             rawBuffer.asShortBuffer().get(samples);
                             com.winlator.star.core.NativeAudio.write(samples, shortCount);
                             
-                            // 🚀 SIMULACIÓN DE AVANCE DEL RELOJ:
-                            // Incrementamos la posición en función de los frames consumidos (Muestras / Canales)
-                            int channelsCount = (alsaClient != null) ? alsaClient.getChannelCount() : 2;
-                            virtualAudioPosition += (shortCount / channelsCount);
+                            // 🚀 CONTADOR EN BYTES REALES:
+                            // Multiplicamos por 2 para devolver la posición exacta en bytes consumidos,
+                            // que es la escala matemática precisa que espera el plugin de ALSA en Wine.
+                            virtualAudioPosition += (shortCount * 2);
                         }
                     } catch (Throwable e) {}
 
@@ -133,9 +135,8 @@ public class ALSARequestHandler implements RequestHandler {
                 break;
             case RequestCodes.POINTER:
                 try (XStreamLock lock = outputStream.lock()) {
-                    // 🔊 ENGAÑO PERFECTO A WINE:
-                    // Devolvemos el puntero virtual incremental para simular el hardware corriendo libre.
-                    // Esto remueve el congelamiento por completo y mantiene la sincronización.
+                    // Devolvemos la posición virtual calibrada en bytes. 
+                    // Remueve el congelamiento y sincroniza el renderizado de fotogramas.
                     outputStream.writeInt(useNativeAudio ? virtualAudioPosition : (alsaClient != null ? alsaClient.pointer() : 0));
                 }
                 break;
