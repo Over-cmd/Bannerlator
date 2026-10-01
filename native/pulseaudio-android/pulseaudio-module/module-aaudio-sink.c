@@ -245,11 +245,11 @@ static void thread_func(void *userdata) {
     struct userdata *u = userdata;
     pa_thread_mq_install(&u->thread_mq);
 
-    /* BANNERLATOR: Eleva el hilo nativo de audio a prioridad de tiempo real */
-    /* Evita que el JIT de Box64 congele el flujo de sonido en cinemáticas */
-    #ident "Bannerlator Thread Optimization"
-    int priority_tid = (int)gettid();
-    setpriority(0, priority_tid, -19); 
+    /* 🔊 OPTIMIZACIÓN ENTORNO INTEGRADO MALI UNISOC:
+       Dejamos que Android maneje de forma elástica la prioridad del subproceso nativo 
+       a través del AAudio Stream de PulseAudio, eliminando de raíz el bloqueo setpriority(-19) 
+       que provocaba la denegación de permisos del Kernel y el silencio de hardware. */
+    #ident "Bannerlator Clean Thread Optimization"
 
     for (;;) {
         if (PA_UNLIKELY(u->sink->thread_info.rewind_requested)) pa_sink_process_rewind(u->sink, 0);
