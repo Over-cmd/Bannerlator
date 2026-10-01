@@ -4585,13 +4585,13 @@ public class XServerDisplayActivity extends AppCompatActivity {
         if ("alsa".equals(d)) return "ALSA";
         if ("pulseaudio".equals(d)) return "PulseAudio";
         if ("directaudio".equals(d)) return "DirectAudio";
-        // 🚀 REGISTRO HISTÓRICO DE IDENTIFICADOR NATIVEAUDIO:
+        // 🚀 REGISTRO DE IDENTIFICADOR DE MOTOR NATIVEAUDIO:
         if ("nativeaudio".equals(d)) return "NativeAudio";
         return d == null ? "" : d;
     }
 
-    // 🔊 GESTOR DE ENTORNO ELÁSTICO POST-INICIALIZACIÓN:
-    // Capturamos el mapa de variables y el contenedor antes de levantar box64.
+    // 🔊 GESTOR DE ENTORNO ELÁSTICO PRE-LAUNCH:
+    // Captura el mapa de variables y el contenedor antes de levantar box64.
     // Si el usuario eligió "nativeaudio", forzamos la descompresión del plugin 
     // en las carpetas de 64 bits de Wine e inyectamos las cañerías en la RAM.
     private void injectNativeAudioEnvironment(com.winlator.star.container.Container container, java.util.Map<String, String> environment) {
@@ -4600,7 +4600,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
                 com.winlator.star.contents.ContentsManager contentsManager = new com.winlator.star.contents.ContentsManager(this);
                 contentsManager.extractNativeAudioAddon();
                 
-                // Forzamos las variables de red local directo en el entorno elástico
+                // Forzamos las variables de red local directo en el entorno elástico de Wine
                 environment.put("ANDROID_ALSA_SERVER", "/data/data/com.winlator.star/files/imagefs/tmp/alsa-server");
                 environment.put("ANDROID_ASERVER_USE_SHM", "1");
                 environment.put("AUDIO_STREAM_FORMAT", "S16_LE");
