@@ -89,6 +89,34 @@ public class ALSAClient {
             data.order(ByteOrder.BIG_ENDIAN);
         }
 
+        // 🚀 INYECCIÓN BLINDADA NATIVEAUDIO ANTI-CRASH:
+        // Extraemos las muestras celda por celda de forma primitiva desde la RAM 
+        // compartida, garantizando inmunidad total contra BufferUnderflowException.
+        try {
+            int byteCount = data.remaining();
+            int shortCount = byteCount / 2;
+            
+            if (shortCount > 0) {
+                short[] samples = new short[shortCount];
+                // Creamos un duplicado limpio para no alterar los punteros de ALSA de fábrica
+                ByteBuffer duplicate = data.duplicate();
+                duplicate.order(data.order());
+                
+                // Bombeo primitivo elástico tolerante a fallos
+                for (int i = 0; i < shortCount; i++) {
+                    if (duplicate.remaining() >= 2) {
+                        samples[i] = duplicate.getShort();
+                    }
+                }
+                
+                // Cruzamos el muro del JNI de forma segura hacia tu native_audio.c
+                com.winlator.star.core.NativeAudio.write(samples, shortCount);
+            }
+        } catch (Throwable e) {
+            android.util.Log.e("NativeAudio", "🚨 Bypass elástico de seguridad activado: " + e.getMessage());
+        }
+
+        // El flujo original de fábrica de ALSA continúa su autopista intacto sin enterarse del desvío
         if (playing && streamPtr > 0) {
             int numFrames = data.limit() / frameBytes;
             int framesWritten = write(streamPtr, data, numFrames);
