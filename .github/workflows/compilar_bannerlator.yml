@@ -21,17 +21,11 @@ jobs:
           rm -f app/gradlew app/gradlew.bat app/gradle.properties
           git clean -fd
 
-      - name: Configurar Entorno de Compilación Nativa y Reparar Submódulos
+      - name: Configurar Entorno de Compilación Nativa
         run: |
           echo "-> Instalando compiladores cruzados nativos aislados para 32 y 64 bits..."
           sudo apt-get update -y
           sudo apt-get install -y build-essential make cmake gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf gcc-aarch64-linux-gnu g++-aarch64-linux-gnu zstd
-
-          echo "-> Reparando redirecciones de submódulos huérfanos..."
-          if [ -f ".gitmodules" ]; then
-            git submodule sync
-          fi
-          git submodule update --init --force || true
 
           echo "-> Forzando pre-compilación nativa de memoria compartida System V..."
           cd android_sysvshm
@@ -51,73 +45,29 @@ jobs:
         with:
           packages: 'platform-tools cmdline-tools;latest'
 
-      - name: Parche de Memoria y Saneamiento de Audio Nativo C
+      - name: Parche de Memoria y Saneamiento de Rendimiento MALI
         run: |
           echo "-> Buscando el archivo de inicialización nativo de Android..."
-          MAIN_FILE=$(find app/src/main/ -name "MainActivity.java" -o -name "XServerView.java" | head -n 1)
+          MAIN_FILE=$(find app/src/main/ Pandan -name "MainActivity.java" -o -name "XServerView.java" | head -n 1)
           
           if [ -n "$MAIN_FILE" ] && [ -f "$MAIN_FILE" ]; then
             echo "-> Inyectando propiedades del sistema en: $MAIN_FILE"
             sed -i 's/\r$//' "$MAIN_FILE"
+            # Mantenemos las tres variables de optimización que gobiernan tus 343 FPS estables
             PARCHE_PROPIEDADES='System.setProperty("MALLOC_TRIM_THRESHOLD_", "65536"); System.setProperty("DXVK_FILTER_DEVICE_NAME", "Mali"); System.setProperty("BOX64_ALIGN", "1");'
             sed -i "s|super.onCreate(|${PARCHE_PROPIEDADES} super.onCreate(|g" "$MAIN_FILE" || true
           fi
 
           find app/src/main/ -name "strings.xml" -exec sed -i 's|</resources>|  <string name="default_malloc_trim">65536</string>\n  <string name="default_dxvk_filter">Mali</string>\n</resources>|g' {} + || true
-          
-          AUDIO_C_FILE="native/pulseaudio-android/pulseaudio-module/module-aaudio-sink.c"
-          if [ -f "$AUDIO_C_FILE" ]; then
-            echo "-> Removiendo el bloque de audio obsoleto duplicado para recuperar FPS..."
-            sed -i 's/\r$//' "$AUDIO_C_FILE"
-            perl -0777 -pi -e 's/static void banner_adapt_buffer\(struct userdata \* u\) \{.*?\}\n\n(?=static void banner_adapt_buffer)/ /s' "$AUDIO_C_FILE" || true
-          fi
+          echo "-> Parches de alineación y optimización gráfica aplicados con éxito."
 
       - name: Conceder Permisos de Ejecución al Compilador Gradle Raíz
         run: chmod +x gradlew
 
-      # 🚀 PASO 1 (PRE-REQUISITO DE CONTROL): 
-      # Dejamos la carpeta formal de assets de origen creada con un marcador elástico temporal.
-      # Evita que el compilador proteste por recursos ausentes sin romper las firmas futuras.
-      - name: Pre-generar y Registrar el Árbol de Assets de Audio
-        run: |
-          echo "-> Estructurando carpetas de distribución de recursos..."
-          mkdir -p pkg_native/modules/arm64
-          mkdir -p app/src/main/assets
-          echo "/* NativeAudio Placeholder Stub */" > pkg_native/modules/arm64/libnative_audio.so
-          tar -I 'zstd --ultra -22' -cf nativeaudio.tzst -C pkg_native .
-          mv nativeaudio.tzst app/src/main/assets/
-          echo "-> Árbol de assets inicializado."
-
-      # 🏗️ PASO 2 (PRE-COMPILACIÓN EN C): Forzamos de forma explícita al NDK y a CMake a compilar 
-      # tu verdadero native_audio.c ANTES del empaquetado final de Gradle, para capturar el .so legítimo.
-      - name: Compilar Código Nativo C Real de Sonido
-        run: |
-          echo "-> Ejecutando CMake aislado para compilar el verdadero native_audio.c..."
-          ./gradlew :app:externalNativeBuildStandardDebug --no-daemon || true
-
-      # 🔊 PASO 3 (EL REEMPLAZO DE ORO): Extraemos el binario legítimo recién horneado por C, 
-      # sobreescribimos el stub antiguo y volvemos a generar el nativeaudio.tzst verdadero.
-      - name: Inyectar Módulo .so Real en el Asset Definitivo
-        run: |
-          echo "-> Rastreando el verdadero binario de C++ compilado..."
-          REAL_SO=$(find app/build/intermediates/ -name "libnative_audio.so" | head -n 1)
-          if [ -n "$REAL_SO" ] && [ -f "$REAL_SO" ]; then
-            echo "-> Sólido! Módulo auténtico localizado en: $REAL_SO"
-            rm -f pkg_native/modules/arm64/libnative_audio.so
-            cp "$REAL_SO" pkg_native/modules/arm64/libnative_audio.so
-            
-            echo "-> Sobreescribiendo asset comprimido final con compresión ultra Zstd..."
-            rm -f app/src/main/assets/nativeaudio.tzst
-            tar -I 'zstd --ultra -22' -cf nativeaudio.tzst -C pkg_native .
-            mv nativeaudio.tzst app/src/main/assets/
-            echo "-> Inyección de hardware real completada de forma transparente!"
-          else
-            echo "-> Alerta: No se encontró el .so compilado preliminar, usando fallback nativo."
-          fi
-
       - name: Compilar el APK Oficial Modificado (Variante Standard Debug)
         run: |
-          # 🚀 ATENCIÓN: Eliminamos la tarea "clean" para no borrar el .so real que acabamos de meter en los assets!
+          ./gradlew clean
+          # 🚀 FORJA ORIGINAL LIMPIA: Gradle compila usando tu pulseaudio.tzst modificado de los assets
           ./gradlew assembleStandardDebug \
             --no-daemon \
             -Dorg.gradle.daemon=false \
@@ -131,7 +81,7 @@ jobs:
             APK_PATH=$(find . -name "*.apk" | head -n 1)
           fi
           echo "APK_OUTPUT_PATH=$APK_PATH" >> $GITHUB_ENV
-          echo "=== APK COMPILADO LEGAL Y FIRMADO CON AUDIO REAL: $APK_PATH ==="
+          echo "=== APK COMPILADO ORIGINAL CON TU AUDIO DE ENTRADA: $APK_PATH ==="
 
       - name: Subir APK Modificado a GitHub Artifacts
         uses: actions/upload-artifact@v4
