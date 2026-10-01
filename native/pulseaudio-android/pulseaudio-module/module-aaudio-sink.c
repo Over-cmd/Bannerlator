@@ -298,15 +298,15 @@ void pa__done(pa_module* m) {
 }
 
 int pa__init(pa_module* m) {
-	struct userdata *u = NULL;
-	pa_modargs *ma = NULL;
+    struct userdata *u = NULL;
+    pa_modargs *ma = NULL;
 
     if (!(ma = pa_modargs_new(m->argument, valid_modargs))) {
         pa_log("Failed to parse module arguments.");
-		goto error;
+        goto error;
     }
 
-	m->userdata = u = pa_xnew0(struct userdata, 1);
+    m->userdata = u = pa_xnew0(struct userdata, 1);
 
     u->core = m->core;
     u->module = m;
@@ -323,7 +323,7 @@ int pa__init(pa_module* m) {
         goto error;
     }
 
-	u->rtpoll_item = pa_rtpoll_item_new_asyncmsgq_read(u->rtpoll, PA_RTPOLL_EARLY-1, u->aaudio_msgq);
+    u->rtpoll_item = pa_rtpoll_item_new_asyncmsgq_read(u->rtpoll, PA_RTPOLL_EARLY-1, u->aaudio_msgq);
 
     u->ss = m->core->default_sample_spec;
     pa_channel_map map = m->core->default_channel_map;
@@ -333,7 +333,7 @@ int pa__init(pa_module* m) {
         goto error;
     }
 
-	u->ss.channels = 2;
+    u->ss.channels = 2;
     u->ss.format = u->ss.format == PA_SAMPLE_FLOAT32LE || u->ss.format == PA_SAMPLE_FLOAT32BE ? PA_SAMPLE_FLOAT32LE : PA_SAMPLE_S16LE;
 
     u->volume = 1.0;
@@ -365,7 +365,7 @@ int pa__init(pa_module* m) {
         }
     }
 
-    /* BANNERLATOR: adaptive modargs */
+/* BANNERLATOR: adaptive modargs */
     int adaptive = 1;
     if (!pa_modargs_get_value_s32(ma, "adaptive", &adaptive)) u->adaptive = adaptive ? 1 : 0;
     int32_t bf = 0;
@@ -375,7 +375,7 @@ int pa__init(pa_module* m) {
 
     if (pa_create_aaudio_stream(u) < 0) goto error;
 
-	pa_sink_new_data data;
+    pa_sink_new_data data;
     pa_sink_new_data_init(&data);
     data.driver = __FILE__;
     data.module = m;
@@ -416,7 +416,12 @@ int pa__init(pa_module* m) {
 
     pa_sink_set_asyncmsgq(u->sink, u->thread_mq.inq);
     pa_sink_set_rtpoll(u->sink, u->rtpoll);
-    pa_sink_set_fixed_latency(u->sink, sink_get_latency(u));
+
+    // 🚀 BARRERA ELÁSTICA DINÁMICA APLICADA (SINCRO TOTAL DE VIDEO Y AUDIO):
+    // Cambiamos la latencia fija por el rango dinámico variable. PulseAudio se estirará
+    // al vuelo junto con tu buffer lineal, destruyendo el lag y los micro-congelamientos.
+    u->sink->flags |= PA_SINK_DYNAMIC_LATENCY;
+    pa_sink_set_latency_range(u->sink, sink_get_latency(u), pa_bytes_to_usec(u->buffer_capacity * u->frame_size, &u->ss));
 
     if (!(u->thread = pa_thread_new("aaudio-sink", thread_func, u))) {
         pa_log("Failed to create thread.");
@@ -425,9 +430,9 @@ int pa__init(pa_module* m) {
 
     pa_sink_put(u->sink);
     pa_modargs_free(ma);
-	return 0;
+    return 0;
 error:
     if (ma) pa_modargs_free(ma);
-	pa__done(m);
-	return -1;
+    pa__done(m);
+    return -1;
 }
