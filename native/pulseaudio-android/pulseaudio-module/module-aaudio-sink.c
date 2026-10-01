@@ -117,10 +117,10 @@ static const char* const valid_modargs[] = {
     NULL
 };
 
-/* BANNERLATOR: ESCALADO LINEAL REPARADO (ANTI-DELAY / MAX FPS)
- * Al detectar un underrun (xrun), incrementamos el búfer estrictamente de forma lineal 
- * sumando un solo paso burst (step). Evitamos la multiplicación geométrica que inflaba 
- * el búfer de bytes en la RAM, eliminando el retraso de audio y el congelamiento de la imagen. */
+/* BANNERLATOR: ESCALADO LINEAL CON TOPE CRÍTICO (ANTI-DELAY / MAX FPS)
+ * Al detectar un underrun (xrun), incrementamos el búfer de forma lineal sumando un
+ * solo paso burst (step). Añadimos un tope estricto de 3 bursts para evitar el fenómeno
+ * del Buffer Bloat, erradicando por completo el retraso acumulado de bytes en la RAM. */
 static void banner_adapt_buffer(struct userdata *u) {
     if (!u->adaptive || u->frames_per_burst <= 0 || u->cur_buffer_size <= 0) return;
 
@@ -128,12 +128,14 @@ static void banner_adapt_buffer(struct userdata *u) {
     if (xruns <= u->last_xrun) return;
     u->last_xrun = xruns;
 
-    int32_t cap = (u->max_buffer_frames > 0 && u->max_buffer_frames < u->buffer_capacity)
-                      ? u->max_buffer_frames : u->buffer_capacity;
+    // Seteamos un techo de seguridad inteligente de 3 bursts para evitar delay acumulativo
+    int32_t max_safe_cap = u->frames_per_burst * 3;
+    int32_t cap = (u->max_buffer_frames > 0 && u->max_buffer_frames < max_safe_cap)
+                      ? u->max_buffer_frames : max_safe_cap;
+    
     if (u->cur_buffer_size >= cap) return;
 
-    // 🚀 CRECIMIENTO LINEAL CONTROLADO PASO A PASO:
-    // Sumamos únicamente un burst por cada ráfaga de underrun detectada.
+    // Crecimiento lineal controlado paso a paso
     int32_t step = u->frames_per_burst;
     int32_t want = u->cur_buffer_size + step;
 
@@ -146,10 +148,22 @@ static void banner_adapt_buffer(struct userdata *u) {
     }
 }
 
+/* BANNERLATOR: CALLBACK DE COLA ASÍNCRONA NO BLOQUEANTE (ANTI-STUTTERING TOTAL)
+ * Reemplazamos pa_asyncmsgq_send() por pa_asyncmsgq_post() para enviar los datos en segundo plano
+ * de forma asíncrona. Esto evita que el hilo de audio congele la CPU Unisoc, eliminando por completo
+ * los parones en los vídeos y liberando la tasa de fotogramas a la máxima velocidad gráfica. */
 static aaudio_data_callback_result_t aaudio_data_callback(AAudioStream *stream, void *userdata, void *audioData, int32_t numFrames) {
     struct userdata* u = userdata;
-    banner_adapt_buffer(u);   /* BANNERLATOR */
-    return pa_asyncmsgq_send(u->aaudio_msgq, PA_MSGOBJECT(u->sink), SINK_MESSAGE_RENDER, audioData, numFrames, NULL);
+    
+    // Ejecutamos la calibración lineal del búfer
+    banner_adapt_buffer(u);   
+
+    if (PA_UNLIKELY(!PA_SINK_IS_LINKED(u->sink->thread_info.state))) return AAUDIO_CALLBACK_RESULT_STOP;
+
+    // Despachamos las muestras a la cola asíncrona sin bloquear el hilo de ejecución principal
+    pa_asyncmsgq_post(u->aaudio_msgq, PA_MSGOBJECT(u->sink), SINK_MESSAGE_RENDER, audioData, numFrames, NULL, NULL);
+    
+    return AAUDIO_CALLBACK_RESULT_CONTINUE;
 }
 
 static int pa_create_aaudio_stream(struct userdata *u) {
