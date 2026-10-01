@@ -488,4 +488,39 @@ public class ContentsManager {
         }
         return true;
     }
+
+    // =============================================================================
+    // 🚀 EXTRACCIÓN AUTOMÁTICA DEL ADDON NATIVEAUDIO (ARM64)
+    // =============================================================================
+    // Captura el asset .tzst unificado por el script y lo inyecta directamente
+    // en el árbol de directorios de Wine (/imagefs) al iniciar el contenedor.
+    public void extractNativeAudioAddon() {
+        try {
+            File imagefsDir = new File(context.getFilesDir(), "imagefs");
+            if (imagefsDir.exists()) {
+                // Abrimos el archivo que pre-generó el flujo de las Actions
+                java.io.InputStream inputStream = context.getAssets().open("nativeaudio.tzst");
+                File tmpTzst = new File(context.getCacheDir(), "nativeaudio.tzst");
+                
+                // Volcado rápido de flujo de bytes
+                com.winlator.star.core.FileUtils.copy(inputStream, new java.io.FileOutputStream(tmpTzst));
+                
+                // Desempaquetamos mediante las utilidades XZ/Zstd del emulador directo al RootFS
+                com.winlator.star.core.TarCompressorUtils.extract(
+                    com.winlator.star.core.TarCompressorUtils.Type.ZSTD, 
+                    context, 
+                    android.net.Uri.fromFile(tmpTzst), 
+                    imagefsDir, 
+                    0, 
+                    null
+                );
+                
+                // Limpieza del archivo temporal de caché
+                tmpTzst.delete();
+                Log.d("ContentsManager", "🚀 NativeAudio Addon desplegado con éxito total en el RootFS!");
+            }
+        } catch (Exception e) {
+            Log.e("ContentsManager", "❌ Fallo crítico al inyectar las librerías de sonido: " + e.getMessage());
+        }
+    }
 }
