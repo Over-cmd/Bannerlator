@@ -144,7 +144,13 @@ static void banner_adapt_buffer(struct userdata *u) {
         u->cur_buffer_size = got;
         pa_log_info("aaudio-sink: grew buffer aggressively to %d frames after %d xruns", (int) got, (int) xruns);
     }
-}static void banner_adapt_buffer(struct userdata *u) {
+}
+
+/* BANNERLATOR: ESCALADO LINEAL REPARADO (ANTI-DELAY / MAX FPS)
+ * Al detectar un underrun (xrun), incrementamos el búfer estrictamente de forma lineal 
+ * sumando un solo paso burst (step). Evitamos la multiplicación geométrica que inflaba 
+ * el búfer de bytes en la RAM, eliminando el retraso de audio y el congelamiento de la imagen. */
+static void banner_adapt_buffer(struct userdata *u) {
     if (!u->adaptive || u->frames_per_burst <= 0 || u->cur_buffer_size <= 0) return;
 
     int32_t xruns = AAudioStream_getXRunCount(u->stream);
@@ -155,25 +161,19 @@ static void banner_adapt_buffer(struct userdata *u) {
                       ? u->max_buffer_frames : u->buffer_capacity;
     if (u->cur_buffer_size >= cap) return;
 
-    /* 🚨 OPTIMIZACIÓN ACÚSTICA MALI CON ENTEROS (ANTI-CRACKLING EXTRA):
-       Reemplazamos la multiplicación por 1.5 flotante por operaciones puras con enteros.
-       Multiplicamos por 3 y dividimos entre 2 en una sola línea matemática veloz.
-       Esto alivia la carga de la CPU Unisoc y absorbe los picos de JIT sin chasquidos. */
-    int32_t step = u->frames_per_burst * 2;
-    int32_t want = (u->cur_buffer_size * 3) / 2;
-    if (want < u->cur_buffer_size + step) {
-        want = u->cur_buffer_size + step;
-    }
+    // 🚀 CRECIMIENTO LINEAL CONTROLADO PASO A PASO:
+    // Sumamos únicamente un burst por cada ráfaga de underrun detectada.
+    int32_t step = u->frames_per_burst;
+    int32_t want = u->cur_buffer_size + step;
 
     if (want > cap) want = cap;
 
     int32_t got = AAudioStream_setBufferSizeInFrames(u->stream, want);
     if (got > 0) {
         u->cur_buffer_size = got;
-        pa_log_info("aaudio-sink: grew buffer aggressively to %d frames after %d xruns", (int) got, (int) xruns);
+        pa_log_info("aaudio-sink: grew buffer linearly to %d frames after %d xruns", (int) got, (int) xruns);
     }
 }
-
 
 static aaudio_data_callback_result_t aaudio_data_callback(AAudioStream *stream, void *userdata, void *audioData, int32_t numFrames) {
     struct userdata* u = userdata;
