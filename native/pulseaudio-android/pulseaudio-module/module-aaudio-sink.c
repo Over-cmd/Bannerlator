@@ -117,35 +117,6 @@ static const char* const valid_modargs[] = {
     NULL
 };
 
-/* BANNERLATOR: on an underrun, grow the AAudio buffer by one burst, up to the cap/capacity. Never
- * shrinks, so it settles at the lowest crackle-free size. Cheap, non-blocking — safe in the callback. */
-static void banner_adapt_buffer(struct userdata *u) {
-    if (!u->adaptive || u->frames_per_burst <= 0 || u->cur_buffer_size <= 0) return;
-
-    int32_t xruns = AAudioStream_getXRunCount(u->stream);
-    if (xruns <= u->last_xrun) return;
-    u->last_xrun = xruns;
-
-    int32_t cap = (u->max_buffer_frames > 0 && u->max_buffer_frames < u->buffer_capacity)
-                      ? u->max_buffer_frames : u->buffer_capacity;
-    if (u->cur_buffer_size >= cap) return;
-
-    /* BANNERLATOR: Crecimiento geométrico más agresivo (1.5x) para absorber picos de JIT */
-    int32_t step = u->frames_per_burst * 2;
-    int32_t want = u->cur_buffer_size * 1.5;
-    if (want < u->cur_buffer_size + step) {
-        want = u->cur_buffer_size + step;
-    }
-
-    if (want > cap) want = cap;
-
-    int32_t got = AAudioStream_setBufferSizeInFrames(u->stream, want);
-    if (got > 0) {
-        u->cur_buffer_size = got;
-        pa_log_info("aaudio-sink: grew buffer aggressively to %d frames after %d xruns", (int) got, (int) xruns);
-    }
-}
-
 /* BANNERLATOR: ESCALADO LINEAL REPARADO (ANTI-DELAY / MAX FPS)
  * Al detectar un underrun (xrun), incrementamos el búfer estrictamente de forma lineal 
  * sumando un solo paso burst (step). Evitamos la multiplicación geométrica que inflaba 
