@@ -59,17 +59,15 @@ public class ALSARequestHandler implements RequestHandler {
                     // Inicializamos tu native_audio.c aislado en C sin tocar el cliente clásico
                     try { com.winlator.star.core.NativeAudio.init(); } catch (Throwable e) {}
                     
-                    // Respondemos el OK virtual y el fd fantasma para que Wine se quede tranquilo y envíe los datos
+                    // Respondemos el OK virtual y el fd fantasma para que Wine se quede tranquilo y envíe los datos.
+                    // 🚨 REMOVEMOS EL FINALLY CLOSE: Mantenemos el descriptor vivo para el mapeo del hardware de Wine.
                     int size = bufferSize * (channels * 2);
                     int fd = SysVSharedMemory.createMemoryFd("alsa-shm"+(++maxSHMemoryId), size);
                     try (XStreamLock lock = outputStream.lock()) {
                         outputStream.writeByte((byte)0);
                         outputStream.setAncillaryFd(fd);
-                    } finally {
-                        if (fd >= 0) XConnectorEpoll.closeFd(fd);
                     }
                 } else {
-                    // Camino original de fábrica solo si nativeaudio estuviera apagado
                     if (alsaClient != null) {
                         alsaClient.setChannelCount(channels);
                         alsaClient.setDataType(ALSAClient.DataType.values()[dataTypeOrdinal]);
@@ -104,8 +102,6 @@ public class ALSARequestHandler implements RequestHandler {
                     } catch (Throwable e) {}
 
                     // 🚀 RESPUESTA DE CONTROL OBLIGATORIA (ACK):
-                    // Le devolvemos un byte de confirmación a Wine bajo candado mutuo para avisar 
-                    // de que la ráfaga fue procesada. Esto destranca el flujo continuo multimedia.
                     try (XStreamLock lock = outputStream.lock()) {
                         outputStream.writeByte((byte)0);
                     }
