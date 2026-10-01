@@ -5,7 +5,6 @@
 #include <stdbool.h>
 #include <pthread.h>
 #include <jni.h>
-#include <sys/resource.h> // 🚀 SEGURIDAD ANDROID: API para el control legal de prioridades
 #include <aaudio/AAudio.h>
 
 #define NATIVE_AUDIO_BUFFER_SIZE 16384 // Búfer de 16KB para amortiguar ráfagas masivas
@@ -28,21 +27,19 @@ typedef struct {
 static WrapperAudioBuffer *g_audio_ctx = NULL;
 static pthread_t g_audio_thread;
 
-// Hilo asíncrono nativo de alta prioridad para despacho directo
+// Hilo asíncrono nativo elástico para despacho directo
 static void* wrapper_audio_playback_loop(void *arg) {
     WrapperAudioBuffer *ctx = (WrapperAudioBuffer*)arg;
     
-    // Fijamos la prioridad legal de Android a máxima velocidad de audio
-    setpriority(PRIO_PROCESS, 0, -19);
-
     // 🏗️ CONSTRUCCIÓN DEL SUMIDERO EN EL HILO AUDIO:
-    // Forzamos el arranque físico desde este hilo con contexto nativo legítimo
+    // Forzamos el arranque físico desde este hilo con contexto nativo legítimo.
+    // Quitamos setpriority(-19) para erradicar el crash por denegación de permisos de Android.
     AAudioStreamBuilder *builder = NULL;
     if (AAudio_createStreamBuilder(&builder) == AAUDIO_OK) {
         AAudioStreamBuilder_setSampleRate(builder, NATIVE_AUDIO_RATE);
         AAudioStreamBuilder_setChannelCount(builder, NATIVE_AUDIO_CHANNELS);
         AAudioStreamBuilder_setFormat(builder, AAUDIO_FORMAT_PCM_I16);
-        AAudioStreamBuilder_setPerformanceMode(builder, AAUDIO_PERFORMANCE_MODE_NONE); // Modo Extensible compatible Mali
+        AAudioStreamBuilder_setPerformanceMode(builder, AAUDIO_PERFORMANCE_MODE_NONE); // Modo compatible Mali
         AAudioStreamBuilder_setSharingMode(builder, AAUDIO_SHARING_MODE_SHARED);
 
         if (AAudioStreamBuilder_openStream(builder, &ctx->aaudio_stream) == AAUDIO_OK) {
@@ -84,7 +81,7 @@ static void* wrapper_audio_playback_loop(void *arg) {
         }
     }
 
-    // 🛑 CIERRE SEGURO DEL HARDWARE: AL salir del bucle, apagamos el flujo
+    // 🛑 CIERRE SEGURO DEL HARDWARE:
     if (ctx->aaudio_stream) {
         AAudioStream_requestStop(ctx->aaudio_stream);
         AAudioStream_close(ctx->aaudio_stream);
@@ -147,7 +144,7 @@ JNIEXPORT void JNICALL
 Java_com_winlator_star_core_NativeAudio_write(JNIEnv *env, jclass clazz, jshortArray samples, jint count) {
     if (count <= 0 || samples == NULL) return;
     
-    // ZONA CRÍTICA DIRECTA JNI: Evitamos copias flotantes en la transferencia
+    // ZONA CRÍTICA DIRECTA JNI: Acceso directo a memoria sin copias flotantes
     jshort *body = (jshort *)(*env)->GetPrimitiveArrayCritical(env, samples, NULL);
     if (body != NULL) {
         wrapper_native_audio_write((const int16_t*)body, count);
