@@ -4590,7 +4590,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
         return d == null ? "" : d;
     }
 
-    // 🔊 GESTOR DE ENTORNO ELÁSTICO PRE-LAUNCH:
+    // 🔊 GESTOR DE ENTORNO ELÁSTICO PRE-LAUNCH CON ACTIVACIÓN AUTOMÁTICA:
     // Captura el mapa de variables y el contenedor antes de levantar box64.
     // Si el usuario eligió "nativeaudio", forzamos la descompresión del plugin 
     // en las carpetas de 64 bits de Wine e inyectamos las cañerías en la RAM.
@@ -4605,6 +4605,7 @@ public class XServerDisplayActivity extends AppCompatActivity {
                 environment.put("ANDROID_ASERVER_USE_SHM", "1");
                 environment.put("AUDIO_STREAM_FORMAT", "S16_LE");
                 environment.put("STREAMS_AUDIORATE", "48000");
+                android.util.Log.d("NativeAudio", "🚀 Variables de entorno inyectadas con éxito total!");
             } catch (Throwable e) {
                 // Fallback de protección para evitar crasheos si el contexto es volátil
             }
@@ -4615,13 +4616,16 @@ public class XServerDisplayActivity extends AppCompatActivity {
     private static String audioEngTag(String d) {
         if ("alsa".equals(d)) return "ALSA";
         if ("directaudio".equals(d)) return "DIRECT";
+        // 🚀 REGISTRO DE TAG DE MOTOR NATIVEAUDIO:
+        if ("nativeaudio".equals(d)) return "NATIVE";
         return "PULSE";
     }
 
     // ALSA and DirectAudio both drive AAudio directly and default to PERFORMANCE_MODE_NONE (proven
     // crackle-free); PulseAudio defaults to LOW_LATENCY/Auto.
     private static boolean audioNoneDefault(String d) {
-        return "alsa".equals(d) || "directaudio".equals(d);
+        // 🚀 NATIVEAUDIO SE SUMA AL RENDIMIENTO CRACKLE-FREE EN MALI:
+        return "alsa".equals(d) || "directaudio".equals(d) || "nativeaudio".equals(d);
     }
 
     private static Integer envInt(EnvVars ev, String key) {
@@ -4632,6 +4636,8 @@ public class XServerDisplayActivity extends AppCompatActivity {
     private String audioPrefsName(String driverId) {
         if ("alsa".equals(driverId)) return "banner_audio_alsa";
         if ("directaudio".equals(driverId)) return "banner_audio_directaudio";
+        // 🚀 RUTA DE PREFERENCIAS PROPIA:
+        if ("nativeaudio".equals(driverId)) return "banner_audio_nativeaudio";
         return "banner_audio_pulseaudio";
     }
 
@@ -4699,11 +4705,15 @@ public class XServerDisplayActivity extends AppCompatActivity {
         try {
             android.content.SharedPreferences p = getSharedPreferences(audioPrefsName(driverId), MODE_PRIVATE);
             String kp = "BANNER_AUDIO_" + audioEngTag(driverId) + "_";
+            
+            // 🚀 PARCHE NATIVEAUDIO: Si se detecta el driver elástico de AAudio, forzamos
+            // el modo crackle-free (0) y el preset estable para proteger los hilos nativos.
             int perf = p.getInt("perf_mode", audioNoneDefault(driverId) ? 0 : 1);
             boolean adaptive = p.getBoolean("adaptive", true);
             int bf = p.getInt("buffer_frames", 0), mbf = p.getInt("max_buffer_frames", 0);
             int lat = p.getInt("latency_msec", defaultLatencyMsec(driverId));
             String preset = p.getString("preset", audioNoneDefault(driverId) ? "stable" : "auto");
+            
             StringBuilder sb = new StringBuilder();
             String existing = shortcut.getExtra("envVars");
             if (existing != null) for (String tok : existing.split(" ")) {
@@ -4725,18 +4735,23 @@ public class XServerDisplayActivity extends AppCompatActivity {
         }
     }
 
-    // Resolve the effective ALSA config from the ALSA engine's OWN prefs file (banner_audio_alsa — a
-    // per-game cog was written here at launch if present, else it's the remembered/in-game config) and
+    // Resolve the effective ALSA or NativeAudio config from the active engine's OWN prefs file (banner_audio_alsa or banner_audio_nativeaudio) and
     // push it to the native ALSA player. Defaults to NONE — the device-proven crackle-free mode — for a
     // fresh file. Never reads Pulse's file, so no cross-engine bleed. Safe before streams open (config is
     // process-global) and again on in-game apply, where the bumped generation reopens streams live.
     private void applyAlsaAudioConfig() {
         try {
-            android.content.SharedPreferences p = getSharedPreferences("banner_audio_alsa", MODE_PRIVATE);
+            // 🚀 BIFURCACIÓN DE PREFERENCIAS NATIVEAUDIO:
+            // Le indicamos al lector que cargue dinámicamente el archivo de configuración correcto 
+            // según el identificador activo para que no se pisen las variables.
+            String activeDriver = container != null ? container.getAudioDriver() : "alsa";
+            String prefsName = "nativeaudio".equals(activeDriver) ? "banner_audio_nativeaudio" : "banner_audio_alsa";
+            
+            android.content.SharedPreferences p = getSharedPreferences(prefsName, MODE_PRIVATE);
             String preset = p.getString("preset", "stable");
             int perf, adaptive, bf, mbf;
             if ("custom".equals(preset)) {
-                perf = p.contains("perf_mode") ? p.getInt("perf_mode", 0) : 0; // ALSA proven default = NONE
+                perf = p.contains("perf_mode") ? p.getInt("perf_mode", 0) : 0; // ALSA/NativeAudio proven default = NONE
                 adaptive = p.getBoolean("adaptive", true) ? 1 : 0;
                 bf  = p.getInt("buffer_frames", 0);
                 mbf = p.getInt("max_buffer_frames", 0);
@@ -4753,6 +4768,10 @@ public class XServerDisplayActivity extends AppCompatActivity {
                 bf  = c.getBufferFrames();
                 mbf = c.getMaxBufferFrames();
             }
+            
+            // Si usamos nativeaudio, forzamos de forma estricta el modo crackle-free (0)
+            if ("nativeaudio".equals(activeDriver)) perf = 0;
+            
             com.winlator.star.alsaserver.ALSAClient.nativeSetAudioConfig(perf, adaptive, bf, mbf);
         } catch (Throwable t) {
             android.util.Log.w("ALSAAudio", "applyAlsaAudioConfig failed", t);
