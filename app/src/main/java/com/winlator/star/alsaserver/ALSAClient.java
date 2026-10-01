@@ -89,31 +89,33 @@ public class ALSAClient {
             data.order(ByteOrder.BIG_ENDIAN);
         }
 
-        // 🚀 INYECCIÓN BLINDADA NATIVEAUDIO ANTI-CRASH:
-        // Extraemos las muestras celda por celda de forma primitiva desde la RAM 
-        // compartida, garantizando inmunidad total contra BufferUnderflowException.
+        // 🚀 INYECCIÓN BLINDADA NATIVEAUDIO ANTI-CRASH TOTAL:
+        // Añadimos una barrera elástica para comprobar que el buffer sea real, directo 
+        // y con datos válidos antes de intentar duplicar o extraer los shorts en la RAM.
         try {
-            int byteCount = data.remaining();
-            int shortCount = byteCount / 2;
-            
-            if (shortCount > 0) {
-                short[] samples = new short[shortCount];
-                // Creamos un duplicado limpio para no alterar los punteros de ALSA de fábrica
-                ByteBuffer duplicate = data.duplicate();
-                duplicate.order(data.order());
+            if (data != null && data.isDirect() && data.remaining() > 0) {
+                int byteCount = data.remaining();
+                int shortCount = byteCount / 2;
                 
-                // Bombeo primitivo elástico tolerante a fallos
-                for (int i = 0; i < shortCount; i++) {
-                    if (duplicate.remaining() >= 2) {
-                        samples[i] = duplicate.getShort();
+                if (shortCount > 0) {
+                    short[] samples = new short[shortCount];
+                    ByteBuffer duplicate = data.duplicate();
+                    duplicate.order(data.order());
+                    
+                    // Extracción primitiva segura celda por celda
+                    for (int i = 0; i < shortCount; i++) {
+                        if (duplicate.remaining() >= 2) {
+                            samples[i] = duplicate.getShort();
+                        }
                     }
+                    
+                    // Enviamos las muestras limpias a tu archivo native_audio.c
+                    com.winlator.star.core.NativeAudio.write(samples, shortCount);
                 }
-                
-                // Cruzamos el muro del JNI de forma segura hacia tu native_audio.c
-                com.winlator.star.core.NativeAudio.write(samples, shortCount);
             }
         } catch (Throwable e) {
-            android.util.Log.e("NativeAudio", "🚨 Bypass elástico de seguridad activado: " + e.getMessage());
+            // Silenciamos cualquier excepción volátil de inicialización para que la app NUNCA crasheé
+            android.util.Log.e("NativeAudio", "🚨 Protección anti-crash activada en el inicio: " + e.getMessage());
         }
 
         // El flujo original de fábrica de ALSA continúa su autopista intacto sin enterarse del desvío
