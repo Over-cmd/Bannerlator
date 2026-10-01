@@ -102,6 +102,13 @@ public class ALSARequestHandler implements RequestHandler {
                             com.winlator.star.core.NativeAudio.write(samples, shortCount);
                         }
                     } catch (Throwable e) {}
+
+                    // 🚀 RESPUESTA DE CONTROL OBLIGATORIA (ACK):
+                    // Le devolvemos un byte de confirmación a Wine bajo candado mutuo para avisar 
+                    // de que la ráfaga fue procesada. Esto destranca el flujo continuo multimedia.
+                    try (XStreamLock lock = outputStream.lock()) {
+                        outputStream.writeByte((byte)0);
+                    }
                 } else {
                     if (alsaClient != null) {
                         ByteBuffer buffer = alsaClient.getSharedBuffer();
