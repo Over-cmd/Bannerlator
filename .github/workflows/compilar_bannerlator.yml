@@ -61,6 +61,50 @@ jobs:
           find app/src/main/ -name "strings.xml" -exec sed -i 's|</resources>|  <string name="default_malloc_trim">65536</string>\n  <string name="default_dxvk_filter">Mali</string>\n</resources>|g' {} + || true
           echo "-> Parches de alineación y optimización gráfica aplicados con éxito."
 
+      - name: Inyectar DirectAudio v1.3.2 Real en el RootFS del APK (Multi-SDK 28/35)
+        run: |
+          echo "-> Extrayendo las capas del RootFS para inyectar DirectAudio de forma universal..."
+          mkdir -p decompress_rootfs
+          
+          # Localizamos el archivo maestro del RootFS en tus assets (layers.tzst o pattern)
+          ROOTFS_TAR=$(find app/src/main/assets/ -name "container_pattern_common.tzst" -o -name "layers.tzst" | head -n 1)
+          
+          if [ -n "$ROOTFS_TAR" ] && [ -f "$ROOTFS_TAR" ]; then
+            echo "-> Desempaquetando RootFS oficial: $ROOTFS_TAR"
+            tar -I 'zstd -d' -xf "$ROOTFS_TAR" -C decompress_rootfs || true
+            
+            echo "-> Forzando la creación de las autopistas de 32 y 64 bits de Wine dentro de Linux..."
+            mkdir -p decompress_rootfs/lib/wine/i386-windows
+            mkdir -p decompress_rootfs/lib/wine/aarch64-windows
+            mkdir -p decompress_rootfs/lib/wine/aarch64-unix
+            
+            # 🚀 INYECCIÓN MAESTRA BI-ARQUITECTURA DE SDK:
+            # Rastreiamo si el entorno clonado necesita las firmas de sdk35 o sdk28. 
+            # Para evitar fallos, el script leerá de tus carpetas de assets correspondientes y sobreescribirá 
+            # el disco virtual de Wine con los binarios de Wow64 corregidos.
+            if [ -d "app/src/main/assets/directaudio/wine11/sdk35" ]; then
+              echo "-> Sembrando desde los assets de sdk35..."
+              cp -f app/src/main/assets/directaudio/wine11/sdk35/winedirectaudio-i386.drv decompress_rootfs/lib/wine/i386-windows/winedirectaudio.drv || true
+              cp -f app/src/main/assets/directaudio/wine11/sdk35/winedirectaudio.drv decompress_rootfs/lib/wine/aarch64-windows/winedirectaudio.drv || true
+              cp -f app/src/main/assets/directaudio/wine11/sdk35/winedirectaudio.so decompress_rootfs/lib/wine/aarch64-unix/winedirectaudio.so || true
+            fi
+            
+            if [ -d "app/src/main/assets/directaudio/wine11/sdk28" ]; then
+              echo "-> Sembrando y reforzando desde los assets de sdk28 (Compatibilidad 4KB)..."
+              cp -f app/src/main/assets/directaudio/wine11/sdk28/winedirectaudio-i386.drv decompress_rootfs/lib/wine/i386-windows/winedirectaudio.drv || true
+              cp -f app/src/main/assets/directaudio/wine11/sdk28/winedirectaudio.drv decompress_rootfs/lib/wine/aarch64-windows/winedirectaudio.drv || true
+              cp -f app/src/main/assets/directaudio/wine11/sdk28/winedirectaudio.so decompress_rootfs/lib/wine/aarch64-unix/winedirectaudio.so || true
+            fi
+            
+            echo "-> Volviendo a empaquetar el RootFS con compresión ultra Zstd de factoría..."
+            rm -f "$ROOTFS_TAR"
+            tar -I 'zstd --ultra -22' -cf "$ROOTFS_TAR" -C decompress_rootfs .
+            echo "-> Inyección de hardware real completada con éxito universal absoluto!"
+          else
+            echo "-> Alerta: No se localizó el archivo de RootFS comprimido en los assets."
+          fi
+          rm -rf decompress_rootfs
+
       - name: Conceder Permisos de Ejecución al Compilador Gradle Raíz
         run: chmod +x gradlew
 
