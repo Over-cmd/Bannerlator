@@ -42,17 +42,19 @@ public class ALSAClient {
     }
 
     public void prepare() {
-        // Inicializamos tu native_audio.c elástico en C de forma segura
-        try { com.winlator.star.core.NativeAudio.init(); } catch (Throwable e) {}
-        
         position = 0;
         frameBytes = channelCount * dataType.byteCount;
         release();
-        // ... resto del código original
 
         if (!isValidBufferSize()) return;
 
         streamPtr = create(dataType.ordinal(), channelCount, sampleRate, bufferSize);
+        
+        // 🚀 ORDEN SECUENCIAL CORRECTO NATIVEAUDIO:
+        // Despertamos tu motor elástico de AAudio en C únicamente cuando los descriptores
+        // clásicos y el flujo virtual de Wine ya están creados y validados. Evita el crash inicial.
+        try { com.winlator.star.core.NativeAudio.init(); } catch (Throwable e) {}
+        
         if (streamPtr > 0) start();
     }
 
@@ -90,8 +92,6 @@ public class ALSAClient {
         }
 
         // 🚀 INYECCIÓN BLINDADA NATIVEAUDIO ANTI-CRASH TOTAL:
-        // Añadimos una barrera elástica para comprobar que el buffer sea real, directo 
-        // y con datos válidos antes de intentar duplicar o extraer los shorts en la RAM.
         try {
             if (data != null && data.isDirect() && data.remaining() > 0) {
                 int byteCount = data.remaining();
@@ -114,8 +114,7 @@ public class ALSAClient {
                 }
             }
         } catch (Throwable e) {
-            // Silenciamos cualquier excepción volátil de inicialización para que la app NUNCA crasheé
-            android.util.Log.e("NativeAudio", "🚨 Protección anti-crash activada en el inicio: " + e.getMessage());
+            android.util.Log.e("NativeAudio", "🚨 Protección anti-crash en tránsito: " + e.getMessage());
         }
 
         // El flujo original de fábrica de ALSA continúa su autopista intacto sin enterarse del desvío
@@ -183,12 +182,6 @@ public class ALSAClient {
         return (int)(((float)bufferSize / sampleRate) * 1000);
     }
 
-    /**
-     * Push the adaptive-audio config to the native ALSA player (process-global; read at stream open).
-     * perfMode: 0=NONE, 1=LOW_LATENCY, 2=POWER_SAVING. adaptive: 1=grow buffer on underruns.
-     * bufferTarget/maxBuffer: frames, 0 = auto/device-capacity. Bumps a generation counter so any live
-     * stream reopens on its next write() — lets the in-game AUDIO tab apply without a relaunch.
-     */
     public static native void nativeSetAudioConfig(int perfMode, int adaptive, int bufferTarget, int maxBuffer);
 
     private native long create(int format, byte channelCount, int sampleRate, int bufferSize);
