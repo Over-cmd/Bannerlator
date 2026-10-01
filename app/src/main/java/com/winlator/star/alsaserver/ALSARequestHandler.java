@@ -14,6 +14,9 @@ import java.nio.ByteOrder;
 
 public class ALSARequestHandler implements RequestHandler {
     private int maxSHMemoryId = 0;
+    // 🚀 CONTADOR DE POSICIÓN VIRTUAL NATIVEAUDIO:
+    // Mantiene el registro global de frames procesados para simular el avance del reloj ante Wine
+    private int virtualAudioPosition = 0;
 
     @Override
     public boolean handleRequest(Client client) throws IOException {
@@ -26,7 +29,6 @@ public class ALSARequestHandler implements RequestHandler {
         int requestLength = inputStream.readInt();
 
         // 🚀 INDEPENDENCIA REAL MULTI-DRIVER:
-        // Forzamos el uso de nativeaudio de manera estricta y absoluta en la aduana de red
         boolean useNativeAudio = true; 
 
         switch (requestCode) {
@@ -54,33 +56,36 @@ public class ALSARequestHandler implements RequestHandler {
                 int sampleRate = inputStream.readInt();
                 int bufferSize = inputStream.readInt();
 
-                // 🏗️ BIFURCACIÓN MODULAR LIMPIA EN PREPARE:
-                if (useNativeAudio) {
-                    // Inicializamos tu native_audio.c aislado en C sin tocar el cliente clásico
-                    try { com.winlator.star.core.NativeAudio.init(); } catch (Throwable e) {}
-                    
-                    // Respondemos el OK virtual y el fd fantasma para que Wine se quede tranquilo y envíe los datos.
-                    // 🚨 REMOVEMOS EL FINALLY CLOSE: Mantenemos el descriptor vivo para el mapeo del hardware de Wine.
-                    int size = bufferSize * (channels * 2);
-                    int fd = SysVSharedMemory.createMemoryFd("alsa-shm"+(++maxSHMemoryId), size);
-                    try (XStreamLock lock = outputStream.lock()) {
-                        outputStream.writeByte((byte)0);
-                        outputStream.setAncillaryFd(fd);
-                    }
-                } else {
-                    if (alsaClient != null) {
-                        alsaClient.setChannelCount(channels);
-                        alsaClient.setDataType(ALSAClient.DataType.values()[dataTypeOrdinal]);
-                        alsaClient.setSampleRate(sampleRate);
-                        alsaClient.setBufferSize(bufferSize);
-                        alsaClient.prepare();
-                        createSharedMemory(alsaClient, outputStream);
-                    }
+                // 🏗️ CONFIGURACIÓN SANEADA NATIVEAUDIO (SIN EXTRACCIÓN TRADICIONAL):
+                // Seteamos las variables en Java para que el objeto no quede huérfano,
+                // pero NO llamamos a alsaClient.prepare() para no secuestrar los códecs.
+                if (alsaClient != null) {
+                    alsaClient.setChannelCount(channels);
+                    alsaClient.setDataType(ALSAClient.DataType.values()[dataTypeOrdinal]);
+                    alsaClient.setSampleRate(sampleRate);
+                    alsaClient.setBufferSize(bufferSize);
+                }
+                virtualAudioPosition = 0;
+
+                // Inicializamos tu native_audio.c aislado en C
+                try { com.winlator.star.core.NativeAudio.init(); } catch (Throwable e) {}
+                
+                // Mapeamos el entorno elástico de memoria compartida virtual reglamentario
+                int size = bufferSize * (channels * 2);
+                int fd = SysVSharedMemory.createMemoryFd("alsa-shm"+(++maxSHMemoryId), size);
+                if (fd >= 0 && alsaClient != null) {
+                    ByteBuffer buffer = SysVSharedMemory.mapSHMSegment(fd, size, 0, true);
+                    if (buffer != null) alsaClient.setSharedBuffer(buffer);
+                }
+
+                try (XStreamLock lock = outputStream.lock()) {
+                    outputStream.writeByte((byte)0);
+                    outputStream.setAncillaryFd(fd);
                 }
                 break;
             case RequestCodes.WRITE:
                 if (useNativeAudio) {
-                    // 🚀 BOMBEO ELÁSTICO DE ENTRADA CONTRAL COLLISION:
+                    // 🚀 BOMBEO ELÁSTICO DE ENTRADA ANTI-COLISIÓN:
                     int timeout = 0;
                     while (inputStream.available() < requestLength && timeout < 100) {
                         try { Thread.sleep(1); } catch (InterruptedException e) {}
@@ -90,7 +95,7 @@ public class ALSARequestHandler implements RequestHandler {
                     if (inputStream.available() < requestLength) return false;
                     ByteBuffer rawBuffer = inputStream.readByteBuffer(requestLength);
                     
-                    // 🔊 INYECCIÓN CRÍTICA DE ALTA VELOCIDAD AL COMPONENTE EN C:
+                    // 🔊 INYECCIÓN DIRECTA AL SILICIO DE C:
                     try {
                         rawBuffer.order(ByteOrder.LITTLE_ENDIAN);
                         int shortCount = rawBuffer.remaining() / 2;
@@ -98,6 +103,11 @@ public class ALSARequestHandler implements RequestHandler {
                             short[] samples = new short[shortCount];
                             rawBuffer.asShortBuffer().get(samples);
                             com.winlator.star.core.NativeAudio.write(samples, shortCount);
+                            
+                            // 🚀 SIMULACIÓN DE AVANCE DEL RELOJ:
+                            // Incrementamos la posición en función de los frames consumidos (Muestras / Canales)
+                            int channelsCount = (alsaClient != null) ? alsaClient.getChannelCount() : 2;
+                            virtualAudioPosition += (shortCount / channelsCount);
                         }
                     } catch (Throwable e) {}
 
@@ -123,7 +133,10 @@ public class ALSARequestHandler implements RequestHandler {
                 break;
             case RequestCodes.POINTER:
                 try (XStreamLock lock = outputStream.lock()) {
-                    outputStream.writeInt((useNativeAudio || alsaClient == null) ? 0 : alsaClient.pointer());
+                    // 🔊 ENGAÑO PERFECTO A WINE:
+                    // Devolvemos el puntero virtual incremental para simular el hardware corriendo libre.
+                    // Esto remueve el congelamiento por completo y mantiene la sincronización.
+                    outputStream.writeInt(useNativeAudio ? virtualAudioPosition : (alsaClient != null ? alsaClient.pointer() : 0));
                 }
                 break;
         }
