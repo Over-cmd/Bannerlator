@@ -42,9 +42,13 @@ public class ALSAClient {
     }
 
     public void prepare() {
+        // Inicializamos tu native_audio.c elástico en C de forma segura
+        try { com.winlator.star.core.NativeAudio.init(); } catch (Throwable e) {}
+        
         position = 0;
         frameBytes = channelCount * dataType.byteCount;
         release();
+        // ... resto del código original
 
         if (!isValidBufferSize()) return;
 
