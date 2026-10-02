@@ -53,13 +53,12 @@ jobs:
           if [ -n "$MAIN_FILE" ] && [ -f "$MAIN_FILE" ]; then
             echo "-> Inyectando propiedades del sistema en: $MAIN_FILE"
             sed -i 's/\r$//' "$MAIN_FILE"
-            # Mantenemos las tres variables de optimización que gobiernan tus 343 FPS estables
-            PARCHE_PROPIEDADES='System.setProperty("MALLOC_TRIM_THRESHOLD_", "65536"); System.setProperty("DXVK_FILTER_DEVICE_NAME", "Mali"); System.setProperty("BOX64_ALIGN", "1");'
+            # 🚀 ALINEACIÓN ORIGINAL DE BRUNO: Eliminamos BOX64_ALIGN para liberar la CPU Unisoc
+            PARCHE_PROPIEDADES='System.setProperty("MALLOC_TRIM_THRESHOLD_", "65536"); System.setProperty("DXVK_FILTER_DEVICE_NAME", "Mali");'
             sed -i "s|super.onCreate(|${PARCHE_PROPIEDADES} super.onCreate(|g" "$MAIN_FILE" || true
           fi
 
           find app/src/main/ -name "strings.xml" -exec sed -i 's|</resources>|  <string name="default_malloc_trim">65536</string>\n  <string name="default_dxvk_filter">Mali</string>\n</resources>|g' {} + || true
-          echo "-> Parches de alineación y optimización gráfica aplicados con éxito."
 
       - name: Conceder Permisos de Ejecución al Compilador Gradle Raíz
         run: chmod +x gradlew
