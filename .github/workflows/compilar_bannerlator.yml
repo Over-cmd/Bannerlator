@@ -127,7 +127,7 @@ jobs:
             # 🚀 CAPA 3: INYECCIÓN DEL PUENTE PROTON LINUX (linux-wine11):
             if [ -d "app/src/main/assets/directaudio/linux-wine11" ]; then
               echo "-> Sólido! Sembrando puente Proton Linux desde assets linux-wine11..."
-              cp -f app/src/main/assets/directaudio/linux-wine11/i386-windows/winedirectaudio.so decompress_rootfs/lib/wine/i386-windows/winedirectaudio.drv || true
+              cp -f app/src/main/assets/directaudio/linux-wine11/i386-windows/winedirectaudio.drv decompress_rootfs/lib/wine/i386-windows/winedirectaudio.drv || true
               cp -f app/src/main/assets/directaudio/linux-wine11/aarch64-windows/winedirectaudio.drv decompress_rootfs/lib/wine/aarch64-windows/winedirectaudio.drv || true
               cp -f app/src/main/assets/directaudio/linux-wine11/aarch64-unix/winedirectaudio.so decompress_rootfs/lib/wine/aarch64-unix/winedirectaudio.so || true
             fi
