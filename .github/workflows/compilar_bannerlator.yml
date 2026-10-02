@@ -91,11 +91,12 @@ jobs:
             mkdir -p decompress_rootfs/lib/wine/aarch64-windows
             mkdir -p decompress_rootfs/lib/wine/aarch64-unix
             
-            # Rastreamos el verdadero binario .so legítimo generado por tu código de C++
-            REAL_SO=$(find app/build/intermediates/ -name "libnative_audio.so" | head -n 1)
+            # 🚀 CORRECCIÓN CRÍTICA DE BÚSQUEDA DE RUTA:
+            # Rastreamos el binario libwinedirectaudio.so auténtico generado por tu CMakeLists.txt
+            REAL_SO=$(find app/build/intermediates/ -name "libwinedirectaudio.so" | head -n 1)
             
             if [ -n "$REAL_SO" ] && [ -f "$REAL_SO" ]; then
-              echo "-> Sólido! Módulo auténtico de tu native_audio localizado en: $REAL_SO"
+              echo "-> Sólido! Módulo auténtico de tu winedirectaudio localizado en: $REAL_SO"
               
               # Clonamos y renombramos tu binario real con las firmas estrictas que Wine necesita
               # para conectarse de forma interna In-Process (estilo DirectAudio)
