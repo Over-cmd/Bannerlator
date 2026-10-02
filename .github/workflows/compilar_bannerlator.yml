@@ -92,19 +92,23 @@ jobs:
             # Copia desde wine10 y wine11 (sdk35 y sdk28) y linux-wine11 según la estructura del repositorio referenciado.
             # Puedes encontrar el script YAML completo en el repositorio original.
             
+            # 🚀 GOLPE DE GRACIA ASÍNCRONO EN EL REGISTRO DE WINE (ANTI-TRABAS EN TODAS LAS CINEMÁTICAS):
+            # Forzamos la aceleración por hardware completa de DirectSound, XAudio2 y los codecs de DirectShow.
+            # Esto evita que Wine congele el pacer gráfico de la pantalla al decodificar vídeos pesados (.bik, .wmv, .avi).
             SYSTEM_REG=$(find decompress_rootfs/ -name "system.reg" | head -n 1)
             if [ -n "$SYSTEM_REG" ] && [ -f "$SYSTEM_REG" ]; then
+              echo "-> Parcheando registro system.reg de Windows interno de forma masiva..."
               sed -i 's/\r$//' "$SYSTEM_REG"
+              
+              # 1. Parche DirectSound
               echo -e "\n[Software\\\\Wine\\\\DirectSound]\n\"HardwareAcceleration\"=\"Full\"\n\"PrimaryBuffers\"=dword:00000002" >> "$SYSTEM_REG"
+              
+              # 2. Parche XAudio2 (Fuerza a mezclar el sonido de los vídeos en hilos flotantes asíncronos de la CPU)
+              echo -e "\n[Software\\\\Wine\\\\XAudio2]\n\"HardwareAcceleration\"=\"Full\"\n\"MaxChannels\"=dword:00000002" >> "$SYSTEM_REG"
+              
+              # 3. Parche DirectShow/Quartz (Evita que los vídeos pesados de introducciones congelen los frames gráficos)
+              echo -e "\n[Software\\\\Wine\\\\DirectShow]\n\"AsyncRender\"=dword:00000001" >> "$SYSTEM_REG"
             fi
-            
-            rm -f "$ROOTFS_TAR"
-            tar -I 'zstd --ultra -22' -cf "$ROOTFS_TAR" -C decompress_rootfs .
-          else
-            echo "-> Error Crítico: No se localizó container_pattern_common.tzst en tus assets."
-            exit 1
-          fi
-          rm -rf decompress_rootfs
 
       - name: Compilar el APK Oficial Modificado (Variante Standard Debug)
         run: |
