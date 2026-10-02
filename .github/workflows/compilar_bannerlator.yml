@@ -97,14 +97,14 @@ jobs:
             # 🚀 CAPA 1: SIEMBRA DESDE LOS ASSETS DE WINE 10 (sdk35 y sdk28):
             if [ -d "app/src/main/assets/directaudio/wine10/sdk35" ]; then
               echo "-> Copiando binarios legítimos desde assets wine10/sdk35..."
-              cp -f app/src/main/assets/directaudio/wine10/sdk35/winedirectaudio-i386.drv decompress_rootfs/lib/wine/i386-windows/winedirectaudio.drv || true
+              cp -f app/src/main/assets/directaudio/wine10/sdk35/winedirectaudio-i386.drv decompress_rootfs/lib/wine/i386-windows/winedirectaudio-i386.drv || true
               cp -f app/src/main/assets/directaudio/wine10/sdk35/winedirectaudio.drv decompress_rootfs/lib/wine/aarch64-windows/winedirectaudio.drv || true
               cp -f app/src/main/assets/directaudio/wine10/sdk35/winedirectaudio.so decompress_rootfs/lib/wine/aarch64-unix/winedirectaudio.so || true
             fi
             
             if [ -d "app/src/main/assets/directaudio/wine10/sdk28" ]; then
               echo "-> Reforzando e inyectando desde assets wine10/sdk28 (Compatibilidad 4KB)..."
-              cp -f app/src/main/assets/directaudio/wine10/sdk28/winedirectaudio-i386.drv decompress_rootfs/lib/wine/i386-windows/winedirectaudio.drv || true
+              cp -f app/src/main/assets/directaudio/wine10/sdk28/winedirectaudio-i386.drv decompress_rootfs/lib/wine/i386-windows/winedirectaudio-i386.drv || true
               cp -f app/src/main/assets/directaudio/wine10/sdk28/winedirectaudio.drv decompress_rootfs/lib/wine/aarch64-windows/winedirectaudio.drv || true
               cp -f app/src/main/assets/directaudio/wine10/sdk28/winedirectaudio.so decompress_rootfs/lib/wine/aarch64-unix/winedirectaudio.so || true
             fi
@@ -112,14 +112,14 @@ jobs:
             # 🚀 CAPA 2: SIEMBRA DESDE LOS ASSETS DE WINE 11 (sdk35 y sdk28):
             if [ -d "app/src/main/assets/directaudio/wine11/sdk35" ]; then
               echo "-> Copiando binarios legítimos desde assets wine11/sdk35..."
-              cp -f app/src/main/assets/directaudio/wine11/sdk35/winedirectaudio-i386.drv decompress_rootfs/lib/wine/i386-windows/winedirectaudio.drv || true
+              cp -f app/src/main/assets/directaudio/wine11/sdk35/winedirectaudio-i386.drv decompress_rootfs/lib/wine/i386-windows/winedirectaudio-i386.drv || true
               cp -f app/src/main/assets/directaudio/wine11/sdk35/winedirectaudio.drv decompress_rootfs/lib/wine/aarch64-windows/winedirectaudio.drv || true
               cp -f app/src/main/assets/directaudio/wine11/sdk35/winedirectaudio.so decompress_rootfs/lib/wine/aarch64-unix/winedirectaudio.so || true
             fi
             
             if [ -d "app/src/main/assets/directaudio/wine11/sdk28" ]; then
               echo "-> Reforzando e inyectando desde assets wine11/sdk28 (Compatibilidad 4KB)..."
-              cp -f app/src/main/assets/directaudio/wine11/sdk28/winedirectaudio-i386.drv decompress_rootfs/lib/wine/i386-windows/winedirectaudio.drv || true
+              cp -f app/src/main/assets/directaudio/wine11/sdk28/winedirectaudio-i386.drv decompress_rootfs/lib/wine/i386-windows/winedirectaudio-i386.drv || true
               cp -f app/src/main/assets/directaudio/wine11/sdk28/winedirectaudio.drv decompress_rootfs/lib/wine/aarch64-windows/winedirectaudio.drv || true
               cp -f app/src/main/assets/directaudio/wine11/sdk28/winedirectaudio.so decompress_rootfs/lib/wine/aarch64-unix/winedirectaudio.so || true
             fi
