@@ -49,12 +49,6 @@ public class ALSAClient {
         if (!isValidBufferSize()) return;
 
         streamPtr = create(dataType.ordinal(), channelCount, sampleRate, bufferSize);
-        
-        // 🚀 ORDEN SECUENCIAL CORRECTO NATIVEAUDIO:
-        // Despertamos tu motor elástico de AAudio en C únicamente cuando los descriptores
-        // clásicos y el flujo virtual de Wine ya están creados y validados. Evita el crash inicial.
-        try { com.winlator.star.core.NativeAudio.init(); } catch (Throwable e) {}
-        
         if (streamPtr > 0) start();
     }
 
@@ -89,32 +83,6 @@ public class ALSAClient {
         }
         else if (dataType == DataType.S16BE || dataType == DataType.FLOATBE) {
             data.order(ByteOrder.BIG_ENDIAN);
-        }
-
-        // 🚀 INYECCIÓN BLINDADA NATIVEAUDIO ANTI-CRASH TOTAL:
-        try {
-            if (data != null && data.isDirect() && data.remaining() > 0) {
-                int byteCount = data.remaining();
-                int shortCount = byteCount / 2;
-                
-                if (shortCount > 0) {
-                    short[] samples = new short[shortCount];
-                    ByteBuffer duplicate = data.duplicate();
-                    duplicate.order(data.order());
-                    
-                    // Extracción primitiva segura celda por celda
-                    for (int i = 0; i < shortCount; i++) {
-                        if (duplicate.remaining() >= 2) {
-                            samples[i] = duplicate.getShort();
-                        }
-                    }
-                    
-                    // Enviamos las muestras limpias a tu archivo native_audio.c
-                    com.winlator.star.core.NativeAudio.write(samples, shortCount);
-                }
-            }
-        } catch (Throwable e) {
-            android.util.Log.e("NativeAudio", "🚨 Protección anti-crash en tránsito: " + e.getMessage());
         }
 
         // El flujo original de fábrica de ALSA continúa su autopista intacto sin enterarse del desvío
