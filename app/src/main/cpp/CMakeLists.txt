@@ -259,17 +259,23 @@ add_subdirectory(waylandcomp)
 # proot: the Linux runtime container (gamescope sessions); see proot/CMakeLists.txt.
 add_subdirectory(proot)
 
-# =============================================================================
-# 🚀 ACCELERACIÓN DE AUDIO NATIVA COMPILACIÓN AISLADA PARA MALI
-# =============================================================================
-# 1. Le indicamos a Gradle que añada y compile tu nuevo archivo nativo en C
-add_library(native_audio SHARED native_audio.c)
+# 🚀 PROYECTO MAESTRO NATIVEAUDIO INDEPENDIENTE (ESTILO DIRECTAUDIO)
+# Cambiamos el nombre de la factoría para que el NDK de Google ensamble los encabezados 
+# ELF de 64 bits bajo la firma oficial de Wine, evitando conflictos de símbolos en la RAM.
+project("winedirectaudio")
 
-# 2. Enlazamos los componentes físicos necesarios: el log del sistema y AAudio de Android
-target_link_libraries(
-    native_audio
-    log
-    aaudio
-)
+# Configuramos las banderas del compilador para asegurar compatibilidad total
+# con el tamaño de página elástico (4KB y 16KB) de tu procesador Unisoc MALI.
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -O3 -fPIC")
 
+# Declaramos la creación de la librería compartida UNIX nativa apuntando a tu código
+add_library(winedirectaudio SHARED
+            native_audio.c)
 
+# 🔊 ENLAZADO DIRECTO AL SILICIO ANALÓGICO DE ANDROID:
+# Conectamos tu código de C puro directamente con la librería física de AAudio
+# del Kernel de Android y la librería de registro estándar 'log', saltándonos 
+# por completo las capas intermedias de Java y el JNI.
+target_link_libraries(winedirectaudio
+                      aaudio
+                      log)
