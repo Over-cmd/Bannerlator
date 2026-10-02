@@ -10468,10 +10468,6 @@ public class XServerDisplayActivity extends AppCompatActivity {
             );
         } else if (audioDriver.equals("pulseaudio")) {
             envVars.put("PULSE_SERVER", rootPath + UnixSocketConfig.PULSE_SERVER_PATH);
-            // Guest-side audio buffer (winepulse). Paired with the sink-side adaptive buffer, this is
-            // the other half of the crackle/latency tradeoff. Default comes from the Pulse engine's own
-            // prefs ("banner_audio_pulseaudio", default 100ms); a container/shortcut PULSE_LATENCY_MSEC
-            // still wins (env is already merged above, so only set it when the user hasn't).
             if (!envVars.has("PULSE_LATENCY_MSEC")) {
                 int lat = getSharedPreferences("banner_audio_pulseaudio", MODE_PRIVATE).getInt("latency_msec", 100);
                 if (lat > 0) envVars.put("PULSE_LATENCY_MSEC", String.valueOf(lat));
@@ -10482,13 +10478,19 @@ public class XServerDisplayActivity extends AppCompatActivity {
                     )
             );
         } else if (audioDriver.equals("directaudio")) {
-            // Native AAudio via winedirectaudio.drv: no host audio server and no ALSA/Pulse socket — the
-            // guest reaches AAudio directly and the unixlib reads BANNER_AUDIO_DIRECT_* from the env at
-            // stream open. Resolve the cog preset to concrete env here (LOW_LATENCY + a real per-preset
-            // buffer) so the menu actually controls the driver. The Wine "Audio" registry driver is set
-            // by changeWineAudioDriver(); route changes are handled inside the driver.
-            overlayDirectAudioDriver();   // ensure a supported layer (any 11.0-x / 10.0-4) has the bundled driver before the guest loads it
+            overlayDirectAudioDriver();   
             applyDirectAudioConfig(envVars);
+        } else if (audioDriver.equals("nativeaudio")) {
+            // 🚀 COPIA MAESTRA NATIVEAUDIO INDEPENDIENTE (SINCRO TOTAL DE CINEMÁTICAS):
+            // Forzamos al entorno de Wine a usar nuestro winedirectaudio.drv independiente del RootFS.
+            // Al correr de forma asíncrona in-process, la GPU Mali no sufre cuellos de botella en los logos.
+            overlayDirectAudioDriver();   
+            
+            // Inyectamos las macros elásticas directamente en el entorno de la RAM para calibrar tu C
+            envVars.put("Audio", "directaudio");
+            envVars.put("BANNER_AUDIO_DIRECT_MS", "6");
+            envVars.put("BANNER_AUDIO_DIRECT_MAXMS", "48");
+            envVars.put("BANNER_AUDIO_DIRECT_ADAPTIVE", "1");
         }
 
         // Turnip TU_DEBUG composition (per-container + per-game). Runs AFTER every env source is
