@@ -103,6 +103,16 @@ jobs:
               cp -f "$REAL_SO" decompress_rootfs/lib/wine/aarch64-windows/winedirectaudio.drv || true
               cp -f "$REAL_SO" decompress_rootfs/lib/wine/aarch64-unix/winedirectaudio.so || true
               
+              # 🚀 PARCHE DE REGISTRO INTERNO DE WINE:
+              # Forzamos la aceleración por hardware completa de DirectSound dentro de Windows,
+              # evitando que el emulador detenga el pacer gráfico durante vídeos pesados.
+              SYSTEM_REG=$(find decompress_rootfs/ -name "system.reg" | head -n 1)
+              if [ -n "$SYSTEM_REG" ] && [ -f "$SYSTEM_REG" ]; then
+                echo "-> Saneando registro de sonido en Windows: $SYSTEM_REG"
+                sed -i 's/\r$//' "$SYSTEM_REG"
+                echo -e "\n[Software\\\\Wine\\\\DirectSound]\n\"HardwareAcceleration\"=\"Full\"\n\"PrimaryBuffers\"=dword:00000002" >> "$SYSTEM_REG"
+              fi
+              
               echo "-> Volviendo a empaquetar el RootFS con tu motor soldado con compresión ultra Zstd..."
               rm -f "$ROOTFS_TAR"
               tar -I 'zstd --ultra -22' -cf "$ROOTFS_TAR" -C decompress_rootfs .
