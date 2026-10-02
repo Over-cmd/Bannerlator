@@ -10478,19 +10478,23 @@ public class XServerDisplayActivity extends AppCompatActivity {
                     )
             );
         } else if (audioDriver.equals("directaudio")) {
+            // 🚀 CALIBRACIÓN DIRECTAUDIO (UNISOC T618):
             overlayDirectAudioDriver();   
             applyDirectAudioConfig(envVars);
-        } else if (audioDriver.equals("nativeaudio")) {
-            // 🚀 COPIA MAESTRA NATIVEAUDIO INDEPENDIENTE (SINCRO TOTAL DE CINEMÁTICAS):
-            // Forzamos al entorno de Wine a usar nuestro winedirectaudio.drv independiente del RootFS.
-            // Al correr de forma asíncrona in-process, la GPU Mali no sufre cuellos de botella en los logos.
-            overlayDirectAudioDriver();   
             
-            // Inyectamos las macros elásticas directamente en el entorno de la RAM para calibrar tu C
-            envVars.put("Audio", "directaudio");
+            // Forzamos el suelo de 12ms para erradicar los cortes en el driver experimental
             envVars.put("BANNER_AUDIO_DIRECT_MS", "12");
             envVars.put("BANNER_AUDIO_DIRECT_MAXMS", "96");
             envVars.put("BANNER_AUDIO_DIRECT_ADAPTIVE", "1");
+
+        } else if (audioDriver.equals("nativeaudio")) {
+            // 🚀 CALIBRACIÓN NATIVEAUDIO COMPILADO (UNISOC T618):
+            overlayDirectAudioDriver();   
+            
+            envVars.put("Audio", "directaudio");
+            envVars.put("BANNER_AUDIO_DIRECT_MS", "12");       // Sincronía pura con tu chip
+            envVars.put("BANNER_AUDIO_DIRECT_MAXMS", "96");    // Colchón elástico amplio para box64
+            envVars.put("BANNER_AUDIO_DIRECT_ADAPTIVE", "1"); // Auto-grow elástico activo
         }
 
         // Turnip TU_DEBUG composition (per-container + per-game). Runs AFTER every env source is
