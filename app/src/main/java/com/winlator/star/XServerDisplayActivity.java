@@ -10488,8 +10488,8 @@ public class XServerDisplayActivity extends AppCompatActivity {
             
             // Inyectamos las macros elásticas directamente en el entorno de la RAM para calibrar tu C
             envVars.put("Audio", "directaudio");
-            envVars.put("BANNER_AUDIO_DIRECT_MS", "6");
-            envVars.put("BANNER_AUDIO_DIRECT_MAXMS", "48");
+            envVars.put("BANNER_AUDIO_DIRECT_MS", "12");
+            envVars.put("BANNER_AUDIO_DIRECT_MAXMS", "96");
             envVars.put("BANNER_AUDIO_DIRECT_ADAPTIVE", "1");
         }
 
