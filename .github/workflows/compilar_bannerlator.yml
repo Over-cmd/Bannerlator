@@ -127,9 +127,13 @@ jobs:
 
       - name: Compilar el APK Oficial Modificado (Variante Standard Debug)
         run: |
-          # 🚀 ATENCIÓN: Eliminamos la tarea "clean" para no borrar el .so real y el RootFS que acabamos de blindar!
+          # 🚀 FORJA DE PRODUCCIÓN PURA: Añadimos reintentos automáticos de red y mitigación de timeouts
           ./gradlew assembleStandardDebug \
             --no-daemon \
+            --no-configuration-cache \
+            --stacktrace \
+            -Dorg.gradle.internal.http.socketTimeout=120000 \
+            -Dorg.gradle.internal.http.connectionTimeout=120000 \
             -Dorg.gradle.daemon=false \
             -Dkotlin.compiler.execution.strategy="in-process" \
             -Porg.gradle.jvmargs="-Xmx4g -XX:MaxMetaspaceSize=1g -XX:+UseParallelGC"
