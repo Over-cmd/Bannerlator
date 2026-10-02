@@ -45,33 +45,32 @@ jobs:
         with:
           packages: 'platform-tools cmdline-tools;latest'
 
-      - name: Parche de Memoria y Saneamiento de Rendimiento MALI
+      - name: Parche de Memoria y Saneamiento de Rendimiento MALI y X11
         run: |
-          echo "-> Buscando el archivo de inicialización nativo de Android..."
-          MAIN_FILE=$(find app/src/main/ -name "MainActivity.java" -o -name "XServerView.java" | head -n 1)
+          echo "-> Buscando los archivos nucleares de inicialización y renderizado..."
+          MAIN_FILE=$(find app/src/main/ -name "MainActivity.java" -o -name "XServerDisplayActivity.java" | head -n 1)
+          VIEW_FILE=$(find app/src/main/ -name "XServerView.java" | head -n 1)
           
           if [ -n "$MAIN_FILE" ] && [ -f "$MAIN_FILE" ]; then
-            echo "-> Inyectando propiedades del sistema en: $MAIN_FILE"
+            echo "-> Inyectando optimizaciones del sistema en el cargador: $MAIN_FILE"
             sed -i 's/\r$//' "$MAIN_FILE"
-            # 🚀 ALINEACIÓN ORIGINAL DE BRUNO: Eliminamos BOX64_ALIGN para liberar la CPU Unisoc
             PARCHE_PROPIEDADES='System.setProperty("MALLOC_TRIM_THRESHOLD_", "65536"); System.setProperty("DXVK_FILTER_DEVICE_NAME", "Mali");'
             sed -i "s|super.onCreate(|${PARCHE_PROPIEDADES} super.onCreate(|g" "$MAIN_FILE" || true
           fi
 
+          # 🚀 EL GOLPE DE GRACIA ASÍNCRONO (ANTI-ATASCOS EN LOGOS Y VIDEOS):
+          # Si tu repositorio conserva el archivo XServerView.java, entramos con sed y relajamos 
+          # los bloques síncronos 'synchronized' que congelan la CPU Unisoc durante los vídeos,
+          # permitiendo que el audio en C y los fotogramas fluyan en paralelo sin tapones de reloj.
+          if [ -n "$VIEW_FILE" ] && [ -f "$VIEW_FILE" ]; then
+            echo "-> Aplicando saneamiento asíncrono anti-bloqueos en: $VIEW_FILE"
+            sed -i 's/\r$//' "$VIEW_FILE"
+            sed -i 's/synchronized\s*(lock)/\/\/ synchronized (lock)/g' "$VIEW_FILE" || true
+            sed -i 's/synchronized\s*(renderLock)/\/\/ synchronized (renderLock)/g' "$VIEW_FILE" || true
+          fi
+
           find app/src/main/ -name "strings.xml" -exec sed -i 's|</resources>|  <string name="default_malloc_trim">65536</string>\n  <string name="default_dxvk_filter">Mali</string>\n</resources>|g' {} + || true
-
-      - name: Conceder Permisos de Ejecución al Compilador Gradle Raíz
-        run: chmod +x gradlew
-
-      # 🏗️ PASO INTERMEDIO DE PRE-COMPILACIÓN: Forzamos a Gradle y a CMake a compilar tu native_audio.c
-      # real en modo nativo ANTES de alterar las capas del RootFS para extraer los binarios legítimos.
-      - name: Forjar Compilación del Módulo de Sonido Nativo C
-        run: |
-          echo "-> Ejecutando compilación cruzada preliminar del NDK para forjar tu native_audio..."
-          ./gradlew :app:externalNativeBuildStandardDebug --no-daemon || true
-
-      - name: Conceder Permisos de Ejecución al Compilador Gradle Raíz
-        run: chmod +x gradlew
+          echo "-> Parches de alineación, rendimiento gráfico y asincronía X11 completados."
 
       # 🔊 INYECCIÓN MAESTRA TOTAL EN EL ROOTFS (WINE10 + WINE11 + PROTON LINUX + MULTI-SDK):
       # Desempaquetamos tu verdadero RootFS de Wine (container_pattern_common.tzst), extraemos de forma
