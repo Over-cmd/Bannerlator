@@ -8,7 +8,7 @@
 
 #define NATIVE_AUDIO_BUFFER_SIZE 32768 // Ampliado a 32KB para blindar Wow64 contra tirones JIT
 #define NATIVE_AUDIO_CHANNELS 2
-#define NATIVE_AUDIO_RATE 48000
+#define NATIVE_AUDIO_RATE 44100
 
 typedef struct {
     int16_t data[NATIVE_AUDIO_BUFFER_SIZE];
