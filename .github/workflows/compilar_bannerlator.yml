@@ -59,9 +59,6 @@ jobs:
           fi
 
           # 🚀 EL GOLPE DE GRACIA ASÍNCRONO (ANTI-ATASCOS EN LOGOS Y VIDEOS):
-          # Si tu repositorio conserva el archivo XServerView.java, entramos con sed y relajamos 
-          # los bloques síncronos 'synchronized' que congelan la CPU Unisoc durante los vídeos,
-          # permitiendo que el audio en C y los fotogramas fluyan en paralelo sin tapones de reloj.
           if [ -n "$VIEW_FILE" ] && [ -f "$VIEW_FILE" ]; then
             echo "-> Aplicando saneamiento asíncrono anti-bloqueos en: $VIEW_FILE"
             sed -i 's/\r$//' "$VIEW_FILE"
@@ -82,6 +79,7 @@ jobs:
           ROOTFS_TAR="app/src/main/assets/container_pattern_common.tzst"
           
           if [ -f "$ROOTFS_TAR" ]; then
+            echo "-> [PROCESANDO ROOTFS]: Localizado disco virtual de Wine en $ROOTFS_TAR"
             mkdir -p decompress_rootfs
             tar -I 'zstd -d' -xf "$ROOTFS_TAR" -C decompress_rootfs || true
             
@@ -89,26 +87,56 @@ jobs:
             mkdir -p decompress_rootfs/lib/wine/aarch64-windows
             mkdir -p decompress_rootfs/lib/wine/aarch64-unix
             
-            # Copia desde wine10 y wine11 (sdk35 y sdk28) y linux-wine11 según la estructura del repositorio referenciado.
-            # Puedes encontrar el script YAML completo en el repositorio original.
+            # 🚀 CAPA 1: INYECCIÓN DESDE LOS ASSETS DE WINE 10 (sdk35 y sdk28):
+            if [ -d "app/src/main/assets/directaudio/wine10/sdk35" ]; then
+              cp -f app/src/main/assets/directaudio/wine10/sdk35/winedirectaudio-i386.drv decompress_rootfs/lib/wine/i386-windows/winedirectaudio-i386.drv || true
+              cp -f app/src/main/assets/directaudio/wine10/sdk35/winedirectaudio.drv decompress_rootfs/lib/wine/aarch64-windows/winedirectaudio.drv || true
+              cp -f app/src/main/assets/directaudio/wine10/sdk35/winedirectaudio.so decompress_rootfs/lib/wine/aarch64-unix/winedirectaudio.so || true
+            fi
+            if [ -d "app/src/main/assets/directaudio/wine10/sdk28" ]; then
+              cp -f app/src/main/assets/directaudio/wine10/sdk28/winedirectaudio-i386.drv decompress_rootfs/lib/wine/i386-windows/winedirectaudio-i386.drv || true
+              cp -f app/src/main/assets/directaudio/wine10/sdk28/winedirectaudio.drv decompress_rootfs/lib/wine/aarch64-windows/winedirectaudio.drv || true
+              cp -f app/src/main/assets/directaudio/wine10/sdk28/winedirectaudio.so decompress_rootfs/lib/wine/aarch64-unix/winedirectaudio.so || true
+            fi
+
+            # 🚀 CAPA 2: INYECCIÓN DESDE LOS ASSETS DE WINE 11 (sdk35 y sdk28):
+            if [ -d "app/src/main/assets/directaudio/wine11/sdk35" ]; then
+              cp -f app/src/main/assets/directaudio/wine11/sdk35/winedirectaudio-i386.drv decompress_rootfs/lib/wine/i386-windows/winedirectaudio-i386.drv || true
+              cp -f app/src/main/assets/directaudio/wine11/sdk35/winedirectaudio.drv decompress_rootfs/lib/wine/aarch64-windows/winedirectaudio.drv || true
+              cp -f app/src/main/assets/directaudio/wine11/sdk35/winedirectaudio.so decompress_rootfs/lib/wine/aarch64-unix/winedirectaudio.so || true
+            fi
+            if [ -d "app/src/main/assets/directaudio/wine11/sdk28" ]; then
+              cp -f app/src/main/assets/directaudio/wine11/sdk28/winedirectaudio-i386.drv decompress_rootfs/lib/wine/i386-windows/winedirectaudio-i386.drv || true
+              cp -f app/src/main/assets/directaudio/wine11/sdk28/winedirectaudio.drv decompress_rootfs/lib/wine/aarch64-windows/winedirectaudio.drv || true
+              cp -f app/src/main/assets/directaudio/wine11/sdk28/winedirectaudio.so decompress_rootfs/lib/wine/aarch64-unix/winedirectaudio.so || true
+            fi
+
+            # 🚀 CAPA 3: INYECCIÓN DEL PUENTE PROTON LINUX (linux-wine11):
+            if [ -d "app/src/main/assets/directaudio/linux-wine11" ]; then
+              cp -f app/src/main/assets/directaudio/linux-wine11/i386-windows/winedirectaudio-i386.drv decompress_rootfs/lib/wine/i386-windows/winedirectaudio-i386.drv || true
+              cp -f app/src/main/assets/directaudio/linux-wine11/aarch64-windows/winedirectaudio.drv decompress_rootfs/lib/wine/aarch64-windows/winedirectaudio.drv || true
+              cp -f app/src/main/assets/directaudio/linux-wine11/aarch64-unix/winedirectaudio.so decompress_rootfs/lib/wine/aarch64-unix/winedirectaudio.so || true
+            fi
             
             # 🚀 GOLPE DE GRACIA ASÍNCRONO EN EL REGISTRO DE WINE (ANTI-TRABAS EN TODAS LAS CINEMÁTICAS):
-            # Forzamos la aceleración por hardware completa de DirectSound, XAudio2 y los codecs de DirectShow.
-            # Esto evita que Wine congele el pacer gráfico de la pantalla al decodificar vídeos pesados (.bik, .wmv, .avi).
             SYSTEM_REG=$(find decompress_rootfs/ -name "system.reg" | head -n 1)
             if [ -n "$SYSTEM_REG" ] && [ -f "$SYSTEM_REG" ]; then
               echo "-> Parcheando registro system.reg de Windows interno de forma masiva..."
               sed -i 's/\r$//' "$SYSTEM_REG"
-              
-              # 1. Parche DirectSound
               echo -e "\n[Software\\\\Wine\\\\DirectSound]\n\"HardwareAcceleration\"=\"Full\"\n\"PrimaryBuffers\"=dword:00000002" >> "$SYSTEM_REG"
-              
-              # 2. Parche XAudio2 (Fuerza a mezclar el sonido de los vídeos en hilos flotantes asíncronos de la CPU)
               echo -e "\n[Software\\\\Wine\\\\XAudio2]\n\"HardwareAcceleration\"=\"Full\"\n\"MaxChannels\"=dword:00000002" >> "$SYSTEM_REG"
-              
-              # 3. Parche DirectShow/Quartz (Evita que los vídeos pesados de introducciones congelen los frames gráficos)
               echo -e "\n[Software\\\\Wine\\\\DirectShow]\n\"AsyncRender\"=dword:00000001" >> "$SYSTEM_REG"
             fi
+            
+            # Repaquetizado seguro ultra-Zstd
+            rm -f "$ROOTFS_TAR"
+            tar -I 'zstd --ultra -22' -cf "$ROOTFS_TAR" -C decompress_rootfs .
+            echo "-> [ÉXITO UNIVERSAL]: Capas soldadas y RootFS cerrado con candado de oro."
+          else
+            echo "-> Error Crítico: No se localizó container_pattern_common.tzst en tus assets."
+            exit 1
+          fi
+          rm -rf decompress_rootfs
 
       - name: Compilar el APK Oficial Modificado (Variante Standard Debug)
         run: |
