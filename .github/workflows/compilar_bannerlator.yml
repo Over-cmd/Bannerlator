@@ -70,60 +70,59 @@ jobs:
           echo "-> Ejecutando compilación cruzada preliminar del NDK para forjar tu native_audio..."
           ./gradlew :app:externalNativeBuildStandardDebug --no-daemon || true
 
-      # 🔊 INYECCIÓN MAESTRA BI-CAPA EN EL ROOTFS REAL DE LOS ASSETS:
-      # Desempaquetamos de forma secuencial tus dos archivos maestros reales detectados en tus assets
-      # (container_pattern_common.tzst y layers.tzst), inyectamos tu native_audio.c compilado puro 
-      # en sus tripas de Wine y volvemos a cerrar el disco virtual con compresión ultra Zstd de factoría.
-      - name: Inyectar tu NativeAudio Real en los RootFS del APK (Multi-TAR/Zstd)
+      # 🔊 INYECCIÓN CRÍTICA EN EL VERDADERO ROOTFS DE LOS ASSETS:
+      # Desempaquetamos estrictamente el archivo container_pattern_common.tzst (el único RootFS real de Wine),
+      # inyectamos tu native_audio.c de 44100Hz y cerramos con compresión ultra Zstd. Evitamos tocar layers.tzst.
+      - name: Inyectar tu NativeAudio Real en el RootFS de Wine (Aislamiento Total)
         run: |
-          echo "-> Iniciando saneamiento universal de los RootFS en tus assets..."
+          echo "-> Iniciando saneamiento del RootFS de Wine en tus assets..."
           
-          # Buscamos de forma explícita todos los archivos comprimidos de RootFS en tus assets reales
-          for ROOTFS_TAR in app/src/main/assets/container_pattern_common.tzst app/src/main/assets/layers.tzst; do
-            if [ -f "$ROOTFS_TAR" ]; then
-              echo "-> [PROCESANDO ROOTFS]: Localizado archivo maestro en $ROOTFS_TAR"
-              mkdir -p decompress_rootfs
+          ROOTFS_TAR="app/src/main/assets/container_pattern_common.tzst"
+          
+          if [ -f "$ROOTFS_TAR" ]; then
+            echo "-> [PROCESANDO ROOTFS]: Localizado disco virtual de Wine en $ROOTFS_TAR"
+            mkdir -p decompress_rootfs
+            
+            echo "-> Desempaquetando capas del disco virtual..."
+            tar -I 'zstd -d' -xf "$ROOTFS_TAR" -C decompress_rootfs || true
+            
+            echo "-> Asegurando autopistas físicas de traducción Wow64 de Wine..."
+            mkdir -p decompress_rootfs/lib/wine/i386-windows
+            mkdir -p decompress_rootfs/lib/wine/aarch64-windows
+            mkdir -p decompress_rootfs/lib/wine/aarch64-unix
+            
+            # Localizamos el verdadero binario .so compilado de tu native_audio.c independiente (44100Hz)
+            REAL_SO=$(find app/build/intermediates/ -name "libwinedirectaudio.so" | head -n 1)
+            
+            if [ -n "$REAL_SO" ] && [ -f "$REAL_SO" ]; then
+              echo "-> Éxito! Inyectando tu binario de C de alta fidelidad ($REAL_SO) en las subcapas de Wine..."
               
-              echo "-> Desempaquetando capas del disco virtual..."
-              tar -I 'zstd -d' -xf "$ROOTFS_TAR" -C decompress_rootfs || true
+              # Sobreescribimos el disco virtual con tu propio código emulando las firmas de DirectAudio
+              cp -f "$REAL_SO" decompress_rootfs/lib/wine/i386-windows/winedirectaudio.drv || true
+              cp -f "$REAL_SO" decompress_rootfs/lib/wine/aarch64-windows/winedirectaudio.drv || true
+              cp -f "$REAL_SO" decompress_rootfs/lib/wine/aarch64-unix/winedirectaudio.so || true
               
-              echo "-> Asegurando autopistas físicas de traducción Wow64 de Wine..."
-              mkdir -p decompress_rootfs/lib/wine/i386-windows
-              mkdir -p decompress_rootfs/lib/wine/aarch64-windows
-              mkdir -p decompress_rootfs/lib/wine/aarch64-unix
-              
-              # Localizamos el verdadero binario .so compilado de tu native_audio.c independiente (44100Hz)
-              REAL_SO=$(find app/build/intermediates/ -name "libwinedirectaudio.so" | head -n 1)
-              
-              if [ -n "$REAL_SO" ] && [ -f "$REAL_SO" ]; then
-                echo "-> Éxito! Inyectando tu binario de C de alta fidelidad ($REAL_SO) en las subcapas de Wine..."
-                
-                # Sobreescribimos el disco virtual con tu propio código emulando las firmas de DirectAudio
-                cp -f "$REAL_SO" decompress_rootfs/lib/wine/i386-windows/winedirectaudio.drv || true
-                cp -f "$REAL_SO" decompress_rootfs/lib/wine/aarch64-windows/winedirectaudio.drv || true
-                cp -f "$REAL_SO" decompress_rootfs/lib/wine/aarch64-unix/winedirectaudio.so || true
-                
-                # Inyectamos el parche de registro DirectSound asíncrono para liberar la CPU Unisoc T618
-                SYSTEM_REG=$(find decompress_rootfs/ -name "system.reg" | head -n 1)
-                if [ -n "$SYSTEM_REG" ] && [ -f "$SYSTEM_REG" ]; then
-                  echo "-> Parcheando registro system.reg de Windows interno..."
-                  sed -i 's/\r$//' "$SYSTEM_REG"
-                  echo -e "\n[Software\\\\Wine\\\\DirectSound]\n\"HardwareAcceleration\"=\"Full\"\n\"PrimaryBuffers\"=dword:00000002" >> "$SYSTEM_REG"
-                fi
-                
-                echo "-> Volviendo a empaquetar el RootFS modificado con compresión elástica ultra Zstd -22..."
-                rm -f "$ROOTFS_TAR"
-                tar -I 'zstd --ultra -22' -cf "$ROOTFS_TAR" -C decompress_rootfs .
-                echo "-> [ÉXITO]: RootFS empaquetado y sellado de forma estanca!"
-              else
-                echo "-> Alerta: No se localizó el binario compilado libwinedirectaudio.so en los intermediates."
+              # Inyectamos el parche de registro DirectSound asíncrono para liberar la CPU Unisoc T618
+              SYSTEM_REG=$(find decompress_rootfs/ -name "system.reg" | head -n 1)
+              if [ -n "$SYSTEM_REG" ] && [ -f "$SYSTEM_REG" ]; then
+                echo "-> Parcheando registro system.reg de Windows interno..."
+                sed -i 's/\r$//' "$SYSTEM_REG"
+                echo -e "\n[Software\\\\Wine\\\\DirectSound]\n\"HardwareAcceleration\"=\"Full\"\n\"PrimaryBuffers\"=dword:00000002" >> "$SYSTEM_REG"
               fi
               
-              rm -rf decompress_rootfs
+              echo "-> Volviendo a empaquetar el RootFS de Wine con tu motor soldado con compresión ultra Zstd -22..."
+              rm -f "$ROOTFS_TAR"
+              tar -I 'zstd --ultra -22' -cf "$ROOTFS_TAR" -C decompress_rootfs .
+              echo "-> [ÉXITO EN ASSETS]: RootFS de Wine empaquetado y sellado de forma estanca!"
             else
-              echo "-> Info: El archivo de assets $ROOTFS_TAR no está presente en esta rama, saltando."
+              echo "-> Alerta: No se localizó el binario compilado libwinedirectaudio.so en los intermediates."
             fi
-          done
+            
+            rm -rf decompress_rootfs
+          else
+            echo "-> Error Crítico: No se localizó container_pattern_common.tzst en tus assets."
+            exit 1
+          fi
 
       - name: Compilar el APK Oficial Modificado (Variante Standard Debug)
         run: |
