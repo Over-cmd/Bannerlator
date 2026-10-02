@@ -4,16 +4,11 @@
 #include <unistd.h>
 #include <stdbool.h>
 #include <pthread.h>
-#include <jni.h>
 #include <aaudio/AAudio.h>
 
 #define NATIVE_AUDIO_BUFFER_SIZE 16384 // Búfer de 16KB para amortiguar ráfagas masivas
 #define NATIVE_AUDIO_CHANNELS 2
 #define NATIVE_AUDIO_RATE 48000
-
-void wrapper_native_audio_init(void);
-void wrapper_native_audio_write(const int16_t *samples, int count);
-void wrapper_native_audio_terminate(void);
 
 typedef struct {
     int16_t data[NATIVE_AUDIO_BUFFER_SIZE];
@@ -33,13 +28,12 @@ static void* wrapper_audio_playback_loop(void *arg) {
     
     // 🏗️ CONSTRUCCIÓN DEL SUMIDERO EN EL HILO AUDIO:
     // Forzamos el arranque físico desde este hilo con contexto nativo legítimo.
-    // Quitamos setpriority(-19) para erradicar el crash por denegación de permisos de Android.
     AAudioStreamBuilder *builder = NULL;
     if (AAudio_createStreamBuilder(&builder) == AAUDIO_OK) {
         AAudioStreamBuilder_setSampleRate(builder, NATIVE_AUDIO_RATE);
         AAudioStreamBuilder_setChannelCount(builder, NATIVE_AUDIO_CHANNELS);
         AAudioStreamBuilder_setFormat(builder, AAUDIO_FORMAT_PCM_I16);
-        AAudioStreamBuilder_setPerformanceMode(builder, AAUDIO_PERFORMANCE_MODE_NONE); // Modo compatible Mali
+        AAudioStreamBuilder_setPerformanceMode(builder, AAUDIO_PERFORMANCE_MODE_LOW_LATENCY); // Forzamos baja latencia MALI
         AAudioStreamBuilder_setSharingMode(builder, AAUDIO_SHARING_MODE_SHARED);
 
         if (AAudioStreamBuilder_openStream(builder, &ctx->aaudio_stream) == AAUDIO_OK) {
@@ -58,7 +52,7 @@ static void* wrapper_audio_playback_loop(void *arg) {
         // 🔄 PACER ELÁSTICO SIN BLOQUEO:
         if (samples_available < 128) {
             pthread_mutex_unlock(&ctx->mutex);
-            usleep(2000); // Pequeño respiro de 2 milisegundos
+            usleep(2000); // Pequeño respiro de 2 milisegundos para absorber picos JIT de box64
             continue;
         }
 
@@ -72,7 +66,7 @@ static void* wrapper_audio_playback_loop(void *arg) {
 
         pthread_mutex_unlock(&ctx->mutex);
 
-        // 🔊 AUDIO DIRECTO AL HARDWARE REAL:
+        // 🔊 AUDIO DIRECTO AL HARDWARE REAL DESDE EL CORAZÓN DE WINE:
         if (ctx->aaudio_stream && ctx->is_running) {
             int32_t num_frames = samples_to_play / NATIVE_AUDIO_CHANNELS;
             if (num_frames > 0) {
@@ -91,7 +85,8 @@ static void* wrapper_audio_playback_loop(void *arg) {
     return NULL;
 }
 
-void wrapper_native_audio_init(void) {
+// 🚀 EXPOSICIÓN DE LAS PUERTAS DE CONTROL DEL DRIVER (ESTILO EXPERIMENTAL):
+void wine_directaudio_init(void) {
     if (g_audio_ctx) return;
 
     g_audio_ctx = (WrapperAudioBuffer*)calloc(1, sizeof(WrapperAudioBuffer));
@@ -104,8 +99,8 @@ void wrapper_native_audio_init(void) {
     pthread_create(&g_audio_thread, NULL, wrapper_audio_playback_loop, g_audio_ctx);
 }
 
-void wrapper_native_audio_write(const int16_t *samples, int count) {
-    if (!g_audio_ctx || !g_audio_ctx->is_running || count <= 0) return;
+void wine_directaudio_write(const int16_t *samples, int count) {
+    if (!g_audio_ctx || !g_audio_ctx->is_running || count <= 0 || samples == NULL) return;
 
     pthread_mutex_lock(&g_audio_ctx->mutex);
 
@@ -121,7 +116,7 @@ void wrapper_native_audio_write(const int16_t *samples, int count) {
     pthread_mutex_unlock(&g_audio_ctx->mutex);
 }
 
-void wrapper_native_audio_terminate(void) {
+void wine_directaudio_terminate(void) {
     if (!g_audio_ctx) return;
 
     pthread_mutex_lock(&g_audio_ctx->mutex);
@@ -133,26 +128,4 @@ void wrapper_native_audio_terminate(void) {
     pthread_mutex_destroy(&g_audio_ctx->mutex);
     free(g_audio_ctx);
     g_audio_ctx = NULL;
-}
-
-JNIEXPORT void JNICALL
-Java_com_winlator_star_core_NativeAudio_init(JNIEnv *env, jclass clazz) {
-    wrapper_native_audio_init();
-}
-
-JNIEXPORT void JNICALL
-Java_com_winlator_star_core_NativeAudio_write(JNIEnv *env, jclass clazz, jshortArray samples, jint count) {
-    if (count <= 0 || samples == NULL) return;
-    
-    // ZONA CRÍTICA DIRECTA JNI: Acceso directo a memoria sin copias flotantes
-    jshort *body = (jshort *)(*env)->GetPrimitiveArrayCritical(env, samples, NULL);
-    if (body != NULL) {
-        wrapper_native_audio_write((const int16_t*)body, count);
-        (*env)->ReleasePrimitiveArrayCritical(env, samples, body, 0);
-    }
-}
-
-JNIEXPORT void JNICALL
-Java_com_winlator_star_core_NativeAudio_terminate(JNIEnv *env, jclass clazz) {
-    wrapper_native_audio_terminate();
 }
