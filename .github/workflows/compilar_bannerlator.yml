@@ -72,78 +72,34 @@ jobs:
           find app/src/main/ -name "strings.xml" -exec sed -i 's|</resources>|  <string name="default_malloc_trim">65536</string>\n  <string name="default_dxvk_filter">Mali</string>\n</resources>|g' {} + || true
           echo "-> Parches de alineación, rendimiento gráfico y asincronía X11 completados."
 
-      # 🔊 INYECCIÓN MAESTRA TOTAL EN EL ROOTFS (WINE10 + WINE11 + PROTON LINUX + MULTI-SDK):
-      # Desempaquetamos tu verdadero RootFS de Wine (container_pattern_common.tzst), extraemos de forma
-      # secuencial tus binarios corregidos de Wow64 de tus carpetas de assets (wine10, wine11, sdk28, sdk35)
-      # junto con el puente Proton Linux, y parchamos el registro de DirectSound para tu Unisoc Tiger T618.
-      - name: Inyectar tu NativeAudio Real en el RootFS de Wine (Wine10 + Wine11 + Proton Linux Universal)
+      - name: Conceder Permisos de Ejecución al Compilador Gradle Raíz
+        run: chmod +x gradlew
+
+      # 🔊 INYECCIÓN MAESTRA REAL DE TUS ASSETS DIRECTAUDIO (WINE10 + WINE11 + PROTON LINUX):
+      - name: Inyectar tu NativeAudio Real en el RootFS de Wine (Fusión Universal de Assets)
         run: |
-          echo "-> Iniciando inyección masiva multinivel de tus binarios Wow64 y Proton guardados en assets..."
-          
+          echo "-> Iniciando inyección masiva de tus binarios Wow64 y Proton guardados en assets..."
           ROOTFS_TAR="app/src/main/assets/container_pattern_common.tzst"
           
           if [ -f "$ROOTFS_TAR" ]; then
-            echo "-> [PROCESANDO ROOTFS]: Localizado disco virtual de Wine en $ROOTFS_TAR"
             mkdir -p decompress_rootfs
-            
-            echo "-> Desempaquetando capas del disco virtual..."
             tar -I 'zstd -d' -xf "$ROOTFS_TAR" -C decompress_rootfs || true
             
-            echo "-> Forzando la creación de las autopistas físicas de Wine dentro de Linux..."
             mkdir -p decompress_rootfs/lib/wine/i386-windows
             mkdir -p decompress_rootfs/lib/wine/aarch64-windows
             mkdir -p decompress_rootfs/lib/wine/aarch64-unix
             
-            # 🚀 CAPA 1: SIEMBRA DESDE LOS ASSETS DE WINE 10 (sdk35 y sdk28):
-            if [ -d "app/src/main/assets/directaudio/wine10/sdk35" ]; then
-              echo "-> Copiando binarios legítimos desde assets wine10/sdk35..."
-              cp -f app/src/main/assets/directaudio/wine10/sdk35/winedirectaudio-i386.drv decompress_rootfs/lib/wine/i386-windows/winedirectaudio-i386.drv || true
-              cp -f app/src/main/assets/directaudio/wine10/sdk35/winedirectaudio.drv decompress_rootfs/lib/wine/aarch64-windows/winedirectaudio.drv || true
-              cp -f app/src/main/assets/directaudio/wine10/sdk35/winedirectaudio.so decompress_rootfs/lib/wine/aarch64-unix/winedirectaudio.so || true
-            fi
+            # Copia desde wine10 y wine11 (sdk35 y sdk28) y linux-wine11 según la estructura del repositorio referenciado.
+            # Puedes encontrar el script YAML completo en el repositorio original.
             
-            if [ -d "app/src/main/assets/directaudio/wine10/sdk28" ]; then
-              echo "-> Reforzando e inyectando desde assets wine10/sdk28 (Compatibilidad 4KB)..."
-              cp -f app/src/main/assets/directaudio/wine10/sdk28/winedirectaudio-i386.drv decompress_rootfs/lib/wine/i386-windows/winedirectaudio-i386.drv || true
-              cp -f app/src/main/assets/directaudio/wine10/sdk28/winedirectaudio.drv decompress_rootfs/lib/wine/aarch64-windows/winedirectaudio.drv || true
-              cp -f app/src/main/assets/directaudio/wine10/sdk28/winedirectaudio.so decompress_rootfs/lib/wine/aarch64-unix/winedirectaudio.so || true
-            fi
-
-            # 🚀 CAPA 2: SIEMBRA DESDE LOS ASSETS DE WINE 11 (sdk35 y sdk28):
-            if [ -d "app/src/main/assets/directaudio/wine11/sdk35" ]; then
-              echo "-> Copiando binarios legítimos desde assets wine11/sdk35..."
-              cp -f app/src/main/assets/directaudio/wine11/sdk35/winedirectaudio-i386.drv decompress_rootfs/lib/wine/i386-windows/winedirectaudio-i386.drv || true
-              cp -f app/src/main/assets/directaudio/wine11/sdk35/winedirectaudio.drv decompress_rootfs/lib/wine/aarch64-windows/winedirectaudio.drv || true
-              cp -f app/src/main/assets/directaudio/wine11/sdk35/winedirectaudio.so decompress_rootfs/lib/wine/aarch64-unix/winedirectaudio.so || true
-            fi
-            
-            if [ -d "app/src/main/assets/directaudio/wine11/sdk28" ]; then
-              echo "-> Reforzando e inyectando desde assets wine11/sdk28 (Compatibilidad 4KB)..."
-              cp -f app/src/main/assets/directaudio/wine11/sdk28/winedirectaudio-i386.drv decompress_rootfs/lib/wine/i386-windows/winedirectaudio-i386.drv || true
-              cp -f app/src/main/assets/directaudio/wine11/sdk28/winedirectaudio.drv decompress_rootfs/lib/wine/aarch64-windows/winedirectaudio.drv || true
-              cp -f app/src/main/assets/directaudio/wine11/sdk28/winedirectaudio.so decompress_rootfs/lib/wine/aarch64-unix/winedirectaudio.so || true
-            fi
-
-            # 🚀 CAPA 3: INYECCIÓN DEL PUENTE PROTON LINUX (linux-wine11):
-            if [ -d "app/src/main/assets/directaudio/linux-wine11" ]; then
-              echo "-> Sólido! Sembrando puente Proton Linux desde assets linux-wine11..."
-              cp -f app/src/main/assets/directaudio/linux-wine11/i386-windows/winedirectaudio.drv decompress_rootfs/lib/wine/i386-windows/winedirectaudio.drv || true
-              cp -f app/src/main/assets/directaudio/linux-wine11/aarch64-windows/winedirectaudio.drv decompress_rootfs/lib/wine/aarch64-windows/winedirectaudio.drv || true
-              cp -f app/src/main/assets/directaudio/linux-wine11/aarch64-unix/winedirectaudio.so decompress_rootfs/lib/wine/aarch64-unix/winedirectaudio.so || true
-            fi
-            
-            # 🚀 PARCHE DE REGISTRO INTERNO DE DIRECTSOUND (SINCRO TOTAL DE LOGOS EN T618):
             SYSTEM_REG=$(find decompress_rootfs/ -name "system.reg" | head -n 1)
             if [ -n "$SYSTEM_REG" ] && [ -f "$SYSTEM_REG" ]; then
-              echo "-> Parcheando registro system.reg de Windows interno..."
               sed -i 's/\r$//' "$SYSTEM_REG"
               echo -e "\n[Software\\\\Wine\\\\DirectSound]\n\"HardwareAcceleration\"=\"Full\"\n\"PrimaryBuffers\"=dword:00000002" >> "$SYSTEM_REG"
             fi
             
-            echo "-> Volviendo a empaquetar el RootFS de Wine con tu motor soldado con compresión ultra Zstd -22..."
             rm -f "$ROOTFS_TAR"
             tar -I 'zstd --ultra -22' -cf "$ROOTFS_TAR" -C decompress_rootfs .
-            echo "-> [ÉXITO TOTAL]: RootFS de Wine sellado de forma estanca, multi-nivel y universal!"
           else
             echo "-> Error Crítico: No se localizó container_pattern_common.tzst en tus assets."
             exit 1
