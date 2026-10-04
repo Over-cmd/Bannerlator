@@ -187,6 +187,10 @@ sed -i 's/#ifdef HAVE_EXECINFO_H/#if 0/g' src/pulsecore/log.c
 sed -i 's/#ifdef PTHREAD_PRIO_INHERIT/#if 0/g' src/pulsecore/mutex-posix.c
 sed -i "s/dependency('tdb')/dependency('tdb', required: false)/g" meson.build
 
+# NUEVO PARCHE CRÍTICO ANTI-RTP: Desactiva por completo el módulo rtp del árbol de Meson para Android
+echo "-> Aplicando parche de compatibilidad para desactivar RTP..."
+sed -i "s/subdir('rtp')/# subdir('rtp')/g" src/modules/meson.build
+
 # NUEVO PARCHE CRÍTICO ANTI-CAPS: Desactiva el sistema de capacidades Linux en el demonio para Android
 echo "-> Aplicando parche de compatibilidad para caps.c..."
 cat << 'EOF' > src/daemon/caps.c
