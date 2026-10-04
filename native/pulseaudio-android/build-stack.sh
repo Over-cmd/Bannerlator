@@ -305,45 +305,35 @@ meson setup "${BUILD_MESON_DIR}" \
 ninja -C "${BUILD_MESON_DIR}"
 ninja -C "${BUILD_MESON_DIR}" install
 
-# 3. Compilar e instalar en el directorio raíz temporal
+# 3. Compilar el código con Ninja (Se remueve la instalación global que causa error de permisos)
 echo "-> Compilando el código con Ninja..."
 ninja -C "${BUILD_MESON_DIR}"
 
-echo "-> Instalando binarios en el prefijo temporal..."
-ninja -C "${BUILD_MESON_DIR}" install
-
-# 4. --- Recolectar el conjunto binario (Mapeo exacto del layout de Bannerlator) ---
+# 4. --- Recolectar el conjunto binario (Mapeo exacto directo desde la carpeta de construcción) ---
 echo "-> Organizando y empaquetando archivos de salida (.so) para el APK..."
 
-# Renombrar el ejecutable principal del demonio para que Bannerlator lo cargue como librería dinámica nativa
-cp -a "$ROOT_DIR/bin/pulseaudio"                               "$OUT/libpulseaudio.so"
+# El ejecutable principal compilado por Ninja se encuentra en la carpeta del demonio
+cp -a "${BUILD_MESON_DIR}/src/daemon/pulseaudio"               "$OUT/libpulseaudio.so"
 
 # Copiar las librerías base centrales generadas por la versión 17.0
-cp -a "$ROOT_DIR"/lib/pulseaudio/libpulsecommon-*.so           "$OUT/"
-cp -a "$ROOT_DIR"/lib/pulseaudio/libpulsecore-*.so             "$OUT/"
-cp -a "$ROOT_DIR/lib/libpulse.so"                              "$OUT/libpulse.so"
+cp -a "${BUILD_MESON_DIR}"/src/libpulsecommon-*.so             "$OUT/"
+cp -a "${BUILD_MESON_DIR}"/src/pulsecore/libpulsecore-*.so     "$OUT/"
+cp -a "${BUILD_MESON_DIR}/src/pulse/libpulse.so"               "$OUT/libpulse.so"
 
-# Copiar las dependencias base de la Parte 1
+# Copiar las dependencias base de la Parte 1 (estas sí se instalaron bien en root-arm64)
 cp -a "$ROOT_DIR/lib/libsndfile.so"                            "$OUT/libsndfile.so"
 cp -a "$ROOT_DIR/lib/libltdl.so"                               "$OUT/libltdl.so"
 
-# Copiar los protocolos de comunicación interna a la subcarpeta de módulos
-cp -a "$ROOT_DIR"/lib/pulseaudio/modules/libprotocol-native.so           "$OUT/modules/"
-cp -a "$ROOT_DIR"/lib/pulseaudio/modules/module-native-protocol-unix.so  "$OUT/modules/"
+# Copiar los protocolos de comunicación interna a la subcarpeta de módulos de Bannerlator
+cp -a "${BUILD_MESON_DIR}"/src/modules/libprotocol-native.so   "$OUT/modules/"
+cp -a "${BUILD_MESON_DIR}"/src/modules/module-native-protocol-unix.so "$OUT/modules/"
 
-# Asegurar la correcta recolección de los módulos de tuberías (Esencial para la compatibilidad del micrófono)
-for m in module-pipe-source module-pipe-sink; do
-  src=$(echo "$ROOT_DIR"/lib/pulseaudio/modules/$m.so)
-  if [ -f "$src" ]; then
-    cp -a "$src" "$OUT/modules/"
-  else
-    echo "ERROR: No se encontró el módulo crítico $m.so en la ruta $src"
-    exit 1
-  fi
-done
+# Asegurar la correcta recolección de los módulos de tuberías esenciales para el micrófono
+cp -a "${BUILD_MESON_DIR}"/src/modules/module-pipe-source.so   "$OUT/modules/"
+cp -a "${BUILD_MESON_DIR}"/src/modules/module-pipe-sink.so     "$OUT/modules/"
 
-echo "=== ¡Pila de PulseAudio 17.0 construida con éxito! ==="
-echo "Contenido en $OUT:"
+echo "=== ¡Pila de PulseAudio 17.0 construida y recolectada con éxito! ==="
+echo "Contenido final en $OUT:"
 ls -la "$OUT" "$OUT/modules"
 
 # Exponer la ruta del código fuente de PulseAudio 17.0 para el script secundario build-module.sh
