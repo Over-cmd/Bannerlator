@@ -173,7 +173,7 @@ meson setup "${BUILD_MESON_DIR}" \
   -Ddoxygen=false \
   -Dtests=false \
   -Ddaemon=true \
-  -Dclient=true
+  -Dclient=true \
   -Dalsa=disabled \
   -Dglib=disabled \
   -Dgtk=disabled \
@@ -185,7 +185,7 @@ meson setup "${BUILD_MESON_DIR}" \
   -Dopenssl=disabled \
   -Dwebrtc-aec=disabled \
   -Dspeex=disabled \
-  -Dorc=disabled
+  -Dorc=disabled \
 
 # 4. Compilar e instalar en el directorio raíz temporal
 echo "-> Compilando el código con Ninja..."
