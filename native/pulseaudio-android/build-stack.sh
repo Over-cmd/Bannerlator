@@ -182,10 +182,18 @@ EOF
 # 2. Configuración con Meson y desactivación de dependencias innecesarias
 cd "${SRC_17_DIR}"
 
-# Parches de compatibilidad para Android (backtrace, mutex-posix, i18n y TDB)
+# Parches de compatibilidad para Android (backtrace, mutex-posix, i18n, TDB y CAP)
 sed -i 's/#ifdef HAVE_EXECINFO_H/#if 0/g' src/pulsecore/log.c
 sed -i 's/#ifdef PTHREAD_PRIO_INHERIT/#if 0/g' src/pulsecore/mutex-posix.c
 sed -i "s/dependency('tdb')/dependency('tdb', required: false)/g" meson.build
+
+# NUEVO PARCHE CRÍTICO ANTI-CAPS: Desactiva el sistema de capacidades Linux en el demonio para Android
+echo "-> Aplicando parche de compatibilidad para caps.c..."
+cat << 'EOF' > src/daemon/caps.c
+#include <config.h>
+#include "caps.h"
+void pa_drop_caps(void) {}
+EOF
 
 # CORREGIDO: Anular i18n de forma idéntica en pulsecore/ añadiendo la macro N_
 cat << 'EOF' > src/pulsecore/i18n.h
