@@ -230,7 +230,9 @@ meson setup "${BUILD_MESON_DIR}" \
   -Dglib=disabled \
   -Dgtk=disabled \
   -Davahi=disabled \
-  -Ddbus=disabled
+  -Ddbus=disabled \
+  -Dtests=false \
+  -Dman=false
 
 ninja -C "${BUILD_MESON_DIR}"
 ninja -C "${BUILD_MESON_DIR}" install
