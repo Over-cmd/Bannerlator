@@ -243,10 +243,9 @@ cp -a "${BUILD_MESON_DIR}/src/pulse/libpulse.so"               "$OUT/libpulse.so
 cp -a "$ROOT_DIR/lib/libsndfile.so"                            "$OUT/libsndfile.so"
 cp -a "$ROOT_DIR/lib/libltdl.so"                               "$OUT/libltdl.so"
 
-cp -a "${BUILD_MESON_DIR}"/src/modules/libprotocol-native.so   "$OUT/modules/"
-cp -a "${BUILD_MESON_DIR}"/src/modules/module-native-protocol-unix.so "$OUT/modules/"
-cp -a "${BUILD_MESON_DIR}"/src/modules/module-pipe-source.so   "$OUT/modules/"
-cp -a "${BUILD_MESON_DIR}"/src/modules/module-pipe-sink.so     "$OUT/modules/"
+# CORRECCIÓN DE RUTAS PARA PA 17.0: Busca todos los módulos .so de forma recursiva 
+# en las subcarpetas de Meson y los copia ordenados en la carpeta de módulos final.
+find "${BUILD_MESON_DIR}/src/modules" -name "*.so" -exec cp -a {} "$OUT/modules/" \;
 
 echo "=== ¡Pila de PulseAudio 17.0 construida y recolectada con éxito! ==="
 echo "Contenido final en $OUT:"
