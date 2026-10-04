@@ -231,6 +231,7 @@ meson setup "${BUILD_MESON_DIR}" \
   -Dgtk=disabled \
   -Davahi=disabled \
   -Ddbus=disabled \
+  -Ddoxygen=false \
   -Dtests=false \
   -Dman=false
 
