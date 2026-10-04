@@ -188,7 +188,8 @@ sed -i 's/#ifdef HAVE_EXECINFO_H/#if 0/g' src/pulsecore/log.c
 sed -i 's/#ifdef PTHREAD_PRIO_INHERIT/#if 0/g' src/pulsecore/mutex-posix.c
 sed -i "s/dependency('tdb')/dependency('tdb', required: false)/g" meson.build
 
-cat << 'EOF' > src/pulseaudio/i18n.h
+# CORREGIDO: Ruta exacta a la carpeta pulsecore de PulseAudio 17.0
+cat << 'EOF' > src/pulsecore/i18n.h
 #ifndef FOO_I18N_H
 #define FOO_I18N_H
 #define _(String) (String)
@@ -196,7 +197,8 @@ void pa_init_i18n(void);
 #endif
 EOF
 
-cat << 'EOF' > src/pulseaudio/i18n.c
+# CORREGIDO: Ruta exacta a la carpeta pulsecore de PulseAudio 17.0
+cat << 'EOF' > src/pulsecore/i18n.c
 #include <config.h>
 #include "i18n.h"
 void pa_init_i18n(void) {}
