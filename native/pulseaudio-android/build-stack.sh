@@ -200,12 +200,16 @@ sed -i 's/#ifdef PTHREAD_PRIO_INHERIT/#if 0/g' src/pulsecore/mutex-posix.c
 echo "-> Aplicando bypass de aislamiento para el módulo de red RTP..."
 sed -i "s/subdir('rtp')/librtp = [] # subdir('rtp')/g" src/modules/meson.build
 
-# PARCHE CRÍTICO ANTI-CAPS: Desactiva el sistema de capacidades Linux en el demonio para Android (Actualizado para PA 17.0)
-echo "-> Aplicando parche de compatibilidad para caps.c..."
+# PARCHE CRÍTICO ANTI-CAPS: Desactiva el sistema de capacidades y root de Linux para Android
+echo "-> Aplicando parche de compatibilidad definitivo para caps.c..."
 cat << 'EOF' > src/daemon/caps.c
 #include <config.h>
 #include "caps.h"
+
+/* Android corre en sandbox de usuario, estas funciones de privilegios elevados 
+   deben ser operaciones nulas (no-op) seguras */
 void pa_drop_root(void) {}
+void pa_drop_caps(void) {}
 EOF
 
 # CORREGIDO: Anular i18n de forma idéntica en pulsecore/ añadiendo la macro N_
