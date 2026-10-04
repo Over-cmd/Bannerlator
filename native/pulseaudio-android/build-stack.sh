@@ -183,16 +183,12 @@ EOF
 # 2. Configuración con Meson y desactivación de dependencias innecesarias
 cd "${SRC_17_DIR}"
 
-# PARCHE CRÍTICO ANTI-BACKTRACE: Desactiva el volcado de error incompatible con Android API 26
-echo "-> Aplicando parche de compatibilidad para backtrace en log.c..."
+# Parches de compatibilidad para Android (backtrace, mutex-posix, i18n y TDB)
 sed -i 's/#ifdef HAVE_EXECINFO_H/#if 0/g' src/pulsecore/log.c
-
-# NUEVO PARCHE CRÍTICO ANTI-PRIO-INHERIT: Desactiva la herencia de prioridad de hilos no soportada por Android Bionic
-echo "-> Aplicando parche de hilos para mutex-posix.c..."
 sed -i 's/#ifdef PTHREAD_PRIO_INHERIT/#if 0/g' src/pulsecore/mutex-posix.c
+sed -i "s/dependency('tdb')/dependency('tdb', required: false)/g" meson.build
 
-# Actualizar cabecera y origen de i18n para compatibilidad con Android
-cat << 'EOF' > src/pulsecore/i18n.h
+cat << 'EOF' > src/pulseaudio/i18n.h
 #ifndef FOO_I18N_H
 #define FOO_I18N_H
 #define _(String) (String)
@@ -200,27 +196,18 @@ void pa_init_i18n(void);
 #endif
 EOF
 
-cat << 'EOF' > src/pulsecore/i18n.c
+cat << 'EOF' > src/pulseaudio/i18n.c
 #include <config.h>
 #include "i18n.h"
 void pa_init_i18n(void) {}
 EOF
 
-meson setup "${BUILD_MESON_DIR}" --cross-file="${BASE_DIR}/android_arm64.txt"
-Usa el código con precaución.
-¿Qué se ha solucionado con esto?
-Se ajustaron i18n.h y i18n.c para proveer una implementación vacía y evitar conflictos de tipos de datos durante la compilación cruzada en Android.
-Guarda los cambios y vuelve a ejecutar el flujo de trabajo.
-Las respuestas de la IA pueden contener errores. Más información
-Por favor, confirma si la compilación avanza correctamente tras aplicar estos cambios.
-
+# Configuración y compilación con Meson y Ninja
 meson setup "${BUILD_MESON_DIR}" \
   --cross-file="${BASE_DIR}/android_arm64.txt" \
   --prefix="${ROOT_DIR}" \
   --buildtype=release \
-  -Dc_args="-Dpthread_mutexattr_setprotocol\(a,b\)=0 -DPTHREAD_PRIO_INHERIT=0 -DPTHREAD_PRIO_NONE=0" \
-  -Dc_link_args="-L${ROOT_DIR}/lib -lintl" \
-  -Ddatabase=simple \
+  -Ddatabase=auto \
   -Dbluez5=disabled \
   -Ddoxygen=false \
   -Dtests=false \
@@ -238,6 +225,9 @@ meson setup "${BUILD_MESON_DIR}" \
   -Dwebrtc-aec=disabled \
   -Dspeex=disabled \
   -Dorc=disabled
+
+ninja -C "${BUILD_MESON_DIR}"
+ninja -C "${BUILD_MESON_DIR}" install
 
 # 3. Compilar e instalar en el directorio raíz temporal
 echo "-> Compilando el código con Ninja..."
