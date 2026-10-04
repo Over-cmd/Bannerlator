@@ -178,9 +178,13 @@ EOF
 # 2. Configuración con Meson y desactivación de dependencias innecesarias
 cd "${SRC_17_DIR}"
 
-# PARCHE CRÍTICO ANTI-BACKTRACE: Desactiva por completo el código de volcado de error incompatible con Android API 26
+# PARCHE CRÍTICO ANTI-BACKTRACE: Desactiva el volcado de error incompatible con Android API 26
 echo "-> Aplicando parche de compatibilidad para backtrace en log.c..."
 sed -i 's/#ifdef HAVE_EXECINFO_H/#if 0/g' src/pulsecore/log.c
+
+# NUEVO PARCHE CRÍTICO ANTI-PRIO-INHERIT: Desactiva la herencia de prioridad de hilos no soportada por Android Bionic
+echo "-> Aplicando parche de hilos para mutex-posix.c..."
+sed -i 's/#ifdef PTHREAD_PRIO_INHERIT/#if 0/g' src/pulsecore/mutex-posix.c
 
 meson setup "${BUILD_MESON_DIR}" \
   --cross-file="${BASE_DIR}/android_arm64.txt" \
