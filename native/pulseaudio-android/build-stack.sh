@@ -20,7 +20,7 @@ OUT="$BASE_DIR/output/$ARCH"
 export PATH="$ROOT_DIR/bin:$PATH"
 export PKG_CONFIG_PATH="$ROOT_DIR/lib/pkgconfig"
 
-LEGACY_C="-Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=int-conversion -Wno-error=incompatible-function-pointer-types -Wno-error=incompatible-pointer-types -Wno-error=deprecated-non-prototype"
+LEGACY_C="-Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=int-conversion -Wno-error=incompatible-function-pointer-types -Wno-error=incompatible-function-pointer-types -Wno-error=deprecated-non-prototype"
 export CFLAGS="-O2 -I$ROOT_DIR/include $LEGACY_C"
 export CPPFLAGS="-I$ROOT_DIR/include"
 export LDFLAGS="-L$ROOT_DIR/lib"
@@ -243,8 +243,6 @@ cp -a "${BUILD_MESON_DIR}/src/pulse/libpulse.so"               "$OUT/libpulse.so
 cp -a "$ROOT_DIR/lib/libsndfile.so"                            "$OUT/libsndfile.so"
 cp -a "$ROOT_DIR/lib/libltdl.so"                               "$OUT/libltdl.so"
 
-# CORRECCIÓN DE RUTAS PARA PA 17.0: Busca todos los módulos .so de forma recursiva 
-# en las subcarpetas de Meson y los copia ordenados en la carpeta de módulos final.
 find "${BUILD_MESON_DIR}/src/modules" -name "*.so" -exec cp -a {} "$OUT/modules/" \;
 
 echo "=== ¡Pila de PulseAudio 17.0 construida y recolectada con éxito! ==="
