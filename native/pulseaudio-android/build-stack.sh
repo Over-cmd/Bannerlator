@@ -195,10 +195,11 @@ cd "${SRC_17_DIR}"
 sed -i 's/#ifdef HAVE_EXECINFO_H/#if 0/g' src/pulsecore/log.c
 sed -i 's/#ifdef PTHREAD_PRIO_INHERIT/#if 0/g' src/pulsecore/mutex-posix.c
 
-# CORRECCIÓN DEFINITIVA ANTI-FUGAS (BYPASS RTP):
-# Comentamos la inclusión del subdirectorio pero declaramos la variable vacía para que Meson no crasheé por 'Unknown variable'
-echo "-> Aplicando bypass de aislamiento para el módulo de red RTP..."
+# CORRECCIÓN DEFINITIVA DE RED (BYPASS TOTAL RTP + MÓDULOS SATÉLITES):
+# Desactiva la subcarpeta central y neutraliza el bucle de compilación de módulos de red secundarios
+echo "-> Aplicando aislamiento total para los módulos de red RTP..."
 sed -i "s/subdir('rtp')/librtp = [] # subdir('rtp')/g" src/modules/meson.build
+sed -i "s/foreach m : rtp_modules/foreach m : [] # foreach m : rtp_modules/g" src/modules/meson.build
 
 # PARCHE CRÍTICO ANTI-CAPS: Desactiva el sistema de capacidades y root de Linux para Android
 echo "-> Aplicando parche de compatibilidad definitivo para caps.c..."
