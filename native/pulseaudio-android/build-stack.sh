@@ -170,6 +170,7 @@ meson setup "${BUILD_MESON_DIR}" \
   -Dc_link_args="-L${ROOT_DIR}/lib -lintl" \
   -Ddatabase=simple \
   -Dbluez5=disabled \
+  -Ddoxygen=false \
   -Dtests=false \
   -Ddaemon=true \
   -Dclient=true
