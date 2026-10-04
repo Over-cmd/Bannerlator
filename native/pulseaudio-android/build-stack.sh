@@ -188,20 +188,30 @@ sed -i 's/#ifdef HAVE_EXECINFO_H/#if 0/g' src/pulsecore/log.c
 sed -i 's/#ifdef PTHREAD_PRIO_INHERIT/#if 0/g' src/pulsecore/mutex-posix.c
 sed -i "s/dependency('tdb')/dependency('tdb', required: false)/g" meson.build
 
-# CORREGIDO: Ruta exacta a la carpeta pulsecore de PulseAudio 17.0
+# CORREGIDO: Anular i18n de forma idéntica en pulsecore/ añadiendo la macro N_
 cat << 'EOF' > src/pulsecore/i18n.h
 #ifndef FOO_I18N_H
 #define FOO_I18N_H
 #define _(String) (String)
+#define N_(String) (String)
 void pa_init_i18n(void);
 #endif
 EOF
 
-# CORREGIDO: Ruta exacta a la carpeta pulsecore de PulseAudio 17.0
 cat << 'EOF' > src/pulsecore/i18n.c
 #include <config.h>
 #include "i18n.h"
 void pa_init_i18n(void) {}
+EOF
+
+# CORREGIDO: Anular también la i18n interna que usa la librería cliente (src/pulse/)
+mkdir -p src/pulse
+cat << 'EOF' > src/pulse/i18n.h
+#ifndef FOO_PULSE_I18N_H
+#define FOO_PULSE_I18N_H
+#define _(String) (String)
+#define N_(String) (String)
+#endif
 EOF
 
 # Configuración y compilación con Meson y Ninja
