@@ -62,27 +62,70 @@ fetch() {
 # --- Compilación de libltdl (Requerido para la carga dinámica de módulos) ---
 if [ ! -e "$ROOT_DIR/include/ltdl.h" ]; then
   cd "$SRC_DIR"
-  [ -f "libtool-$LIBTOOL_VER.tar.gz" ] || fetch "libtool-$LIBTOOL_VER.tar.gz" \
-    "https://gnu.org" \
-    "https://kernel.org"
-  rm -rf "libtool-$LIBTOOL_VER"; tar xf "libtool-$LIBTOOL_VER.tar.gz"
+  
+  URL_L1="https://mirrors.kernel.org"
+  URL_L1="$URL_L1/gnu/libtool"
+  URL_L1="$URL_L1/libtool-$LIBTOOL_VER.tar.gz"
+  
+  URL_L2="https://ftp.gnu.org"
+  URL_L2="$URL_L2/gnu/libtool"
+  URL_L2="$URL_L2/libtool-$LIBTOOL_VER.tar.gz"
+
+  [ -f "libtool-$LIBTOOL_VER.tar.gz" ] || \
+    fetch "libtool-$LIBTOOL_VER.tar.gz" \
+    "$URL_L1" \
+    "$URL_L2"
+    
+  rm -rf "libtool-$LIBTOOL_VER"
+  tar xf "libtool-$LIBTOOL_VER.tar.gz"
   cd "libtool-$LIBTOOL_VER"
-  rm -rf "build-$ARCH"; mkdir -p "build-$ARCH"; cd "build-$ARCH"
-  ../configure --host=$BUILDCHAIN --prefix="$ROOT_DIR" --enable-ltdl-install --enable-shared \
-    HELP2MAN=/bin/true MAKEINFO=/bin/true
-  make -j"$(nproc)"; make install
-  test -e "$ROOT_DIR/include/ltdl.h" || { echo "ltdl.h still missing after libtool install"; exit 1; }
+  rm -rf "build-$ARCH"
+  mkdir -p "build-$ARCH"
+  cd "build-$ARCH"
+  
+  ../configure \
+    --host=$BUILDCHAIN \
+    --prefix="$ROOT_DIR" \
+    --enable-ltdl-install \
+    --enable-shared \
+    HELP2MAN=/bin/true \
+    MAKEINFO=/bin/true
+    
+  make -j"$(nproc)"
+  make install
+  
+  test -e "$ROOT_DIR/include/ltdl.h" || \
+    { echo "ltdl.h still missing"; exit 1; }
 fi
 
 # --- Compilación de libsndfile (Soporte de archivos de audio básico) ---
 if [ ! -e "$ROOT_DIR/lib/libsndfile.so" ]; then
   cd "$SRC_DIR"
-  [ -f "libsndfile-$LIBSNDFILE_VER.tar.bz2" ] || fetch "libsndfile-$LIBSNDFILE_VER.tar.bz2" \
-    "https://github.com"
-  rm -rf "libsndfile-$LIBSNDFILE_VER"; tar xf "libsndfile-$LIBSNDFILE_VER.tar.bz2"
+  
+  URL_S1="https://github.com"
+  URL_S1="$URL_S1/libsndfile/libsndfile"
+  URL_S1="$URL_S1/releases/download/$LIBSNDFILE_VER"
+  URL_S1="$URL_S1/libsndfile-$LIBSNDFILE_VER.tar.bz2"
+
+  [ -f "libsndfile-$LIBSNDFILE_VER.tar.bz2" ] || \
+    fetch "libsndfile-$LIBSNDFILE_VER.tar.bz2" \
+    "$URL_S1"
+    
+  rm -rf "libsndfile-$LIBSNDFILE_VER"
+  tar xf "libsndfile-$LIBSNDFILE_VER.tar.bz2"
   cd "libsndfile-$LIBSNDFILE_VER"
-  ./configure --host=$BUILDCHAIN --prefix="$ROOT_DIR" --disable-external-libs --disable-alsa --disable-sqlite --disable-static --enable-shared
-  make -j"$(nproc)"; make install
+  
+  ./configure \
+    --host=$BUILDCHAIN \
+    --prefix="$ROOT_DIR" \
+    --disable-external-libs \
+    --disable-alsa \
+    --disable-sqlite \
+    --disable-static \
+    --enable-shared
+    
+  make -j"$(nproc)"
+  make install
 fi
 
 # --- PulseAudio 17.0 (Compilación mediante Meson + Ninja usando el código clonado del YAML) ---
