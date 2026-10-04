@@ -191,6 +191,9 @@ sed -i 's/#ifdef HAVE_EXECINFO_H/#if 0/g' src/pulsecore/log.c
 echo "-> Aplicando parche de hilos para mutex-posix.c..."
 sed -i 's/#ifdef PTHREAD_PRIO_INHERIT/#if 0/g' src/pulsecore/mutex-posix.c
 
+# Parches para compatibilidad con Android e i18n
+sed -i 's/#include <libintl.h>/\/\/#include <libintl.h>/g' src/pulsecore/i18n.h
+
 meson setup "${BUILD_MESON_DIR}" \
   --cross-file="${BASE_DIR}/android_arm64.txt" \
   --prefix="${ROOT_DIR}" \
