@@ -1,0 +1,71 @@
+name: Build PulseAudio 17.0 + adaptive AAudio sink (arm64)
+
+# Compila de forma cruzada la pila PulseAudio 17.0 utilizando Meson + Ninja
+# junto con el módulo module-aaudio-sink optimizado para Android arm64.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install host build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            m4 pkg-config gettext autopoint libsndfile1-dev \
+            perl git zstd file build-essential python3-pip python3-setuptools
+          # Instalar Meson y Ninja que son obligatorios para PulseAudio 15+
+          pip3 install meson ninja
+
+      - name: Resolve NDK (r27c)
+        run: |
+          NDK="$HOME/android-ndk-r27c"
+          if [ ! -d "$NDK" ]; then
+            curl -sSL -o /tmp/ndk.zip https://dl.google.com/android/repository/android-ndk-r27c-linux.zip
+            unzip -q /tmp/ndk.zip -d "$HOME"
+          fi
+          echo "NDK_PATH=$NDK" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$NDK" >> "$GITHUB_ENV"
+          echo "using NDK at $NDK"
+
+      - name: Fetch PulseAudio 17.0 Source
+        working-directory: native/pulseaudio-android
+        run: |
+          # Clonar código limpio de la versión 17.0 directamente de Freedesktop
+          git clone --depth 1 --branch v17.0 https://gitlab.freedesktop.org/pulseaudio/pulseaudio.git src-17.0
+
+      - name: Build PulseAudio 17.0 stack (Meson Cross-Compile)
+        working-directory: native/pulseaudio-android
+        run: |
+          # NOTA: Tus scripts internos (build-stack.sh) deben actualizarse 
+          # para llamar a 'meson setup' usando un archivo de configuración cruzada (cross-file) de Android.
+          chmod +x build-stack.sh build-module.sh
+          ./build-stack.sh --version 17.0
+
+      - name: Build enhanced module-aaudio-sink
+        working-directory: native/pulseaudio-android
+        run: ./build-module.sh --version 17.0
+
+      - name: Package
+        working-directory: native/pulseaudio-android
+        run: |
+          rm -rf pkg && mkdir -p pkg/modules/arm64
+          cp -a output/arm64/modules/*.so pkg/modules/arm64/
+          tar -I 'zstd --ultra -22' -cf pulseaudio.tzst -C pkg .
+          file output/arm64/*.so output/arm64/modules/*.so || true
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pulseaudio17-arm64
+          path: |
+            native/pulseaudio-android/output/arm64/*.so
+            native/pulseaudio-android/output/arm64/modules/*.so
+            native/pulseaudio-android/pulseaudio.tzst
