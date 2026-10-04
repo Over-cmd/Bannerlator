@@ -143,6 +143,19 @@ mkdir -p "${OUT}/modules"
 echo "-> Creando librería virtual libintl.so..."
 SYSROOT_LIB="${NDK_PATH}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/${API}"
 ln -sf "${SYSROOT_LIB}/libc.so" "${ROOT_DIR}/lib/libintl.so"
+# CORRECCIÓN DEFINITIVA: Generar archivo de cabecera libintl.h vacío para Clang (Evita error de compilación)
+echo "-> Creando archivo de cabecera virtual libintl.h..."
+cat << EOF > "${ROOT_DIR}/include/libintl.h"
+#ifndef LIBINTL_H
+#define LIBINTL_H
+#define gettext(String) (String)
+#define dgettext(Domain,String) (String)
+#define dcgettext(Domain,String,Type) (String)
+#define textdomain(Domain) ((char*) (Domain))
+#define bindtextdomain(Domain,Directory) ((char*) (Domain))
+#define bind_textdomain_codeset(Domain,Codeset) ((char*) (Domain))
+#endif
+EOF
 
 # Generar archivo de configuración cruzada
 cat << EOF > "${BASE_DIR}/android_arm64.txt"
