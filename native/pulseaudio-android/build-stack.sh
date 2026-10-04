@@ -191,8 +191,17 @@ sed -i 's/#ifdef HAVE_EXECINFO_H/#if 0/g' src/pulsecore/log.c
 echo "-> Aplicando parche de hilos para mutex-posix.c..."
 sed -i 's/#ifdef PTHREAD_PRIO_INHERIT/#if 0/g' src/pulsecore/mutex-posix.c
 
-# Parches para compatibilidad con Android e i18n
-sed -i 's/#include <libintl.h>/\/\/#include <libintl.h>/g' src/pulsecore/i18n.h
+# PARCHE DEFINITIVO ANTI-I18N: Sobrescribir i18n.h con macros nulas para anular dgettext/gettext
+echo "-> Parcheando i18n.h con macros de traducción vacías..."
+cat << 'EOF' > src/pulsecore/i18n.h
+#ifndef FOO_I18N_H
+#define FOO_I18N_H
+#define _(String) (String)
+#define N_(String) (String)
+#define dgettext(Domain,String) (String)
+#define pa_init_i18n() (void)0
+#endif
+EOF
 
 meson setup "${BUILD_MESON_DIR}" \
   --cross-file="${BASE_DIR}/android_arm64.txt" \
