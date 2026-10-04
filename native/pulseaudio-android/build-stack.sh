@@ -195,8 +195,8 @@ cd "${SRC_17_DIR}"
 sed -i 's/#ifdef HAVE_EXECINFO_H/#if 0/g' src/pulsecore/log.c
 sed -i 's/#ifdef PTHREAD_PRIO_INHERIT/#if 0/g' src/pulsecore/mutex-posix.c
 
-# CORRECCIÓN DEFINITIVA ANTI-RTP (NEUTRALIZACIÓN DE CÓDIGO FUENTE):
-# Vaciamos los archivos de los módulos satélites de red para que compilen vacíos y no busquen símbolos de librtp
+# CORRECCIÓN DEFINITIVA DE RED (NEUTRALIZACIÓN TOTAL DE LA PILA RTP):
+# Vaciamos los archivos de los módulos satélites de red para que compilen vacíos
 echo "-> Neutralizando código de módulos RTP satélites para Android..."
 cat << 'EOF' > src/modules/rtp/module-rtp-send.c
 #include <config.h>
@@ -210,6 +210,36 @@ cat << 'EOF' > src/modules/rtp/module-rtp-recv.c
 #include <pulsecore/module.h>
 int pa__init(pa_module*m) { return 0; }
 void pa__done(pa_module*m) {}
+EOF
+
+# NUEVO PARCHE CRÍTICO ANTI-HOST-POLLUTION: Vaciar el núcleo de la librería librtp.so 
+# para que no use GIO/GLib de la máquina de GitHub Actions
+echo "-> Neutralizando el núcleo de librtp para evitar contaminación del host..."
+echo "/* Vacío por compatibilidad con Android */" > src/modules/rtp/rtp-common.c
+echo "/* Vacío por compatibilidad con Android */" > src/modules/rtp/sdp.c
+echo "/* Vacío por compatibilidad con Android */" > src/modules/rtp/sap.c
+echo "/* Vacío por compatibilidad con Android */" > src/modules/rtp/rtsp_client.c
+echo "/* Vacío por compatibilidad con Android */" > src/modules/rtp/headerlist.c
+echo "/* Vacío por compatibilidad con Android */" > src/modules/rtp/rtp-native.c
+
+# Modificar el archivo build de rtp para quitarle la búsqueda forzada de dependencias del sistema anfitrión
+cat << 'EOF' > src/modules/rtp/meson.build
+librtp_sources = [
+  'rtp-common.c',
+  'sdp.c',
+  'sap.c',
+  'rtsp_client.c',
+  'headerlist.c',
+  'rtp-native.c'
+]
+librtp = shared_library('rtp',
+  librtp_sources,
+  include_directories : [configinc, srcinc],
+  dependencies : [libpulse_dep, libpulsecommon_dep, libpulsecore_dep],
+  install : true,
+  install_dir : privlibdir,
+  rm_with_exec : true,
+)
 EOF
 
 # PARCHE CRÍTICO ANTI-CAPS: Desactiva el sistema de capacidades y root de Linux para Android
