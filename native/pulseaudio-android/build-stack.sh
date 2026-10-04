@@ -173,7 +173,7 @@ meson setup "${BUILD_MESON_DIR}" \
   --buildtype=release \
   -Dc_args="-I${ROOT_DIR}/include" \
   -Dc_link_args="-L${ROOT_DIR}/lib" \
-  -Dnls=disabled \
+  -Dlocaledir="" \
   -Ddatabase=simple \
   -Dbluez5=disabled \
   -Dtests=false \
@@ -191,7 +191,7 @@ meson setup "${BUILD_MESON_DIR}" \
   -Dopenssl=disabled \
   -Dwebrtc-aec=disabled \
   -Dspeex=disabled \
-  -Dorc=disabled \
+  -Dorc=disabled
 
 # 4. Compilar e instalar en el directorio raíz temporal
 echo "-> Compilando el código con Ninja..."
