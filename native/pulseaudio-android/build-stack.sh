@@ -182,20 +182,16 @@ EOF
 # 2. Configuración con Meson y desactivación de dependencias innecesarias
 cd "${SRC_17_DIR}"
 
-# Parches básicos y aislamiento del módulo RTP
-sed -i 's/#ifdef HAVE_EXECINFO_H/#if 0/g' src/pulsecore/log.c
-sed -i "s/dependency('gio-2.0')/dependency('gio-2.0', required: false)/g" src/modules/rtp/meson.build
-
-# Parches de compatibilidad para Android (backtrace, mutex-posix, i18n, TDB y CAP)
+# Parches de compatibilidad y desactivación de dependencias en meson.build
 sed -i 's/#ifdef HAVE_EXECINFO_H/#if 0/g' src/pulsecore/log.c
 sed -i 's/#ifdef PTHREAD_PRIO_INHERIT/#if 0/g' src/pulsecore/mutex-posix.c
 sed -i "s/dependency('tdb')/dependency('tdb', required: false)/g" meson.build
 
-# NUEVO PARCHE CRÍTICO ANTI-RTP: Desactiva por completo el módulo rtp del árbol de Meson para Android
-echo "-> Aplicando parche de compatibilidad para desactivar RTP..."
-sed -i "s/subdir('rtp')/# subdir('rtp')/g" src/modules/meson.build
+# CORRECCIÓN DE LA FUGA HOST (ANTI-GIO/GLIB): Fuerza a Meson a tratar a GIO como opcional y desactivarlo
+echo "-> Forzando la desactivación de GIO/GLib en los módulos RTP..."
+sed -i "s/dependency('gio-2.0')/dependency('gio-2.0', required: false)/g" src/modules/rtp/meson.build
 
-# NUEVO PARCHE CRÍTICO ANTI-CAPS: Desactiva el sistema de capacidades Linux en el demonio para Android
+# Parche de desactivación de capacidades del sistema (caps.c)
 echo "-> Aplicando parche de compatibilidad para caps.c..."
 cat << 'EOF' > src/daemon/caps.c
 #include <config.h>
