@@ -182,14 +182,14 @@ EOF
 # 2. Configuración con Meson y desactivación de dependencias innecesarias
 cd "${SRC_17_DIR}"
 
-# Parches de compatibilidad y desactivación de dependencias en meson.build
+# Parches de compatibilidad para Android (backtrace, mutex-posix, i18n y CAP)
 sed -i 's/#ifdef HAVE_EXECINFO_H/#if 0/g' src/pulsecore/log.c
 sed -i 's/#ifdef PTHREAD_PRIO_INHERIT/#if 0/g' src/pulsecore/mutex-posix.c
-sed -i "s/dependency('tdb')/dependency('tdb', required: false)/g" meson.build
 
-# CORRECCIÓN DE LA FUGA HOST (ANTI-GIO/GLIB): Fuerza a Meson a tratar a GIO como opcional y desactivarlo
-echo "-> Forzando la desactivación de GIO/GLib en los módulos RTP..."
-sed -i "s/dependency('gio-2.0')/dependency('gio-2.0', required: false)/g" src/modules/rtp/meson.build
+# CORRECCIÓN DEFINITIVA ANTI-FUGAS (BYPASS RTP):
+# Comentamos la inclusión del subdirectorio pero declaramos la variable vacía para que Meson no crasheé por 'Unknown variable'
+echo "-> Aplicando bypass de aislamiento para el módulo de red RTP..."
+sed -i "s/subdir('rtp')/librtp = [] # subdir('rtp')/g" src/modules/meson.build
 
 # Parche de desactivación de capacidades del sistema (caps.c)
 echo "-> Aplicando parche de compatibilidad para caps.c..."
