@@ -209,7 +209,7 @@ meson setup "${BUILD_MESON_DIR}" \
   --cross-file="${BASE_DIR}/android_arm64.txt" \
   --prefix="${ROOT_DIR}" \
   --buildtype=release \
-  -Ddatabase=auto \
+  -Ddatabase=simple \
   -Dbluez5=disabled \
   -Ddoxygen=false \
   -Dtests=false \
