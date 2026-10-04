@@ -28,7 +28,7 @@ mkdir -p "$OUT/modules"
 echo "=== Compilando module-aaudio-sink.so para PulseAudio 17.0 ==="
 
 # Invocación directa del compilador Clang del NDK
-# CORREGIDO: Añadida la ruta de inclusión a ${BUILD_MESON_DIR}/src para resolver 'pulse/version.h'
+# CORREGIDO: Añadida la ruta de enlace -L a ${BUILD_MESON_DIR}/src para que localice libpulsecommon-17.0.so
 $CC -O2 -shared $LEGACY_C \
   -DPACKAGE_VERSION=\"17.0\" \
   -DHAVE_CONFIG_H \
@@ -36,6 +36,7 @@ $CC -O2 -shared $LEGACY_C \
   -I"${BUILD_MESON_DIR}/src" \
   -I"${PA_SRC}/src" \
   -I"${ROOT_DIR}/include" \
+  -L"${BUILD_MESON_DIR}/src" \
   -L"${BUILD_MESON_DIR}/src/pulsecore" \
   -L"${BUILD_MESON_DIR}/src/pulse" \
   -L"${ROOT_DIR}/lib" \
