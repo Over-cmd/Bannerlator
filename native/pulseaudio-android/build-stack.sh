@@ -243,7 +243,8 @@ meson setup "${BUILD_MESON_DIR}" \
   -Dopenssl=disabled \
   -Dwebrtc-aec=disabled \
   -Dspeex=disabled \
-  -Dorc=disabled
+  -Dorc=disabled \
+  -Drtp=disabled
 
 ninja -C "${BUILD_MESON_DIR}"
 ninja -C "${BUILD_MESON_DIR}" install
