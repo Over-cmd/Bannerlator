@@ -190,7 +190,7 @@ meson setup "${BUILD_MESON_DIR}" \
   --cross-file="${BASE_DIR}/android_arm64.txt" \
   --prefix="${ROOT_DIR}" \
   --buildtype=release \
-  -Dc_args="-I${ROOT_DIR}/include -DENABLE_NLS=0 -DHAVE_GETTEXT=0" \
+  -Dc_args="-Dpthread_mutexattr_setprotocol\(a,b\)=0 -DPTHREAD_PRIO_INHERIT=0 -DPTHREAD_PRIO_NONE=0" \
   -Dc_link_args="-L${ROOT_DIR}/lib -lintl" \
   -Ddatabase=simple \
   -Dbluez5=disabled \
