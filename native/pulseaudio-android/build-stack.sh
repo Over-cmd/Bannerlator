@@ -221,30 +221,16 @@ cat << 'EOF' > src/pulse/i18n.h
 #endif
 EOF
 
-# Configuración y compilación con Meson y Ninja
+# Configuración simplificada de Meson sin dependencias de escritorio
 meson setup "${BUILD_MESON_DIR}" \
   --cross-file="${BASE_DIR}/android_arm64.txt" \
   --prefix="${ROOT_DIR}" \
   --buildtype=release \
   -Ddatabase=simple \
-  -Dbluez5=disabled \
-  -Ddoxygen=false \
-  -Dtests=false \
-  -Ddaemon=true \
-  -Dclient=true \
-  -Dalsa=disabled \
   -Dglib=disabled \
   -Dgtk=disabled \
   -Davahi=disabled \
-  -Djack=disabled \
-  -Dasyncns=disabled \
-  -Ddbus=disabled \
-  -Dudev=disabled \
-  -Dopenssl=disabled \
-  -Dwebrtc-aec=disabled \
-  -Dspeex=disabled \
-  -Dorc=disabled \
-  -Drtp=disabled
+  -Ddbus=disabled
 
 ninja -C "${BUILD_MESON_DIR}"
 ninja -C "${BUILD_MESON_DIR}" install
