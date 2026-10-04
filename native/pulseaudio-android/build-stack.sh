@@ -222,7 +222,7 @@ echo "/* Vacío por compatibilidad con Android */" > src/modules/rtp/rtsp_client
 echo "/* Vacío por compatibilidad con Android */" > src/modules/rtp/headerlist.c
 echo "/* Vacío por compatibilidad con Android */" > src/modules/rtp/rtp-native.c
 
-# Modificar el archivo build de rtp para quitarle la búsqueda forzada de dependencias del sistema anfitrión
+# Modificar el archivo build de rtp para quitarle las variables conflictivas y dependencias del sistema anfitrión
 cat << 'EOF' > src/modules/rtp/meson.build
 librtp_sources = [
   'rtp-common.c',
@@ -234,11 +234,9 @@ librtp_sources = [
 ]
 librtp = shared_library('rtp',
   librtp_sources,
-  include_directories : [configinc, srcinc],
   dependencies : [libpulse_dep, libpulsecommon_dep, libpulsecore_dep],
   install : true,
-  install_dir : privlibdir,
-  rm_with_exec : true,
+  install_dir : privlibdir
 )
 EOF
 
