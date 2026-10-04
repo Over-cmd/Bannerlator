@@ -70,12 +70,8 @@ PA_MODULE_USAGE(
 
 #define DEFAULT_SINK_NAME "AAudioSink"
 
-/* COMPATIBILIDAD CON PULSEAUDIO 17.0: 
-   Mapea la constante antigua si el framework moderno usa la nueva nomenclatura */
-#ifndef PA_SINK_MESSAGE_MAX
-#define PA_SINK_MESSAGE_MAX PA_SINK_MESSAGE_LAST
-#endif
-
+/* COMPATIBILIDAD CON PULSEAUDIO 17.0:
+   La constante nativa se mantiene como MAX de fábrica en esta revisión */
 enum {
     SINK_MESSAGE_RENDER = PA_SINK_MESSAGE_MAX,
 };
