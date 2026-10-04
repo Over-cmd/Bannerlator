@@ -20,13 +20,11 @@ OUT="$BASE_DIR/output/$ARCH"
 export PATH="$ROOT_DIR/bin:$PATH"
 export PKG_CONFIG_PATH="$ROOT_DIR/lib/pkgconfig"
 
-# Flags heredados para corregir problemas de sintaxis C en dependencias antiguas con Clang moderno
 LEGACY_C="-Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=int-conversion -Wno-error=incompatible-function-pointer-types -Wno-error=incompatible-pointer-types -Wno-error=deprecated-non-prototype"
 export CFLAGS="-O2 -I$ROOT_DIR/include $LEGACY_C"
 export CPPFLAGS="-I$ROOT_DIR/include"
 export LDFLAGS="-L$ROOT_DIR/lib"
 
-# Bionic quirk overrides para las configuraciones por Autotools (libltdl y libsndfile)
 export ALLOW_UNRESOLVED_SYMBOLS=1
 export ac_cv_func_mkfifo=yes
 export ac_cv_func_getuid=no
@@ -45,7 +43,6 @@ test -x "$CC" || { echo "CC not found: $CC"; ls "$TOOLCHAIN" | grep -i clang | h
 
 mkdir -p "$SRC_DIR" "$ROOT_DIR"
 
-# Función de descarga compartida
 fetch() {
   local dest="$1"; shift
   local url
@@ -59,116 +56,59 @@ fetch() {
   echo "ERROR: all mirrors failed for $dest"; return 1
 }
 
-# --- Compilación de libltdl (Requerido para la carga dinámica de módulos) ---
+# --- PARTE 1: Compilación de Dependencias Base (Autotools) ---
 if [ ! -e "$ROOT_DIR/include/ltdl.h" ]; then
   cd "$SRC_DIR"
+  URL_L1="https://kernel.org"
+  URL_L2="https://gnu.org"
+  [ -f "libtool-$LIBTOOL_VER.tar.gz" ] || fetch "libtool-$LIBTOOL_VER.tar.gz" "$URL_L1" "$URL_L2"
   
-  URL_L1="https://mirrors.kernel.org"
-  URL_L1="$URL_L1/gnu/libtool"
-  URL_L1="$URL_L1/libtool-$LIBTOOL_VER.tar.gz"
-  
-  URL_L2="https://ftp.gnu.org"
-  URL_L2="$URL_L2/gnu/libtool"
-  URL_L2="$URL_L2/libtool-$LIBTOOL_VER.tar.gz"
-
-  [ -f "libtool-$LIBTOOL_VER.tar.gz" ] || \
-    fetch "libtool-$LIBTOOL_VER.tar.gz" \
-    "$URL_L1" \
-    "$URL_L2"
-    
-  rm -rf "libtool-$LIBTOOL_VER"
-  tar xf "libtool-$LIBTOOL_VER.tar.gz"
+  rm -rf "libtool-$LIBTOOL_VER"; tar xf "libtool-$LIBTOOL_VER.tar.gz"
   cd "libtool-$LIBTOOL_VER"
-  rm -rf "build-$ARCH"
-  mkdir -p "build-$ARCH"
-  cd "build-$ARCH"
-  
-  ../configure \
-    --host=$BUILDCHAIN \
-    --prefix="$ROOT_DIR" \
-    --enable-ltdl-install \
-    --enable-shared \
-    HELP2MAN=/bin/true \
-    MAKEINFO=/bin/true
-    
-  make -j"$(nproc)"
-  make install
-  
-  test -e "$ROOT_DIR/include/ltdl.h" || \
-    { echo "ltdl.h still missing"; exit 1; }
+  rm -rf "build-$ARCH"; mkdir -p "build-$ARCH"; cd "build-$ARCH"
+  ../configure --host=$BUILDCHAIN --prefix="$ROOT_DIR" --enable-ltdl-install --enable-shared HELP2MAN=/bin/true MAKEINFO=/bin/true
+  make -j"$(nproc)"; make install
 fi
 
-# --- Compilación de libsndfile (Soporte de archivos de audio básico) ---
 if [ ! -e "$ROOT_DIR/lib/libsndfile.so" ]; then
   cd "$SRC_DIR"
-  
   URL_S1="https://github.com"
-  URL_S1="$URL_S1/libsndfile/libsndfile"
-  URL_S1="$URL_S1/releases/download/$LIBSNDFILE_VER"
-  URL_S1="$URL_S1/libsndfile-$LIBSNDFILE_VER.tar.bz2"
-
-  [ -f "libsndfile-$LIBSNDFILE_VER.tar.bz2" ] || \
-    fetch "libsndfile-$LIBSNDFILE_VER.tar.bz2" \
-    "$URL_S1"
-    
-  rm -rf "libsndfile-$LIBSNDFILE_VER"
-  tar xf "libsndfile-$LIBSNDFILE_VER.tar.bz2"
-  cd "libsndfile-$LIBSNDFILE_VER"
+  [ -f "libsndfile-$LIBSNDFILE_VER.tar.bz2" ] || fetch "libsndfile-$LIBSNDFILE_VER.tar.bz2" "$URL_S1"
   
-  ./configure \
-    --host=$BUILDCHAIN \
-    --prefix="$ROOT_DIR" \
-    --disable-external-libs \
-    --disable-alsa \
-    --disable-sqlite \
-    --disable-static \
-    --enable-shared
-    
-  make -j"$(nproc)"
-  make install
+  rm -rf "libsndfile-$LIBSNDFILE_VER"; tar xf "libsndfile-$LIBSNDFILE_VER.tar.bz2"
+  cd "libsndfile-$LIBSNDFILE_VER"
+  ./configure --host=$BUILDCHAIN --prefix="$ROOT_DIR" --disable-external-libs --disable-alsa --disable-sqlite --disable-static --enable-shared
+  make -j"$(nproc)"; make install
 fi
 
-# --- PulseAudio 17.0 (Compilación mediante Meson + Ninja usando el código clonado del YAML) ---
+# --- PARTE 2: Compilación de la Pila PulseAudio 17.0 (Meson + Ninja) ---
 cd "$BASE_DIR"
 SRC_17_DIR="${BASE_DIR}/src-17.0"
 BUILD_MESON_DIR="${BASE_DIR}/build-meson"
 
 echo "=== Iniciando la compilación de PulseAudio 17.0 con Meson ==="
-
-# 1. Limpieza y creación de directorios
 rm -rf "${BUILD_MESON_DIR}" "${OUT}"
-mkdir -p "${OUT}/modules"
-mkdir -p "${ROOT_DIR}/include"
+mkdir -p "${OUT}/modules" "${ROOT_DIR}/include"
 
-# CREACIÓN DEL ARCHIVO VIRTUAL (ENLACE SIMBÓLICO) para Android
-echo "-> Creando librería virtual libintl.so..."
+echo "-> Creando stubs virtuales libintl para Android..."
 SYSROOT_LIB="${NDK_PATH}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/${API}"
 ln -sf "${SYSROOT_LIB}/libc.so" "${ROOT_DIR}/lib/libintl.so"
 
-# Generar archivo de cabecera libintl.h vacío para Clang
-echo "-> Creando archivo de cabecera virtual libintl.h..."
-cat << EOF > "${ROOT_DIR}/include/libintl.h"
+cat << 'EOF' > "${ROOT_DIR}/include/libintl.h"
 #ifndef LIBINTL_H
 #define LIBINTL_H
-
-/* Macros de mapeo directo para texto estándar */
 #define gettext(String) (String)
 #define dgettext(Domain,String) (String)
 #define dcgettext(Domain,String,Type) (String)
-
-/* CORRECCIÓN DEFINITIVA DE PLURALES: Engaña al preprocesador devolviendo
-   siempre el texto principal en singular (Msgid1) de forma segura */
 #define ngettext(Msgid1,Msgid2,N) (Msgid1)
 #define dngettext(Domain,Msgid1,Msgid2,N) (Msgid1)
 #define dcngettext(Domain,Msgid1,Msgid2,N,Type) (Msgid1)
-
 #define textdomain(Domain) ((char*) (Domain))
 #define bindtextdomain(Domain,Directory) ((char*) (Domain))
 #define bind_textdomain_codeset(Domain,Codeset) ((char*) (Domain))
 #endif
 EOF
 
-# Generar archivo de configuración cruzada
 cat << EOF > "${BASE_DIR}/android_arm64.txt"
 [binaries]
 c = '${CC}'
@@ -188,16 +128,14 @@ cpu = 'arm64-v8a'
 endian = 'little'
 EOF
 
-# 2. Configuración con Meson y desactivación de dependencias innecesarias
 cd "${SRC_17_DIR}"
 
-# Parches de compatibilidad para Android (backtrace, mutex-posix, i18n y CAP)
+echo "-> Aplicando parches de compatibilidad en el código fuente..."
 sed -i 's/#ifdef HAVE_EXECINFO_H/#if 0/g' src/pulsecore/log.c
 sed -i 's/#ifdef PTHREAD_PRIO_INHERIT/#if 0/g' src/pulsecore/mutex-posix.c
+sed -i "s/dependency('tdb')/dependency('tdb', required: false)/g" meson.build
 
-# CORRECCIÓN DEFINITIVA DE RED (NEUTRALIZACIÓN TOTAL DE LA PILA RTP):
-# Vaciamos los archivos de los módulos satélites de red para que compilen vacíos
-echo "-> Neutralizando código de módulos RTP satélites para Android..."
+echo "-> Neutralizando los módulos de red RTP satélites para Android..."
 cat << 'EOF' > src/modules/rtp/module-rtp-send.c
 #include <config.h>
 #include <pulsecore/module.h>
@@ -212,47 +150,26 @@ int pa__init(pa_module*m) { return 0; }
 void pa__done(pa_module*m) {}
 EOF
 
-# NUEVO PARCHE CRÍTICO ANTI-HOST-POLLUTION: Vaciar el núcleo de la librería librtp.so 
-# para que no use GIO/GLib de la máquina de GitHub Actions
 echo "-> Neutralizando el núcleo de librtp para evitar contaminación del host..."
-echo "/* Vacío por compatibilidad con Android */" > src/modules/rtp/rtp-common.c
-echo "/* Vacío por compatibilidad con Android */" > src/modules/rtp/sdp.c
-echo "/* Vacío por compatibilidad con Android */" > src/modules/rtp/sap.c
-echo "/* Vacío por compatibilidad con Android */" > src/modules/rtp/rtsp_client.c
-echo "/* Vacío por compatibilidad con Android */" > src/modules/rtp/headerlist.c
-echo "/* Vacío por compatibilidad con Android */" > src/modules/rtp/rtp-native.c
+echo "/* Vacío por compatibilidad */" > src/modules/rtp/rtp-common.c
+echo "/* Vacío por compatibilidad */" > src/modules/rtp/sdp.c
+echo "/* Vacío por compatibilidad */" > src/modules/rtp/sap.c
+echo "/* Vacío por compatibilidad */" > src/modules/rtp/rtsp_client.c
+echo "/* Vacío por compatibilidad */" > src/modules/rtp/headerlist.c
+echo "/* Vacío por compatibilidad */" > src/modules/rtp/rtp-native.c
 
-# Modificar el archivo build de rtp para quitarle las variables conflictivas y dependencias del sistema anfitrión
 cat << 'EOF' > src/modules/rtp/meson.build
-librtp_sources = [
-  'rtp-common.c',
-  'sdp.c',
-  'sap.c',
-  'rtsp_client.c',
-  'headerlist.c',
-  'rtp-native.c'
-]
-librtp = shared_library('rtp',
-  librtp_sources,
-  dependencies : [libpulse_dep, libpulsecommon_dep, libpulsecore_dep],
-  install : true,
-  install_dir : privlibdir
-)
+librtp_sources = ['rtp-common.c', 'sdp.c', 'sap.c', 'rtsp_client.c', 'headerlist.c', 'rtp-native.c']
+librtp = shared_library('rtp', librtp_sources, dependencies : [libpulse_dep, libpulsecommon_dep, libpulsecore_dep], install : true, install_dir : privlibdir)
 EOF
 
-# PARCHE CRÍTICO ANTI-CAPS: Desactiva el sistema de capacidades y root de Linux para Android
-echo "-> Aplicando parche de compatibilidad definitivo para caps.c..."
 cat << 'EOF' > src/daemon/caps.c
 #include <config.h>
 #include "caps.h"
-
-/* Android corre en sandbox de usuario, estas funciones de privilegios elevados 
-   deben ser operaciones nulas (no-op) seguras */
 void pa_drop_root(void) {}
 void pa_drop_caps(void) {}
 EOF
 
-# CORREGIDO: Anular i18n de forma idéntica en pulsecore/ añadiendo la macro N_
 cat << 'EOF' > src/pulsecore/i18n.h
 #ifndef FOO_I18N_H
 #define FOO_I18N_H
@@ -268,7 +185,6 @@ cat << 'EOF' > src/pulsecore/i18n.c
 void pa_init_i18n(void) {}
 EOF
 
-# CORREGIDO: Anular también la i18n interna que usa la librería cliente (src/pulse/)
 mkdir -p src/pulse
 cat << 'EOF' > src/pulse/i18n.h
 #ifndef FOO_PULSE_I18N_H
@@ -278,7 +194,7 @@ cat << 'EOF' > src/pulse/i18n.h
 #endif
 EOF
 
-# Configuración simplificada de Meson sin dependencias de escritorio
+echo "-> Ejecutando configuración de Meson..."
 meson setup "${BUILD_MESON_DIR}" \
   --cross-file="${BASE_DIR}/android_arm64.txt" \
   --prefix="${ROOT_DIR}" \
@@ -302,33 +218,19 @@ meson setup "${BUILD_MESON_DIR}" \
   -Dspeex=disabled \
   -Dorc=disabled
 
-ninja -C "${BUILD_MESON_DIR}"
-ninja -C "${BUILD_MESON_DIR}" install
-
-# 3. Compilar el código con Ninja (Se remueve la instalación global que causa error de permisos)
 echo "-> Compilando el código con Ninja..."
 ninja -C "${BUILD_MESON_DIR}"
 
-# 4. --- Recolectar el conjunto binario (Mapeo exacto directo desde la carpeta de construcción) ---
 echo "-> Organizando y empaquetando archivos de salida (.so) para el APK..."
-
-# El ejecutable principal compilado por Ninja se encuentra en la carpeta del demonio
 cp -a "${BUILD_MESON_DIR}/src/daemon/pulseaudio"               "$OUT/libpulseaudio.so"
-
-# Copiar las librerías base centrales generadas por la versión 17.0
 cp -a "${BUILD_MESON_DIR}"/src/libpulsecommon-*.so             "$OUT/"
 cp -a "${BUILD_MESON_DIR}"/src/pulsecore/libpulsecore-*.so     "$OUT/"
 cp -a "${BUILD_MESON_DIR}/src/pulse/libpulse.so"               "$OUT/libpulse.so"
-
-# Copiar las dependencias base de la Parte 1 (estas sí se instalaron bien en root-arm64)
 cp -a "$ROOT_DIR/lib/libsndfile.so"                            "$OUT/libsndfile.so"
 cp -a "$ROOT_DIR/lib/libltdl.so"                               "$OUT/libltdl.so"
 
-# Copiar los protocolos de comunicación interna a la subcarpeta de módulos de Bannerlator
 cp -a "${BUILD_MESON_DIR}"/src/modules/libprotocol-native.so   "$OUT/modules/"
 cp -a "${BUILD_MESON_DIR}"/src/modules/module-native-protocol-unix.so "$OUT/modules/"
-
-# Asegurar la correcta recolección de los módulos de tuberías esenciales para el micrófono
 cp -a "${BUILD_MESON_DIR}"/src/modules/module-pipe-source.so   "$OUT/modules/"
 cp -a "${BUILD_MESON_DIR}"/src/modules/module-pipe-sink.so     "$OUT/modules/"
 
@@ -336,5 +238,4 @@ echo "=== ¡Pila de PulseAudio 17.0 construida y recolectada con éxito! ==="
 echo "Contenido final en $OUT:"
 ls -la "$OUT" "$OUT/modules"
 
-# Exponer la ruta del código fuente de PulseAudio 17.0 para el script secundario build-module.sh
 echo "${SRC_17_DIR}" > "$BASE_DIR/.pa_src_path"
