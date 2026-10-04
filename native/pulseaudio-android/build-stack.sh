@@ -160,6 +160,7 @@ cat << EOF > "${ROOT_DIR}/include/libintl.h"
 EOF
 
 # Generar archivo de configuración cruzada
+# CORREGIDO: Añadido [built-in options] para inyectar flags globales en Meson
 cat << EOF > "${BASE_DIR}/android_arm64.txt"
 [binaries]
 c = '${CC}'
@@ -167,6 +168,10 @@ cpp = '${CXX}'
 ar = '${AR}'
 strip = '${STRIP}'
 pkgconfig = 'pkg-config'
+
+[built-in options]
+c_args = ['-I${ROOT_DIR}/include', '-DENABLE_NLS=0', '-DHAVE_GETTEXT=0', '-DHAVE_BACKTRACE=0', '-DHAVE_EXECINFO_H=0', '-Dpthread_mutexattr_setprotocol(a,b)=0', '-DPTHREAD_PRIO_INHERIT=0', '-DPTHREAD_PRIO_NONE=0']
+c_link_args = ['-L${ROOT_DIR}/lib', '-lintl']
 
 [host_machine]
 system = 'android'
