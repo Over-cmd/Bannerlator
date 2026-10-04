@@ -192,7 +192,6 @@ meson setup "${BUILD_MESON_DIR}" \
   -Dspeex=disabled \
   -Dorc=disabled \
   -Dhal-compat=false \
-  -Dspeaker-management=disabled
 
 # 4. Compilar e instalar en el directorio raíz temporal
 echo "-> Compilando el código con Ninja..."
