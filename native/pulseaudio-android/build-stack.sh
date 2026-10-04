@@ -176,13 +176,17 @@ endian = 'little'
 EOF
 
 # 2. Configuración con Meson y desactivación de dependencias innecesarias
-# CORREGIDO: Se inyectan -DHAVE_BACKTRACE=0 y -DHAVE_EXECINFO_H=0 en c_args para evitar el error de pulsecore_log.c
 cd "${SRC_17_DIR}"
+
+# PARCHE CRÍTICO ANTI-BACKTRACE: Desactiva por completo el código de volcado de error incompatible con Android API 26
+echo "-> Aplicando parche de compatibilidad para backtrace en log.c..."
+sed -i 's/#ifdef HAVE_EXECINFO_H/#if 0/g' src/pulsecore/log.c
+
 meson setup "${BUILD_MESON_DIR}" \
   --cross-file="${BASE_DIR}/android_arm64.txt" \
   --prefix="${ROOT_DIR}" \
   --buildtype=release \
-  -Dc_args="-I${ROOT_DIR}/include -DENABLE_NLS=0 -DHAVE_GETTEXT=0 -DHAVE_BACKTRACE=0 -DHAVE_EXECINFO_H=0" \
+  -Dc_args="-I${ROOT_DIR}/include -DENABLE_NLS=0 -DHAVE_GETTEXT=0" \
   -Dc_link_args="-L${ROOT_DIR}/lib -lintl" \
   -Ddatabase=simple \
   -Dbluez5=disabled \
