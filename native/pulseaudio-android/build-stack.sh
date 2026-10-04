@@ -135,12 +135,16 @@ BUILD_MESON_DIR="${BASE_DIR}/build-meson"
 
 echo "=== Iniciando la compilación de PulseAudio 17.0 con Meson ==="
 
-# 1. Limpieza de directorios de construcción previos
+# 1. Limpieza y creación de directorios
 rm -rf "${BUILD_MESON_DIR}" "${OUT}"
 mkdir -p "${OUT}/modules"
 
-# CORRECCIÓN DE RUTA: Forzar la creación del archivo cross-file exacto aquí mismo
-echo "-> Generando archivo de configuración cruzada android_arm64.txt..."
+# CREACIÓN DEL ARCHIVO VIRTUAL (ENLACE SIMBÓLICO) para Android
+echo "-> Creando librería virtual libintl.so..."
+SYSROOT_LIB="${NDK_PATH}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/${API}"
+ln -sf "${SYSROOT_LIB}/libc.so" "${ROOT_DIR}/lib/libintl.so"
+
+# Generar archivo de configuración cruzada
 cat << EOF > "${BASE_DIR}/android_arm64.txt"
 [binaries]
 c = '${CC}'
@@ -156,30 +160,19 @@ cpu = 'arm64-v8a'
 endian = 'little'
 EOF
 
-# 2. Verificar que el paso del YAML descargó el código fuente correctamente
-if [ ! -d "${SRC_17_DIR}" ]; then
-    echo "ERROR: No se encontró la carpeta de origen ${SRC_17_DIR}. Asegúrate de que el paso Git Clone del YAML se ejecutó."
-    exit 1
-fi
-
+# 2. Configuración con Meson y desactivación de dependencias innecesarias
 cd "${SRC_17_DIR}"
-
-# 3. Configurar el entorno de compilación cruzada con Meson
-# Pasamos las rutas de los includes y librerías de libltdl y libsndfile compilados en la Parte 1
-echo "-> Configurando Meson con el archivo android_arm64.txt..."
 meson setup "${BUILD_MESON_DIR}" \
   --cross-file="${BASE_DIR}/android_arm64.txt" \
   --prefix="${ROOT_DIR}" \
   --buildtype=release \
-  -Dc_args="-I${ROOT_DIR}/include" \
-  -Dc_link_args="-L${ROOT_DIR}/lib" \
-  -Dlocaledir="" \
+  -Dc_args="-I${ROOT_DIR}/include -DENABLE_NLS=0 -DHAVE_GETTEXT=0" \
+  -Dc_link_args="-L${ROOT_DIR}/lib -lintl" \
   -Ddatabase=simple \
   -Dbluez5=disabled \
   -Dtests=false \
-  -Dman=false \
   -Ddaemon=true \
-  -Dclient=true \
+  -Dclient=true
   -Dalsa=disabled \
   -Dglib=disabled \
   -Dgtk=disabled \
