@@ -195,11 +195,22 @@ cd "${SRC_17_DIR}"
 sed -i 's/#ifdef HAVE_EXECINFO_H/#if 0/g' src/pulsecore/log.c
 sed -i 's/#ifdef PTHREAD_PRIO_INHERIT/#if 0/g' src/pulsecore/mutex-posix.c
 
-# CORRECCIÓN DEFINITIVA DE RED (BYPASS TOTAL RTP + MÓDULOS SATÉLITES):
-# Desactiva la subcarpeta central y neutraliza el bucle de compilación de módulos de red secundarios
-echo "-> Aplicando aislamiento total para los módulos de red RTP..."
-sed -i "s/subdir('rtp')/librtp = [] # subdir('rtp')/g" src/modules/meson.build
-sed -i "s/foreach m : rtp_modules/foreach m : [] # foreach m : rtp_modules/g" src/modules/meson.build
+# CORRECCIÓN DEFINITIVA ANTI-RTP (NEUTRALIZACIÓN DE CÓDIGO FUENTE):
+# Vaciamos los archivos de los módulos satélites de red para que compilen vacíos y no busquen símbolos de librtp
+echo "-> Neutralizando código de módulos RTP satélites para Android..."
+cat << 'EOF' > src/modules/rtp/module-rtp-send.c
+#include <config.h>
+#include <pulsecore/module.h>
+int pa__init(pa_module*m) { return 0; }
+void pa__done(pa_module*m) {}
+EOF
+
+cat << 'EOF' > src/modules/rtp/module-rtp-recv.c
+#include <config.h>
+#include <pulsecore/module.h>
+int pa__init(pa_module*m) { return 0; }
+void pa__done(pa_module*m) {}
+EOF
 
 # PARCHE CRÍTICO ANTI-CAPS: Desactiva el sistema de capacidades y root de Linux para Android
 echo "-> Aplicando parche de compatibilidad definitivo para caps.c..."
