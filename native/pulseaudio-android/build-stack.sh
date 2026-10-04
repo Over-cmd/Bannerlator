@@ -138,12 +138,14 @@ echo "=== Iniciando la compilación de PulseAudio 17.0 con Meson ==="
 # 1. Limpieza y creación de directorios
 rm -rf "${BUILD_MESON_DIR}" "${OUT}"
 mkdir -p "${OUT}/modules"
+mkdir -p "${ROOT_DIR}/include"
 
 # CREACIÓN DEL ARCHIVO VIRTUAL (ENLACE SIMBÓLICO) para Android
 echo "-> Creando librería virtual libintl.so..."
 SYSROOT_LIB="${NDK_PATH}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/${API}"
 ln -sf "${SYSROOT_LIB}/libc.so" "${ROOT_DIR}/lib/libintl.so"
-# CORRECCIÓN DEFINITIVA: Generar archivo de cabecera libintl.h vacío para Clang (Evita error de compilación)
+
+# Generar archivo de cabecera libintl.h vacío para Clang
 echo "-> Creando archivo de cabecera virtual libintl.h..."
 cat << EOF > "${ROOT_DIR}/include/libintl.h"
 #ifndef LIBINTL_H
@@ -174,12 +176,13 @@ endian = 'little'
 EOF
 
 # 2. Configuración con Meson y desactivación de dependencias innecesarias
+# CORREGIDO: Se inyectan -DHAVE_BACKTRACE=0 y -DHAVE_EXECINFO_H=0 en c_args para evitar el error de pulsecore_log.c
 cd "${SRC_17_DIR}"
 meson setup "${BUILD_MESON_DIR}" \
   --cross-file="${BASE_DIR}/android_arm64.txt" \
   --prefix="${ROOT_DIR}" \
   --buildtype=release \
-  -Dc_args="-I${ROOT_DIR}/include -DENABLE_NLS=0 -DHAVE_GETTEXT=0" \
+  -Dc_args="-I${ROOT_DIR}/include -DENABLE_NLS=0 -DHAVE_GETTEXT=0 -DHAVE_BACKTRACE=0 -DHAVE_EXECINFO_H=0" \
   -Dc_link_args="-L${ROOT_DIR}/lib -lintl" \
   -Ddatabase=simple \
   -Dbluez5=disabled \
@@ -198,16 +201,16 @@ meson setup "${BUILD_MESON_DIR}" \
   -Dopenssl=disabled \
   -Dwebrtc-aec=disabled \
   -Dspeex=disabled \
-  -Dorc=disabled \
+  -Dorc=disabled
 
-# 4. Compilar e instalar en el directorio raíz temporal
+# 3. Compilar e instalar en el directorio raíz temporal
 echo "-> Compilando el código con Ninja..."
 ninja -C "${BUILD_MESON_DIR}"
 
 echo "-> Instalando binarios en el prefijo temporal..."
 ninja -C "${BUILD_MESON_DIR}" install
 
-# 5. --- Recolectar el conjunto binario (Mapeo exacto del layout de Bannerlator) ---
+# 4. --- Recolectar el conjunto binario (Mapeo exacto del layout de Bannerlator) ---
 echo "-> Organizando y empaquetando archivos de salida (.so) para el APK..."
 
 # Renombrar el ejecutable principal del demonio para que Bannerlator lo cargue como librería dinámica nativa
