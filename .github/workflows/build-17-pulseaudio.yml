@@ -20,7 +20,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             m4 pkg-config gettext autopoint libsndfile1-dev \
-            perl git zstd file build-essential python3-pip python3-setuptools
+            perl git zstd file build-essential python3-pip python3-setuptools \
+            libxml-parser-perl
           # Instalar Meson y Ninja que son obligatorios para PulseAudio 15+
           pip3 install meson ninja
 
