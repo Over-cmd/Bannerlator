@@ -150,9 +150,18 @@ echo "-> Creando archivo de cabecera virtual libintl.h..."
 cat << EOF > "${ROOT_DIR}/include/libintl.h"
 #ifndef LIBINTL_H
 #define LIBINTL_H
+
+/* Macros de mapeo directo para texto estándar */
 #define gettext(String) (String)
 #define dgettext(Domain,String) (String)
 #define dcgettext(Domain,String,Type) (String)
+
+/* CORRECCIÓN DEFINITIVA DE PLURALES: Engaña al preprocesador devolviendo
+   siempre el texto principal en singular (Msgid1) de forma segura */
+#define ngettext(Msgid1,Msgid2,N) (Msgid1)
+#define dngettext(Domain,Msgid1,Msgid2,N) (Msgid1)
+#define dcngettext(Domain,Msgid1,Msgid2,N,Type) (Msgid1)
+
 #define textdomain(Domain) ((char*) (Domain))
 #define bindtextdomain(Domain,Directory) ((char*) (Domain))
 #define bind_textdomain_codeset(Domain,Codeset) ((char*) (Domain))
