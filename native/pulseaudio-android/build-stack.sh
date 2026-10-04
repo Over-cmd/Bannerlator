@@ -182,6 +182,10 @@ EOF
 # 2. Configuración con Meson y desactivación de dependencias innecesarias
 cd "${SRC_17_DIR}"
 
+# Parches básicos y aislamiento del módulo RTP
+sed -i 's/#ifdef HAVE_EXECINFO_H/#if 0/g' src/pulsecore/log.c
+sed -i "s/dependency('gio-2.0')/dependency('gio-2.0', required: false)/g" src/modules/rtp/meson.build
+
 # Parches de compatibilidad para Android (backtrace, mutex-posix, i18n, TDB y CAP)
 sed -i 's/#ifdef HAVE_EXECINFO_H/#if 0/g' src/pulsecore/log.c
 sed -i 's/#ifdef PTHREAD_PRIO_INHERIT/#if 0/g' src/pulsecore/mutex-posix.c
