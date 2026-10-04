@@ -139,6 +139,23 @@ echo "=== Iniciando la compilación de PulseAudio 17.0 con Meson ==="
 rm -rf "${BUILD_MESON_DIR}" "${OUT}"
 mkdir -p "${OUT}/modules"
 
+# CORRECCIÓN DE RUTA: Forzar la creación del archivo cross-file exacto aquí mismo
+echo "-> Generando archivo de configuración cruzada android_arm64.txt..."
+cat << EOF > "${BASE_DIR}/android_arm64.txt"
+[binaries]
+c = '${CC}'
+cpp = '${CXX}'
+ar = '${AR}'
+strip = '${STRIP}'
+pkgconfig = 'pkg-config'
+
+[host_machine]
+system = 'android'
+cpu_family = 'aarch64'
+cpu = 'arm64-v8a'
+endian = 'little'
+EOF
+
 # 2. Verificar que el paso del YAML descargó el código fuente correctamente
 if [ ! -d "${SRC_17_DIR}" ]; then
     echo "ERROR: No se encontró la carpeta de origen ${SRC_17_DIR}. Asegúrate de que el paso Git Clone del YAML se ejecutó."
