@@ -243,7 +243,7 @@ cp -a "${BUILD_MESON_DIR}/src/pulse/libpulse.so"               "$OUT/libpulse.so
 cp -a "$ROOT_DIR/lib/libsndfile.so"                            "$OUT/libsndfile.so"
 cp -a "$ROOT_DIR/lib/libltdl.so"                               "$OUT/libltdl.so"
 
-find "${BUILD_MESON_DIR}/src/modules" -name "*.so" -exec cp -a {} "$OUT/modules/" \;
+find "${BUILD_MESON_DIR}/src" \( -name 'libprotocol-*.so' -o -name 'libcli.so' \) -exec cp -a {} "$OUT/modules/" \;
 
 echo "=== ¡Pila de PulseAudio 17.0 construida y recolectada con éxito! ==="
 echo "Contenido final en $OUT:"
