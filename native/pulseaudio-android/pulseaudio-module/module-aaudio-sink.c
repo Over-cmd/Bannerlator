@@ -156,6 +156,14 @@ static void banner_adapt_buffer(struct userdata *u) {
  * los parones en los vídeos y liberando la tasa de fotogramas a la máxima velocidad gráfica. */
 static aaudio_data_callback_result_t aaudio_data_callback(AAudioStream *stream, void *userdata, void *audioData, int32_t numFrames) {
     struct userdata* u = userdata;
+    banner_adapt_buffer(u);
+
+    if (PA_UNLIKELY(!u->sink || !PA_SINK_IS_LINKED(u->sink->thread_info.state))) {
+        memset(audioData, 0, (size_t) numFrames * u->frame_size);
+        return AAUDIO_CALLBACK_RESULT_CONTINUE;
+    }
+    return pa_asyncmsgq_send(u->aaudio_msgq, PA_MSGOBJECT(u->sink), SINK_MESSAGE_RENDER, audioData, numFrames, NULL);
+}
     
     // Ejecutamos la calibración lineal del búfer pasito a pasito
     banner_adapt_buffer(u);   
@@ -431,8 +439,8 @@ int pa__init(pa_module* m) {
     // 🚀 BARRERA ELÁSTICA DINÁMICA APLICADA (SINCRO TOTAL DE VIDEO Y AUDIO):
     // Cambiamos la latencia fija por el rango dinámico variable. PulseAudio se estirará
     // al vuelo junto con tu buffer lineal, destruyendo el lag y los micro-congelamientos.
-    u->sink->flags |= PA_SINK_DYNAMIC_LATENCY;
-    pa_sink_set_latency_range(u->sink, sink_get_latency(u), pa_bytes_to_usec(u->buffer_capacity * u->frame_size, &u->ss));
+	
+    pa_sink_set_fixed_latency(u->sink, sink_get_latency(u));
 
     if (!(u->thread = pa_thread_new("aaudio-sink", thread_func, u))) {
         pa_log("Failed to create thread.");
