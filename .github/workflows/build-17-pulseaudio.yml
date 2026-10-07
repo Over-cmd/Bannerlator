@@ -61,6 +61,10 @@ jobs:
           cp -a output/arm64/modules/*.so pkg/modules/arm64/
           tar -I 'zstd --ultra -22' -cf pulseaudio.tzst -C pkg .
           file output/arm64/*.so output/arm64/modules/*.so || true
+          
+          mkdir -p pkg/modules/arm64
+          cp output/arm64/modules/* pkg/modules/arm64/
+          tar --numeric-owner -C pkg -cf - . | zstd -19 -T0 > pulseaudio.tzst
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
