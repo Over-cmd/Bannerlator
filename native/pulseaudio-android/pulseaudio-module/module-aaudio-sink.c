@@ -119,10 +119,6 @@ static const char* const valid_modargs[] = {
     NULL
 };
 
-/* BANNERLATOR: ESCALADO LINEAL CON TOPE CRÍTICO (ANTI-DELAY / MAX FPS)
- * Al detectar un underrun (xrun), incrementamos el búfer de forma lineal sumando un
- * solo paso burst (step). Añadimos un tope estricto de 3 bursts para evitar el fenómeno
- * del Buffer Bloat, erradicando por completo el retraso acumulado de bytes en la RAM. */
 static void banner_adapt_buffer(struct userdata *u) {
     if (!u->adaptive || u->frames_per_burst <= 0 || u->cur_buffer_size <= 0) return;
 
@@ -130,38 +126,34 @@ static void banner_adapt_buffer(struct userdata *u) {
     if (xruns <= u->last_xrun) return;
     u->last_xrun = xruns;
 
-    // Seteamos un techo de seguridad inteligente de 3 bursts para evitar delay acumulativo
-    int32_t max_safe_cap = u->frames_per_burst * 3;
+    int32_t max_safe_cap = u->frames_per_burst * 4;
     int32_t cap = (u->max_buffer_frames > 0 && u->max_buffer_frames < max_safe_cap)
                       ? u->max_buffer_frames : max_safe_cap;
-    
+    if (u->buffer_capacity > 0 && cap > u->buffer_capacity) cap = u->buffer_capacity;
+
     if (u->cur_buffer_size >= cap) return;
 
-    // Crecimiento lineal controlado paso a paso
-    int32_t step = u->frames_per_burst;
-    int32_t want = u->cur_buffer_size + step;
-
+    int32_t want = u->cur_buffer_size + u->frames_per_burst;
     if (want > cap) want = cap;
 
     int32_t got = AAudioStream_setBufferSizeInFrames(u->stream, want);
     if (got > 0) {
         u->cur_buffer_size = got;
-        pa_log_info("aaudio-sink: grew buffer linearly to %d frames after %d xruns", (int) got, (int) xruns);
+        pa_log_info("aaudio-sink: buffer grew to %d frames after %d xruns", (int) got, (int) xruns);
     }
 }
 
-/* BANNERLATOR: CALLBACK DE COLA ASÍNCRONA NO BLOQUEANTE (ANTI-STUTTERING TOTAL)
- * Reemplazamos pa_asyncmsgq_send() por pa_asyncmsgq_post() para enviar los datos en segundo plano
- * de forma asíncrona. Esto evita que el hilo de audio congele la CPU Unisoc, eliminando por completo
- * los parones en los vídeos y liberando la tasa de fotogramas a la máxima velocidad gráfica. */
 static aaudio_data_callback_result_t aaudio_data_callback(AAudioStream *stream, void *userdata, void *audioData, int32_t numFrames) {
-    struct userdata* u = userdata;
+    struct userdata *u = userdata;
+
     banner_adapt_buffer(u);
 
     if (PA_UNLIKELY(!u->sink || !PA_SINK_IS_LINKED(u->sink->thread_info.state))) {
-        memset(audioData, 0, (size_t) numFrames * u->frame_size);
+        if (audioData && numFrames > 0)
+            memset(audioData, 0, (size_t) numFrames * u->frame_size);
         return AAUDIO_CALLBACK_RESULT_CONTINUE;
     }
+
     return pa_asyncmsgq_send(u->aaudio_msgq, PA_MSGOBJECT(u->sink), SINK_MESSAGE_RENDER, audioData, numFrames, NULL);
 }
     
